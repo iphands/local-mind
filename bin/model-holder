@@ -1,0 +1,9 @@
+#!/bin/bash
+set -e
+pushd ./opencode/helpers/model-holder >/dev/null
+cargo build --release
+popd >/dev/null
+
+pushd ./opencode >/dev/null
+./helpers/model-holder/target/release/model-holder $*
+popd >/dev/null

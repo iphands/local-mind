@@ -1,0 +1,41 @@
+#!/bin/bash
+MODEL="$1"
+CTX=16384
+CTX=20000
+CTX=30000
+# CTX=32768
+# CTX=48000
+
+LAYERS=99
+
+MODEL=Ministral-3-14B-Instruct-2512-UD-Q3_K_XL.gguf
+MODEL=Qwen3-8B-Q4_K_S.gguf
+
+docker run -it --rm \
+  --name ikllm-00 \
+  --gpus '"device=0"' \
+  -e UID=1000 \
+  -e GID=1000 \
+  -e APP_UID=1000 \
+  -e APP_GID=1000 \
+  -p 0.0.0.0:8700:8080 \
+  -v /mnt/noir/scratch/ai/llm/models:/models:ro \
+  ghcr.io/ggml-org/llama.cpp:server-cuda --model /models/$MODEL --alias cosmo-3070 \
+  --numa isolate \
+  --batch-size 2048 \
+  --cache-type-k q8_0 \
+  --cache-type-v q8_0 \
+  --cont-batching \
+  --ctx-size $CTX \
+  --flash-attn off \
+  --n-gpu-layers $LAYERS \
+  --parallel 1 \
+  --ubatch-size 512 \
+  --mmap \
+  --jinja \
+  --flash-attn on \
+  --threads 28 \
+  --top_k 20 \
+  --top_p 0.8 \
+  --min-p 0.0 \
+  --threads `cat /proc/cpuinfo | grep MHz | wc -l`

@@ -1,0 +1,25 @@
+#!/bin/bash
+set -e
+ROOT=`git rev-parse --show-toplevel`
+
+${ROOT}/bin/build-container-opencode || echo FAIL
+
+cd "${ROOT}/opencode"
+
+# -v /home/iphands/prog/ai/opencode/opencode_data:/home/iphands/.opencode:rw
+# -e OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=16000
+
+CONTAINER_ARGS=(
+  --name opencode
+  --user 1000:1000
+  -e HOSTNAME=opencode
+  -p 0.0.0.0:8080:8080
+  -v ${ROOT}/opencode/container_data/config:/home/iphands/.config:rw
+  -v ${ROOT}/opencode/container_data/cache:/home/iphands/.cache:rw
+  -v ${ROOT}/opencode/container_data/local:/home/iphands/.local:rw
+  -v ${ROOT}/opencode/container_data/.bash_history:/home/iphands/.bash_history:rw
+  -v ${HOME}/prog:/home/iphands/prog:rw
+  -v /run/docker.sock:/var/run/docker.sock:rw
+)
+
+docker run --rm -it "${CONTAINER_ARGS[@]}" ocli

@@ -1,0 +1,15 @@
+#!/bin/bash
+set -e
+SESSION_FILE="${1:-session.json}"
+
+[[ ! -f "$SESSION_FILE" ]] && {
+    echo "Usage: $0 <session.json>"
+    exit 1
+}
+
+echo "=== Subagent Consultation Counts ==="
+echo "neckbeard calls: $(grep -c '"subagent_type"[[:space:]]*:[[:space:]]*"neckbeard"' "$SESSION_FILE")"
+echo "hoodie calls:    $(grep -c '"subagent_type"[[:space:]]*:[[:space:]]*"hoodie"' "$SESSION_FILE")"
+echo ""
+echo "=== Call Details ==="
+grep -B5 -A5 '"subagent_type"' "$SESSION_FILE" | head -100

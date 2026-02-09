@@ -1,0 +1,4 @@
+#!/bin/bash
+set -e
+cd /home/iphands/prog/ai/ik_llama.cpp
+docker build --tag ikllm -f ../ikllm/Dockerfile .

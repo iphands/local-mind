@@ -1,0 +1,4 @@
+#!/bin/bash
+cd ./opencode
+# docker build --target builder -t ocli .
+docker build -t ocli .

@@ -1,0 +1,86 @@
+#!/bin/bash
+MODEL="$1"
+MODE=${MODE:-vanilla}
+LAYERS=${LAYERS:-0}
+CTX=${CTX:-65000}
+(( CTX < 1024 )) && CTX=$(( CTX * 1000 ))
+
+RUNNER=docker
+[[ -f /usr/bin/podman ]] && RUNNER=podman
+
+MODEL_PATH=$1
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL=${MODEL_PATH##*/}
+
+case `hostname` in
+"noir")
+  echo "## NOIR"
+  ALIAS=noir-model
+  ;;
+"station")
+  echo "## STAION"
+  ALIAS=station-model
+  ;;
+"cosmo")
+  echo "## COSMO"
+  RUNNER=docker
+  ARGS+=(--gpus all)
+  ALIAS=cosmo-both
+  LAYERS=99
+  ;;
+esac
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name llama-server
+  -e UID=1000
+  -e GID=1000
+  -e APP_UID=1000
+  -e APP_GID=1000
+  -p 0.0.0.0:8799:8080
+  -v "$MODEL_FOLDER":/models:ro
+  # --entrypoint /bin/bash
+)
+
+LLAMA_ARGS=(
+  --model /models/$MODEL --alias $ALIAS
+  # --n-gpu-layers $LAYERS
+  --fit on
+  --batch-size  4096
+  --cache-type-k q8_0
+  --cache-type-v q8_0
+  --cont-batching
+  --ctx-size $CTX
+  --flash-attn on
+  --jinja
+  --parallel 2
+  --threads `cat /proc/cpuinfo | grep MHz | wc -l`
+  # --top_k 40
+  # --top_p 0.95
+  # --min-p 0.0
+  --ubatch-size 512
+  --cache-ram 16384
+)
+
+case $MODE in
+"ikllm")
+  CONTAINER=ikllm:latest
+;;
+"vanilla")
+  CONTAINER=ghcr.io/ggml-org/llama.cpp:server-cuda
+  LLAMA_ARGS+=(--mmap)
+;;
+*)
+  echo "[FATAL] bad MODE: $MODE"
+  exit 1
+esac
+
+echo
+echo "## Run model-holder"
+echo "./bin/model-holder $MODEL_PATH"
+
+echo
+echo "## Running $CONTAINER"
+echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
+"$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
+# "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER"
