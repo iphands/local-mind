@@ -122,21 +122,227 @@ fn truncate(s: &str, max_len: usize) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_format_compact() {
+    fn create_test_metrics() -> RequestMetrics {
         let mut m = RequestMetrics::new();
         m.model = "test-model".to_string();
         m.prompt_tokens = 100;
         m.completion_tokens = 50;
+        m.total_tokens = 150;
+        m.prompt_tps = 200.5;
         m.generation_tps = 42.5;
+        m.prompt_ms = 500.0;
         m.generation_ms = 1176.0;
         m.streaming = true;
         m.finish_reason = "stop".to_string();
         m.duration_ms = 1200.0;
+        m
+    }
+
+    #[test]
+    fn test_format_compact() {
+        let m = create_test_metrics();
 
         let output = format_compact(&m);
         assert!(output.contains("test-model"));
         assert!(output.contains("100/50"));
         assert!(output.contains("stream"));
+        assert!(output.contains("stop"));
+        assert!(output.contains("42.5"));
+    }
+
+    #[test]
+    fn test_format_compact_sync() {
+        let mut m = create_test_metrics();
+        m.streaming = false;
+
+        let output = format_compact(&m);
+        assert!(output.contains("sync"));
+    }
+
+    #[test]
+    fn test_format_compact_with_context() {
+        let mut m = create_test_metrics();
+        m.context_used = Some(100);
+        m.context_total = Some(4096);
+
+        let output = format_compact(&m);
+        assert!(output.contains("ctx:100/4096"));
+    }
+
+    #[test]
+    fn test_format_compact_no_context() {
+        let m = create_test_metrics();
+
+        let output = format_compact(&m);
+        assert!(output.contains("ctx:N/A"));
+    }
+
+    #[test]
+    fn test_format_json() {
+        let m = create_test_metrics();
+
+        let output = format_json(&m);
+        assert!(output.contains("\"model\":\"test-model\""));
+        assert!(output.contains("\"prompt_tokens\":100"));
+        assert!(output.contains("\"streaming\":true"));
+    }
+
+    #[test]
+    fn test_format_pretty_basic() {
+        let m = create_test_metrics();
+
+        let output = format_pretty(&m);
+        assert!(output.contains("test-model"));
+        assert!(output.contains("LLM Request Metrics"));
+        assert!(output.contains("200.50"));
+        assert!(output.contains("42.50"));
+    }
+
+    #[test]
+    fn test_format_pretty_with_context() {
+        let mut m = create_test_metrics();
+        m.context_used = Some(100);
+        m.context_total = Some(4096);
+        m.context_percent = Some(2.44);
+
+        let output = format_pretty(&m);
+        assert!(output.contains("100/4096"));
+        assert!(output.contains("2.4%"));
+    }
+
+    #[test]
+    fn test_format_pretty_no_context() {
+        let m = create_test_metrics();
+
+        let output = format_pretty(&m);
+        assert!(output.contains("N/A"));
+    }
+
+    #[test]
+    fn test_format_pretty_with_client_id() {
+        let mut m = create_test_metrics();
+        m.client_id = Some("client-123".to_string());
+
+        let output = format_pretty(&m);
+        assert!(output.contains("client-123"));
+    }
+
+    #[test]
+    fn test_format_pretty_with_conversation_id() {
+        let mut m = create_test_metrics();
+        m.conversation_id = Some("conv-456".to_string());
+
+        let output = format_pretty(&m);
+        assert!(output.contains("conv-456"));
+    }
+
+    #[test]
+    fn test_format_pretty_with_both_ids() {
+        let mut m = create_test_metrics();
+        m.client_id = Some("client-123".to_string());
+        m.conversation_id = Some("conv-456".to_string());
+
+        let output = format_pretty(&m);
+        assert!(output.contains("client-123"));
+        assert!(output.contains("conv-456"));
+    }
+
+    #[test]
+    fn test_format_metrics_pretty() {
+        let m = create_test_metrics();
+        let output = format_metrics(&m, StatsFormat::Pretty);
+        assert!(output.contains("LLM Request Metrics"));
+    }
+
+    #[test]
+    fn test_format_metrics_json() {
+        let m = create_test_metrics();
+        let output = format_metrics(&m, StatsFormat::Json);
+        assert!(serde_json::from_str::<serde_json::Value>(&output).is_ok());
+    }
+
+    #[test]
+    fn test_format_metrics_compact() {
+        let m = create_test_metrics();
+        let output = format_metrics(&m, StatsFormat::Compact);
+        assert!(output.contains("test-model"));
+    }
+
+    #[test]
+    fn test_truncate_short() {
+        let result = truncate("hello", 10);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_truncate_exact() {
+        let result = truncate("hello", 5);
+        assert_eq!(result, "hello");
+    }
+
+    #[test]
+    fn test_truncate_long() {
+        let result = truncate("hello world this is long", 10);
+        assert_eq!(result, "hello w...");
+        assert_eq!(result.len(), 10);
+    }
+
+    #[test]
+    fn test_truncate_very_short() {
+        let result = truncate("hi", 2);
+        assert_eq!(result, "hi");
+    }
+
+    #[test]
+    fn test_truncate_empty() {
+        let result = truncate("", 10);
+        assert_eq!(result, "");
+    }
+
+    #[test]
+    fn test_format_pretty_long_model_name() {
+        let mut m = create_test_metrics();
+        m.model = "this-is-a-very-long-model-name-that-should-be-truncated-to-fit".to_string();
+
+        let output = format_pretty(&m);
+        // Should contain truncated version with ellipsis
+        assert!(output.contains("..."));
+    }
+
+    #[test]
+    fn test_format_pretty_finish_reason_length() {
+        let mut m = create_test_metrics();
+        m.finish_reason = "tool_calls".to_string();
+
+        let output = format_pretty(&m);
+        assert!(output.contains("tool_calls"));
+    }
+
+    #[test]
+    fn test_format_pretty_context_partial() {
+        let mut m = create_test_metrics();
+        m.context_used = Some(100);
+        m.context_total = Some(4096);
+        // No context_percent
+
+        let output = format_pretty(&m);
+        assert!(output.contains("100/4096"));
+        assert!(!output.contains("2.4%"));
+    }
+
+    #[test]
+    fn test_format_compact_all_fields() {
+        let mut m = create_test_metrics();
+        m.generation_tps = 150.0; // This is what format_compact uses for "tps="
+        m.generation_ms = 500.0;
+        m.finish_reason = "length".to_string();
+        m.duration_ms = 600.0;
+
+        let output = format_compact(&m);
+        // Format: tps={:.1}/{:.1}ms={} -> generation_tps/generation_ms
+        assert!(output.contains("150"));
+        assert!(output.contains("500"));
+        assert!(output.contains("length"));
+        assert!(output.contains("600"));
     }
 }

@@ -369,4 +369,276 @@ mod tests {
         let fixed = fix.fix_arguments(valid);
         assert_eq!(fixed, valid);
     }
+
+    #[test]
+    fn test_new_with_remove_duplicate() {
+        let fix = ToolcallBadFilepathFix::new(true);
+        assert_eq!(fix.name(), "toolcall_bad_filepath");
+        assert!(fix.description().contains("filePath"));
+    }
+
+    #[test]
+    fn test_set_remove_duplicate() {
+        let fix = ToolcallBadFilepathFix::new(true);
+        fix.set_remove_duplicate(false);
+        // Should not panic, setting works
+    }
+
+    #[test]
+    fn test_is_valid_json() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        assert!(fix.is_valid_json("{}"));
+        assert!(fix.is_valid_json("{\"key\": \"value\"}"));
+        assert!(fix.is_valid_json("[]"));
+        assert!(!fix.is_valid_json("invalid"));
+        assert!(!fix.is_valid_json("{broken"));
+    }
+
+    #[test]
+    fn test_is_malformed() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        // Valid JSON with filePath - not malformed
+        assert!(!fix.is_malformed(r#"{"filePath": "/path"}"#));
+
+        // Invalid JSON with filePath - malformed
+        assert!(fix.is_malformed(r#"{"filePath": "/path" broken"#));
+
+        // Valid JSON without filePath - not malformed (no filePath to check)
+        assert!(!fix.is_malformed(r#"{"other": "value"}"#));
+    }
+
+    #[test]
+    fn test_fix_arguments_empty() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let empty = "{}";
+        let fixed = fix.fix_arguments(empty);
+        assert_eq!(fixed, "{}");
+    }
+
+    #[test]
+    fn test_fix_arguments_complex_valid() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let valid = r#"{"content":"some code","filePath":"/home/user/file.txt"}"#;
+        let fixed = fix.fix_arguments(valid);
+        // Should return valid JSON (might be reformatted)
+        assert!(fix.is_valid_json(&fixed));
+    }
+
+    #[test]
+    fn test_applies_no_choices() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let response = serde_json::json!({"other": "data"});
+        assert!(!fix.applies(&response));
+    }
+
+    #[test]
+    fn test_applies_no_tool_calls() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {"content": "Hello"}
+            }]
+        });
+        assert!(!fix.applies(&response));
+    }
+
+    #[test]
+    fn test_applies_valid_tool_call() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": {
+                            "name": "write",
+                            "arguments": "{\"content\":\"code\",\"filePath\":\"/path\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        // Valid JSON - doesn't apply
+        assert!(!fix.applies(&response));
+    }
+
+    #[test]
+    fn test_applies_malformed_tool_call() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": {
+                            "name": "write",
+                            "arguments": "{\"filePath\":\"/path\",\"filePath\"/broken\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+        assert!(fix.applies(&response));
+    }
+
+    #[test]
+    fn test_apply_no_changes_needed() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "content": "Hello",
+                    "tool_calls": null
+                }
+            }]
+        });
+
+        let result = fix.apply(response.clone());
+        assert_eq!(result, response);
+    }
+
+    #[test]
+    fn test_apply_fixes_malformed() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": {
+                            "name": "write",
+                            "arguments": "{\"content\":\"code\",\"filePath\":\"/path\",\"filePath\"/broken\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let result = fix.apply(response);
+        let args = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert!(fix.is_valid_json(args));
+    }
+
+    #[test]
+    fn test_apply_stream_no_delta() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let chunk = serde_json::json!({
+            "choices": [{
+                "message": {"content": "test"}
+            }]
+        });
+
+        let result = fix.apply_stream(chunk.clone());
+        assert_eq!(result, chunk);
+    }
+
+    #[test]
+    fn test_apply_stream_with_delta() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let chunk = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "function": {
+                            "name": "write",
+                            "arguments": "{\"filePath\":\"/path\",\"filePath\"/broken\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let result = fix.apply_stream(chunk);
+        let args = result["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert!(fix.is_valid_json(args));
+    }
+
+    #[test]
+    fn test_fix_malformed_json_no_filepath() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        // Malformed JSON but no filePath - should still try to fix
+        let malformed = r#"{"key": "value" broken"#;
+        // This doesn't contain filePath, so is_malformed returns false
+        assert!(!fix.is_malformed(malformed));
+    }
+
+    #[test]
+    fn test_fix_keep_duplicate_mode() {
+        let fix = ToolcallBadFilepathFix::new(false); // Don't remove duplicate
+
+        // This tests the non-removal path
+        let malformed = r#"{"filePath":"/path","filePath"/broken"}"#;
+        let fixed = fix.fix_arguments(malformed);
+        // Should still produce valid JSON (via aggressive fix if needed)
+        assert!(
+            fix.is_valid_json(&fixed) || fixed == "{}",
+            "Fixed output should be valid JSON or empty object"
+        );
+    }
+
+    #[test]
+    fn test_multiple_tool_calls() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "read",
+                                "arguments": "{\"filePath\":\"/valid/path\"}"
+                            }
+                        },
+                        {
+                            "function": {
+                                "name": "write",
+                                "arguments": "{\"filePath\":\"/path\",\"filePath\"/broken\"}"
+                            }
+                        }
+                    ]
+                }
+            }]
+        });
+
+        assert!(fix.applies(&response));
+        let result = fix.apply(response);
+
+        // First tool call should be unchanged
+        let args1 = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert!(fix.is_valid_json(args1));
+
+        // Second tool call should be fixed
+        let args2 = result["choices"][0]["message"]["tool_calls"][1]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert!(fix.is_valid_json(args2));
+    }
+
+    #[test]
+    fn test_escaped_characters() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        let valid = r#"{"content":"line1\nline2","filePath":"/path/to/file"}"#;
+        assert!(!fix.is_malformed(valid));
+
+        let fixed = fix.fix_arguments(valid);
+        assert!(fix.is_valid_json(&fixed));
+    }
 }

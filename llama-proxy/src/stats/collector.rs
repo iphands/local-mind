@@ -250,3 +250,262 @@ impl ContextInfo {
         })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_request_metrics_new() {
+        let metrics = RequestMetrics::new();
+
+        assert!(!metrics.request_id.is_empty());
+        assert_eq!(metrics.model, "unknown");
+        assert!(metrics.client_id.is_none());
+        assert!(metrics.conversation_id.is_none());
+        assert_eq!(metrics.prompt_tokens, 0);
+        assert_eq!(metrics.completion_tokens, 0);
+        assert_eq!(metrics.total_tokens, 0);
+        assert_eq!(metrics.prompt_tps, 0.0);
+        assert_eq!(metrics.generation_tps, 0.0);
+        assert!(!metrics.streaming);
+        assert_eq!(metrics.finish_reason, "unknown");
+    }
+
+    #[test]
+    fn test_request_metrics_default() {
+        let metrics = RequestMetrics::default();
+        assert_eq!(metrics.model, "unknown");
+    }
+
+    #[test]
+    fn test_request_metrics_from_response_basic() {
+        let response = serde_json::json!({
+            "model": "test-model",
+            "choices": [{
+                "finish_reason": "stop",
+                "message": {"content": "Hello world"}
+            }]
+        });
+
+        let request = serde_json::json!({
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+
+        let metrics = RequestMetrics::from_response(&response, &request, false, 100.0);
+
+        assert_eq!(metrics.model, "test-model");
+        assert_eq!(metrics.finish_reason, "stop");
+        assert_eq!(metrics.output_len, 11); // "Hello world"
+        assert!(!metrics.streaming);
+        assert_eq!(metrics.duration_ms, 100.0);
+    }
+
+    #[test]
+    fn test_request_metrics_from_response_with_usage() {
+        let response = serde_json::json!({
+            "model": "test-model",
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150
+            },
+            "choices": [{"finish_reason": "stop"}]
+        });
+
+        let request = serde_json::json!({});
+
+        let metrics = RequestMetrics::from_response(&response, &request, true, 200.0);
+
+        assert_eq!(metrics.prompt_tokens, 100);
+        assert_eq!(metrics.completion_tokens, 50);
+        assert_eq!(metrics.total_tokens, 150);
+        assert!(metrics.streaming);
+    }
+
+    #[test]
+    fn test_request_metrics_from_response_with_timings() {
+        let response = serde_json::json!({
+            "model": "test-model",
+            "timings": {
+                "prompt_ms": 50.5,
+                "predicted_ms": 100.25,
+                "prompt_per_second": 198.0,
+                "predicted_per_second": 99.75,
+                "cache_n": 10
+            },
+            "choices": [{"finish_reason": "stop"}]
+        });
+
+        let request = serde_json::json!({});
+
+        let metrics = RequestMetrics::from_response(&response, &request, false, 150.0);
+
+        assert_eq!(metrics.prompt_ms, 50.5);
+        assert_eq!(metrics.generation_ms, 100.25);
+        assert_eq!(metrics.prompt_tps, 198.0);
+        assert_eq!(metrics.generation_tps, 99.75);
+        assert_eq!(metrics.context_used, Some(10));
+    }
+
+    #[test]
+    fn test_request_metrics_from_response_with_messages() {
+        let response = serde_json::json!({
+            "model": "test-model",
+            "choices": [{"finish_reason": "stop"}]
+        });
+
+        let request = serde_json::json!({
+            "messages": [
+                {"role": "system", "content": "You are helpful"},
+                {"role": "user", "content": "Hello there"}
+            ]
+        });
+
+        let metrics = RequestMetrics::from_response(&response, &request, false, 50.0);
+
+        assert_eq!(metrics.input_messages, 2);
+        // "You are helpful" (15) + "Hello there" (11) = 26
+        assert_eq!(metrics.input_len, 26);
+    }
+
+    #[test]
+    fn test_request_metrics_from_response_multimodal_content() {
+        let response = serde_json::json!({
+            "model": "test-model",
+            "choices": [{"finish_reason": "stop"}]
+        });
+
+        let request = serde_json::json!({
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": "What's in this image?"},
+                    {"type": "image_url", "image_url": {"url": "http://example.com/image.png"}}
+                ]
+            }]
+        });
+
+        let metrics = RequestMetrics::from_response(&response, &request, false, 50.0);
+
+        assert_eq!(metrics.input_messages, 1);
+        assert_eq!(metrics.input_len, 21); // "What's in this image?"
+    }
+
+    #[test]
+    fn test_request_metrics_from_response_no_choices() {
+        let response = serde_json::json!({
+            "model": "test-model"
+        });
+
+        let request = serde_json::json!({});
+
+        let metrics = RequestMetrics::from_response(&response, &request, false, 50.0);
+
+        assert_eq!(metrics.finish_reason, "unknown");
+        assert_eq!(metrics.output_len, 0);
+    }
+
+    #[test]
+    fn test_request_metrics_calculate_context_percent() {
+        let mut metrics = RequestMetrics::new();
+        metrics.context_used = Some(50);
+        metrics.context_total = Some(100);
+
+        metrics.calculate_context_percent();
+
+        assert_eq!(metrics.context_percent, Some(50.0));
+    }
+
+    #[test]
+    fn test_request_metrics_calculate_context_percent_zero_total() {
+        let mut metrics = RequestMetrics::new();
+        metrics.context_used = Some(50);
+        metrics.context_total = Some(0);
+
+        metrics.calculate_context_percent();
+
+        assert_eq!(metrics.context_percent, None);
+    }
+
+    #[test]
+    fn test_request_metrics_calculate_context_percent_missing_values() {
+        let mut metrics = RequestMetrics::new();
+
+        metrics.calculate_context_percent();
+
+        assert_eq!(metrics.context_percent, None);
+    }
+
+    #[test]
+    fn test_request_metrics_serialize() {
+        let metrics = RequestMetrics::new();
+        let json = serde_json::to_string(&metrics);
+        assert!(json.is_ok());
+        assert!(json.unwrap().contains("request_id"));
+    }
+
+    #[test]
+    fn test_context_info_from_slots_response() {
+        let response = serde_json::json!([
+            {
+                "id": 0,
+                "n_ctx": 4096,
+                "n_tokens": 100,
+                "is_processing": true
+            },
+            {
+                "id": 1,
+                "n_ctx": 4096,
+                "n_tokens": 50,
+                "is_processing": false
+            }
+        ]);
+
+        let info = ContextInfo::from_slots_response(&response);
+
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.total_context, 8192);
+        assert_eq!(info.used_context, 150);
+        assert_eq!(info.slots.len(), 2);
+        assert_eq!(info.slots[0].slot_id, 0);
+        assert!(info.slots[0].is_processing);
+        assert!(!info.slots[1].is_processing);
+    }
+
+    #[test]
+    fn test_context_info_from_slots_response_empty() {
+        let response = serde_json::json!([]);
+        let info = ContextInfo::from_slots_response(&response);
+
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.total_context, 0);
+        assert_eq!(info.used_context, 0);
+        assert!(info.slots.is_empty());
+    }
+
+    #[test]
+    fn test_context_info_from_slots_response_not_array() {
+        let response = serde_json::json!({"not": "array"});
+        let info = ContextInfo::from_slots_response(&response);
+        assert!(info.is_none());
+    }
+
+    #[test]
+    fn test_context_info_from_slots_response_partial_data() {
+        let response = serde_json::json!([
+            {"id": 0}, // Missing other fields
+            {"n_ctx": 2048, "n_tokens": 25}
+        ]);
+
+        let info = ContextInfo::from_slots_response(&response);
+
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.slots.len(), 2);
+        assert_eq!(info.slots[0].n_ctx, 0); // Default
+        assert_eq!(info.slots[1].slot_id, 0); // Default
+    }
+}

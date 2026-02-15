@@ -121,3 +121,201 @@ impl<T: std::any::Any> AsAny for T {
         self
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::fixes::ToolcallBadFilepathFix;
+
+    #[test]
+    fn test_registry_new() {
+        let registry = FixRegistry::new();
+        assert!(registry.fixes.is_empty());
+        assert!(registry.enabled.is_empty());
+    }
+
+    #[test]
+    fn test_registry_default() {
+        let registry = FixRegistry::default();
+        assert!(registry.list_fixes().is_empty());
+    }
+
+    #[test]
+    fn test_registry_register() {
+        let mut registry = FixRegistry::new();
+        let fix = Arc::new(ToolcallBadFilepathFix::new(true));
+        registry.register(fix);
+
+        assert_eq!(registry.list_fixes().len(), 1);
+        assert!(registry.is_enabled("toolcall_bad_filepath"));
+    }
+
+    #[test]
+    fn test_registry_set_enabled() {
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+
+        assert!(registry.is_enabled("toolcall_bad_filepath"));
+
+        registry.set_enabled("toolcall_bad_filepath", false);
+        assert!(!registry.is_enabled("toolcall_bad_filepath"));
+
+        registry.set_enabled("toolcall_bad_filepath", true);
+        assert!(registry.is_enabled("toolcall_bad_filepath"));
+    }
+
+    #[test]
+    fn test_registry_set_enabled_unknown_fix() {
+        let mut registry = FixRegistry::new();
+        // Should not panic, just do nothing
+        registry.set_enabled("unknown_fix", false);
+        assert!(!registry.is_enabled("unknown_fix"));
+    }
+
+    #[test]
+    fn test_registry_is_enabled_unknown() {
+        let registry = FixRegistry::new();
+        assert!(!registry.is_enabled("nonexistent"));
+    }
+
+    #[test]
+    fn test_registry_get_fix() {
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+
+        let fix = registry.get_fix("toolcall_bad_filepath");
+        assert!(fix.is_some());
+        assert_eq!(fix.unwrap().name(), "toolcall_bad_filepath");
+
+        let missing = registry.get_fix("nonexistent");
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn test_registry_apply_fixes_no_fixes() {
+        let registry = FixRegistry::new();
+        let response = serde_json::json!({"test": "value"});
+        let result = registry.apply_fixes(response.clone());
+        assert_eq!(result, response);
+    }
+
+    #[test]
+    fn test_registry_apply_fixes_disabled() {
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+        registry.set_enabled("toolcall_bad_filepath", false);
+
+        let response = serde_json::json!({"test": "value"});
+        let result = registry.apply_fixes(response.clone());
+        assert_eq!(result, response);
+    }
+
+    #[test]
+    fn test_registry_apply_fixes_doesnt_apply() {
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+
+        // Response without tool calls - fix doesn't apply
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {"content": "Hello"}
+            }]
+        });
+        let result = registry.apply_fixes(response.clone());
+        assert_eq!(result, response);
+    }
+
+    #[test]
+    fn test_registry_apply_fixes_applies() {
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+
+        // Response with malformed tool call
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": {
+                            "name": "write",
+                            "arguments": "{\"filePath\":\"/path\",\"filePath\"/broken\"}"
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let result = registry.apply_fixes(response);
+        // The fix should have been applied (arguments should be valid JSON now)
+        let args = &result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"];
+        let args_str = args.as_str().unwrap();
+        // Should be valid JSON after fix
+        assert!(serde_json::from_str::<serde_json::Value>(args_str).is_ok());
+    }
+
+    #[test]
+    fn test_registry_apply_fixes_stream() {
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+
+        let chunk = serde_json::json!({
+            "choices": [{
+                "delta": {"content": "test"}
+            }]
+        });
+
+        let result = registry.apply_fixes_stream(chunk.clone());
+        assert_eq!(result, chunk);
+    }
+
+    #[test]
+    fn test_registry_configure() {
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+
+        let mut options = HashMap::new();
+        options.insert(
+            "remove_duplicate".to_string(),
+            serde_yaml::Value::Bool(false),
+        );
+
+        let mut modules = HashMap::new();
+        modules.insert(
+            "toolcall_bad_filepath".to_string(),
+            crate::config::FixModuleConfig {
+                enabled: false,
+                options,
+            },
+        );
+
+        registry.configure(&modules);
+        assert!(!registry.is_enabled("toolcall_bad_filepath"));
+    }
+
+    #[test]
+    fn test_registry_configure_unknown_fix() {
+        let mut registry = FixRegistry::new();
+
+        let mut modules = HashMap::new();
+        modules.insert(
+            "unknown_fix".to_string(),
+            crate::config::FixModuleConfig {
+                enabled: true,
+                options: HashMap::new(),
+            },
+        );
+
+        // Should not panic
+        registry.configure(&modules);
+    }
+
+    #[test]
+    fn test_multiple_fixes() {
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+        registry.register(Arc::new(ToolcallBadFilepathFix::new(false)));
+
+        assert_eq!(registry.list_fixes().len(), 2);
+        // Both should be enabled by default
+        assert!(registry.is_enabled("toolcall_bad_filepath"));
+    }
+}
