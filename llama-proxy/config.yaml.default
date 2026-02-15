@@ -1,0 +1,57 @@
+# llama-proxy configuration
+# Copy to config.yaml and modify as needed
+
+# Proxy server settings
+server:
+  # Port to listen on
+  port: 8066
+  # Bind address
+  host: "0.0.0.0"
+
+# Backend llama-server configuration
+backend:
+  # Hostname or IP of llama-server
+  host: "localhost"
+  # Port of llama-server
+  port: 8080
+  # Request timeout in seconds
+  timeout_seconds: 300
+
+# Response fix modules (enable/disable)
+fixes:
+  # Enable all fixes by default
+  enabled: true
+  # Individual fix toggles
+  modules:
+    # Fix duplicate/malformed filePath in Qwen3-Coder tool calls
+    toolcall_bad_filepath:
+      enabled: true
+      # If true, remove duplicate keys; if false, fix and keep both
+      remove_duplicate: true
+
+# Stats logging to STDOUT
+stats:
+  # Enable stats logging
+  enabled: true
+  # Log format: "pretty" | "json" | "compact"
+  format: "pretty"
+  # Log every N requests (1 = every request)
+  log_interval: 1
+
+# Remote exporters for metrics
+exporters:
+  # InfluxDB v2 exporter
+  influxdb:
+    enabled: false
+    # InfluxDB server URL
+    url: "http://localhost:8086"
+    # Organization
+    org: "my-org"
+    # Bucket name
+    bucket: "llama-metrics"
+    # Authentication token
+    token: "your-token-here"
+    # Batch writes (0 = immediate)
+    batch_size: 10
+    # Flush interval in seconds
+    flush_interval_seconds: 5

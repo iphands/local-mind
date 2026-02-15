@@ -1,0 +1,56 @@
+[package]
+name = "llama-proxy"
+version = "0.1.0"
+edition = "2021"
+description = "HTTP reverse proxy for llama.cpp server with response fixing and metrics"
+license = "MIT"
+authors = ["iphands"]
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP server & client
+axum = "0.7"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream", "rustls-tls"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+hyper = { version = "1", features = ["full"] }
+hyper-util = { version = "0.1", features = ["tokio", "client-legacy"] }
+http-body-util = "0.1"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["json", "env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Async utilities
+futures = "0.3"
+async-trait = "0.1"
+bytes = "1"
+
+# InfluxDB exporter (optional)
+influxdb2 = { version = "0.5", optional = true }
+
+# Utilities
+thiserror = "2"
+anyhow = "1"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[features]
+default = []
+influxdb = ["influxdb2"]
+
+[[bin]]
+name = "llama-proxy"
+path = "src/main.rs"
