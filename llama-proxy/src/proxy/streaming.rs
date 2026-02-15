@@ -38,10 +38,16 @@ pub async fn handle_streaming_response(
     let accumulated = Arc::new(tokio::sync::Mutex::new(String::new()));
     let accumulated_clone = accumulated.clone();
 
+    // Create oneshot channel for stream completion signaling
+    let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<()>();
+    let completion_tx = Arc::new(tokio::sync::Mutex::new(Some(completion_tx)));
+    let completion_tx_clone = completion_tx.clone();
+
     let processed_stream = stream.then(move |chunk_result| {
         let fix_registry = fix_registry.clone();
         let accumulated = accumulated_clone.clone();
         let stats_enabled = stats_enabled;
+        let completion_tx = completion_tx_clone.clone();
 
         async move {
             let chunk = match chunk_result {
@@ -68,6 +74,13 @@ pub async fn handle_streaming_response(
                     let data = &line[6..];
 
                     if data == "[DONE]" {
+                        // Signal completion to metrics task
+                        if stats_enabled {
+                            if let Some(tx) = completion_tx.lock().await.take() {
+                                let _ = tx.send(());
+                            }
+                        }
+
                         output.push_str(line);
                         if i < lines.len() - 1 {
                             output.push('\n');
@@ -114,8 +127,23 @@ pub async fn handle_streaming_response(
         let backend_url = backend_url.clone();
 
         tokio::spawn(async move {
-            // Wait a bit for stream to complete
-            tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+            // Wait for stream completion signal with timeout fallback
+            let wait_result = tokio::time::timeout(
+                tokio::time::Duration::from_secs(30),
+                completion_rx
+            ).await;
+
+            match wait_result {
+                Ok(Ok(())) => {
+                    tracing::debug!("Stream completion signal received");
+                },
+                Ok(Err(_)) => {
+                    tracing::warn!("Stream completion channel closed unexpectedly");
+                },
+                Err(_) => {
+                    tracing::warn!("Stream completion timeout after 30s, extracting metrics anyway");
+                },
+            }
 
             let acc = accumulated.lock().await;
             if !acc.is_empty() {
@@ -314,7 +342,78 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                 acc["usage"] = usage.clone();
             }
 
+            // Explicitly preserve model field (llama.cpp includes in first chunk)
+            if let Some(model) = chunk.get("model") {
+                if !model.is_null() {
+                    acc["model"] = model.clone();
+                }
+            }
+
+            // Preserve timings if present (llama.cpp extension, in final chunk)
+            if let Some(timings) = chunk.get("timings") {
+                acc["timings"] = timings.clone();
+            }
+
             acc
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn test_merge_chunk_preserves_model() {
+        let chunk1 = json!({"model": "qwen3", "choices": []});
+        let chunk2 = json!({"choices": [{"delta": {"content": "hi"}}]});
+
+        let merged = merge_chunk(None, chunk1);
+        let merged = merge_chunk(Some(merged), chunk2);
+
+        assert_eq!(merged["model"].as_str().unwrap(), "qwen3");
+    }
+
+    #[test]
+    fn test_merge_chunk_preserves_timings() {
+        let chunk1 = json!({"model": "qwen3", "choices": []});
+        let chunk2 = json!({
+            "usage": {"prompt_tokens": 10},
+            "timings": {"prompt_ms": 50.5}
+        });
+
+        let merged = merge_chunk(None, chunk1);
+        let merged = merge_chunk(Some(merged), chunk2);
+
+        assert!(merged.get("timings").is_some());
+        assert_eq!(merged["timings"]["prompt_ms"].as_f64().unwrap(), 50.5);
+    }
+
+    #[test]
+    fn test_parse_accumulated_sse_complete() {
+        let sse = "data: {\"model\":\"qwen3\",\"choices\":[]}\n\
+                   data: {\"usage\":{\"prompt_tokens\":10,\"completion_tokens\":5}}\n\
+                   data: [DONE]\n";
+
+        let result = parse_accumulated_sse(sse).unwrap();
+        assert_eq!(result["model"].as_str().unwrap(), "qwen3");
+        assert_eq!(result["usage"]["prompt_tokens"].as_u64().unwrap(), 10);
+    }
+
+    #[test]
+    fn test_merge_chunk_accumulates_content() {
+        let chunk1 = json!({
+            "model": "test-model",
+            "choices": [{"index": 0, "delta": {"content": "Hello"}, "message": {"content": "Hello"}}]
+        });
+        let chunk2 = json!({
+            "choices": [{"index": 0, "delta": {"content": " World"}}]
+        });
+
+        let merged = merge_chunk(None, chunk1);
+        let merged = merge_chunk(Some(merged), chunk2);
+
+        assert_eq!(merged["choices"][0]["message"]["content"].as_str().unwrap(), "Hello World");
     }
 }
