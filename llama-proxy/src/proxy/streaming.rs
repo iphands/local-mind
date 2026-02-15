@@ -57,15 +57,21 @@ pub async fn handle_streaming_response(
 
             let chunk_str = String::from_utf8_lossy(&chunk);
 
-            // Process each SSE event
-            let mut output = Vec::new();
+            // Process each SSE event, preserving the exact format including blank lines
+            let mut output = String::new();
 
-            for line in chunk_str.lines() {
+            // Split by newlines but preserve empty strings (blank lines)
+            let lines: Vec<&str> = chunk_str.split('\n').collect();
+
+            for (i, line) in lines.iter().enumerate() {
                 if line.starts_with("data: ") {
                     let data = &line[6..];
 
                     if data == "[DONE]" {
-                        output.push(line.to_string());
+                        output.push_str(line);
+                        if i < lines.len() - 1 {
+                            output.push('\n');
+                        }
                         continue;
                     }
 
@@ -76,23 +82,28 @@ pub async fn handle_streaming_response(
                         // Accumulate for stats
                         if stats_enabled {
                             let mut acc = accumulated.lock().await;
+                            acc.push_str("data: ");
                             acc.push_str(&serde_json::to_string(&json).unwrap_or_default());
                             acc.push('\n');
                         }
 
-                        output.push(format!(
-                            "data: {}",
-                            serde_json::to_string(&json).unwrap_or_default()
-                        ));
+                        output.push_str("data: ");
+                        output.push_str(&serde_json::to_string(&json).unwrap_or_default());
                     } else {
-                        output.push(line.to_string());
+                        output.push_str(line);
                     }
                 } else {
-                    output.push(line.to_string());
+                    // Preserve empty lines and other SSE format lines (event:, id:, etc.)
+                    output.push_str(line);
+                }
+
+                // Add newline unless this is the last item and it's empty
+                if i < lines.len() - 1 {
+                    output.push('\n');
                 }
             }
 
-            Ok(Bytes::from(output.join("\n")))
+            Ok(Bytes::from(output))
         }
     });
 
