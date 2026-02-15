@@ -9,8 +9,11 @@ use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::config::StatsFormat;
 use crate::exporters::ExporterManager;
 use crate::fixes::FixRegistry;
+use crate::proxy::fetch_context_total;
+use crate::stats::{format_metrics, RequestMetrics};
 
 /// Handle a streaming (SSE) response from the backend
 #[allow(clippy::too_many_arguments)]
@@ -18,9 +21,12 @@ pub async fn handle_streaming_response(
     backend_response: reqwest::Response,
     fix_registry: Arc<FixRegistry>,
     stats_enabled: bool,
+    stats_format: StatsFormat,
     exporter_manager: Arc<ExporterManager>,
     request_json: Option<serde_json::Value>,
     start: Instant,
+    http_client: reqwest::Client,
+    backend_url: String,
 ) -> Response {
     let status = backend_response.status();
     let headers = backend_response.headers().clone();
@@ -92,22 +98,52 @@ pub async fn handle_streaming_response(
 
     // Spawn task to collect stats after stream completes
     if stats_enabled {
+        let exporter_manager = exporter_manager.clone();
+        let client = http_client.clone();
+        let backend_url = backend_url.clone();
+
         tokio::spawn(async move {
             // Wait a bit for stream to complete
             tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
 
             let acc = accumulated.lock().await;
             if !acc.is_empty() {
-                // Try to reconstruct final response for stats
-                // This is a best-effort approach for streaming
-                tracing::debug!(
-                    duration_ms = start.elapsed().as_millis() as u64,
-                    request_json = ?request_json,
-                    "Streaming request completed"
-                );
+                // Parse final SSE event
+                if let Some(final_event) = parse_accumulated_sse(&acc) {
+                    // Extract metrics from final event
+                    let mut metrics = if let Some(ref req_json) = request_json {
+                        RequestMetrics::from_response(
+                            &final_event,
+                            req_json,
+                            true, // streaming
+                            start.elapsed().as_millis() as f64,
+                        )
+                    } else {
+                        tracing::debug!(
+                            duration_ms = start.elapsed().as_millis() as u64,
+                            "Streaming completed (no request JSON)"
+                        );
+                        return;
+                    };
 
-                // Export to remote systems if enabled
-                let _ = exporter_manager; // Suppress unused warning
+                    // Fetch and set context_total
+                    if let Some(ctx_total) = fetch_context_total(&client, &backend_url).await {
+                        metrics.context_total = Some(ctx_total);
+                        metrics.calculate_context_percent();
+                    }
+
+                    // Format and log stats
+                    let formatted = format_metrics(&metrics, stats_format);
+                    tracing::info!("\n{}", formatted);
+
+                    // Export to remote systems
+                    exporter_manager.export_all(&metrics).await;
+                } else {
+                    tracing::debug!(
+                        duration_ms = start.elapsed().as_millis() as u64,
+                        "Streaming completed (unable to parse final event)"
+                    );
+                }
             }
         });
     }
@@ -129,7 +165,6 @@ pub async fn handle_streaming_response(
 }
 
 /// Parse accumulated SSE data into a complete response for stats
-#[allow(dead_code)]
 fn parse_accumulated_sse(data: &str) -> Option<serde_json::Value> {
     let mut combined: Option<serde_json::Value> = None;
 

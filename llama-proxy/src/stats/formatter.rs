@@ -95,8 +95,7 @@ fn format_compact(m: &RequestMetrics) -> String {
     };
 
     format!(
-        "[{}] model={} tokens={}/{} tps={:.1}/{:.1}ms={} {} finish={} dur={:.1}ms",
-        m.timestamp.format("%H:%M:%S"),
+        "model={} tokens={}/{} tps={:.1}/{:.1}ms {} {} finish={} dur={:.1}ms",
         m.model,
         m.prompt_tokens,
         m.completion_tokens,

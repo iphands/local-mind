@@ -9,6 +9,7 @@ use std::time::Instant;
 
 use super::server::ProxyState;
 use super::streaming::handle_streaming_response;
+use crate::proxy::fetch_context_total;
 use crate::stats::{format_metrics, RequestMetrics};
 
 /// Proxy request handler
@@ -99,9 +100,12 @@ impl ProxyHandler {
                 backend_response,
                 self.state.fix_registry.clone(),
                 self.state.config.stats.enabled,
+                self.state.config.stats.format,
                 self.state.exporter_manager.clone(),
                 request_json,
                 start,
+                self.state.http_client.clone(),
+                self.state.config.backend.url().to_string(),
             )
             .await
         } else {
@@ -147,7 +151,7 @@ impl ProxyHandler {
                 json = self.state.fix_registry.apply_fixes(json);
 
                 // Collect stats if enabled
-                let metrics = if self.state.config.stats.enabled {
+                let mut metrics = if self.state.config.stats.enabled {
                     if let Some(ref req_json) = request_json {
                         Some(RequestMetrics::from_response(
                             &json,
@@ -161,6 +165,19 @@ impl ProxyHandler {
                 } else {
                     None
                 };
+
+                // Fetch and set context_total for stats
+                if let Some(ref mut m) = metrics {
+                    if let Some(ctx_total) = fetch_context_total(
+                        &self.state.http_client,
+                        &self.state.config.backend.url(),
+                    )
+                    .await
+                    {
+                        m.context_total = Some(ctx_total);
+                        m.calculate_context_percent();
+                    }
+                }
 
                 // Serialize back to bytes
                 match serde_json::to_vec(&json) {
