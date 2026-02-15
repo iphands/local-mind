@@ -225,6 +225,34 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                                     }
                                 }
 
+                                // Merge reasoning_text (concatenate like content)
+                                if let Some(reasoning) =
+                                    delta.get("reasoning_text").and_then(|r| r.as_str())
+                                {
+                                    if let Some(acc_msg) = acc_choice.get_mut("message") {
+                                        if let Some(existing) = acc_msg
+                                            .get("reasoning_text")
+                                            .and_then(|r| r.as_str())
+                                        {
+                                            acc_msg["reasoning_text"] =
+                                                serde_json::Value::String(format!(
+                                                    "{}{}",
+                                                    existing, reasoning
+                                                ));
+                                        } else {
+                                            acc_msg["reasoning_text"] =
+                                                serde_json::Value::String(reasoning.to_string());
+                                        }
+                                    }
+                                }
+
+                                // Merge reasoning_opaque (replace, not concat - it's a state blob)
+                                if let Some(opaque) = delta.get("reasoning_opaque") {
+                                    if let Some(acc_msg) = acc_choice.get_mut("message") {
+                                        acc_msg["reasoning_opaque"] = opaque.clone();
+                                    }
+                                }
+
                                 // Merge tool calls
                                 if let Some(tool_calls) = delta.get("tool_calls") {
                                     if let Some(acc_tc) = acc_choice

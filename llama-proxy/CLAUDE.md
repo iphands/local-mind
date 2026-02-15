@@ -10,6 +10,57 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Collects and logs performance metrics (tokens/sec, timing, context usage)
 - Exports metrics to external systems (InfluxDB)
 
+### Client Compatibility
+
+The proxy sits between **llama.cpp server** and AI client tools, supporting:
+
+**Supported Clients:**
+1. **Claude Code CLI/TUI** (`../vendor/claude-code`) - Anthropic's official Claude CLI
+2. **Opencode CLI/TUI** (`../vendor/opencode`) - Open-source AI coding assistant
+
+**API Standards Supported:**
+- ✅ **Vanilla OpenAI Chat Completions API** (`/v1/chat/completions`)
+  - Standard request/response format
+  - Streaming via Server-Sent Events (SSE)
+  - Tool calls in OpenAI format with index-based accumulation
+  - All standard parameters (temperature, top_p, max_tokens, etc.)
+
+- ✅ **llama.cpp Extensions**
+  - `timings` object for performance metrics (prompt_n, predicted_n, tokens/sec)
+  - `/props` endpoint for server properties (n_ctx, model info)
+  - `/slots` endpoint for KV cache monitoring
+  - Extended sampling parameters (mirostat, DRY sampling, etc.)
+
+- ✅ **Opencode Extensions** (full type-safe support)
+  - **Request parameters**: `reasoning_effort`, `verbosity`, `thinking_budget` (pass-through to backend)
+  - **Response fields**: `reasoning_text` / `reasoning_opaque` in messages and deltas
+  - **Extended usage**: `completion_tokens_details` with `reasoning_tokens`, `accepted_prediction_tokens`, `rejected_prediction_tokens`
+  - **Streaming support**: Proper accumulation of reasoning fields in SSE chunks
+  - **Metrics tracking**: Extended token counts logged and exported to InfluxDB
+  - **Note**: llama.cpp models don't generate these fields, but proxy preserves them for forward compatibility
+
+**Key Compatibility Principles:**
+1. **Transparent Pass-Through**: Unknown fields in requests/responses are preserved (forward compatibility)
+2. **No Modification of Standard Fields**: OpenAI-compliant fields passed unmodified
+3. **Extension Preservation**: Client-specific extensions preserved even if not used by backend
+4. **Fix Layer Isolation**: Response fixes applied without breaking API contract
+
+**Detailed Client Documentation:**
+See `../context/opencode_claude_llama_notes.md` for comprehensive details on:
+- Request/response formats for each client
+- Streaming behavior and SSE format
+- Tool call accumulation patterns
+- Context window calculations
+- Testing procedures
+- Known issues and workarounds
+
+**Architecture Insight:**
+The proxy is designed as a **transparent interceptor** that:
+- Routes all requests to llama.cpp backend unchanged
+- Applies fixes during response streaming (per-chunk processing)
+- Collects metrics from llama.cpp-specific extensions
+- Maintains full OpenAI API compatibility for maximum client support
+
 ## Build, Run, and Test Commands
 
 ```bash
@@ -43,8 +94,8 @@ cp config.yaml.default config.yaml
 
 **proxy/** - HTTP server and request handling
 - `server.rs`: Axum server setup, ProxyState with shared config/registry/exporters
-- `handler.rs`: Request router that determines streaming vs non-streaming
-- `streaming.rs`: SSE stream processing with fix application per chunk
+- `handler.rs`: Request router with pass-through endpoints (/props, /slots, /health, /v1/models, /metrics)
+- `streaming.rs`: SSE stream processing with fix application and reasoning field accumulation per chunk
 - `context.rs`: Fetches context_total from backend /slots endpoint for stats
 
 **fixes/** - Pluggable response fix system
@@ -55,10 +106,11 @@ cp config.yaml.default config.yaml
 - Fixes work on both streaming chunks (`apply_stream()`) and complete responses (`apply()`)
 
 **stats/** - Metrics collection
-- `collector.rs`: `RequestMetrics` struct, calculates tokens/sec, context usage
-- `formatter.rs`: Formats metrics as pretty/json/compact for logging
+- `collector.rs`: `RequestMetrics` struct, calculates tokens/sec, context usage, extended token details
+- `formatter.rs`: Formats metrics as pretty/json/compact for logging (includes reasoning tokens when present)
 - Metrics collected for both streaming and non-streaming requests
 - Context usage calculated from model's KV cache via /slots endpoint
+- Extended metrics: reasoning_tokens, accepted_prediction_tokens, rejected_prediction_tokens (Opencode/Copilot)
 
 **exporters/** - Remote metrics export
 - `mod.rs`: `ExporterManager` with pluggable exporter trait
@@ -66,9 +118,10 @@ cp config.yaml.default config.yaml
 - Exporters run async after request completes
 
 **api/** - Type definitions
-- `openai.rs`: OpenAI API types
+- `openai.rs`: OpenAI API types with Opencode extensions (reasoning fields, extended usage)
 - `llama.rs`: llama.cpp specific types
 - Shared between request parsing and response handling
+- All extension fields use `Option<T>` with `#[serde(skip_serializing_if = "Option::is_none")]` for backward compatibility
 
 **config/** - YAML configuration
 - `mod.rs`: Main AppConfig struct
@@ -101,6 +154,38 @@ Key test files:
 - `src/stats/collector.rs`: Metrics calculation
 - `src/config/loader.rs`: Config parsing
 
+**Testing with Real Clients:**
+```bash
+# Test with Claude Code (point it at proxy instead of llama.cpp directly)
+# Configure in Claude Code settings to use http://localhost:8066 as base URL
+
+# Test with Opencode
+# Configure Opencode to use http://localhost:8066 as OpenAI-compatible endpoint
+
+# Manual API testing (simulates client behavior)
+# Non-streaming request
+curl -X POST http://localhost:8066/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3","messages":[{"role":"user","content":"Hello"}]}'
+
+# Streaming request
+curl -X POST http://localhost:8066/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3","messages":[{"role":"user","content":"Count to 5"}],"stream":true}'
+
+# Tool call test
+curl -X POST http://localhost:8066/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"qwen3","messages":[{"role":"user","content":"Get weather"}],"tools":[{"type":"function","function":{"name":"get_weather","parameters":{"type":"object","properties":{"location":{"type":"string"}}}}}]}'
+```
+
+**Reference Implementation:**
+For understanding how clients interact with the API:
+- Claude Code client code: `../vendor/claude-code/` (TypeScript/Node.js)
+- Opencode client code: `../vendor/opencode/packages/opencode/src/provider/sdk/copilot/` (TypeScript)
+- llama.cpp server API: `../vendor/llama.cpp/examples/server/` (C++)
+- Comprehensive client notes: `../context/opencode_claude_llama_notes.md`
+
 ## Configuration
 
 The proxy requires `config.yaml` (copy from `config.yaml.default`). Key settings:
@@ -131,3 +216,39 @@ The proxy requires `config.yaml` (copy from `config.yaml.default`). Key settings
 2. Update calculation logic in `from_response()` or `from_streaming_chunks()`
 3. Update formatters in `src/stats/formatter.rs`
 4. Add to InfluxDB fields in `src/exporters/influxdb.rs`
+
+## Maintaining Client Compatibility
+
+When modifying the proxy, ensure these compatibility requirements:
+
+**MUST Preserve:**
+- ✅ All standard OpenAI API fields (model, messages, temperature, etc.)
+- ✅ Tool call format and IDs
+- ✅ Finish reason values (stop, length, tool_calls, content_filter)
+- ✅ Token counts in usage object (including extended details like reasoning_tokens)
+- ✅ Message ordering and structure
+- ✅ Reasoning fields (reasoning_text, reasoning_opaque) in both messages and streaming deltas
+- ✅ Unknown request/response fields (pass-through)
+
+**MUST NOT:**
+- ❌ Modify standard OpenAI field values
+- ❌ Strip or rename fields from requests/responses
+- ❌ Reorder tool_calls array or change indices
+- ❌ Alter streaming chunk format (SSE protocol)
+- ❌ Change Authorization header behavior
+- ❌ Break backward compatibility without versioning
+
+**Testing Checklist for Changes:**
+1. Run unit tests: `cargo test`
+2. Test non-streaming requests with curl
+3. Test streaming requests (verify SSE format)
+4. Test tool calls (both streaming and non-streaming)
+5. Verify metrics collection still works
+6. Check that unknown fields pass through
+7. Optionally: Test with real Claude Code or Opencode client
+
+**When in Doubt:**
+- Consult `../context/opencode_claude_llama_notes.md` for client behavior
+- Check `../vendor/opencode/` for Opencode implementation patterns
+- Review `../vendor/llama.cpp/examples/server/README.md` for backend API
+- Prefer pass-through over modification (transparency principle)

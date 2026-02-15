@@ -50,6 +50,14 @@ pub struct RequestMetrics {
     pub finish_reason: String,
     /// Request duration in ms
     pub duration_ms: f64,
+
+    // Extended token details (Opencode/Copilot extensions)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accepted_prediction_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rejected_prediction_tokens: Option<u64>,
 }
 
 impl RequestMetrics {
@@ -77,6 +85,9 @@ impl RequestMetrics {
             streaming: false,
             finish_reason: "unknown".to_string(),
             duration_ms: 0.0,
+            reasoning_tokens: None,
+            accepted_prediction_tokens: None,
+            rejected_prediction_tokens: None,
         }
     }
 
@@ -123,6 +134,19 @@ impl RequestMetrics {
                     .and_then(|t| t.as_u64())
                     .unwrap_or(0);
                 metrics.total_tokens = metrics.prompt_tokens + metrics.completion_tokens;
+            }
+
+            // Extract extended usage details (Opencode/Copilot extensions)
+            if let Some(details) = usage.get("completion_tokens_details") {
+                metrics.reasoning_tokens = details
+                    .get("reasoning_tokens")
+                    .and_then(|t| t.as_u64());
+                metrics.accepted_prediction_tokens = details
+                    .get("accepted_prediction_tokens")
+                    .and_then(|t| t.as_u64());
+                metrics.rejected_prediction_tokens = details
+                    .get("rejected_prediction_tokens")
+                    .and_then(|t| t.as_u64());
             }
         } else {
             tracing::debug!("No usage field found in response");
@@ -566,5 +590,35 @@ mod tests {
         assert_eq!(info.slots.len(), 2);
         assert_eq!(info.slots[0].n_ctx, 0); // Default
         assert_eq!(info.slots[1].slot_id, 0); // Default
+    }
+
+    #[test]
+    fn test_extended_usage_extraction() {
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {"role": "assistant", "content": "test"},
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 100,
+                "completion_tokens": 50,
+                "total_tokens": 150,
+                "completion_tokens_details": {
+                    "reasoning_tokens": 20,
+                    "accepted_prediction_tokens": 5
+                }
+            }
+        });
+
+        let metrics = RequestMetrics::from_response(
+            &response,
+            &serde_json::json!({"messages": []}),
+            false,
+            100.0
+        );
+
+        assert_eq!(metrics.reasoning_tokens, Some(20));
+        assert_eq!(metrics.accepted_prediction_tokens, Some(5));
+        assert_eq!(metrics.rejected_prediction_tokens, None);
     }
 }

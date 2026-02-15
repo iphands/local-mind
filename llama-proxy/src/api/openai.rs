@@ -27,6 +27,14 @@ pub struct ChatCompletionRequest {
     pub presence_penalty: Option<f32>,
     #[serde(default)]
     pub user: Option<String>,
+
+    // Opencode request extensions (pass-through to backend)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_effort: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verbosity: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking_budget: Option<u64>,
 }
 
 /// Chat message
@@ -146,6 +154,12 @@ pub struct ResponseMessage {
     pub content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCall>>,
+
+    // Opencode/Anthropic/Copilot reasoning extensions (optional)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_opaque: Option<String>,
 }
 
 /// Tool call in response
@@ -176,6 +190,12 @@ pub struct Delta {
     pub content: Option<String>,
     #[serde(default)]
     pub tool_calls: Option<Vec<ToolCall>>,
+
+    // Reasoning extensions for streaming
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_opaque: Option<String>,
 }
 
 /// Token usage
@@ -184,6 +204,21 @@ pub struct Usage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,
     pub total_tokens: u64,
+
+    // Extended usage details (Opencode/Copilot)
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+/// Extended completion token details
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CompletionTokensDetails {
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
+    #[serde(default)]
+    pub accepted_prediction_tokens: Option<u64>,
+    #[serde(default)]
+    pub rejected_prediction_tokens: Option<u64>,
 }
 
 /// Timing information from llama.cpp
@@ -254,6 +289,9 @@ mod tests {
             frequency_penalty: None,
             presence_penalty: None,
             user: None,
+            reasoning_effort: None,
+            verbosity: None,
+            thinking_budget: None,
         };
 
         let json = serde_json::to_string(&request).unwrap();
@@ -484,6 +522,7 @@ mod tests {
             prompt_tokens: 100,
             completion_tokens: 50,
             total_tokens: 150,
+            completion_tokens_details: None,
         };
 
         let json = serde_json::to_string(&usage).unwrap();
@@ -499,6 +538,8 @@ mod tests {
             role: Some("assistant".to_string()),
             content: Some("Hello".to_string()),
             tool_calls: None,
+            reasoning_text: None,
+            reasoning_opaque: None,
         };
 
         let json = serde_json::to_string(&delta).unwrap();
@@ -534,5 +575,65 @@ mod tests {
         let parsed: ToolCall = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, Some("call-123".to_string()));
         assert_eq!(parsed.index, Some(0));
+    }
+
+    #[test]
+    fn test_response_message_with_reasoning() {
+        let json = r#"{
+            "role": "assistant",
+            "content": "Answer",
+            "reasoning_text": "Thinking steps",
+            "reasoning_opaque": "state_blob"
+        }"#;
+        let msg: ResponseMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.reasoning_text, Some("Thinking steps".to_string()));
+        assert_eq!(msg.reasoning_opaque, Some("state_blob".to_string()));
+    }
+
+    #[test]
+    fn test_response_message_without_reasoning() {
+        let json = r#"{
+            "role": "assistant",
+            "content": "Answer"
+        }"#;
+        let msg: ResponseMessage = serde_json::from_str(json).unwrap();
+        assert_eq!(msg.reasoning_text, None);
+        assert_eq!(msg.reasoning_opaque, None);
+    }
+
+    #[test]
+    fn test_usage_with_extended_details() {
+        let json = r#"{
+            "prompt_tokens": 100,
+            "completion_tokens": 50,
+            "total_tokens": 150,
+            "completion_tokens_details": {
+                "reasoning_tokens": 20
+            }
+        }"#;
+        let usage: Usage = serde_json::from_str(json).unwrap();
+        assert_eq!(usage.completion_tokens_details.unwrap().reasoning_tokens, Some(20));
+    }
+
+    #[test]
+    fn test_request_with_reasoning_effort() {
+        let json = r#"{
+            "model": "test",
+            "messages": [{"role": "user", "content": "Test"}],
+            "reasoning_effort": "high"
+        }"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(req.reasoning_effort, Some("high".to_string()));
+    }
+
+    #[test]
+    fn test_delta_with_reasoning() {
+        let json = r#"{
+            "role": "assistant",
+            "content": "Text",
+            "reasoning_text": "Thinking"
+        }"#;
+        let delta: Delta = serde_json::from_str(json).unwrap();
+        assert_eq!(delta.reasoning_text, Some("Thinking".to_string()));
     }
 }

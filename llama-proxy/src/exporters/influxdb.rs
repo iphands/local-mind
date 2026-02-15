@@ -89,7 +89,7 @@ impl MetricsExporter for InfluxDbExporter {
             builder = builder.tag("conversation_id", conv_id.as_str());
         }
 
-        let point = builder
+        let mut point = builder
             .field("prompt_tokens", metrics.prompt_tokens as f64)
             .field("completion_tokens", metrics.completion_tokens as f64)
             .field("total_tokens", metrics.total_tokens as f64)
@@ -99,8 +99,20 @@ impl MetricsExporter for InfluxDbExporter {
             .field("generation_ms", metrics.generation_ms)
             .field("duration_ms", metrics.duration_ms)
             .field("input_len", metrics.input_len as f64)
-            .field("output_len", metrics.output_len as f64)
-            .timestamp(metrics.timestamp.timestamp_nanos_opt().unwrap_or(0));
+            .field("output_len", metrics.output_len as f64);
+
+        // Add extended token details if present (Opencode/Copilot extensions)
+        if let Some(reasoning) = metrics.reasoning_tokens {
+            point = point.field("reasoning_tokens", reasoning as f64);
+        }
+        if let Some(accepted) = metrics.accepted_prediction_tokens {
+            point = point.field("accepted_prediction_tokens", accepted as f64);
+        }
+        if let Some(rejected) = metrics.rejected_prediction_tokens {
+            point = point.field("rejected_prediction_tokens", rejected as f64);
+        }
+
+        let point = point.timestamp(metrics.timestamp.timestamp_nanos_opt().unwrap_or(0));
 
         let point = match point.build() {
             Ok(p) => p,

@@ -47,6 +47,10 @@ fn format_pretty(m: &RequestMetrics) -> String {
         (None, None) => String::new(),
     };
 
+    let reasoning_line = m.reasoning_tokens
+        .map(|r| format!("│   Reasoning Tokens: {:46}│\n", r))
+        .unwrap_or_default();
+
     format!(
         r#"┌──────────────────────────────────────────────────────────────────┐
 │ LLM Request Metrics                                              │
@@ -60,7 +64,7 @@ fn format_pretty(m: &RequestMetrics) -> String {
 ├──────────────────────────────────────────────────────────────────┤
 │ Tokens                                                           │
 │   Input: {:6} │ Output: {:6} │ Total: {:6}                   │
-├──────────────────────────────────────────────────────────────────┤
+{}├──────────────────────────────────────────────────────────────────┤
 │ Context: {:54}│
 │ Finish: {:56}│
 │ Duration: {:54.1}ms│
@@ -76,6 +80,7 @@ fn format_pretty(m: &RequestMetrics) -> String {
         m.prompt_tokens,
         m.completion_tokens,
         m.total_tokens,
+        reasoning_line,
         context_str,
         m.finish_reason,
         m.duration_ms,

@@ -31,6 +31,22 @@ impl ProxyHandler {
 
         tracing::debug!(method = %method, path = %path, "Processing request");
 
+        // Route specific endpoints to simple pass-through
+        match (&method, path) {
+            // llama.cpp monitoring/status endpoints (simple pass-through)
+            (&Method::GET, "/props")
+            | (&Method::GET, "/slots")
+            | (&Method::GET, "/health")
+            | (&Method::GET, "/v1/health")
+            | (&Method::GET, "/v1/models")
+            | (&Method::GET, "/metrics") => {
+                return self.proxy_passthrough(req).await;
+            }
+
+            // All other routes continue with existing logic
+            _ => {}
+        }
+
         // Save headers before consuming the request
         let headers = req.headers().clone();
 
@@ -214,5 +230,69 @@ impl ProxyHandler {
         }
 
         response.body(Body::from(body_bytes)).unwrap().into_response()
+    }
+
+    /// Simple pass-through with no fix application or stats collection
+    /// Used for monitoring endpoints like /props, /slots, /health
+    async fn proxy_passthrough(&self, req: Request<Body>) -> Response {
+        let method = req.method().clone();
+        let uri = req.uri().clone();
+        let headers = req.headers().clone();
+        let path = uri.path();
+
+        tracing::debug!(method = %method, path = %path, "Pass-through request");
+
+        // Read body
+        let body_bytes = match to_bytes(req.into_body(), 1024 * 1024 * 10).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("Failed to read body: {}", e))
+                    .into_response();
+            }
+        };
+
+        // Build backend URL
+        let backend_url = format!("{}{}", self.state.config.backend.url(), path);
+
+        // Forward to backend
+        let mut backend_req = self.state.http_client.request(
+            Method::from_bytes(method.as_str().as_bytes()).unwrap(),
+            &backend_url,
+        );
+
+        // Copy headers
+        for (name, value) in headers.iter() {
+            if name != header::HOST {
+                backend_req = backend_req.header(name, value);
+            }
+        }
+        backend_req = backend_req.body(body_bytes);
+
+        let backend_response = match backend_req.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                return (StatusCode::BAD_GATEWAY, format!("Backend error: {}", e))
+                    .into_response();
+            }
+        };
+
+        // Pass through response
+        let status = backend_response.status();
+        let headers = backend_response.headers().clone();
+        let body = match backend_response.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                return (StatusCode::BAD_GATEWAY, format!("Failed to read response: {}", e))
+                    .into_response();
+            }
+        };
+
+        let mut response = Response::builder().status(status);
+        for (name, value) in headers {
+            if let Some(name) = name {
+                response = response.header(name, value);
+            }
+        }
+        response.body(Body::from(body)).unwrap()
     }
 }
