@@ -91,29 +91,46 @@ impl RequestMetrics {
         metrics.streaming = streaming;
         metrics.duration_ms = duration_ms;
 
+        // Debug: Log the response structure
+        tracing::debug!("Extracting metrics from response: {}", serde_json::to_string(response).unwrap_or_else(|_| "invalid".to_string()));
+
         // Extract model
         if let Some(model) = response.get("model").and_then(|m| m.as_str()) {
             metrics.model = model.to_string();
         }
 
-        // Extract usage
+        // Extract usage (support both OpenAI and Anthropic formats)
         if let Some(usage) = response.get("usage") {
-            metrics.prompt_tokens = usage
-                .get("prompt_tokens")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0);
-            metrics.completion_tokens = usage
-                .get("completion_tokens")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0);
-            metrics.total_tokens = usage
-                .get("total_tokens")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0);
+            tracing::debug!("Found usage: {:?}", usage);
+
+            // Try OpenAI format first
+            if let Some(prompt) = usage.get("prompt_tokens").and_then(|t| t.as_u64()) {
+                metrics.prompt_tokens = prompt;
+                metrics.completion_tokens = usage
+                    .get("completion_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                metrics.total_tokens = usage
+                    .get("total_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(metrics.prompt_tokens + metrics.completion_tokens);
+            }
+            // Try Anthropic format
+            else if let Some(input) = usage.get("input_tokens").and_then(|t| t.as_u64()) {
+                metrics.prompt_tokens = input;
+                metrics.completion_tokens = usage
+                    .get("output_tokens")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                metrics.total_tokens = metrics.prompt_tokens + metrics.completion_tokens;
+            }
+        } else {
+            tracing::debug!("No usage field found in response");
         }
 
         // Extract timings (llama.cpp specific)
         if let Some(timings) = response.get("timings") {
+            tracing::debug!("Found timings: {:?}", timings);
             metrics.prompt_ms = timings
                 .get("prompt_ms")
                 .and_then(|t| t.as_f64())
@@ -135,9 +152,36 @@ impl RequestMetrics {
             if let Some(cache_n) = timings.get("cache_n").and_then(|t| t.as_u64()) {
                 metrics.context_used = Some(cache_n);
             }
+        } else {
+            tracing::debug!("No timings field found in response");
+
+            // If no timings, estimate TPS from duration and token counts
+            if duration_ms > 0.0 && metrics.total_tokens > 0 {
+                // Estimate: assume 20% of time for prompt, 80% for generation
+                let estimated_prompt_ms = duration_ms * 0.2;
+                let estimated_generation_ms = duration_ms * 0.8;
+
+                if metrics.prompt_tokens > 0 && estimated_prompt_ms > 0.0 {
+                    metrics.prompt_tps = (metrics.prompt_tokens as f64 / estimated_prompt_ms) * 1000.0;
+                    metrics.prompt_ms = estimated_prompt_ms;
+                }
+
+                if metrics.completion_tokens > 0 && estimated_generation_ms > 0.0 {
+                    metrics.generation_tps =
+                        (metrics.completion_tokens as f64 / estimated_generation_ms) * 1000.0;
+                    metrics.generation_ms = estimated_generation_ms;
+                }
+
+                tracing::debug!(
+                    "Estimated TPS - prompt: {:.2}, generation: {:.2}",
+                    metrics.prompt_tps,
+                    metrics.generation_tps
+                );
+            }
         }
 
-        // Extract finish reason
+        // Extract finish reason and output length (support both OpenAI and Anthropic formats)
+        // Try OpenAI format first
         if let Some(choices) = response.get("choices").and_then(|c| c.as_array()) {
             if let Some(first_choice) = choices.first() {
                 metrics.finish_reason = first_choice
@@ -154,6 +198,21 @@ impl RequestMetrics {
                 {
                     metrics.output_len = content.len();
                 }
+            }
+        }
+        // Try Anthropic format
+        else if let Some(stop_reason) = response.get("stop_reason").and_then(|f| f.as_str()) {
+            metrics.finish_reason = stop_reason.to_string();
+
+            // Extract output length from content array
+            if let Some(content_array) = response.get("content").and_then(|c| c.as_array()) {
+                metrics.output_len = content_array
+                    .iter()
+                    .filter_map(|item| {
+                        // Sum up text content lengths
+                        item.get("text").and_then(|t| t.as_str()).map(|s| s.len())
+                    })
+                    .sum();
             }
         }
 
