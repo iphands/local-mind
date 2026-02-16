@@ -9,8 +9,9 @@ use std::time::Instant;
 
 use super::server::ProxyState;
 use super::streaming::handle_streaming_response;
+use crate::config::StatsFormat;
 use crate::proxy::fetch_context_total;
-use crate::stats::{format_metrics, RequestMetrics};
+use crate::stats::{format_metrics, format_request_log, RequestMetrics};
 
 /// Proxy request handler
 pub struct ProxyHandler {
@@ -30,6 +31,9 @@ impl ProxyHandler {
         let path = uri.path();
 
         tracing::debug!(method = %method, path = %path, "Processing request");
+
+        let is_anthropic_api = path.starts_with("/v1/messages");
+        tracing::debug!(is_anthropic_api = is_anthropic_api, "Detected API format");
 
         // Route specific endpoints to simple pass-through
         match (&method, path) {
@@ -72,6 +76,11 @@ impl ProxyHandler {
             .and_then(|s| s.as_bool())
             .unwrap_or(false);
 
+        // Log request
+        if let Some(ref req_json) = request_json {
+            tracing::info!("{}", format_request_log(req_json));
+        }
+
         // Build backend URL
         let backend_url = format!("{}{}", self.state.config.backend.url(), path);
 
@@ -111,7 +120,7 @@ impl ProxyHandler {
             .unwrap_or(false);
 
         if is_streaming_response {
-            // Handle streaming response
+            // Handle streaming response (auto-detects Anthropic vs OpenAI format)
             handle_streaming_response(
                 backend_response,
                 self.state.fix_registry.clone(),
@@ -210,7 +219,11 @@ impl ProxyHandler {
         // Log stats
         if let Some(ref m) = metrics {
             let formatted = format_metrics(m, self.state.config.stats.format);
-            tracing::info!("\n{}", formatted);
+            if self.state.config.stats.format == StatsFormat::Compact {
+                tracing::info!("{}", formatted);
+            } else {
+                tracing::info!("\n{}", formatted);
+            }
 
             // Export to remote systems
             let exporters = self.state.exporter_manager.clone();

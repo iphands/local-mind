@@ -61,7 +61,7 @@ pub struct StatsConfig {
 }
 
 /// Stats output format
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default)]
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum StatsFormat {
     #[default]
@@ -194,7 +194,10 @@ mod tests {
     #[test]
     fn test_fix_module_config_with_options() {
         let mut options = HashMap::new();
-        options.insert("remove_duplicate".to_string(), serde_yaml::Value::Bool(true));
+        options.insert(
+            "remove_duplicate".to_string(),
+            serde_yaml::Value::Bool(true),
+        );
 
         let config = FixModuleConfig {
             enabled: false,
@@ -215,6 +218,11 @@ mod tests {
 
     #[test]
     fn test_load_or_default_none() {
+        // Create a temporary directory without config files to test error case
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let _ = std::env::set_current_dir(temp_dir.path());
+
+        // When no path is provided and no default files exist, should return NotFound error
         let result = AppConfig::load_or_default(None);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ConfigError::NotFound(_)));

@@ -47,7 +47,8 @@ fn format_pretty(m: &RequestMetrics) -> String {
         (None, None) => String::new(),
     };
 
-    let reasoning_line = m.reasoning_tokens
+    let reasoning_line = m
+        .reasoning_tokens
         .map(|r| format!("│   Reasoning Tokens: {:46}│\n", r))
         .unwrap_or_default();
 
@@ -100,12 +101,12 @@ fn format_compact(m: &RequestMetrics) -> String {
     };
 
     format!(
-        "model={} tokens={}/{} tps={:.1}/{:.1}ms {} {} finish={} dur={:.1}ms",
+        "model={} tokens={}/{} tps={:.2}s/{:.2}s {} {} finish={} dur={:.1}ms",
         m.model,
         m.prompt_tokens,
         m.completion_tokens,
+        m.prompt_tps,
         m.generation_tps,
-        m.generation_ms,
         context_str,
         if m.streaming { "stream" } else { "sync" },
         m.finish_reason,
@@ -337,15 +338,15 @@ mod tests {
     #[test]
     fn test_format_compact_all_fields() {
         let mut m = create_test_metrics();
-        m.generation_tps = 150.0; // This is what format_compact uses for "tps="
-        m.generation_ms = 500.0;
+        m.prompt_tps = 123.45; // Prompt processing TPS
+        m.generation_tps = 150.00; // Generation TPS
         m.finish_reason = "length".to_string();
         m.duration_ms = 600.0;
 
         let output = format_compact(&m);
-        // Format: tps={:.1}/{:.1}ms={} -> generation_tps/generation_ms
-        assert!(output.contains("150"));
-        assert!(output.contains("500"));
+        // Format: tps={:.2}/{:.2} -> prompt_tps/generation_tps
+        assert!(output.contains("123.45"));
+        assert!(output.contains("150.00"));
         assert!(output.contains("length"));
         assert!(output.contains("600"));
     }

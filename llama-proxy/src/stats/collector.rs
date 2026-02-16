@@ -103,11 +103,24 @@ impl RequestMetrics {
         metrics.duration_ms = duration_ms;
 
         // Debug: Log the response structure
-        tracing::debug!("Extracting metrics from response: {}", serde_json::to_string(response).unwrap_or_else(|_| "invalid".to_string()));
+        tracing::debug!(
+            "Extracting metrics from response: {}",
+            serde_json::to_string(response).unwrap_or_else(|_| "invalid".to_string())
+        );
 
-        // Extract model
+        // Extract model (check both top-level and nested in message)
         if let Some(model) = response.get("model").and_then(|m| m.as_str()) {
+            tracing::debug!("Found model at top level: {}", model);
             metrics.model = model.to_string();
+        } else if let Some(model) = response
+            .get("message")
+            .and_then(|m| m.get("model"))
+            .and_then(|m| m.as_str())
+        {
+            tracing::debug!("Found model in message object: {}", model);
+            metrics.model = model.to_string();
+        } else {
+            tracing::debug!("No model field found in response");
         }
 
         // Extract usage (support both OpenAI and Anthropic formats)
@@ -138,9 +151,7 @@ impl RequestMetrics {
 
             // Extract extended usage details (Opencode/Copilot extensions)
             if let Some(details) = usage.get("completion_tokens_details") {
-                metrics.reasoning_tokens = details
-                    .get("reasoning_tokens")
-                    .and_then(|t| t.as_u64());
+                metrics.reasoning_tokens = details.get("reasoning_tokens").and_then(|t| t.as_u64());
                 metrics.accepted_prediction_tokens = details
                     .get("accepted_prediction_tokens")
                     .and_then(|t| t.as_u64());
@@ -172,9 +183,28 @@ impl RequestMetrics {
                 .and_then(|t| t.as_f64())
                 .unwrap_or(0.0);
 
-            // Context info
-            if let Some(cache_n) = timings.get("cache_n").and_then(|t| t.as_u64()) {
-                metrics.context_used = Some(cache_n);
+            // Context info - use prompt_n for actual context consumption
+            if let Some(prompt_n) = timings.get("prompt_n").and_then(|t| t.as_u64()) {
+                metrics.context_used = Some(prompt_n);
+            }
+
+            // Fallback to timings for token counts when usage is missing (e.g., timeout scenarios)
+            if metrics.prompt_tokens == 0 && metrics.completion_tokens == 0 {
+                metrics.prompt_tokens = timings
+                    .get("prompt_n")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                metrics.completion_tokens = timings
+                    .get("predicted_n")
+                    .and_then(|t| t.as_u64())
+                    .unwrap_or(0);
+                metrics.total_tokens = metrics.prompt_tokens + metrics.completion_tokens;
+
+                tracing::debug!(
+                    "Using timings fallback for token counts: prompt={}, completion={}",
+                    metrics.prompt_tokens,
+                    metrics.completion_tokens
+                );
             }
         } else {
             tracing::debug!("No timings field found in response");
@@ -186,7 +216,8 @@ impl RequestMetrics {
                 let estimated_generation_ms = duration_ms * 0.8;
 
                 if metrics.prompt_tokens > 0 && estimated_prompt_ms > 0.0 {
-                    metrics.prompt_tps = (metrics.prompt_tokens as f64 / estimated_prompt_ms) * 1000.0;
+                    metrics.prompt_tps =
+                        (metrics.prompt_tokens as f64 / estimated_prompt_ms) * 1000.0;
                     metrics.prompt_ms = estimated_prompt_ms;
                 }
 
@@ -415,6 +446,7 @@ mod tests {
                 "predicted_ms": 100.25,
                 "prompt_per_second": 198.0,
                 "predicted_per_second": 99.75,
+                "prompt_n": 42,
                 "cache_n": 10
             },
             "choices": [{"finish_reason": "stop"}]
@@ -428,7 +460,7 @@ mod tests {
         assert_eq!(metrics.generation_ms, 100.25);
         assert_eq!(metrics.prompt_tps, 198.0);
         assert_eq!(metrics.generation_tps, 99.75);
-        assert_eq!(metrics.context_used, Some(10));
+        assert_eq!(metrics.context_used, Some(42)); // Uses prompt_n, not cache_n
     }
 
     #[test]
@@ -614,11 +646,107 @@ mod tests {
             &response,
             &serde_json::json!({"messages": []}),
             false,
-            100.0
+            100.0,
         );
 
         assert_eq!(metrics.reasoning_tokens, Some(20));
         assert_eq!(metrics.accepted_prediction_tokens, Some(5));
         assert_eq!(metrics.rejected_prediction_tokens, None);
+    }
+
+    #[test]
+    fn test_request_metrics_from_response_timings_only() {
+        // Scenario: streaming timeout where usage is missing but timings has token counts
+        let response = serde_json::json!({
+            "model": "test-model",
+            "timings": {
+                "prompt_n": 538,
+                "predicted_n": 983,
+                "prompt_ms": 316.829,
+                "predicted_ms": 29669.411,
+                "prompt_per_second": 1698.07,
+                "predicted_per_second": 33.13
+            },
+            "prompt_progress": {"total": 562},
+            "choices": [{"finish_reason": null, "delta": {"content": null}}]
+        });
+
+        let metrics = RequestMetrics::from_response(
+            &response,
+            &serde_json::json!({"messages": []}),
+            true,
+            30181.0,
+        );
+
+        assert_eq!(metrics.prompt_tokens, 538);
+        assert_eq!(metrics.completion_tokens, 983);
+        assert_eq!(metrics.total_tokens, 1521);
+        assert_eq!(metrics.context_used, Some(538)); // Uses prompt_n, not cache_n
+    }
+
+    #[test]
+    fn test_request_metrics_from_anthropic_merged() {
+        // This simulates the merged response from Anthropic SSE events
+        let response = serde_json::json!({
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "Qwen3-14B-128K-Q3_K_S.gguf",
+            "content": [
+                {"type": "text", "text": "Hello world"}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 124,
+                "output_tokens": 273
+            }
+        });
+
+        let request = serde_json::json!({
+            "messages": [{"role": "user", "content": "Hi"}]
+        });
+
+        let metrics = RequestMetrics::from_response(&response, &request, true, 8000.0);
+
+        assert_eq!(metrics.model, "Qwen3-14B-128K-Q3_K_S.gguf");
+        assert_eq!(metrics.prompt_tokens, 124);
+        assert_eq!(metrics.completion_tokens, 273);
+        assert_eq!(metrics.total_tokens, 397);
+        assert_eq!(metrics.finish_reason, "end_turn");
+        assert_eq!(metrics.output_len, 11); // "Hello world"
+        assert!(metrics.streaming);
+    }
+
+    #[test]
+    fn test_request_metrics_from_anthropic_with_thinking() {
+        // Anthropic response with thinking content block
+        let response = serde_json::json!({
+            "id": "msg_2",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3",
+            "content": [
+                {"type": "thinking", "thinking": "Let me reason..."},
+                {"type": "text", "text": "The answer is 42"}
+            ],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 200
+            }
+        });
+
+        let request = serde_json::json!({
+            "messages": [{"role": "user", "content": "What is the answer?"}]
+        });
+
+        let metrics = RequestMetrics::from_response(&response, &request, false, 5000.0);
+
+        assert_eq!(metrics.model, "claude-3");
+        assert_eq!(metrics.prompt_tokens, 100);
+        assert_eq!(metrics.completion_tokens, 200);
+        // Output len should only count text content, not thinking
+        assert_eq!(metrics.output_len, 16); // "The answer is 42"
+        assert_eq!(metrics.finish_reason, "end_turn");
     }
 }

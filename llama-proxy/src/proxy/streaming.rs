@@ -63,19 +63,52 @@ pub async fn handle_streaming_response(
 
             let chunk_str = String::from_utf8_lossy(&chunk);
 
+            tracing::trace!("Raw SSE chunk ({} bytes): {:?}", chunk.len(), chunk_str.as_ref());
+
             // Process each SSE event, preserving the exact format including blank lines
             let mut output = String::new();
 
             // Split by newlines but preserve empty strings (blank lines)
             let lines: Vec<&str> = chunk_str.split('\n').collect();
 
+            // Track current event type for Anthropic format
+            let mut current_event_type: Option<String> = None;
+
             for (i, line) in lines.iter().enumerate() {
+                // Handle event: lines (Anthropic format uses these)
+                if line.starts_with("event: ") {
+                    current_event_type = Some(line[7..].to_string());
+                    output.push_str(line);
+                    if i < lines.len() - 1 {
+                        output.push('\n');
+                    }
+                    continue;
+                }
+
                 if line.starts_with("data: ") {
                     let data = &line[6..];
 
-                    if data == "[DONE]" {
-                        // Signal completion to metrics task
+                    tracing::trace!(
+                        "SSE data (event={:?}): {}",
+                        current_event_type,
+                        data
+                    );
+
+                    // Check for Anthropic completion event (message_stop)
+                    if current_event_type.as_deref() == Some("message_stop") {
+                        // Signal completion for Anthropic streams
                         if stats_enabled {
+                            tracing::trace!("Anthropic stream completion detected (message_stop event)");
+                            if let Some(tx) = completion_tx.lock().await.take() {
+                                let _ = tx.send(());
+                            }
+                        }
+                    }
+
+                    if data == "[DONE]" {
+                        // Signal completion to metrics task (OpenAI format)
+                        if stats_enabled {
+                            tracing::trace!("OpenAI stream completion detected ([DONE] marker)");
                             if let Some(tx) = completion_tx.lock().await.take() {
                                 let _ = tx.send(());
                             }
@@ -92,9 +125,15 @@ pub async fn handle_streaming_response(
                     if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(data) {
                         json = fix_registry.apply_fixes_stream(json);
 
-                        // Accumulate for stats
+                        // Accumulate for stats (include event type for Anthropic format)
                         if stats_enabled {
                             let mut acc = accumulated.lock().await;
+                            // Store event type if present (Anthropic format)
+                            if let Some(ref event_type) = current_event_type {
+                                acc.push_str("event: ");
+                                acc.push_str(event_type);
+                                acc.push('\n');
+                            }
                             acc.push_str("data: ");
                             acc.push_str(&serde_json::to_string(&json).unwrap_or_default());
                             acc.push('\n');
@@ -105,6 +144,8 @@ pub async fn handle_streaming_response(
                     } else {
                         output.push_str(line);
                     }
+                    // Reset event type after using it
+                    current_event_type = None;
                 } else {
                     // Preserve empty lines and other SSE format lines (event:, id:, etc.)
                     output.push_str(line);
@@ -135,10 +176,10 @@ pub async fn handle_streaming_response(
 
             match wait_result {
                 Ok(Ok(())) => {
-                    tracing::debug!("Stream completion signal received");
+                    tracing::trace!("Stream completion signal received");
                 },
                 Ok(Err(_)) => {
-                    tracing::warn!("Stream completion channel closed unexpectedly");
+                    tracing::debug!("Stream completion channel closed unexpectedly (possible network interruption)");
                 },
                 Err(_) => {
                     tracing::warn!("Stream completion timeout after 30s, extracting metrics anyway");
@@ -146,9 +187,16 @@ pub async fn handle_streaming_response(
             }
 
             let acc = accumulated.lock().await;
+            tracing::trace!("Accumulated SSE data length: {} bytes", acc.len());
             if !acc.is_empty() {
-                // Parse final SSE event
+                let preview = if acc.len() > 1000 { &acc[..1000] } else { &acc[..] };
+                tracing::trace!("Accumulated SSE preview:\n{}", preview);
+                
                 if let Some(final_event) = parse_accumulated_sse(&acc) {
+                    tracing::trace!(
+                        "Successfully merged SSE events into final response with keys: {:?}",
+                        final_event.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                    );
                     // Extract metrics from final event
                     let mut metrics = if let Some(ref req_json) = request_json {
                         RequestMetrics::from_response(
@@ -158,7 +206,7 @@ pub async fn handle_streaming_response(
                             start.elapsed().as_millis() as f64,
                         )
                     } else {
-                        tracing::debug!(
+                        tracing::trace!(
                             duration_ms = start.elapsed().as_millis() as u64,
                             "Streaming completed (no request JSON)"
                         );
@@ -173,12 +221,16 @@ pub async fn handle_streaming_response(
 
                     // Format and log stats
                     let formatted = format_metrics(&metrics, stats_format);
-                    tracing::info!("\n{}", formatted);
+                    if stats_format == StatsFormat::Compact {
+                        tracing::info!("{}", formatted);
+                    } else {
+                        tracing::info!("\n{}", formatted);
+                    }
 
                     // Export to remote systems
                     exporter_manager.export_all(&metrics).await;
                 } else {
-                    tracing::debug!(
+                    tracing::trace!(
                         duration_ms = start.elapsed().as_millis() as u64,
                         "Streaming completed (unable to parse final event)"
                     );
@@ -203,24 +255,226 @@ pub async fn handle_streaming_response(
     response.body(body).unwrap().into_response()
 }
 
-/// Parse accumulated SSE data into a complete response for stats
+/// API format detected from SSE stream
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum StreamFormat {
+    OpenAI,
+    Anthropic,
+    Unknown,
+}
+
+/// Detect API format from SSE data
+fn detect_format(data: &str) -> StreamFormat {
+    // Look for Anthropic markers: event: message_start or "type": "message_start" in data
+    for line in data.lines() {
+        if line.starts_with("event: ") {
+            let event_type = &line[7..];
+            if event_type == "message_start" || event_type == "content_block_delta" {
+                return StreamFormat::Anthropic;
+            }
+        }
+        if line.starts_with("data: ") {
+            let json_str = &line[6..];
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+                if json.get("type").is_some() {
+                    // Anthropic events have a "type" field at root level
+                    return StreamFormat::Anthropic;
+                }
+                if json.get("choices").is_some() {
+                    return StreamFormat::OpenAI;
+                }
+            }
+        }
+    }
+    StreamFormat::Unknown
+}
+
+/// Parsed SSE event with optional event type
+struct SseEvent {
+    event_type: Option<String>,
+    data: serde_json::Value,
+}
+
 fn parse_accumulated_sse(data: &str) -> Option<serde_json::Value> {
-    let mut combined: Option<serde_json::Value> = None;
+    tracing::trace!("Parsing accumulated SSE data ({} bytes)", data.len());
+
+    let format = detect_format(data);
+    tracing::trace!("Detected stream format: {:?}", format);
+
+    let events = parse_sse_events(data);
+    tracing::trace!("Parsed {} SSE events", events.len());
+
+    match format {
+        StreamFormat::Anthropic => {
+            let merged = merge_anthropic_events(events);
+            tracing::trace!("Merged Anthropic response: {:?}", merged);
+            Some(merged)
+        }
+        StreamFormat::OpenAI => {
+            let mut combined: Option<serde_json::Value> = None;
+            for event in events {
+                combined = Some(merge_chunk(combined, event.data));
+            }
+            tracing::trace!("Merged OpenAI response: {:?}", combined);
+            combined
+        }
+        StreamFormat::Unknown => {
+            tracing::warn!("Unknown SSE format, cannot extract metrics");
+            None
+        }
+    }
+}
+
+/// Parse SSE events with their types
+fn parse_sse_events(data: &str) -> Vec<SseEvent> {
+    let mut events = Vec::new();
+    let mut current_event_type: Option<String> = None;
 
     for line in data.lines() {
-        if line.starts_with("data: ") {
+        if line.starts_with("event: ") {
+            current_event_type = Some(line[7..].to_string());
+        } else if line.starts_with("data: ") {
             let json_str = &line[6..];
             if json_str == "[DONE]" {
                 continue;
             }
-
-            if let Ok(chunk) = serde_json::from_str::<serde_json::Value>(json_str) {
-                combined = Some(merge_chunk(combined, chunk));
+            if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
+                events.push(SseEvent {
+                    event_type: current_event_type.clone(),
+                    data: json,
+                });
             }
         }
     }
 
-    combined
+    events
+}
+
+/// Merge Anthropic SSE events into a single response
+fn merge_anthropic_events(events: Vec<SseEvent>) -> serde_json::Value {
+    use serde_json::json;
+
+    let mut message = json!({"content": []});
+
+    for event in &events {
+        let event_type = event.event_type.as_deref().unwrap_or_else(|| {
+            // Fall back to data's type field if no event line
+            event.data.get("type").and_then(|t| t.as_str()).unwrap_or("")
+        });
+
+        match event_type {
+            "message_start" => {
+                // message_start contains the initial message object
+                if let Some(msg) = event.data.get("message") {
+                    message = msg.clone();
+                    // Ensure content array exists
+                    if message.get("content").is_none() {
+                        message["content"] = json!([]);
+                    }
+                }
+            }
+            "content_block_start" => {
+                // Create content block at specified index
+                let idx = event.data.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                if let Some(block) = event.data.get("content_block") {
+                    if let Some(content) = message.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        // Ensure array is large enough
+                        while content.len() <= idx {
+                            content.push(json!(null));
+                        }
+                        content[idx] = block.clone();
+                    }
+                }
+            }
+            "content_block_delta" => {
+                // Append delta text/thinking to content block
+                let idx = event.data.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
+                if let Some(delta) = event.data.get("delta") {
+                    if let Some(content) = message.get_mut("content").and_then(|c| c.as_array_mut()) {
+                        // Ensure array is large enough and block exists with proper type
+                        while content.len() <= idx {
+                            content.push(json!(null));
+                        }
+                        
+                        // If block is null, initialize it based on delta type
+                        if content[idx].is_null() {
+                            let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("text_delta");
+                            let block_type = if delta_type == "thinking_delta" { "thinking" } 
+                                           else if delta_type == "input_json_delta" { "tool_use" }
+                                           else { "text" };
+                            content[idx] = json!({"type": block_type});
+                        }
+                        
+                        let block = &mut content[idx];
+                        if let Some(obj) = block.as_object_mut() {
+                            // Handle text_delta - use in-place mutation for O(n) performance
+                            if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                if let Some(serde_json::Value::String(ref mut existing)) = obj.get_mut("text") {
+                                    existing.push_str(text);
+                                } else {
+                                    obj.insert("text".to_string(), json!(text));
+                                }
+                            }
+
+                            // Handle thinking_delta (for reasoning models)
+                            if let Some(thinking) = delta.get("thinking").and_then(|t| t.as_str()) {
+                                if let Some(serde_json::Value::String(ref mut existing)) = obj.get_mut("thinking") {
+                                    existing.push_str(thinking);
+                                } else {
+                                    obj.insert("thinking".to_string(), json!(thinking));
+                                }
+                            }
+
+                            // Handle partial_json for tool_use input
+                            if let Some(partial) = delta.get("partial_json").and_then(|p| p.as_str()) {
+                                if let Some(serde_json::Value::String(ref mut existing)) = obj.get_mut("input") {
+                                    existing.push_str(partial);
+                                } else {
+                                    obj.insert("input".to_string(), json!(partial));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            "message_delta" => {
+                // Contains stop_reason and output_tokens usage
+                if let Some(delta) = event.data.get("delta") {
+                    if let Some(stop) = delta.get("stop_reason").and_then(|s| s.as_str()) {
+                        message["stop_reason"] = json!(stop);
+                    }
+                }
+                // usage is at top level of message_delta event
+                if let Some(usage) = event.data.get("usage") {
+                    if let Some(msg_usage) = message.get_mut("usage") {
+                        if let Some(obj) = msg_usage.as_object_mut() {
+                            if let Some(output_tokens) = usage.get("output_tokens") {
+                                obj.insert("output_tokens".to_string(), output_tokens.clone());
+                            }
+                        }
+                    } else {
+                        message["usage"] = usage.clone();
+                    }
+                }
+            }
+            "content_block_stop" | "message_stop" | "ping" => {
+                // These are signals only, no data to merge
+            }
+            "error" => {
+                // Log error events at warn level
+                if let Some(err) = event.data.get("error") {
+                    tracing::warn!("Anthropic error event: {:?}", err);
+                } else {
+                    tracing::warn!("Anthropic error event with no error field: {:?}", event.data);
+                }
+            }
+            _ => {
+                tracing::trace!("Unknown Anthropic event type: {}", event_type);
+            }
+        }
+    }
+
+    message
 }
 
 /// Merge a streaming chunk into accumulated response
@@ -415,5 +669,52 @@ mod tests {
         let merged = merge_chunk(Some(merged), chunk2);
 
         assert_eq!(merged["choices"][0]["message"]["content"].as_str().unwrap(), "Hello World");
+    }
+
+    #[test]
+    fn test_detect_format_anthropic() {
+        let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"model\":\"claude\"}}\n";
+        assert_eq!(detect_format(sse), StreamFormat::Anthropic);
+
+        let sse2 = "data: {\"type\":\"content_block_delta\",\"index\":0}\n";
+        assert_eq!(detect_format(sse2), StreamFormat::Anthropic);
+    }
+
+    #[test]
+    fn test_detect_format_openai() {
+        let sse = "data: {\"model\":\"gpt-4\",\"choices\":[]}\n";
+        assert_eq!(detect_format(sse), StreamFormat::OpenAI);
+    }
+
+    #[test]
+    fn test_parse_anthropic_sse() {
+        let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n";
+
+        let result = parse_accumulated_sse(sse).unwrap();
+        
+        assert_eq!(result["model"].as_str().unwrap(), "claude-3");
+        assert_eq!(result["stop_reason"].as_str().unwrap(), "end_turn");
+        assert_eq!(result["usage"]["input_tokens"].as_u64().unwrap(), 10);
+        assert_eq!(result["usage"]["output_tokens"].as_u64().unwrap(), 5);
+        
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 1);
+        assert_eq!(content[0]["text"].as_str().unwrap(), "Hello world");
+    }
+
+    #[test]
+    fn test_merge_anthropic_with_thinking() {
+        let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"input_tokens\":100,\"output_tokens\":0}}}\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me think\"}}\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Answer\"}}\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":50}}\n";
+
+        let result = parse_accumulated_sse(sse).unwrap();
+        
+        assert_eq!(result["model"].as_str().unwrap(), "claude-3");
+        assert_eq!(result["usage"]["input_tokens"].as_u64().unwrap(), 100);
+        assert_eq!(result["usage"]["output_tokens"].as_u64().unwrap(), 50);
+        
+        let content = result["content"].as_array().unwrap();
+        assert_eq!(content.len(), 2);
+        assert_eq!(content[0]["thinking"].as_str().unwrap(), "Let me think");
+        assert_eq!(content[1]["text"].as_str().unwrap(), "Answer");
     }
 }

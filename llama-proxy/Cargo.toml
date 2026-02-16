@@ -34,7 +34,8 @@ clap = { version = "4", features = ["derive"] }
 # Time
 chrono = { version = "0.4", features = ["serde"] }
 
-# Async utilities
+# Utilities
+tempfile = "3"
 futures = "0.3"
 async-trait = "0.1"
 bytes = "1"

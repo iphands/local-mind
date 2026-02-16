@@ -6,9 +6,30 @@
 //! - Performance metrics logging
 //! - Remote metrics export (InfluxDB, etc.)
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum LogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+}
+
+impl std::fmt::Display for LogLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LogLevel::Trace => write!(f, "trace"),
+            LogLevel::Debug => write!(f, "debug"),
+            LogLevel::Info => write!(f, "info"),
+            LogLevel::Warn => write!(f, "warn"),
+            LogLevel::Error => write!(f, "error"),
+        }
+    }
+}
 
 use llama_proxy::{
     config::AppConfig,
@@ -36,9 +57,9 @@ struct Cli {
     #[arg(short, long, global = true, default_value = "config.yaml")]
     config: PathBuf,
 
-    /// Enable debug logging
-    #[arg(short, long, global = true)]
-    debug: bool,
+    /// Set logging level (trace, debug, info, warn, error)
+    #[arg(long, global = true, value_name = "LEVEL")]
+    log_level: Option<LogLevel>,
 
     #[command(subcommand)]
     command: Commands,
@@ -77,19 +98,17 @@ enum Commands {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    // Initialize logging (with debug override from CLI)
-    if cli.debug {
-        tracing_subscriber::fmt()
-            .with_env_filter(tracing_subscriber::EnvFilter::new("debug"))
-            .init();
+    let level_filter = if let Some(level) = cli.log_level {
+        level.to_string()
     } else {
-        tracing_subscriber::fmt()
-            .with_env_filter(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-            )
-            .init();
-    }
+        tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
+            .to_string()
+    };
+
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::new(&level_filter))
+        .init();
 
     match cli.command {
         Commands::Run {
