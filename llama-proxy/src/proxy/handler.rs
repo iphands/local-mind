@@ -106,9 +106,18 @@ impl ProxyHandler {
             }
         }
 
+        // Add Authorization header if api_key is configured
+        if let Some(ref api_key) = self.state.config.backend.api_key {
+            backend_req = backend_req.header(header::AUTHORIZATION, format!("Bearer {}", api_key));
+        }
+
         // ALWAYS force stream: false for backend request
         let body_bytes = if let Some(mut json) = request_json.clone() {
             json["stream"] = serde_json::Value::Bool(false);
+            // Override model if configured
+            if let Some(ref model) = self.state.config.backend.model {
+                json["model"] = serde_json::Value::String(model.clone());
+            }
             if client_wants_streaming {
                 tracing::debug!(
                     "Forcing non-streaming backend request (will synthesize streaming response)"
@@ -430,6 +439,10 @@ impl ProxyHandler {
             if name != header::HOST {
                 backend_req = backend_req.header(name, value);
             }
+        }
+        // Add Authorization header if api_key is configured
+        if let Some(ref api_key) = self.state.config.backend.api_key {
+            backend_req = backend_req.header(header::AUTHORIZATION, format!("Bearer {}", api_key));
         }
         backend_req = backend_req.body(body_bytes);
 

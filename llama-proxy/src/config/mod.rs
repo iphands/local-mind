@@ -41,6 +41,12 @@ pub struct BackendConfig {
     /// TLS configuration options
     #[serde(default)]
     pub tls: Option<TlsConfig>,
+    /// Model identifier in provider/model format (e.g., "anthropic/claude-sonnet-4-5")
+    #[serde(default)]
+    pub model: Option<String>,
+    /// API key for backend authentication
+    #[serde(default)]
+    pub api_key: Option<String>,
 }
 
 /// TLS configuration for backend connections
@@ -67,6 +73,8 @@ impl Default for BackendConfig {
             url: "http://localhost:8080".to_string(),
             timeout_seconds: default_timeout(),
             tls: None,
+            model: None,
+            api_key: None,
         }
     }
 }
@@ -338,6 +346,8 @@ mod tests {
             url: "http://localhost:8080".to_string(),
             timeout_seconds: 300,
             tls: None,
+            model: None,
+            api_key: None,
         };
         assert_eq!(config.base_url(), "http://localhost:8080");
     }
@@ -348,6 +358,8 @@ mod tests {
             url: "https://example.com:4234".to_string(),
             timeout_seconds: 300,
             tls: None,
+            model: None,
+            api_key: None,
         };
         assert_eq!(config.base_url(), "https://example.com:4234");
         assert!(config.is_tls());
@@ -359,6 +371,8 @@ mod tests {
             url: "http://localhost:8080".to_string(),
             timeout_seconds: 300,
             tls: None,
+            model: None,
+            api_key: None,
         };
         assert!(!http_config.is_tls());
 
@@ -366,6 +380,8 @@ mod tests {
             url: "https://secure.example.com".to_string(),
             timeout_seconds: 300,
             tls: None,
+            model: None,
+            api_key: None,
         };
         assert!(https_config.is_tls());
     }
@@ -376,6 +392,8 @@ mod tests {
             url: "http://localhost:8080/".to_string(),
             timeout_seconds: 300,
             tls: None,
+            model: None,
+            api_key: None,
         };
         assert_eq!(config.base_url(), "http://localhost:8080");
     }
@@ -386,6 +404,8 @@ mod tests {
         assert_eq!(config.url, "http://localhost:8080");
         assert_eq!(config.timeout_seconds, 300);
         assert!(config.tls.is_none());
+        assert!(config.model.is_none());
+        assert!(config.api_key.is_none());
     }
 
     #[test]
@@ -399,11 +419,26 @@ mod tests {
                 client_cert_path: None,
                 client_key_path: None,
             }),
+            model: None,
+            api_key: None,
         };
         assert!(config.tls.is_some());
         let tls = config.tls.unwrap();
         assert!(tls.accept_invalid_certs);
         assert_eq!(tls.ca_cert_path, Some("/path/to/ca.pem".to_string()));
+    }
+
+    #[test]
+    fn test_backend_config_model_and_api_key() {
+        let config = BackendConfig {
+            url: "https://api.example.com".to_string(),
+            timeout_seconds: 300,
+            tls: None,
+            model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            api_key: Some("sk-test-key".to_string()),
+        };
+        assert_eq!(config.model, Some("anthropic/claude-sonnet-4-5".to_string()));
+        assert_eq!(config.api_key, Some("sk-test-key".to_string()));
     }
 
     #[test]
