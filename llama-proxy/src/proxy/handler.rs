@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use super::server::ProxyState;
 use super::streaming::handle_streaming_response;
-use super::synthesize_streaming_response;
-use crate::api::ChatCompletionResponse;
+use super::{synthesize_anthropic_streaming_response, synthesize_streaming_response};
+use crate::api::{AnthropicMessage, ChatCompletionResponse};
 use crate::config::StatsFormat;
 use crate::proxy::fetch_context_total;
 use crate::stats::{format_metrics, format_request_log, RequestMetrics};
@@ -163,6 +163,7 @@ impl ProxyHandler {
                 backend_response,
                 request_json,
                 client_wants_streaming,
+                is_anthropic_api,
                 start,
             )
             .await
@@ -175,6 +176,7 @@ impl ProxyHandler {
         backend_response: reqwest::Response,
         request_json: Option<serde_json::Value>,
         client_wants_streaming: bool,
+        is_anthropic_api: bool,
         start: Instant,
     ) -> Response {
         let status = backend_response.status();
@@ -291,21 +293,72 @@ impl ProxyHandler {
         // If client wants streaming, synthesize it from complete JSON
         if client_wants_streaming {
             if let Some(ref json) = json_value {
-                // Try to parse as ChatCompletionResponse for synthesis
-                match serde_json::from_value::<ChatCompletionResponse>(json.clone()) {
-                    Ok(chat_response) => {
-                        tracing::debug!("Synthesizing streaming response from complete JSON");
-                        match synthesize_streaming_response(chat_response).await {
-                            Ok(response) => return response,
-                            Err(e) => {
-                                tracing::error!(error = %e, "Failed to synthesize streaming response");
-                                // Fall through to return JSON
+                if is_anthropic_api {
+                    // Anthropic API: try parsing as Anthropic format first
+                    match serde_json::from_value::<AnthropicMessage>(json.clone()) {
+                        Ok(anthropic_msg) => {
+                            tracing::debug!("Backend returned Anthropic format, synthesizing streaming response");
+                            match synthesize_anthropic_streaming_response(anthropic_msg).await {
+                                Ok(response) => return response,
+                                Err(e) => {
+                                    tracing::error!(error = %e, "Failed to synthesize Anthropic streaming response");
+                                    // Fall through to return JSON
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Backend returned OpenAI format - convert to Anthropic and synthesize
+                            tracing::debug!("Backend returned OpenAI format, converting to Anthropic for streaming synthesis");
+                            match serde_json::from_value::<ChatCompletionResponse>(json.clone()) {
+                                Ok(openai_response) => {
+                                    // Convert OpenAI → Anthropic format
+                                    let anthropic_msg = AnthropicMessage::from(openai_response);
+                                    tracing::debug!(
+                                        converted_tokens = anthropic_msg.usage.input_tokens + anthropic_msg.usage.output_tokens,
+                                        content_blocks = anthropic_msg.content.len(),
+                                        "Converted OpenAI response to Anthropic format"
+                                    );
+                                    match synthesize_anthropic_streaming_response(anthropic_msg).await {
+                                        Ok(response) => return response,
+                                        Err(e) => {
+                                            tracing::error!(error = %e, "Failed to synthesize after OpenAI→Anthropic conversion");
+                                            // Fall through to return JSON
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        "Failed to parse backend response as either Anthropic or OpenAI format"
+                                    );
+                                    // Fall through to return JSON
+                                }
                             }
                         }
                     }
-                    Err(e) => {
-                        tracing::warn!(error = %e, "Cannot parse as ChatCompletionResponse for synthesis");
-                        // Fall through to return JSON
+                } else {
+                    // OpenAI API: synthesize in OpenAI SSE format
+                    match serde_json::from_value::<ChatCompletionResponse>(json.clone()) {
+                        Ok(response) => {
+                            tracing::debug!("Synthesizing OpenAI streaming response from complete JSON");
+                            match synthesize_streaming_response(response).await {
+                                Ok(response) => return response,
+                                Err(e) => {
+                                    tracing::error!(error = %e, "Failed to synthesize OpenAI streaming response");
+                                    // Fall through to return JSON
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Log full response JSON for diagnosis
+                            let json_preview = serde_json::to_string_pretty(&json)
+                                .unwrap_or_else(|_| format!("{:?}", json));
+                            tracing::warn!(
+                                error = %e,
+                                response_json = %json_preview,
+                                "Cannot parse as ChatCompletionResponse for synthesis - dumping full response"
+                            );
+                        }
                     }
                 }
             }

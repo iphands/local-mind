@@ -11,7 +11,9 @@
       "Bash(git add:*)",
       "Bash(/tmp/log_level_demo.md:*)",
       "Bash(else echo \"config.yaml not found\")",
-      "Bash(fi)"
+      "Bash(fi)",
+      "Bash(git -C /home/iphands/prog/slop/vendor/claude-code log --oneline)"
     ]
-  }
+  },
+  "prefersReducedMotion": true
 }

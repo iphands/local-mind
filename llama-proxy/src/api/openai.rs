@@ -264,6 +264,180 @@ pub struct StreamChoice {
     pub finish_reason: Option<String>,
 }
 
+// ============================================================================
+// Anthropic Messages API Types
+// ============================================================================
+
+/// Anthropic Messages API response format
+/// Used by llama.cpp when endpoint is /v1/messages
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnthropicMessage {
+    pub id: String,
+    #[serde(rename = "type")]
+    pub message_type: String, // "message"
+    pub role: String,
+    pub content: Vec<AnthropicContentBlock>,
+    pub model: String,
+    #[serde(default)]
+    pub stop_reason: Option<String>,
+    #[serde(default)]
+    pub stop_sequence: Option<String>,
+    pub usage: AnthropicUsage,
+}
+
+/// Anthropic content block (text or thinking)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(tag = "type")]
+pub enum AnthropicContentBlock {
+    #[serde(rename = "text")]
+    Text { text: String },
+    #[serde(rename = "thinking")]
+    Thinking {
+        thinking: String,
+        #[serde(default)]
+        signature: Option<String>,
+    },
+}
+
+/// Anthropic usage (different field names than OpenAI)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnthropicUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// Convert Anthropic Message to OpenAI ChatCompletionResponse
+/// This allows us to reuse synthesis logic for Anthropic format
+impl From<AnthropicMessage> for ChatCompletionResponse {
+    fn from(msg: AnthropicMessage) -> Self {
+        // Convert content blocks to single text string
+        // Concatenate text and thinking blocks with newlines
+        let content = msg
+            .content
+            .iter()
+            .filter_map(|block| match block {
+                AnthropicContentBlock::Text { text } => Some(text.clone()),
+                AnthropicContentBlock::Thinking { thinking, .. } => Some(thinking.clone()),
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        // Map Anthropic stop_reason to OpenAI finish_reason
+        // "end_turn" -> "stop", "max_tokens" -> "length", etc.
+        let finish_reason = msg.stop_reason.as_ref().map(|reason| {
+            match reason.as_str() {
+                "end_turn" => "stop".to_string(),
+                "max_tokens" => "length".to_string(),
+                "stop_sequence" => "stop".to_string(),
+                other => other.to_string(), // Pass through unknown reasons
+            }
+        });
+
+        ChatCompletionResponse {
+            id: msg.id,
+            object: "chat.completion".to_string(),
+            created: 0, // Anthropic format doesn't include timestamp
+            model: msg.model,
+            choices: vec![Choice {
+                index: 0,
+                message: Some(ResponseMessage {
+                    role: msg.role,
+                    content: Some(content),
+                    tool_calls: None,
+                    reasoning_text: None,
+                    reasoning_opaque: None,
+                }),
+                delta: None,
+                finish_reason,
+            }],
+            usage: Some(Usage {
+                prompt_tokens: msg.usage.input_tokens,
+                completion_tokens: msg.usage.output_tokens,
+                total_tokens: msg.usage.input_tokens + msg.usage.output_tokens,
+                completion_tokens_details: None,
+            }),
+            timings: None, // Anthropic format doesn't include timings
+        }
+    }
+}
+
+/// Convert OpenAI ChatCompletionResponse to Anthropic Message format
+/// This is needed when the backend (e.g., llama.cpp) returns OpenAI format
+/// but the client expects Anthropic format (e.g., Claude CLI)
+impl From<ChatCompletionResponse> for AnthropicMessage {
+    fn from(resp: ChatCompletionResponse) -> Self {
+        // Extract content from the first choice and convert to content blocks
+        let content: Vec<AnthropicContentBlock> = resp
+            .choices
+            .get(0)
+            .and_then(|c| c.message.as_ref())
+            .map(|m| {
+                let mut blocks = Vec::new();
+
+                // Add reasoning as thinking block if present
+                if let Some(reasoning) = &m.reasoning_text {
+                    blocks.push(AnthropicContentBlock::Thinking {
+                        thinking: reasoning.clone(),
+                        signature: None,
+                    });
+                }
+
+                // Add text content
+                if let Some(text) = &m.content {
+                    if !text.is_empty() {
+                        blocks.push(AnthropicContentBlock::Text { text: text.clone() });
+                    }
+                }
+
+                // If no content at all, add empty text block
+                if blocks.is_empty() {
+                    blocks.push(AnthropicContentBlock::Text {
+                        text: String::new(),
+                    });
+                }
+
+                blocks
+            })
+            .unwrap_or_else(|| {
+                vec![AnthropicContentBlock::Text {
+                    text: String::new(),
+                }]
+            });
+
+        // Convert usage from OpenAI format to Anthropic format
+        let usage = resp.usage.as_ref()
+            .map(|u| AnthropicUsage {
+                input_tokens: u.prompt_tokens,
+                output_tokens: u.completion_tokens,
+            })
+            .unwrap_or(AnthropicUsage {
+                input_tokens: 0,
+                output_tokens: 0,
+            });
+
+        // Map OpenAI finish_reason to Anthropic stop_reason
+        let stop_reason = resp.choices.get(0).and_then(|c| c.finish_reason.as_ref()).map(|r| {
+            match r.as_str() {
+                "stop" => "end_turn".to_string(),
+                "length" => "max_tokens".to_string(),
+                "tool_calls" => "tool_use".to_string(),
+                other => other.to_string(),
+            }
+        });
+
+        AnthropicMessage {
+            id: resp.id,
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content,
+            model: resp.model,
+            stop_reason,
+            stop_sequence: None,
+            usage,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -635,5 +809,391 @@ mod tests {
         }"#;
         let delta: Delta = serde_json::from_str(json).unwrap();
         assert_eq!(delta.reasoning_text, Some("Thinking".to_string()));
+    }
+
+    // ============================================================================
+    // Anthropic Messages API Tests
+    // ============================================================================
+
+    #[test]
+    fn test_parse_anthropic_message() {
+        let json = serde_json::json!({
+            "id": "msg-123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Hello!"}
+            ],
+            "model": "test-model",
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 10,
+                "output_tokens": 5
+            }
+        });
+
+        let msg: AnthropicMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.id, "msg-123");
+        assert_eq!(msg.message_type, "message");
+        assert_eq!(msg.role, "assistant");
+        assert_eq!(msg.usage.input_tokens, 10);
+        assert_eq!(msg.usage.output_tokens, 5);
+        assert_eq!(msg.content.len(), 1);
+    }
+
+    #[test]
+    fn test_parse_anthropic_message_with_thinking() {
+        let json = serde_json::json!({
+            "id": "msg-456",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "thinking", "thinking": "Let me think..."},
+                {"type": "text", "text": "Answer"}
+            ],
+            "model": "test-model",
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 20,
+                "output_tokens": 10
+            }
+        });
+
+        let msg: AnthropicMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.content.len(), 2);
+        match &msg.content[0] {
+            AnthropicContentBlock::Thinking { thinking, .. } => {
+                assert_eq!(thinking, "Let me think...");
+            }
+            _ => panic!("Expected thinking block"),
+        }
+        match &msg.content[1] {
+            AnthropicContentBlock::Text { text } => {
+                assert_eq!(text, "Answer");
+            }
+            _ => panic!("Expected text block"),
+        }
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_conversion() {
+        let anthropic_msg = AnthropicMessage {
+            id: "msg-123".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::Text {
+                text: "Hello!".to_string(),
+            }],
+            model: "test-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 10,
+                output_tokens: 5,
+            },
+        };
+
+        let openai_response: ChatCompletionResponse = anthropic_msg.into();
+        assert_eq!(openai_response.id, "msg-123");
+        assert_eq!(openai_response.model, "test-model");
+        assert_eq!(openai_response.object, "chat.completion");
+        assert_eq!(openai_response.choices.len(), 1);
+        assert_eq!(
+            openai_response.choices[0].message.as_ref().unwrap().content,
+            Some("Hello!".to_string())
+        );
+        assert_eq!(openai_response.choices[0].finish_reason, Some("stop".to_string()));
+
+        let usage = openai_response.usage.as_ref().unwrap();
+        assert_eq!(usage.prompt_tokens, 10);
+        assert_eq!(usage.completion_tokens, 5);
+        assert_eq!(usage.total_tokens, 15);
+    }
+
+    #[test]
+    fn test_anthropic_to_openai_with_thinking() {
+        let anthropic_msg = AnthropicMessage {
+            id: "msg-456".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                AnthropicContentBlock::Thinking {
+                    thinking: "Let me think...".to_string(),
+                    signature: None,
+                },
+                AnthropicContentBlock::Text {
+                    text: "Answer".to_string(),
+                },
+            ],
+            model: "test-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 20,
+                output_tokens: 10,
+            },
+        };
+
+        let openai_response: ChatCompletionResponse = anthropic_msg.into();
+        // Content should concatenate thinking and text with newline
+        assert_eq!(
+            openai_response.choices[0].message.as_ref().unwrap().content,
+            Some("Let me think...\nAnswer".to_string())
+        );
+    }
+
+    #[test]
+    fn test_anthropic_stop_reason_mapping() {
+        let test_cases = vec![
+            ("end_turn", "stop"),
+            ("max_tokens", "length"),
+            ("stop_sequence", "stop"),
+        ];
+
+        for (anthropic_reason, expected_openai) in test_cases {
+            let anthropic_msg = AnthropicMessage {
+                id: "msg-test".to_string(),
+                message_type: "message".to_string(),
+                role: "assistant".to_string(),
+                content: vec![AnthropicContentBlock::Text {
+                    text: "Test".to_string(),
+                }],
+                model: "test-model".to_string(),
+                stop_reason: Some(anthropic_reason.to_string()),
+                stop_sequence: None,
+                usage: AnthropicUsage {
+                    input_tokens: 5,
+                    output_tokens: 5,
+                },
+            };
+
+            let openai_response: ChatCompletionResponse = anthropic_msg.into();
+            assert_eq!(
+                openai_response.choices[0].finish_reason,
+                Some(expected_openai.to_string()),
+                "Failed for anthropic reason: {}",
+                anthropic_reason
+            );
+        }
+    }
+
+    #[test]
+    fn test_real_anthropic_response_from_llama_server() {
+        // This is an actual response format from llama.cpp server on /v1/messages endpoint
+        let json = serde_json::json!({
+            "id": "chatcmpl-5678",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Hello! How can I help you today?"}
+            ],
+            "model": "ERNIE-4.5",
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 158,
+                "output_tokens": 265
+            }
+        });
+
+        // Parse as Anthropic format
+        let anthropic_msg: AnthropicMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(anthropic_msg.usage.input_tokens, 158);
+        assert_eq!(anthropic_msg.usage.output_tokens, 265);
+
+        // Convert to OpenAI format (this is what the proxy does)
+        let openai_response: ChatCompletionResponse = anthropic_msg.into();
+
+        // Verify conversion preserves critical fields
+        assert_eq!(openai_response.usage.as_ref().unwrap().prompt_tokens, 158);
+        assert_eq!(openai_response.usage.as_ref().unwrap().completion_tokens, 265);
+        assert_eq!(openai_response.usage.as_ref().unwrap().total_tokens, 423);
+        assert_eq!(openai_response.choices[0].finish_reason, Some("stop".to_string()));
+        assert_eq!(
+            openai_response.choices[0].message.as_ref().unwrap().content,
+            Some("Hello! How can I help you today?".to_string())
+        );
+    }
+
+    #[test]
+    fn test_openai_to_anthropic_conversion() {
+        // Test OpenAI → Anthropic conversion (for backends that return OpenAI format)
+        let openai_response = ChatCompletionResponse {
+            id: "chatcmpl-123".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1234567890,
+            model: "test-model".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Some(ResponseMessage {
+                    role: "assistant".to_string(),
+                    content: Some("Hello from OpenAI!".to_string()),
+                    tool_calls: None,
+                    reasoning_text: None,
+                    reasoning_opaque: None,
+                }),
+                delta: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: Some(Usage {
+                prompt_tokens: 10,
+                completion_tokens: 5,
+                total_tokens: 15,
+                completion_tokens_details: None,
+            }),
+            timings: None,
+        };
+
+        let anthropic: AnthropicMessage = openai_response.into();
+        assert_eq!(anthropic.id, "chatcmpl-123");
+        assert_eq!(anthropic.message_type, "message");
+        assert_eq!(anthropic.role, "assistant");
+        assert_eq!(anthropic.model, "test-model");
+        assert_eq!(anthropic.stop_reason, Some("end_turn".to_string())); // stop -> end_turn
+        assert_eq!(anthropic.usage.input_tokens, 10); // was prompt_tokens
+        assert_eq!(anthropic.usage.output_tokens, 5); // was completion_tokens
+
+        // Check content block
+        assert_eq!(anthropic.content.len(), 1);
+        match &anthropic.content[0] {
+            AnthropicContentBlock::Text { text } => {
+                assert_eq!(text, "Hello from OpenAI!");
+            }
+            _ => panic!("Expected text block"),
+        }
+    }
+
+    #[test]
+    fn test_openai_to_anthropic_with_reasoning() {
+        // Test OpenAI → Anthropic conversion with reasoning_text
+        let openai_response = ChatCompletionResponse {
+            id: "chatcmpl-456".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1234567890,
+            model: "test-model".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Some(ResponseMessage {
+                    role: "assistant".to_string(),
+                    content: Some("The answer is 42.".to_string()),
+                    tool_calls: None,
+                    reasoning_text: Some("Let me think about this...".to_string()),
+                    reasoning_opaque: None,
+                }),
+                delta: None,
+                finish_reason: Some("stop".to_string()),
+            }],
+            usage: Some(Usage {
+                prompt_tokens: 20,
+                completion_tokens: 10,
+                total_tokens: 30,
+                completion_tokens_details: None,
+            }),
+            timings: None,
+        };
+
+        let anthropic: AnthropicMessage = openai_response.into();
+
+        // Should have two content blocks: thinking + text
+        assert_eq!(anthropic.content.len(), 2);
+
+        match &anthropic.content[0] {
+            AnthropicContentBlock::Thinking { thinking, .. } => {
+                assert_eq!(thinking, "Let me think about this...");
+            }
+            _ => panic!("Expected thinking block first"),
+        }
+
+        match &anthropic.content[1] {
+            AnthropicContentBlock::Text { text } => {
+                assert_eq!(text, "The answer is 42.");
+            }
+            _ => panic!("Expected text block second"),
+        }
+    }
+
+    #[test]
+    fn test_openai_to_anthropic_finish_reason_mapping() {
+        let test_cases = vec![
+            ("stop", "end_turn"),
+            ("length", "max_tokens"),
+            ("tool_calls", "tool_use"),
+        ];
+
+        for (openai_reason, expected_anthropic) in test_cases {
+            let openai_response = ChatCompletionResponse {
+                id: "chatcmpl-test".to_string(),
+                object: "chat.completion".to_string(),
+                created: 0,
+                model: "test".to_string(),
+                choices: vec![Choice {
+                    index: 0,
+                    message: Some(ResponseMessage {
+                        role: "assistant".to_string(),
+                        content: Some("Test".to_string()),
+                        tool_calls: None,
+                        reasoning_text: None,
+                        reasoning_opaque: None,
+                    }),
+                    delta: None,
+                    finish_reason: Some(openai_reason.to_string()),
+                }],
+                usage: None,
+                timings: None,
+            };
+
+            let anthropic: AnthropicMessage = openai_response.into();
+            assert_eq!(
+                anthropic.stop_reason,
+                Some(expected_anthropic.to_string()),
+                "Failed for OpenAI reason: {}",
+                openai_reason
+            );
+        }
+    }
+
+    #[test]
+    fn test_openai_to_anthropic_from_llama_cpp() {
+        // This is what llama.cpp actually returns (OpenAI format)
+        let json = serde_json::json!({
+            "id": "chatcmpl-abc123",
+            "object": "chat.completion",
+            "created": 1234567890,
+            "model": "qwen3-coder",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "Here's the code you requested."
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 150,
+                "completion_tokens": 75,
+                "total_tokens": 225
+            }
+        });
+
+        // Parse as OpenAI format
+        let openai_response: ChatCompletionResponse = serde_json::from_value(json).unwrap();
+
+        // Convert to Anthropic format
+        let anthropic: AnthropicMessage = openai_response.into();
+
+        // Verify conversion
+        assert_eq!(anthropic.id, "chatcmpl-abc123");
+        assert_eq!(anthropic.message_type, "message");
+        assert_eq!(anthropic.model, "qwen3-coder");
+        assert_eq!(anthropic.stop_reason, Some("end_turn".to_string()));
+        assert_eq!(anthropic.usage.input_tokens, 150);
+        assert_eq!(anthropic.usage.output_tokens, 75);
+
+        // Content should be preserved
+        match &anthropic.content[0] {
+            AnthropicContentBlock::Text { text } => {
+                assert_eq!(text, "Here's the code you requested.");
+            }
+            _ => panic!("Expected text block"),
+        }
     }
 }

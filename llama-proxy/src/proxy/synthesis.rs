@@ -13,15 +13,19 @@ use axum::response::{
     sse::{Event, Sse},
     IntoResponse, Response,
 };
-use futures::stream;
+use futures::stream::{self, StreamExt};
 use serde_json::json;
 use std::convert::Infallible;
 
-use crate::api::{ChatCompletionResponse, ToolCall, Usage, Timings};
+use crate::api::{AnthropicContentBlock, AnthropicMessage, ChatCompletionResponse, ToolCall, Usage, Timings};
 
 /// Default text chunk size (chars per SSE chunk when synthesizing)
 /// Can be configured via config in the future
 const DEFAULT_CHUNK_SIZE: usize = 50;
+
+/// Default delay between SSE chunks (milliseconds)
+/// Set to 0 for instant streaming, or positive value to simulate realistic pace
+const DEFAULT_CHUNK_DELAY_MS: u64 = 50; // 50ms between chunks
 
 /// Synthesize a streaming SSE response from a complete ChatCompletionResponse
 ///
@@ -55,8 +59,8 @@ pub async fn synthesize_streaming_response(
     let usage = response.usage.clone();
     let timings = response.timings.clone();
 
-    // Create SSE event stream
-    let stream = stream::iter(synthesize_chunks(
+    // Pre-compute all chunks
+    let chunks = synthesize_chunks(
         id,
         model,
         created,
@@ -67,7 +71,15 @@ pub async fn synthesize_streaming_response(
         finish_reason,
         usage,
         timings,
-    ));
+    );
+
+    // Wrap in async stream with delays between chunks
+    let stream = stream::iter(chunks).then(|chunk| async move {
+        if DEFAULT_CHUNK_DELAY_MS > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(DEFAULT_CHUNK_DELAY_MS)).await;
+        }
+        chunk
+    });
 
     // Build SSE response
     Ok(Sse::new(stream).into_response())
@@ -246,12 +258,223 @@ fn create_sse_event(json: &serde_json::Value) -> Event {
     Event::default().json_data(json).unwrap()
 }
 
+// ============================================================================
+// Anthropic Streaming Synthesis
+// ============================================================================
+
+/// Synthesize an Anthropic-formatted streaming SSE response from a complete AnthropicMessage
+///
+/// This creates streaming events that match Anthropic's Messages API SSE format:
+/// - message_start: Initial message metadata
+/// - content_block_start: Start of each content block
+/// - content_block_delta: Text chunks
+/// - content_block_stop: End of content block
+/// - message_delta: Final metadata (stop_reason, usage)
+/// - message_stop: Stream terminator
+pub async fn synthesize_anthropic_streaming_response(
+    msg: AnthropicMessage,
+) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
+    // Pre-compute all chunks
+    let chunks = synthesize_anthropic_chunks(msg);
+
+    // Wrap in async stream with delays between chunks
+    let stream = stream::iter(chunks).then(|chunk| async move {
+        if DEFAULT_CHUNK_DELAY_MS > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(DEFAULT_CHUNK_DELAY_MS)).await;
+        }
+        chunk
+    });
+
+    // Build SSE response
+    Ok(Sse::new(stream).into_response())
+}
+
+/// Generate the sequence of Anthropic SSE events from complete message
+fn synthesize_anthropic_chunks(msg: AnthropicMessage) -> Vec<Result<Event, Infallible>> {
+    let mut chunks = Vec::new();
+
+    // Event 1: message_start
+    chunks.push(Ok(create_anthropic_sse_event(
+        "message_start",
+        &build_message_start_event(&msg),
+    )));
+
+    // Events 2-N: content_block_start -> content_block_delta chunks -> content_block_stop
+    for (idx, block) in msg.content.iter().enumerate() {
+        match block {
+            AnthropicContentBlock::Text { text } => {
+                // Start text block
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_start",
+                    &build_content_block_start_event(idx, "text"),
+                )));
+
+                // Send text as chunked deltas
+                for text_chunk in chunk_text(text, DEFAULT_CHUNK_SIZE) {
+                    chunks.push(Ok(create_anthropic_sse_event(
+                        "content_block_delta",
+                        &build_content_block_delta_event(idx, "text_delta", &text_chunk),
+                    )));
+                }
+
+                // Stop text block
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_stop",
+                    &build_content_block_stop_event(idx),
+                )));
+            }
+            AnthropicContentBlock::Thinking { thinking, signature } => {
+                // Start thinking block
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_start",
+                    &build_thinking_block_start_event(idx, signature.as_deref()),
+                )));
+
+                // Send thinking as chunked deltas
+                for thinking_chunk in chunk_text(thinking, DEFAULT_CHUNK_SIZE) {
+                    chunks.push(Ok(create_anthropic_sse_event(
+                        "content_block_delta",
+                        &build_thinking_block_delta_event(idx, &thinking_chunk),
+                    )));
+                }
+
+                // Stop thinking block
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_stop",
+                    &build_content_block_stop_event(idx),
+                )));
+            }
+        }
+    }
+
+    // Event N-1: message_delta with stop_reason and usage
+    chunks.push(Ok(create_anthropic_sse_event(
+        "message_delta",
+        &build_message_delta_event(&msg),
+    )));
+
+    // Event N: message_stop
+    chunks.push(Ok(create_anthropic_sse_event(
+        "message_stop",
+        &build_message_stop_event(),
+    )));
+
+    chunks
+}
+
+/// Create an Anthropic SSE Event with event type and data
+fn create_anthropic_sse_event(event_type: &str, data: &serde_json::Value) -> Event {
+    Event::default()
+        .event(event_type)
+        .json_data(data)
+        .unwrap()
+}
+
+/// Build message_start event
+fn build_message_start_event(msg: &AnthropicMessage) -> serde_json::Value {
+    json!({
+        "type": "message_start",
+        "message": {
+            "id": msg.id,
+            "type": "message",
+            "role": msg.role,
+            "model": msg.model,
+            "content": [],
+            "stop_reason": null,
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": msg.usage.input_tokens,
+                "output_tokens": 0
+            }
+        }
+    })
+}
+
+/// Build content_block_start event for text blocks
+fn build_content_block_start_event(index: usize, block_type: &str) -> serde_json::Value {
+    json!({
+        "type": "content_block_start",
+        "index": index,
+        "content_block": {
+            "type": block_type,
+            "text": ""
+        }
+    })
+}
+
+/// Build content_block_start event for thinking blocks
+fn build_thinking_block_start_event(index: usize, signature: Option<&str>) -> serde_json::Value {
+    let mut content_block = json!({
+        "type": "thinking",
+        "thinking": ""
+    });
+
+    if let Some(sig) = signature {
+        content_block["signature"] = json!(sig);
+    }
+
+    json!({
+        "type": "content_block_start",
+        "index": index,
+        "content_block": content_block
+    })
+}
+
+/// Build content_block_delta event for text
+fn build_content_block_delta_event(index: usize, delta_type: &str, text: &str) -> serde_json::Value {
+    json!({
+        "type": "content_block_delta",
+        "index": index,
+        "delta": {
+            "type": delta_type,
+            "text": text
+        }
+    })
+}
+
+/// Build content_block_delta event for thinking
+fn build_thinking_block_delta_event(index: usize, thinking: &str) -> serde_json::Value {
+    json!({
+        "type": "content_block_delta",
+        "index": index,
+        "delta": {
+            "type": "thinking_delta",
+            "thinking": thinking
+        }
+    })
+}
+
+/// Build content_block_stop event
+fn build_content_block_stop_event(index: usize) -> serde_json::Value {
+    json!({
+        "type": "content_block_stop",
+        "index": index
+    })
+}
+
+/// Build message_delta event with stop_reason and final usage
+fn build_message_delta_event(msg: &AnthropicMessage) -> serde_json::Value {
+    json!({
+        "type": "message_delta",
+        "delta": {
+            "stop_reason": msg.stop_reason,
+            "stop_sequence": msg.stop_sequence
+        },
+        "usage": {
+            "output_tokens": msg.usage.output_tokens
+        }
+    })
+}
+
+/// Build message_stop event
+fn build_message_stop_event() -> serde_json::Value {
+    json!({"type": "message_stop"})
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{
-        ChatCompletionResponse, Choice, FunctionCall, ResponseMessage, ToolCall, Usage, Timings,
-    };
+    use crate::api::{FunctionCall, ToolCall, Usage, Timings};
 
     #[test]
     fn test_chunk_text_short() {
@@ -455,5 +678,310 @@ mod tests {
         let chunks = chunk_text(&text, 50);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].len(), 50);
+    }
+
+    // ========================================================================
+    // Anthropic Synthesis Tests
+    // ========================================================================
+
+    use crate::api::{AnthropicContentBlock, AnthropicMessage, AnthropicUsage};
+
+    #[test]
+    fn test_build_message_start_event() {
+        let msg = AnthropicMessage {
+            id: "msg-123".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            model: "test-model".to_string(),
+            stop_reason: None,
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+            },
+        };
+
+        let event = build_message_start_event(&msg);
+        assert_eq!(event["type"], "message_start");
+        assert_eq!(event["message"]["id"], "msg-123");
+        assert_eq!(event["message"]["role"], "assistant");
+        assert_eq!(event["message"]["model"], "test-model");
+        assert_eq!(event["message"]["usage"]["input_tokens"], 10);
+        assert_eq!(event["message"]["usage"]["output_tokens"], 0); // Always 0 in start
+    }
+
+    #[test]
+    fn test_build_content_block_start_event() {
+        let event = build_content_block_start_event(0, "text");
+        assert_eq!(event["type"], "content_block_start");
+        assert_eq!(event["index"], 0);
+        assert_eq!(event["content_block"]["type"], "text");
+        assert_eq!(event["content_block"]["text"], "");
+    }
+
+    #[test]
+    fn test_build_thinking_block_start_event() {
+        let event = build_thinking_block_start_event(0, Some("sig-abc"));
+        assert_eq!(event["type"], "content_block_start");
+        assert_eq!(event["index"], 0);
+        assert_eq!(event["content_block"]["type"], "thinking");
+        assert_eq!(event["content_block"]["thinking"], "");
+        assert_eq!(event["content_block"]["signature"], "sig-abc");
+    }
+
+    #[test]
+    fn test_build_content_block_delta_event() {
+        let event = build_content_block_delta_event(0, "text_delta", "Hello");
+        assert_eq!(event["type"], "content_block_delta");
+        assert_eq!(event["index"], 0);
+        assert_eq!(event["delta"]["type"], "text_delta");
+        assert_eq!(event["delta"]["text"], "Hello");
+    }
+
+    #[test]
+    fn test_build_thinking_block_delta_event() {
+        let event = build_thinking_block_delta_event(0, "Thinking...");
+        assert_eq!(event["type"], "content_block_delta");
+        assert_eq!(event["index"], 0);
+        assert_eq!(event["delta"]["type"], "thinking_delta");
+        assert_eq!(event["delta"]["thinking"], "Thinking...");
+    }
+
+    #[test]
+    fn test_build_content_block_stop_event() {
+        let event = build_content_block_stop_event(0);
+        assert_eq!(event["type"], "content_block_stop");
+        assert_eq!(event["index"], 0);
+    }
+
+    #[test]
+    fn test_build_message_delta_event() {
+        let msg = AnthropicMessage {
+            id: "msg-123".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            model: "test-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 10,
+                output_tokens: 20,
+            },
+        };
+
+        let event = build_message_delta_event(&msg);
+        assert_eq!(event["type"], "message_delta");
+        assert_eq!(event["delta"]["stop_reason"], "end_turn");
+        assert_eq!(event["usage"]["output_tokens"], 20);
+    }
+
+    #[test]
+    fn test_build_message_stop_event() {
+        let event = build_message_stop_event();
+        assert_eq!(event["type"], "message_stop");
+    }
+
+    #[test]
+    fn test_synthesize_anthropic_chunks_text_block() {
+        let msg = AnthropicMessage {
+            id: "msg-123".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::Text {
+                text: "Hi".to_string(),
+            }],
+            model: "test-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 5,
+                output_tokens: 2,
+            },
+        };
+
+        let chunks = synthesize_anthropic_chunks(msg);
+
+        // Expected: message_start, content_block_start, content_block_delta, content_block_stop, message_delta, message_stop
+        assert_eq!(chunks.len(), 6);
+
+        // All chunks should be Ok
+        for chunk in &chunks {
+            assert!(chunk.is_ok());
+        }
+    }
+
+    #[test]
+    fn test_synthesize_anthropic_chunks_thinking_block() {
+        let msg = AnthropicMessage {
+            id: "msg-123".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::Thinking {
+                thinking: "Let me think...".to_string(),
+                signature: Some("sig-xyz".to_string()),
+            }],
+            model: "test-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 5,
+                output_tokens: 3,
+            },
+        };
+
+        let chunks = synthesize_anthropic_chunks(msg);
+
+        // Expected: message_start, content_block_start, content_block_delta, content_block_stop, message_delta, message_stop
+        assert_eq!(chunks.len(), 6);
+
+        // All chunks should be Ok
+        for chunk in &chunks {
+            assert!(chunk.is_ok());
+        }
+    }
+
+    #[test]
+    fn test_synthesize_anthropic_chunks_multiple_blocks() {
+        let msg = AnthropicMessage {
+            id: "msg-123".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                AnthropicContentBlock::Thinking {
+                    thinking: "Thinking".to_string(),
+                    signature: None,
+                },
+                AnthropicContentBlock::Text {
+                    text: "Answer".to_string(),
+                },
+            ],
+            model: "test-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 5,
+                output_tokens: 10,
+            },
+        };
+
+        let chunks = synthesize_anthropic_chunks(msg);
+
+        // Expected:
+        // - message_start (1)
+        // - Block 0: content_block_start, content_block_delta, content_block_stop (3)
+        // - Block 1: content_block_start, content_block_delta, content_block_stop (3)
+        // - message_delta (1)
+        // - message_stop (1)
+        // Total: 9
+        assert_eq!(chunks.len(), 9);
+
+        // All chunks should be Ok
+        for chunk in &chunks {
+            assert!(chunk.is_ok());
+        }
+    }
+
+    #[test]
+    fn test_synthesize_anthropic_chunks_empty_content() {
+        let msg = AnthropicMessage {
+            id: "msg-123".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![],
+            model: "test-model".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 5,
+                output_tokens: 0,
+            },
+        };
+
+        let chunks = synthesize_anthropic_chunks(msg);
+
+        // Expected: message_start, message_delta, message_stop
+        assert_eq!(chunks.len(), 3);
+
+        // All chunks should be Ok
+        for chunk in &chunks {
+            assert!(chunk.is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn test_synthesize_anthropic_streaming_full_flow() {
+        // Create a realistic Anthropic message
+        let msg = AnthropicMessage {
+            id: "msg-test-123".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                AnthropicContentBlock::Text {
+                    text: "Hello, how can I help you?".to_string(),
+                },
+            ],
+            model: "claude-3-5-sonnet".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 10,
+                output_tokens: 7,
+            },
+        };
+
+        // Call the main synthesis function
+        let response = synthesize_anthropic_streaming_response(msg).await;
+
+        // Verify we got a response
+        assert!(response.is_ok(), "Should synthesize response successfully");
+
+        // The response should be an SSE stream
+        let response = response.unwrap();
+        assert_eq!(response.status(), 200);
+
+        // Verify content-type header is set for SSE
+        let content_type = response.headers().get("content-type");
+        assert!(content_type.is_some());
+        let content_type_str = content_type.unwrap().to_str().unwrap();
+        assert!(content_type_str.contains("text/event-stream"));
+    }
+
+    #[test]
+    fn test_anthropic_event_sequence_order() {
+        // Verify event sequence matches Anthropic spec
+        let msg = AnthropicMessage {
+            id: "msg-order-test".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::Text {
+                text: "Hi".to_string(),
+            }],
+            model: "test".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+
+        let chunks = synthesize_anthropic_chunks(msg);
+
+        // Verify minimum expected sequence:
+        // 1. message_start
+        // 2. content_block_start
+        // 3. content_block_delta (at least one)
+        // 4. content_block_stop
+        // 5. message_delta
+        // 6. message_stop
+
+        assert!(chunks.len() >= 6, "Should have at least 6 events");
+
+        // All events should be valid SSE events
+        for chunk in &chunks {
+            assert!(chunk.is_ok(), "All chunks should be Ok");
+        }
     }
 }
