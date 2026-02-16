@@ -97,6 +97,12 @@ impl ProxyHandler {
     // We now ALWAYS force non-streaming backend requests and synthesize streaming responses
     // when clients request them. This simplifies fix application significantly.
 
+    /// Check if Content-Type indicates JSON response
+    fn is_json_content_type(content_type: &str) -> bool {
+        let ct_lower = content_type.to_lowercase();
+        ct_lower.contains("application/json") || ct_lower.contains("application/vnd.") && ct_lower.contains("+json")
+    }
+
     /// Handle an incoming request
     pub async fn handle(&self, req: Request<Body>) -> Response {
         let start = Instant::now();
@@ -342,8 +348,11 @@ impl ProxyHandler {
             "Received non-streaming response from backend"
         );
 
-        // Try to parse as JSON and apply fixes
-        let (json_value, metrics) =
+        // Only try to parse as JSON if Content-Type indicates JSON
+        let is_json_response = Self::is_json_content_type(content_type);
+
+        // Try to parse as JSON and apply fixes (only if Content-Type is JSON)
+        let (json_value, metrics) = if is_json_response {
             if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                 tracing::debug!("Response parsed as JSON successfully");
                 // Apply fixes with request context if available
@@ -390,14 +399,22 @@ impl ProxyHandler {
 
                 (Some(json), metrics)
             } else {
-                // JSON parsing failed - log warning with body preview
+                // Content-Type says JSON but parsing failed - log warning
                 tracing::warn!(
                     body_size = body_bytes.len(),
                     body_preview = %String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(200)]),
-                    "Failed to parse response as JSON - returning original body unchanged"
+                    "Content-Type indicates JSON but parsing failed - returning original body unchanged"
                 );
                 (None, None)
-            };
+            }
+        } else {
+            // Content-Type is not JSON - this is expected, just passthrough
+            tracing::debug!(
+                content_type = %content_type,
+                "Non-JSON content type, passing through unchanged"
+            );
+            (None, None)
+        };
 
         // Log stats
         if let Some(ref m) = metrics {
@@ -699,4 +716,27 @@ mod tests {
     // - All backend requests: stream = false
     // - Client wants streaming: synthesize from complete JSON
     // - Client wants non-streaming: return complete JSON as-is
+
+    #[test]
+    fn test_is_json_content_type() {
+        // Standard JSON content types
+        assert!(ProxyHandler::is_json_content_type("application/json"));
+        assert!(ProxyHandler::is_json_content_type("application/json; charset=utf-8"));
+        assert!(ProxyHandler::is_json_content_type("APPLICATION/JSON"));
+
+        // Vendor-specific JSON types
+        assert!(ProxyHandler::is_json_content_type("application/vnd.api+json"));
+        assert!(ProxyHandler::is_json_content_type("application/vnd.github.v3+json"));
+        assert!(ProxyHandler::is_json_content_type("application/vnd.custom+json; charset=utf-8"));
+
+        // Non-JSON types
+        assert!(!ProxyHandler::is_json_content_type("text/html"));
+        assert!(!ProxyHandler::is_json_content_type("text/plain"));
+        assert!(!ProxyHandler::is_json_content_type("text/javascript"));
+        assert!(!ProxyHandler::is_json_content_type("application/javascript"));
+        assert!(!ProxyHandler::is_json_content_type("image/png"));
+        assert!(!ProxyHandler::is_json_content_type("image/jpeg"));
+        assert!(!ProxyHandler::is_json_content_type("text/css"));
+        assert!(!ProxyHandler::is_json_content_type("application/octet-stream"));
+    }
 }
