@@ -96,8 +96,8 @@ fn format_json(m: &RequestMetrics) -> String {
 /// Compact single-line format
 fn format_compact(m: &RequestMetrics) -> String {
     let context_str = match (m.context_used, m.context_total) {
-        (Some(used), Some(total)) => format!("ctx:{}/{}", used, total),
-        _ => "ctx:N/A".to_string(),
+        (Some(used), Some(total)) => format!("ctx={}/{}", used, total),
+        _ => "ctx=null".to_string(),
     };
 
     format!(
@@ -171,7 +171,7 @@ mod tests {
         m.context_total = Some(4096);
 
         let output = format_compact(&m);
-        assert!(output.contains("ctx:100/4096"));
+        assert!(output.contains("ctx=100/4096"));
     }
 
     #[test]
@@ -179,7 +179,7 @@ mod tests {
         let m = create_test_metrics();
 
         let output = format_compact(&m);
-        assert!(output.contains("ctx:N/A"));
+        assert!(output.contains("ctx=null"));
     }
 
     #[test]
