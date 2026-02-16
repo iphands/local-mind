@@ -722,6 +722,8 @@ mod tests {
         assert_eq!(metrics.finish_reason, "end_turn");
         assert_eq!(metrics.output_len, 11); // "Hello world"
         assert!(metrics.streaming);
+        // Verify context_used fallback (Anthropic format has no timings)
+        assert_eq!(metrics.context_used, Some(124));
     }
 
     #[test]
@@ -755,5 +757,7 @@ mod tests {
         // Output len should only count text content, not thinking
         assert_eq!(metrics.output_len, 16); // "The answer is 42"
         assert_eq!(metrics.finish_reason, "end_turn");
+        // Verify context_used fallback (Anthropic format has no timings)
+        assert_eq!(metrics.context_used, Some(100));
     }
 }
