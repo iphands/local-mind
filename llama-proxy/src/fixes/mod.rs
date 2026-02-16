@@ -56,7 +56,9 @@ pub trait ResponseFix: Send + Sync {
 /// Create the default fix registry with all available fixes
 pub fn create_default_registry() -> FixRegistry {
     let mut registry = FixRegistry::new();
-    registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+    // Register malformed arguments fix first - it handles the more specific {}":" pattern
+    // This ensures it runs before the broader filepath fix
     registry.register(Arc::new(ToolcallMalformedArgumentsFix::new()));
+    registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
     registry
 }

@@ -78,8 +78,10 @@ impl ToolcallMalformedArgumentsFix {
             return None;
         }
 
-        tracing::debug!(
+        tracing::warn!(
+            fix_name = self.name(),
             tool_name = tool_name,
+            malformed_args = args_str,
             "Detected malformed arguments with {{}}\" pattern"
         );
 
@@ -94,9 +96,10 @@ impl ToolcallMalformedArgumentsFix {
         let parsed = match self.aggressive_parse_json(args_str) {
             Some(obj) => obj,
             None => {
-                tracing::warn!(
+                tracing::error!(
+                    fix_name = self.name(),
                     tool_name = tool_name,
-                    args = args_str,
+                    malformed_args = args_str,
                     "Could not parse malformed arguments even with aggressive parsing"
                 );
                 return None;
@@ -111,7 +114,11 @@ impl ToolcallMalformedArgumentsFix {
             .collect();
 
         if missing_params.is_empty() {
-            tracing::debug!("No missing parameters found, cannot determine replacement");
+            tracing::error!(
+                fix_name = self.name(),
+                tool_name = tool_name,
+                "No missing parameters found, cannot determine replacement"
+            );
             return None;
         }
 
@@ -123,17 +130,20 @@ impl ToolcallMalformedArgumentsFix {
             // Pattern: ,{}"= becomes ,"file_path":
             let fixed_args = args_str.replace("{}\":", &format!("\"{}\":", correct_param));
 
-            tracing::info!(
-                tool_name = tool_name,
-                correct_param = correct_param,
-                "Fixed malformed argument: replaced {{}}\" with correct parameter"
-            );
-
             // Validate the fixed JSON is actually valid
             if serde_json::from_str::<Value>(&fixed_args).is_ok() {
+                tracing::info!(
+                    fix_name = self.name(),
+                    tool_name = tool_name,
+                    correct_param = correct_param,
+                    original_args = args_str,
+                    fixed_args = &fixed_args,
+                    "Fixed malformed argument: replaced {{}}\" with correct parameter"
+                );
                 return Some(fixed_args);
             } else {
-                tracing::warn!(
+                tracing::error!(
+                    fix_name = self.name(),
                     tool_name = tool_name,
                     fixed_args = &fixed_args,
                     "Fixed arguments are still invalid JSON"
@@ -166,8 +176,11 @@ impl ToolcallMalformedArgumentsFix {
                     let fixed_args = args_str.replace("{}\":", &format!("\"{}\":", guess));
                     if serde_json::from_str::<Value>(&fixed_args).is_ok() {
                         tracing::info!(
+                            fix_name = self.name(),
                             tool_name = tool_name,
                             guessed_param = guess,
+                            original_args = args_str,
+                            fixed_args = &fixed_args,
                             "Fixed malformed argument using heuristic"
                         );
                         return Some(fixed_args);
@@ -239,7 +252,10 @@ impl ToolcallMalformedArgumentsFix {
         let schemas = Self::extract_tool_schemas(request);
 
         if schemas.is_empty() {
-            tracing::trace!("No tool schemas in request, skipping malformed arguments fix");
+            tracing::warn!(
+                fix_name = self.name(),
+                "No tool schemas in request - cannot fix malformed arguments without context"
+            );
             return response;
         }
 
@@ -276,6 +292,10 @@ impl ToolcallMalformedArgumentsFix {
         let schemas = Self::extract_tool_schemas(request);
 
         if schemas.is_empty() {
+            tracing::debug!(
+                fix_name = self.name(),
+                "No tool schemas in request - cannot fix malformed arguments in streaming"
+            );
             return chunk;
         }
 

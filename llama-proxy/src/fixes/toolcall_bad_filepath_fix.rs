@@ -32,8 +32,29 @@ impl ToolcallBadFilepathFix {
 
     /// Check if arguments string is malformed
     fn is_malformed(&self, args: &str) -> bool {
-        // Quick check for common malformation patterns
-        args.contains("filePath") && !self.is_valid_json(args)
+        // Only trigger if:
+        // 1. "filePath" appears as a JSON key (quoted, followed by colon or in duplicate pattern)
+        // 2. AND the JSON is invalid
+
+        // Look for "filePath" as a key pattern (not just anywhere in the string)
+        let has_filepath_key = args.contains(r#""filePath":"#)
+            || args.contains(r#","filePath""#)
+            || args.starts_with(r#"{"filePath""#);
+
+        if !has_filepath_key {
+            return false;
+        }
+
+        // Check for duplicate "filePath" or malformed "filePath" patterns
+        let filepath_count = args.matches(r#""filePath""#).count();
+
+        // If multiple "filePath" keys, definitely malformed
+        if filepath_count > 1 {
+            return true;
+        }
+
+        // Single "filePath" key with invalid JSON
+        !self.is_valid_json(args)
     }
 
     /// Check if a string is valid JSON
@@ -302,13 +323,35 @@ impl ResponseFix for ToolcallBadFilepathFix {
                         if let Some(function) = call.get_mut("function") {
                             if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
                                 if self.is_malformed(args) {
-                                    let fixed = self.fix_arguments(args);
-                                    tracing::debug!(
-                                        original = %args,
-                                        fixed = %fixed,
-                                        "Fixed malformed tool call arguments"
+                                    let tool_name = function
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("unknown");
+                                    tracing::warn!(
+                                        fix_name = self.name(),
+                                        tool_name = tool_name,
+                                        original_args = %args,
+                                        "Detected malformed tool call arguments with invalid filePath JSON"
                                     );
-                                    function["arguments"] = Value::String(fixed);
+                                    let fixed = self.fix_arguments(args);
+                                    if self.is_valid_json(&fixed) {
+                                        tracing::info!(
+                                            fix_name = self.name(),
+                                            tool_name = tool_name,
+                                            original_args = %args,
+                                            fixed_args = %fixed,
+                                            "Fixed malformed tool call arguments"
+                                        );
+                                        function["arguments"] = Value::String(fixed);
+                                    } else {
+                                        tracing::error!(
+                                            fix_name = self.name(),
+                                            tool_name = tool_name,
+                                            original_args = %args,
+                                            attempted_fix = %fixed,
+                                            "Failed to fix malformed tool call arguments - result still invalid JSON"
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -332,7 +375,35 @@ impl ResponseFix for ToolcallBadFilepathFix {
                         if let Some(function) = call.get_mut("function") {
                             if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
                                 if self.is_malformed(args) {
-                                    function["arguments"] = Value::String(self.fix_arguments(args));
+                                    let tool_name = function
+                                        .get("name")
+                                        .and_then(|n| n.as_str())
+                                        .unwrap_or("unknown");
+                                    tracing::warn!(
+                                        fix_name = self.name(),
+                                        tool_name = tool_name,
+                                        original_args = %args,
+                                        "Detected malformed tool call arguments with invalid filePath JSON"
+                                    );
+                                    let fixed = self.fix_arguments(args);
+                                    if self.is_valid_json(&fixed) {
+                                        tracing::info!(
+                                            fix_name = self.name(),
+                                            tool_name = tool_name,
+                                            original_args = %args,
+                                            fixed_args = %fixed,
+                                            "Fixed malformed tool call arguments"
+                                        );
+                                        function["arguments"] = Value::String(fixed);
+                                    } else {
+                                        tracing::error!(
+                                            fix_name = self.name(),
+                                            tool_name = tool_name,
+                                            original_args = %args,
+                                            attempted_fix = %fixed,
+                                            "Failed to fix malformed tool call arguments - result still invalid JSON"
+                                        );
+                                    }
                                 }
                             }
                         }
