@@ -8,7 +8,7 @@ CTX=${CTX:-65000}
 RUNNER=docker
 [[ -f /usr/bin/podman ]] && RUNNER=podman
 
-MODEL_PATH=$1
+MODEL_PATH=$(realpath "$1")
 MODEL_FOLDER=${MODEL_PATH%/*}
 MODEL=${MODEL_PATH##*/}
 
@@ -26,38 +26,41 @@ case `hostname` in
   RUNNER=docker
   ARGS+=(--gpus all)
   ALIAS=cosmo-both
-  # LAYERS=99
+  LAYERS=99
   ;;
 esac
 
 CONTAINER_ARGS=(
   run -it --rm
-  --name llama-server-van
+  --name llama-server-vanilla
   -e UID=1000
   -e GID=1000
   -e APP_UID=1000
   -e APP_GID=1000
-  -p 0.0.0.0:8798:8080
+  -p 0.0.0.0:8798:8799
   -v "$MODEL_FOLDER":/models:ro
   # --entrypoint /bin/bash
 )
 
 LLAMA_ARGS=(
-  --model /models/$MODEL --alias $ALIAS
+  --model /models/$MODEL
+  # --alias $ALIAS
+  --port 8799
+  --host 0.0.0.0
   --n-gpu-layers $LAYERS
-  --batch-size  4096
+  --batch-size  2048
+  --ubatch-size 128
   --cache-type-k q8_0
   --cache-type-v q8_0
   --cont-batching
   --ctx-size $CTX
   --flash-attn on
   --jinja
-  --parallel 2
+  --parallel 1
   --threads `cat /proc/cpuinfo | grep MHz | wc -l`
-  # --top_k 40
-  # --top_p 0.95
-  # --min-p 0.0
-  --ubatch-size 512
+  --kv-offload
+  # --verbose --metrics
+  --temp 0.75 --top_p 0.95 --min-p 0.01   # --top_k 40
   --cache-ram 16384
 )
 
@@ -67,8 +70,9 @@ case $MODE in
   ;;
 "vanilla")
   CONTAINER=ghcr.io/ggml-org/llama.cpp:full-cuda
+  CONTAINER_ARGS+=(--entrypoint /app/llama-server)
   LLAMA_ARGS+=(--mmap)
-  LLAMA_ARGS+=(--fit on)
+  LLAMA_ARGS+=(--fit on --main-gpu 1)
   ;;
 *)
   echo "[FATAL] bad MODE: $MODE"

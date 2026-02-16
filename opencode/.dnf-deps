@@ -13,6 +13,7 @@ gtk3-devel
 gtk4-devel
 less
 lm_sensors-devel
+nasm
 npm
 openssl
 openssl-devel

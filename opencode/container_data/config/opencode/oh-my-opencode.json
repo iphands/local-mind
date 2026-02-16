@@ -5,69 +5,69 @@
     "layout": "main-vertical"
   },
   "agents": {
-    "sisyphus-junior": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "OpenCode-Builder": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "oracle": {
+    "explore": {
       "model": "cosmo-both/cosmo-both"
     },
     "plan": {
       "model": "cosmo-both/cosmo-both"
     },
-    "build": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "multimodal-looker": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "prometheus": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "atlas": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "sisyphus": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "metis": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "explore": {
+    "oracle": {
       "model": "cosmo-both/cosmo-both"
     },
     "big-pickle-agent": {
       "model": "cosmo-both/cosmo-both"
     },
-    "librarian": {
+    "OpenCode-Builder": {
+      "model": "cosmo-both/cosmo-both"
+    },
+    "sisyphus": {
       "model": "cosmo-both/cosmo-both"
     },
     "momus": {
       "model": "cosmo-both/cosmo-both"
+    },
+    "atlas": {
+      "model": "cosmo-both/cosmo-both"
+    },
+    "prometheus": {
+      "model": "cosmo-both/cosmo-both"
+    },
+    "multimodal-looker": {
+      "model": "cosmo-both/cosmo-both"
+    },
+    "metis": {
+      "model": "cosmo-both/cosmo-both"
+    },
+    "build": {
+      "model": "cosmo-both/cosmo-both"
+    },
+    "librarian": {
+      "model": "cosmo-both/cosmo-both"
+    },
+    "sisyphus-junior": {
+      "model": "cosmo-both/cosmo-both"
     }
   },
   "categories": {
+    "quick": {
+      "model": "cosmo-both/cosmo-both"
+    },
     "writing": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "visual-engineering": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "unspecified-high": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "unspecified-low": {
       "model": "cosmo-both/cosmo-both"
     },
     "ultrabrain": {
       "model": "cosmo-both/cosmo-both"
     },
+    "unspecified-high": {
+      "model": "cosmo-both/cosmo-both"
+    },
+    "visual-engineering": {
+      "model": "cosmo-both/cosmo-both"
+    },
     "artistry": {
       "model": "cosmo-both/cosmo-both"
     },
-    "quick": {
+    "unspecified-low": {
       "model": "cosmo-both/cosmo-both"
     }
   }

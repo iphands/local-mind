@@ -22,7 +22,7 @@ RUN mkdir ~/bin && ln -s ~/vendor/bin/drush ~/bin/drush
 
 FROM builder
 RUN git config --global user.name "Ian Page Hands" && git config --global user.email "iphands@gmail.com"
-RUN echo bump_003
+RUN echo bump_004
 RUN touch /home/iphands/IM_A_CONTAINER
 
 RUN curl -fsSL https://opencode.ai/install | bash
@@ -32,11 +32,10 @@ RUN npm config set prefix '~/.local/'
 RUN npm install -g oh-my-opencode-linux-x64
 RUN npm install -g @ast-grep/cli
 RUN npm install -g pyright typescript typescript-language-server
-
 RUN source /home/iphands/.bash_profile ; bunx oh-my-opencode install --no-tui --claude=no --gemini=no --copilot=no --opencode-zen=no --zai-coding-plan=no
 
-RUN git clone https://github.com/Shlomob/ocmonitor-share.git && cd ocmonitor-share && ./install.sh
 RUN git clone https://github.com/iphands/dotfiles.git && cd dotfiles && ./init
+RUN git clone https://github.com/Shlomob/ocmonitor-share.git && cd ocmonitor-share && ./install.sh
 
 RUN ln -s /home/iphands/ocmonitor-share/ocmonitor-wrapper.sh /home/iphands/bin/ocm && \
     ln -s /home/iphands/.opencode/bin/opencode /home/iphands/bin/opencode

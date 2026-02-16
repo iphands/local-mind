@@ -3,6 +3,11 @@
   "plugin": ["oh-my-opencode@latest"],
   "$schema": "https://opencode.ai/config.json",
   "default_agent": "local-mind",
+  "compaction": {
+    "auto": true,
+    "prune": true,
+    "reserved": 10000
+  },
   "permission": {
     "bash": {
       "*": "allow",
@@ -19,7 +24,7 @@
       "npm": "@ai-sdk/openai-compatible",
       "models": { "runpod-model": { "name": "runpod-model" }, },
       "options": {
-        "baseURL": "/v1",
+        "baseURL": "https://9haoyv9i0buu4y-7860.proxy.runpod.net/v1",
         "apiKey": "deadbeef1234"
       }
     },
