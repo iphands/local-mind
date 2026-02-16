@@ -11,8 +11,11 @@ pub use loader::load_config;
 pub struct AppConfig {
     pub server: ServerConfig,
     pub backend: BackendConfig,
+    #[serde(default)]
     pub fixes: FixesConfig,
+    #[serde(default)]
     pub stats: StatsConfig,
+    #[serde(default)]
     pub exporters: ExportersConfig,
     #[serde(default)]
     pub detection: DetectionConfig,
@@ -83,8 +86,23 @@ impl BackendConfig {
 /// Response fix modules configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FixesConfig {
+    #[serde(default = "default_fixes_enabled")]
     pub enabled: bool,
+    #[serde(default)]
     pub modules: HashMap<String, FixModuleConfig>,
+}
+
+fn default_fixes_enabled() -> bool {
+    true
+}
+
+impl Default for FixesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_fixes_enabled(),
+            modules: HashMap::new(),
+        }
+    }
 }
 
 /// Individual fix module configuration
@@ -98,9 +116,30 @@ pub struct FixModuleConfig {
 /// Stats logging configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StatsConfig {
+    #[serde(default = "default_stats_enabled")]
     pub enabled: bool,
+    #[serde(default)]
     pub format: StatsFormat,
+    #[serde(default = "default_log_interval")]
     pub log_interval: u32,
+}
+
+fn default_stats_enabled() -> bool {
+    true
+}
+
+fn default_log_interval() -> u32 {
+    1
+}
+
+impl Default for StatsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_stats_enabled(),
+            format: StatsFormat::default(),
+            log_interval: default_log_interval(),
+        }
+    }
 }
 
 /// Stats output format
@@ -143,57 +182,107 @@ impl Default for DetectionConfig {
     }
 }
 
-/// Streaming control configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct StreamingConfig {
-    /// Enable streaming responses globally (when false, all requests use non-streaming)
-    #[serde(default = "default_streaming_enabled")]
-    pub enabled: bool,
-
-    /// Allow streaming when request contains tools (default: true)
-    /// Set to false to disable streaming for tool requests
-    #[serde(default = "default_streaming_on_tools")]
-    pub streaming_on_tools: bool,
-
-    /// Per-client streaming rules (User-Agent pattern -> enabled)
-    #[serde(default)]
-    pub client_rules: HashMap<String, bool>,
+/// Streaming mode configuration
+///
+/// Controls how the proxy handles streaming responses:
+/// - `Disabled`: Forces streaming off completely (both frontend and backend)
+/// - `Fake`: Current behavior - forces non-streaming to backend, synthesizes streaming to frontend
+/// - `Accumulator`: Not yet implemented - will error if used
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamingMode {
+    Disabled,
+    #[default]
+    Fake,
+    Accumulator,
 }
 
-fn default_streaming_on_tools() -> bool {
-    true
-}
+impl StreamingMode {
+    /// Returns true if this mode is implemented
+    pub fn is_implemented(&self) -> bool {
+        matches!(self, StreamingMode::Disabled | StreamingMode::Fake)
+    }
 
-fn default_streaming_enabled() -> bool {
-    true
-}
+    /// Returns true if streaming is completely disabled
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, StreamingMode::Disabled)
+    }
 
-impl Default for StreamingConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_streaming_enabled(),
-            streaming_on_tools: default_streaming_on_tools(),
-            client_rules: HashMap::new(),
-        }
+    /// Returns true if using fake streaming mode
+    pub fn is_fake(&self) -> bool {
+        matches!(self, StreamingMode::Fake)
     }
 }
+
+// Keep StreamingConfig as an alias for backward compatibility, but it's now just the enum
+pub type StreamingConfig = StreamingMode;
 
 /// Exporters configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ExportersConfig {
+    #[serde(default)]
     pub influxdb: InfluxDbConfig,
+}
+
+impl Default for ExportersConfig {
+    fn default() -> Self {
+        Self {
+            influxdb: InfluxDbConfig::default(),
+        }
+    }
 }
 
 /// InfluxDB exporter configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct InfluxDbConfig {
+    #[serde(default)]
     pub enabled: bool,
+    #[serde(default = "default_influxdb_url")]
     pub url: String,
+    #[serde(default = "default_influxdb_org")]
     pub org: String,
+    #[serde(default = "default_influxdb_bucket")]
     pub bucket: String,
+    #[serde(default)]
     pub token: String,
+    #[serde(default = "default_batch_size")]
     pub batch_size: usize,
+    #[serde(default = "default_flush_interval")]
     pub flush_interval_seconds: u64,
+}
+
+fn default_influxdb_url() -> String {
+    "http://localhost:8086".to_string()
+}
+
+fn default_influxdb_org() -> String {
+    "my-org".to_string()
+}
+
+fn default_influxdb_bucket() -> String {
+    "llama-metrics".to_string()
+}
+
+fn default_batch_size() -> usize {
+    10
+}
+
+fn default_flush_interval() -> u64 {
+    5
+}
+
+impl Default for InfluxDbConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: default_influxdb_url(),
+            org: default_influxdb_org(),
+            bucket: default_influxdb_bucket(),
+            token: String::new(),
+            batch_size: default_batch_size(),
+            flush_interval_seconds: default_flush_interval(),
+        }
+    }
 }
 
 impl AppConfig {
@@ -441,28 +530,56 @@ mod tests {
     }
 
     #[test]
-    fn test_streaming_config_default() {
-        let config = StreamingConfig::default();
-        assert!(config.enabled);
-        assert!(config.streaming_on_tools);
-        assert!(config.client_rules.is_empty());
+    fn test_streaming_mode_default() {
+        let mode = StreamingMode::default();
+        assert_eq!(mode, StreamingMode::Fake);
+        assert!(mode.is_implemented());
+        assert!(mode.is_fake());
+        assert!(!mode.is_disabled());
     }
 
     #[test]
-    fn test_streaming_config_with_rules() {
-        let mut client_rules = HashMap::new();
-        client_rules.insert("claude-code".to_string(), false);
-        client_rules.insert("opencode".to_string(), true);
+    fn test_streaming_mode_disabled() {
+        let mode = StreamingMode::Disabled;
+        assert!(mode.is_implemented());
+        assert!(mode.is_disabled());
+        assert!(!mode.is_fake());
+    }
 
-        let config = StreamingConfig {
-            enabled: true,
-            streaming_on_tools: false,
-            client_rules,
-        };
-        assert!(config.enabled);
-        assert!(!config.streaming_on_tools);
-        assert_eq!(config.client_rules.len(), 2);
-        assert!(!config.client_rules["claude-code"]);
-        assert!(config.client_rules["opencode"]);
+    #[test]
+    fn test_streaming_mode_fake() {
+        let mode = StreamingMode::Fake;
+        assert!(mode.is_implemented());
+        assert!(mode.is_fake());
+        assert!(!mode.is_disabled());
+    }
+
+    #[test]
+    fn test_streaming_mode_accumulator() {
+        let mode = StreamingMode::Accumulator;
+        assert!(!mode.is_implemented());
+        assert!(!mode.is_disabled());
+        assert!(!mode.is_fake());
+    }
+
+    #[test]
+    fn test_streaming_mode_serde() {
+        // Test serialization
+        let disabled = StreamingMode::Disabled;
+        let fake = StreamingMode::Fake;
+        let accumulator = StreamingMode::Accumulator;
+
+        assert_eq!(serde_json::to_string(&disabled).unwrap(), "\"disabled\"");
+        assert_eq!(serde_json::to_string(&fake).unwrap(), "\"fake\"");
+        assert_eq!(serde_json::to_string(&accumulator).unwrap(), "\"accumulator\"");
+
+        // Test deserialization
+        let disabled: StreamingMode = serde_json::from_str("\"disabled\"").unwrap();
+        let fake: StreamingMode = serde_json::from_str("\"fake\"").unwrap();
+        let accumulator: StreamingMode = serde_json::from_str("\"accumulator\"").unwrap();
+
+        assert_eq!(disabled, StreamingMode::Disabled);
+        assert_eq!(fake, StreamingMode::Fake);
+        assert_eq!(accumulator, StreamingMode::Accumulator);
     }
 }

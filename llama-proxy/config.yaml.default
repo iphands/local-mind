@@ -1,6 +1,8 @@
 # llama-proxy configuration
 # Copy to config.yaml and modify as needed
 
+# === REQUIRED SECTIONS ===
+
 # Proxy server settings
 server:
   # Port to listen on
@@ -25,77 +27,45 @@ backend:
   #   # Path to client private key for mTLS
   #   client_key_path: "/path/to/client.key"
 
-# Response fix modules (enable/disable)
-fixes:
-  # Enable all fixes by default
-  enabled: true
-  # Individual fix toggles
-  modules:
-    # Fix null or missing index fields in tool calls
-    # llama.cpp sometimes sends index=null which causes client validation errors
-    toolcall_null_index:
-      enabled: true
+# === OPTIONAL SECTIONS (defaults shown) ===
 
-    # Fix duplicate/malformed filePath in Qwen3-Coder tool calls
-    toolcall_bad_filepath:
-      enabled: true
-      # If true, remove duplicate keys; if false, fix and keep both
-      remove_duplicate: true
+# Response fix modules (default: enabled with all fixes active)
+# fixes:
+#   enabled: true
+#   modules:
+#     toolcall_null_index:
+#       enabled: true
+#     toolcall_bad_filepath:
+#       enabled: true
+#       remove_duplicate: true
+#     toolcall_malformed_arguments:
+#       enabled: true
 
-    # Fix malformed tool call arguments with invalid property names like `{}":`
-    # Uses tool schemas from request to determine correct parameter names
-    toolcall_malformed_arguments:
-      enabled: true
+# Pre-parse detection (default: enabled with warn level)
+# detection:
+#   enabled: true
+#   log_level: "warn"
 
-# Pre-parse detection of malformed patterns
-# This runs BEFORE JSON parsing and logs warnings immediately
-detection:
-  # Enable pre-parse malformed pattern detection
-  enabled: true
-  # Log level for detections: "warn" | "error" | "info"
-  log_level: "warn"
+# Streaming mode (default: fake)
+# Controls how the proxy handles streaming responses:
+#   disabled: Forces streaming off completely
+#   fake: Forces non-streaming to backend, synthesizes streaming to frontend
+#   accumulator: NOT IMPLEMENTED - will error if used
+# streaming: fake
 
-# Streaming control
-streaming:
-  # Enable streaming responses globally
-  # Set to false to force all requests to use non-streaming
-  enabled: true
+# Stats logging (default: enabled, pretty format, log every request)
+# stats:
+#   enabled: true
+#   format: "pretty"
+#   log_interval: 1
 
-  # Allow streaming when request contains tools
-  # Set to false to disable streaming for tool requests
-  streaming_on_tools: true
-
-  # Per-client streaming rules (optional)
-  # Map User-Agent substrings to streaming enabled/disabled
-  # Example:
-  #   client_rules:
-  #     "claude-code": false
-  #     "opencode": true
-  client_rules: {}
-
-# Stats logging to STDOUT
-stats:
-  # Enable stats logging
-  enabled: true
-  # Log format: "pretty" | "json" | "compact"
-  format: "pretty"
-  # Log every N requests (1 = every request)
-  log_interval: 1
-
-# Remote exporters for metrics
-exporters:
-  # InfluxDB v2 exporter
-  influxdb:
-    enabled: false
-    # InfluxDB server URL
-    url: "http://localhost:8086"
-    # Organization
-    org: "my-org"
-    # Bucket name
-    bucket: "llama-metrics"
-    # Authentication token
-    token: "your-token-here"
-    # Batch writes (0 = immediate)
-    batch_size: 10
-    # Flush interval in seconds
-    flush_interval_seconds: 5
+# Remote exporters (default: all disabled)
+# exporters:
+#   influxdb:
+#     enabled: false
+#     url: "http://localhost:8086"
+#     org: "my-org"
+#     bucket: "llama-metrics"
+#     token: "your-token-here"
+#     batch_size: 10
+#     flush_interval_seconds: 5

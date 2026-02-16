@@ -75,12 +75,9 @@ enum Commands {
         /// Override backend URL (e.g., "https://example.com:4234")
         #[arg(long)]
         backend_url: Option<String>,
-        /// Disable all streaming (force non-streaming responses)
-        #[arg(long)]
-        disable_streaming: bool,
-        /// Disable streaming for requests with tools
-        #[arg(long)]
-        disable_streaming_on_tools: bool,
+        /// Override streaming mode (disabled, fake, accumulator)
+        #[arg(long, value_name = "MODE")]
+        streaming_mode: Option<String>,
     },
 
     /// List all available response fix modules
@@ -117,10 +114,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Run {
             port,
             backend_url,
-            disable_streaming,
-            disable_streaming_on_tools,
+            streaming_mode,
         } => {
-            run_proxy(cli.config, port, backend_url, disable_streaming, disable_streaming_on_tools)
+            run_proxy(cli.config, port, backend_url, streaming_mode)
                 .await?;
         }
         Commands::ListFixes { verbose } => {
@@ -142,8 +138,7 @@ async fn run_proxy(
     config_path: PathBuf,
     port_override: Option<u16>,
     backend_url_override: Option<String>,
-    disable_streaming: bool,
-    disable_streaming_on_tools: bool,
+    streaming_mode_override: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = load_config_or_exit(&config_path);
@@ -155,11 +150,27 @@ async fn run_proxy(
     if let Some(url) = backend_url_override {
         config.backend.url = url;
     }
-    if disable_streaming {
-        config.streaming.enabled = false;
+    if let Some(mode_str) = streaming_mode_override {
+        use llama_proxy::config::StreamingMode;
+        config.streaming = match mode_str.to_lowercase().as_str() {
+            "disabled" => StreamingMode::Disabled,
+            "fake" => StreamingMode::Fake,
+            "accumulator" => StreamingMode::Accumulator,
+            _ => {
+                eprintln!("Invalid streaming mode: {}. Use 'disabled', 'fake', or 'accumulator'.", mode_str);
+                std::process::exit(1);
+            }
+        };
     }
-    if disable_streaming_on_tools {
-        config.streaming.streaming_on_tools = false;
+
+    // Validate streaming mode is implemented
+    if !config.streaming.is_implemented() {
+        eprintln!("Error: Streaming mode '{:?}' is not yet implemented.", config.streaming);
+        eprintln!("Available modes:");
+        eprintln!("  - disabled: Forces streaming off completely");
+        eprintln!("  - fake: Forces non-streaming to backend, synthesizes streaming to frontend (default)");
+        eprintln!("  - accumulator: NOT IMPLEMENTED");
+        std::process::exit(1);
     }
 
     tracing::info!("Loading configuration from {:?}", config_path);
@@ -269,18 +280,9 @@ fn log_config_settings(config: &AppConfig) {
 
     // Streaming
     tracing::info!(
-        enabled = config.streaming.enabled,
-        streaming_on_tools = config.streaming.streaming_on_tools,
-        client_rules_count = config.streaming.client_rules.len(),
+        mode = ?config.streaming,
         "Streaming"
     );
-    for (pattern, enabled) in &config.streaming.client_rules {
-        tracing::info!(
-            pattern = %pattern,
-            enabled = enabled,
-            "Streaming client rule"
-        );
-    }
 
     // Stats
     tracing::info!(
@@ -369,14 +371,7 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
             println!("  Enabled: {}", config.stats.enabled);
             println!("  Format: {:?}", config.stats.format);
             println!("\nStreaming:");
-            println!("  Enabled: {}", config.streaming.enabled);
-            println!("  Streaming on tools: {}", config.streaming.streaming_on_tools);
-            if !config.streaming.client_rules.is_empty() {
-                println!("  Client rules:");
-                for (pattern, enabled) in &config.streaming.client_rules {
-                    println!("    {} : {}", pattern, enabled);
-                }
-            }
+            println!("  Mode: {:?}", config.streaming);
             println!("\nExporters:");
             println!("  InfluxDB: {}", config.exporters.influxdb.enabled);
             Ok(())
