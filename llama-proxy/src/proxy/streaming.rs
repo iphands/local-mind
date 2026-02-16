@@ -43,6 +43,11 @@ pub async fn handle_streaming_response(
     let completion_tx = Arc::new(tokio::sync::Mutex::new(Some(completion_tx)));
     let completion_tx_clone = completion_tx.clone();
 
+    // Activity signaling for adaptive timeout (watch channel)
+    let (activity_tx, activity_rx) = tokio::sync::watch::channel(());
+    let activity_tx = Arc::new(tokio::sync::Mutex::new(activity_tx));
+    let activity_tx_clone = activity_tx.clone();
+
     // Clone request_json for use in stream processing
     let request_json_for_stream = request_json.clone();
 
@@ -51,6 +56,7 @@ pub async fn handle_streaming_response(
         let accumulated = accumulated_clone.clone();
         let stats_enabled = stats_enabled;
         let completion_tx = completion_tx_clone.clone();
+        let activity_tx = activity_tx_clone.clone();
         let request_json = request_json_for_stream.clone();
 
         async move {
@@ -166,6 +172,11 @@ pub async fn handle_streaming_response(
                 }
             }
 
+            // Signal activity for adaptive timeout (only if we have meaningful output)
+            if !output.is_empty() {
+                let _ = activity_tx.lock().await.send(());
+            }
+
             Ok(Bytes::from(output))
         }
     });
@@ -177,22 +188,85 @@ pub async fn handle_streaming_response(
         let backend_url = backend_url.clone();
 
         tokio::spawn(async move {
-            // Wait for stream completion signal with timeout fallback
-            let wait_result = tokio::time::timeout(
-                tokio::time::Duration::from_secs(30),
-                completion_rx
-            ).await;
+            // Adaptive timeout constants
+            const ACTIVITY_TIMEOUT_SECS: u64 = 90;   // Reset on each chunk
+            const ABSOLUTE_TIMEOUT_SECS: u64 = 600;  // 10 minutes hard limit
 
-            match wait_result {
-                Ok(Ok(())) => {
-                    tracing::trace!("Stream completion signal received");
-                },
-                Ok(Err(_)) => {
-                    tracing::debug!("Stream completion channel closed unexpectedly (possible network interruption)");
-                },
-                Err(_) => {
-                    tracing::warn!("Stream completion timeout after 30s, extracting metrics anyway");
-                },
+            // Wait for stream completion with adaptive timeout
+            let absolute_deadline = tokio::time::Instant::now()
+                + tokio::time::Duration::from_secs(ABSOLUTE_TIMEOUT_SECS);
+
+            let mut completion_rx = completion_rx;
+            let mut activity_rx = activity_rx;
+            let mut completed = false;
+
+            loop {
+                // Create fresh activity timeout each iteration (resets on activity)
+                let activity_timeout_sleep = tokio::time::sleep(
+                    tokio::time::Duration::from_secs(ACTIVITY_TIMEOUT_SECS)
+                );
+                tokio::pin!(activity_timeout_sleep);
+
+                // Calculate remaining time until absolute deadline
+                let absolute_remaining = absolute_deadline
+                    .checked_duration_since(tokio::time::Instant::now())
+                    .unwrap_or(tokio::time::Duration::ZERO);
+                let absolute_timeout_sleep = tokio::time::sleep(absolute_remaining);
+                tokio::pin!(absolute_timeout_sleep);
+
+                tokio::select! {
+                    // Completion signal from stream
+                    result = &mut completion_rx => {
+                        match result {
+                            Ok(()) => {
+                                tracing::trace!("Stream completion signal received");
+                                completed = true;
+                            }
+                            Err(_) => {
+                                tracing::debug!("Stream completion channel closed unexpectedly");
+                            }
+                        }
+                        break;
+                    }
+
+                    // Activity detected - reset the activity timeout by continuing loop
+                    res = activity_rx.changed() => {
+                        if res.is_ok() {
+                            tracing::trace!("Stream activity detected, resetting timeout");
+                        } else {
+                            // Channel closed - stream ended without completion signal
+                            tracing::trace!("Activity channel closed, stream ended");
+                        }
+                        // Continue loop with fresh timers
+                        continue;
+                    }
+
+                    // 90s inactivity timeout
+                    _ = &mut activity_timeout_sleep => {
+                        tracing::warn!(
+                            "Stream inactivity timeout ({}s since last chunk), extracting metrics",
+                            ACTIVITY_TIMEOUT_SECS
+                        );
+                        break;
+                    }
+
+                    // 5 minute absolute timeout
+                    _ = absolute_timeout_sleep => {
+                        tracing::warn!(
+                            "Stream absolute timeout reached ({}s total), extracting metrics",
+                            ABSOLUTE_TIMEOUT_SECS
+                        );
+                        break;
+                    }
+                }
+            }
+
+            // Log the reason we're extracting metrics
+            if completed {
+                tracing::trace!(
+                    duration_ms = start.elapsed().as_millis() as u64,
+                    "Stream completed normally"
+                );
             }
 
             let acc = accumulated.lock().await;
