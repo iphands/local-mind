@@ -104,12 +104,12 @@ fn normalize_whitespace(s: &str) -> String {
 }
 
 /// Truncate message according to rules:
-/// - If <= 200 chars: show all
-/// - If > 200 chars: first 80 + " ... " + last 120
+/// - If <= 100 chars: show all
+/// - If > 100 chars: first 25 + " ... " + last 75
 fn truncate_message(s: &str) -> String {
-    const MAX_TOTAL: usize = 200;
-    const PREFIX_LEN: usize = 80;
-    const SUFFIX_LEN: usize = 120;
+    const MAX_TOTAL: usize = 100;
+    const PREFIX_LEN: usize = 25;
+    const SUFFIX_LEN: usize = 75;
     const ELLIPSIS: &str = " ... ";
 
     if s.len() <= MAX_TOTAL {
@@ -177,18 +177,18 @@ mod tests {
     }
 
     #[test]
-    fn test_truncate_message_exactly_200() {
-        let msg = "x".repeat(200);
-        assert_eq!(truncate_message(&msg).len(), 200);
+    fn test_truncate_message_exactly_100() {
+        let msg = "x".repeat(100);
+        assert_eq!(truncate_message(&msg).len(), 100);
     }
 
     #[test]
     fn test_truncate_message_long() {
         let msg = "x".repeat(300);
         let truncated = truncate_message(&msg);
-        assert!(truncated.starts_with(&"x".repeat(80)));
+        assert!(truncated.starts_with(&"x".repeat(25)));
         assert!(truncated.contains(" ... "));
-        assert!(truncated.ends_with(&"x".repeat(120)));
+        assert!(truncated.ends_with(&"x".repeat(75)));
     }
 
     #[test]
@@ -224,7 +224,7 @@ mod tests {
     fn test_truncate_real_world() {
         let msg = "Can you help me write a Rust function that parses JSON and handles errors gracefully? I need it to work with large files and be memory efficient. The function should also validate the structure of the JSON before processing it further.";
         let truncated = truncate_message(msg);
-        assert!(truncated.len() > 200);
+        assert_eq!(truncated.len(), 105);
         assert!(truncated.contains(" ... "));
     }
 }

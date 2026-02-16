@@ -209,6 +209,13 @@ impl RequestMetrics {
         } else {
             tracing::debug!("No timings field found in response");
 
+            // If no timings, use prompt_tokens as context_used fallback
+            // (Anthropic format responses have usage.input_tokens but no timings)
+            if metrics.prompt_tokens > 0 {
+                metrics.context_used = Some(metrics.prompt_tokens);
+                tracing::debug!("Using prompt_tokens as context_used: {}", metrics.prompt_tokens);
+            }
+
             // If no timings, estimate TPS from duration and token counts
             if duration_ms > 0.0 && metrics.total_tokens > 0 {
                 // Estimate: assume 20% of time for prompt, 80% for generation
