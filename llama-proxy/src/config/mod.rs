@@ -14,6 +14,8 @@ pub struct AppConfig {
     pub fixes: FixesConfig,
     pub stats: StatsConfig,
     pub exporters: ExportersConfig,
+    #[serde(default)]
+    pub detection: DetectionConfig,
 }
 
 /// Proxy server configuration
@@ -26,14 +28,53 @@ pub struct ServerConfig {
 /// Backend llama-server configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BackendConfig {
-    pub host: String,
-    pub port: u16,
+    /// Full backend URL (e.g., "https://example.com:4234" or "http://localhost:8080")
+    pub url: String,
+    /// Request timeout in seconds
+    #[serde(default = "default_timeout")]
     pub timeout_seconds: u64,
+    /// TLS configuration options
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+}
+
+/// TLS configuration for backend connections
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TlsConfig {
+    /// Accept invalid certificates (self-signed, expired)
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
+    /// Path to custom CA certificate (PEM format)
+    pub ca_cert_path: Option<String>,
+    /// Path to client certificate for mTLS
+    pub client_cert_path: Option<String>,
+    /// Path to client private key for mTLS
+    pub client_key_path: Option<String>,
+}
+
+fn default_timeout() -> u64 {
+    300
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://localhost:8080".to_string(),
+            timeout_seconds: default_timeout(),
+            tls: None,
+        }
+    }
 }
 
 impl BackendConfig {
-    pub fn url(&self) -> String {
-        format!("http://{}:{}", self.host, self.port)
+    /// Returns the base URL with trailing slash stripped
+    pub fn base_url(&self) -> &str {
+        self.url.trim_end_matches('/')
+    }
+
+    /// Returns true if the URL uses HTTPS
+    pub fn is_tls(&self) -> bool {
+        self.url.to_lowercase().starts_with("https://")
     }
 }
 
@@ -68,6 +109,36 @@ pub enum StatsFormat {
     Pretty,
     Json,
     Compact,
+}
+
+/// Pre-parse detection configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DetectionConfig {
+    /// Enable pre-parse malformed pattern detection
+    /// This runs BEFORE JSON parsing and logs warnings immediately
+    #[serde(default = "default_detection_enabled")]
+    pub enabled: bool,
+
+    /// Log level for detections: "warn" | "error" | "info"
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+}
+
+fn default_detection_enabled() -> bool {
+    true
+}
+
+fn default_log_level() -> String {
+    "warn".to_string()
+}
+
+impl Default for DetectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_detection_enabled(),
+            log_level: default_log_level(),
+        }
+    }
 }
 
 /// Exporters configuration
@@ -126,6 +197,9 @@ pub enum ConfigError {
 
     #[error("Failed to parse configuration: {0}")]
     Parse(#[from] serde_yaml::Error),
+
+    #[error("Configuration validation error: {0}")]
+    Validation(String),
 }
 
 #[cfg(test)]
@@ -133,23 +207,77 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_backend_config_url() {
+    fn test_backend_config_base_url() {
         let config = BackendConfig {
-            host: "localhost".to_string(),
-            port: 8080,
+            url: "http://localhost:8080".to_string(),
             timeout_seconds: 300,
+            tls: None,
         };
-        assert_eq!(config.url(), "http://localhost:8080");
+        assert_eq!(config.base_url(), "http://localhost:8080");
     }
 
     #[test]
-    fn test_backend_config_remote_host() {
+    fn test_backend_config_https() {
         let config = BackendConfig {
-            host: "192.168.1.100".to_string(),
-            port: 9000,
-            timeout_seconds: 60,
+            url: "https://example.com:4234".to_string(),
+            timeout_seconds: 300,
+            tls: None,
         };
-        assert_eq!(config.url(), "http://192.168.1.100:9000");
+        assert_eq!(config.base_url(), "https://example.com:4234");
+        assert!(config.is_tls());
+    }
+
+    #[test]
+    fn test_backend_config_is_tls() {
+        let http_config = BackendConfig {
+            url: "http://localhost:8080".to_string(),
+            timeout_seconds: 300,
+            tls: None,
+        };
+        assert!(!http_config.is_tls());
+
+        let https_config = BackendConfig {
+            url: "https://secure.example.com".to_string(),
+            timeout_seconds: 300,
+            tls: None,
+        };
+        assert!(https_config.is_tls());
+    }
+
+    #[test]
+    fn test_backend_config_trailing_slash() {
+        let config = BackendConfig {
+            url: "http://localhost:8080/".to_string(),
+            timeout_seconds: 300,
+            tls: None,
+        };
+        assert_eq!(config.base_url(), "http://localhost:8080");
+    }
+
+    #[test]
+    fn test_backend_config_default() {
+        let config = BackendConfig::default();
+        assert_eq!(config.url, "http://localhost:8080");
+        assert_eq!(config.timeout_seconds, 300);
+        assert!(config.tls.is_none());
+    }
+
+    #[test]
+    fn test_backend_config_tls_options() {
+        let config = BackendConfig {
+            url: "https://secure.example.com".to_string(),
+            timeout_seconds: 300,
+            tls: Some(TlsConfig {
+                accept_invalid_certs: true,
+                ca_cert_path: Some("/path/to/ca.pem".to_string()),
+                client_cert_path: None,
+                client_key_path: None,
+            }),
+        };
+        assert!(config.tls.is_some());
+        let tls = config.tls.unwrap();
+        assert!(tls.accept_invalid_certs);
+        assert_eq!(tls.ca_cert_path, Some("/path/to/ca.pem".to_string()));
     }
 
     #[test]
@@ -214,6 +342,9 @@ mod tests {
 
         let err = ConfigError::Parse(serde_yaml::from_str::<AppConfig>("invalid").unwrap_err());
         assert!(err.to_string().contains("parse"));
+
+        let err = ConfigError::Validation("invalid URL".to_string());
+        assert!(err.to_string().contains("invalid URL"));
     }
 
     #[test]

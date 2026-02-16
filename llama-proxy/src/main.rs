@@ -72,12 +72,9 @@ enum Commands {
         /// Override listen port
         #[arg(short, long)]
         port: Option<u16>,
-        /// Override backend host
+        /// Override backend URL (e.g., "https://example.com:4234")
         #[arg(long)]
-        backend_host: Option<String>,
-        /// Override backend port
-        #[arg(long)]
-        backend_port: Option<u16>,
+        backend_url: Option<String>,
     },
 
     /// List all available response fix modules
@@ -113,10 +110,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     match cli.command {
         Commands::Run {
             port,
-            backend_host,
-            backend_port,
+            backend_url,
         } => {
-            run_proxy(cli.config, port, backend_host, backend_port).await?;
+            run_proxy(cli.config, port, backend_url).await?;
         }
         Commands::ListFixes { verbose } => {
             list_fixes(verbose);
@@ -136,8 +132,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn run_proxy(
     config_path: PathBuf,
     port_override: Option<u16>,
-    backend_host_override: Option<String>,
-    backend_port_override: Option<u16>,
+    backend_url_override: Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = load_config_or_exit(&config_path);
@@ -146,11 +141,8 @@ async fn run_proxy(
     if let Some(port) = port_override {
         config.server.port = port;
     }
-    if let Some(host) = backend_host_override {
-        config.backend.host = host;
-    }
-    if let Some(port) = backend_port_override {
-        config.backend.port = port;
+    if let Some(url) = backend_url_override {
+        config.backend.url = url;
     }
 
     tracing::info!("Loading configuration from {:?}", config_path);
@@ -249,10 +241,19 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
             println!("Server:");
             println!("  Listen: {}:{}", config.server.host, config.server.port);
             println!("\nBackend:");
-            println!(
-                "  Target: {}:{}",
-                config.backend.host, config.backend.port
-            );
+            println!("  URL: {}", config.backend.url);
+            println!("  TLS: {}", if config.backend.is_tls() { "enabled" } else { "disabled" });
+            if let Some(ref tls) = config.backend.tls {
+                if tls.accept_invalid_certs {
+                    println!("  TLS: Accepting invalid certificates");
+                }
+                if let Some(ref ca) = tls.ca_cert_path {
+                    println!("  TLS CA: {}", ca);
+                }
+                if let Some(ref cert) = tls.client_cert_path {
+                    println!("  TLS Client Cert: {}", cert);
+                }
+            }
             println!("  Timeout: {}s", config.backend.timeout_seconds);
             println!("\nFixes:");
             println!("  Global: {}", config.fixes.enabled);
@@ -276,15 +277,37 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
 /// Test connection to backend
 async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config_or_exit(&config_path);
-    let backend_url = format!("http://{}:{}/health", config.backend.host, config.backend.port);
+    let base_url = config.backend.base_url();
+    let health_url = format!("{}/health", base_url);
 
-    println!("Testing connection to backend: {}", backend_url);
+    println!("Testing connection to backend: {}", health_url);
 
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()?;
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5));
 
-    match client.get(&backend_url).send().await {
+    // Apply TLS settings for test
+    if let Some(ref tls) = config.backend.tls {
+        if tls.accept_invalid_certs {
+            client_builder = client_builder.danger_accept_invalid_certs(true);
+        }
+        if let Some(ref ca_path) = tls.ca_cert_path {
+            let ca_cert = std::fs::read(ca_path)?;
+            let ca_cert = reqwest::Certificate::from_pem(&ca_cert)?;
+            client_builder = client_builder.add_root_certificate(ca_cert);
+        }
+        if let (Some(cert_path), Some(key_path)) =
+            (&tls.client_cert_path, &tls.client_key_path)
+        {
+            let cert_pem = std::fs::read(cert_path)?;
+            let key_pem = std::fs::read(key_path)?;
+            let identity = reqwest::Identity::from_pem(&[cert_pem, key_pem].concat())?;
+            client_builder = client_builder.identity(identity);
+        }
+    }
+
+    let client = client_builder.build()?;
+
+    match client.get(&health_url).send().await {
         Ok(resp) => {
             if resp.status().is_success() {
                 println!("✓ Backend is reachable");
@@ -304,10 +327,7 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
     }
 
     // Also try /v1/models
-    let models_url = format!(
-        "http://{}:{}/v1/models",
-        config.backend.host, config.backend.port
-    );
+    let models_url = format!("{}/v1/models", base_url);
     println!("\nTesting /v1/models endpoint: {}", models_url);
 
     match client.get(&models_url).send().await {

@@ -48,6 +48,7 @@ influxdb2 = { version = "0.5", optional = true }
 thiserror = "2"
 anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
+url = "2.5"
 
 [features]
 default = []

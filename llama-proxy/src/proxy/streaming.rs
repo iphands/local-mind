@@ -11,7 +11,7 @@ use std::time::Instant;
 
 use crate::config::StatsFormat;
 use crate::exporters::ExporterManager;
-use crate::fixes::FixRegistry;
+use crate::fixes::{FixRegistry, ToolCallAccumulator};
 use crate::proxy::fetch_context_total;
 use crate::stats::{format_metrics, RequestMetrics};
 
@@ -38,6 +38,11 @@ pub async fn handle_streaming_response(
     let accumulated = Arc::new(tokio::sync::Mutex::new(String::new()));
     let accumulated_clone = accumulated.clone();
 
+    // Accumulator for tool call argument fixing
+    let tool_call_accumulator =
+        Arc::new(tokio::sync::Mutex::new(ToolCallAccumulator::new()));
+    let tool_call_accumulator_clone = tool_call_accumulator.clone();
+
     // Create oneshot channel for stream completion signaling
     let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<()>();
     let completion_tx = Arc::new(tokio::sync::Mutex::new(Some(completion_tx)));
@@ -54,6 +59,7 @@ pub async fn handle_streaming_response(
     let processed_stream = stream.then(move |chunk_result| {
         let fix_registry = fix_registry.clone();
         let accumulated = accumulated_clone.clone();
+        let tool_call_accumulator = tool_call_accumulator_clone.clone();
         let stats_enabled = stats_enabled;
         let completion_tx = completion_tx_clone.clone();
         let activity_tx = activity_tx_clone.clone();
@@ -131,13 +137,15 @@ pub async fn handle_streaming_response(
                         continue;
                     }
 
-                    // Try to parse as JSON and apply fixes
+                    // Parse and apply fixes
                     if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(data) {
-                        // Apply fixes with request context if available
+                        // Apply fixes with accumulation support
                         json = if let Some(ref req_json) = request_json {
-                            fix_registry.apply_fixes_stream_with_context(json, req_json)
+                            let mut acc = tool_call_accumulator.lock().await;
+                            fix_registry.apply_fixes_stream_with_accumulation(json, req_json, &mut acc)
                         } else {
-                            fix_registry.apply_fixes_stream(json)
+                            let mut acc = tool_call_accumulator.lock().await;
+                            fix_registry.apply_fixes_stream_with_accumulation_default(json, &mut acc)
                         };
 
                         // Accumulate for stats (include event type for Anthropic format)
@@ -157,6 +165,7 @@ pub async fn handle_streaming_response(
                         output.push_str("data: ");
                         output.push_str(&serde_json::to_string(&json).unwrap_or_default());
                     } else {
+                        // Parse failed - pass through unchanged
                         output.push_str(line);
                     }
                     // Reset event type after using it

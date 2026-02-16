@@ -82,7 +82,7 @@ impl ProxyHandler {
         }
 
         // Build backend URL
-        let backend_url = format!("{}{}", self.state.config.backend.url(), path);
+        let backend_url = format!("{}{}", self.state.config.backend.base_url(), path);
 
         // Forward request to backend
         let mut backend_req = self.state.http_client.request(
@@ -130,7 +130,7 @@ impl ProxyHandler {
                 request_json,
                 start,
                 self.state.http_client.clone(),
-                self.state.config.backend.url().to_string(),
+                self.state.config.backend.base_url().to_string(),
             )
             .await
         } else {
@@ -199,7 +199,7 @@ impl ProxyHandler {
                 if let Some(ref mut m) = metrics {
                     if let Some(ctx_total) = fetch_context_total(
                         &self.state.http_client,
-                        &self.state.config.backend.url(),
+                        &self.state.config.backend.base_url(),
                     )
                     .await
                     {
@@ -269,7 +269,7 @@ impl ProxyHandler {
         };
 
         // Build backend URL
-        let backend_url = format!("{}{}", self.state.config.backend.url(), path);
+        let backend_url = format!("{}{}", self.state.config.backend.base_url(), path);
 
         // Forward to backend
         let mut backend_req = self.state.http_client.request(

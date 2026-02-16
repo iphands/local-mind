@@ -5,7 +5,9 @@
       "Bash(cargo build:*)",
       "Bash(find:*)",
       "Bash(ls:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(cargo run:*)",
+      "Bash(chmod:*)"
     ]
   }
 }

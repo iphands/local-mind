@@ -18,7 +18,7 @@
 //! 2. Uses tool schemas from the request to determine the correct parameter name
 //! 3. Replaces the malformed property name with the correct one from the schema
 
-use super::ResponseFix;
+use super::{FixAction, ResponseFix};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -72,18 +72,12 @@ impl ToolcallMalformedArgumentsFix {
     }
 
     /// Attempt to fix malformed arguments using tool schema
+    /// Returns Some(fixed_args) on success, None on failure
     fn fix_arguments(&self, args_str: &str, tool_name: &str, schemas: &HashMap<String, Vec<String>>) -> Option<String> {
         // Check if arguments contain malformed pattern
         if !self.malformed_pattern.is_match(args_str) {
             return None;
         }
-
-        tracing::warn!(
-            fix_name = self.name(),
-            tool_name = tool_name,
-            malformed_args = args_str,
-            "Detected malformed arguments with {{}}\" pattern"
-        );
 
         // Get schema for this tool
         let schema_params = schemas.get(tool_name)?;
@@ -93,18 +87,7 @@ impl ToolcallMalformedArgumentsFix {
         // We need to find what parameters are present and what's missing
 
         // First, try to parse as-is to see what we get
-        let parsed = match self.aggressive_parse_json(args_str) {
-            Some(obj) => obj,
-            None => {
-                tracing::error!(
-                    fix_name = self.name(),
-                    tool_name = tool_name,
-                    malformed_args = args_str,
-                    "Could not parse malformed arguments even with aggressive parsing"
-                );
-                return None;
-            }
-        };
+        let parsed = self.aggressive_parse_json(args_str)?;
 
         // Find which schema parameters are missing from parsed object
         let parsed_keys: Vec<String> = parsed.keys().map(|k| k.to_string()).collect();
@@ -114,11 +97,6 @@ impl ToolcallMalformedArgumentsFix {
             .collect();
 
         if missing_params.is_empty() {
-            tracing::error!(
-                fix_name = self.name(),
-                tool_name = tool_name,
-                "No missing parameters found, cannot determine replacement"
-            );
             return None;
         }
 
@@ -132,33 +110,14 @@ impl ToolcallMalformedArgumentsFix {
 
             // Validate the fixed JSON is actually valid
             if serde_json::from_str::<Value>(&fixed_args).is_ok() {
-                tracing::info!(
-                    fix_name = self.name(),
-                    tool_name = tool_name,
-                    correct_param = correct_param,
-                    original_args = args_str,
-                    fixed_args = &fixed_args,
-                    "Fixed malformed argument: replaced {{}}\" with correct parameter"
-                );
                 return Some(fixed_args);
             } else {
-                tracing::error!(
-                    fix_name = self.name(),
-                    tool_name = tool_name,
-                    fixed_args = &fixed_args,
-                    "Fixed arguments are still invalid JSON"
-                );
                 return None;
             }
         }
 
         // Multiple missing parameters - try heuristic matching
         if missing_params.len() > 1 && parsed.contains_key("{}") {
-            tracing::debug!(
-                missing = ?missing_params,
-                "Multiple missing parameters, trying heuristic matching"
-            );
-
             // Common heuristics for parameter names
             let heuristics = [
                 "file_path",
@@ -175,14 +134,6 @@ impl ToolcallMalformedArgumentsFix {
                 if missing_params.iter().any(|p| p.as_str() == *guess) {
                     let fixed_args = args_str.replace("{}\":", &format!("\"{}\":", guess));
                     if serde_json::from_str::<Value>(&fixed_args).is_ok() {
-                        tracing::info!(
-                            fix_name = self.name(),
-                            tool_name = tool_name,
-                            guessed_param = guess,
-                            original_args = args_str,
-                            fixed_args = &fixed_args,
-                            "Fixed malformed argument using heuristic"
-                        );
                         return Some(fixed_args);
                     }
                 }
@@ -248,7 +199,7 @@ impl ToolcallMalformedArgumentsFix {
     }
 
     /// Fix tool calls in response using request context
-    fn fix_response_with_context(&self, mut response: Value, request: &Value) -> Value {
+    fn fix_response_with_context(&self, mut response: Value, request: &Value) -> (Value, FixAction) {
         let schemas = Self::extract_tool_schemas(request);
 
         if schemas.is_empty() {
@@ -256,8 +207,10 @@ impl ToolcallMalformedArgumentsFix {
                 fix_name = self.name(),
                 "No tool schemas in request - cannot fix malformed arguments without context"
             );
-            return response;
+            return (response, FixAction::NotApplicable);
         }
+
+        let mut overall_action = FixAction::NotApplicable;
 
         // Navigate to tool_calls in response
         if let Some(choices) = response.get_mut("choices").and_then(|c| c.as_array_mut()) {
@@ -273,8 +226,10 @@ impl ToolcallMalformedArgumentsFix {
                                     .to_string();
 
                                 if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
+                                    let original = args.to_string();
                                     if let Some(fixed_args) = self.fix_arguments(args, &tool_name, &schemas) {
-                                        function["arguments"] = Value::String(fixed_args);
+                                        function["arguments"] = Value::String(fixed_args.clone());
+                                        overall_action = FixAction::fixed(&original, &fixed_args);
                                     }
                                 }
                             }
@@ -284,11 +239,11 @@ impl ToolcallMalformedArgumentsFix {
             }
         }
 
-        response
+        (response, overall_action)
     }
 
     /// Fix tool calls in streaming delta using request context
-    fn fix_stream_with_context(&self, mut chunk: Value, request: &Value) -> Value {
+    fn fix_stream_with_context(&self, mut chunk: Value, request: &Value) -> (Value, FixAction) {
         let schemas = Self::extract_tool_schemas(request);
 
         if schemas.is_empty() {
@@ -296,8 +251,10 @@ impl ToolcallMalformedArgumentsFix {
                 fix_name = self.name(),
                 "No tool schemas in request - cannot fix malformed arguments in streaming"
             );
-            return chunk;
+            return (chunk, FixAction::NotApplicable);
         }
+
+        let mut overall_action = FixAction::NotApplicable;
 
         // Navigate to tool_calls in delta
         if let Some(choices) = chunk.get_mut("choices").and_then(|c| c.as_array_mut()) {
@@ -316,8 +273,10 @@ impl ToolcallMalformedArgumentsFix {
                                     // For streaming, we might get partial JSON
                                     // Only try to fix if we see the malformed pattern
                                     if self.malformed_pattern.is_match(args) {
+                                        let original = args.to_string();
                                         if let Some(fixed_args) = self.fix_arguments(args, &tool_name, &schemas) {
-                                            function["arguments"] = Value::String(fixed_args);
+                                            function["arguments"] = Value::String(fixed_args.clone());
+                                            overall_action = FixAction::fixed(&original, &fixed_args);
                                         }
                                     }
                                 }
@@ -328,7 +287,7 @@ impl ToolcallMalformedArgumentsFix {
             }
         }
 
-        chunk
+        (chunk, overall_action)
     }
 }
 
@@ -351,14 +310,14 @@ impl ResponseFix for ToolcallMalformedArgumentsFix {
             .is_some()
     }
 
-    fn apply(&self, response: Value) -> Value {
+    fn apply(&self, response: Value) -> (Value, FixAction) {
         // Without context, we can't fix - just pass through
-        response
+        (response, FixAction::NotApplicable)
     }
 
-    fn apply_stream(&self, chunk: Value) -> Value {
+    fn apply_stream(&self, chunk: Value) -> (Value, FixAction) {
         // Without context, we can't fix - just pass through
-        chunk
+        (chunk, FixAction::NotApplicable)
     }
 
     fn applies_with_context(&self, response: &Value, request: &Value) -> bool {
@@ -375,11 +334,11 @@ impl ResponseFix for ToolcallMalformedArgumentsFix {
         has_tool_calls && has_tools
     }
 
-    fn apply_with_context(&self, response: Value, request: &Value) -> Value {
+    fn apply_with_context(&self, response: Value, request: &Value) -> (Value, FixAction) {
         self.fix_response_with_context(response, request)
     }
 
-    fn apply_stream_with_context(&self, chunk: Value, request: &Value) -> Value {
+    fn apply_stream_with_context(&self, chunk: Value, request: &Value) -> (Value, FixAction) {
         self.fix_stream_with_context(chunk, request)
     }
 }
@@ -594,7 +553,7 @@ mod tests {
             }]
         });
 
-        let fixed = fix.fix_response_with_context(response, &request);
+        let (fixed, action) = fix.fix_response_with_context(response, &request);
 
         let args = fixed["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
             .as_str()
@@ -607,6 +566,9 @@ mod tests {
         // Should be valid JSON
         let parsed: Result<Value, _> = serde_json::from_str(args);
         assert!(parsed.is_ok());
+
+        // Should have detected the fix
+        assert!(action.detected());
     }
 
     #[test]
@@ -642,7 +604,7 @@ mod tests {
             }]
         });
 
-        let fixed = fix.fix_stream_with_context(chunk, &request);
+        let (fixed, action) = fix.fix_stream_with_context(chunk, &request);
 
         let args = fixed["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
             .as_str()
@@ -650,6 +612,7 @@ mod tests {
 
         assert!(args.contains("\"file_path\":"));
         assert!(!args.contains("{}\":"));
+        assert!(action.detected());
     }
 
     #[test]
@@ -670,8 +633,9 @@ mod tests {
         });
 
         // Without context, should pass through unchanged
-        let result = fix.apply(response.clone());
+        let (result, action) = fix.apply(response.clone());
         assert_eq!(result, response);
+        assert!(!action.detected());
     }
 
     #[test]
@@ -747,7 +711,7 @@ mod tests {
         });
 
         // Apply the fix
-        let fixed = fix.apply_with_context(response, &request);
+        let (fixed, action) = fix.apply_with_context(response, &request);
 
         // Verify the fix was applied
         let args_str = fixed["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
@@ -768,5 +732,8 @@ mod tests {
             "/home/iphands/prog/slop/llama-proxy/trash/primes.sh"
         );
         assert!(args["content"].as_str().unwrap().contains("#!/bin/bash"));
+
+        // Should have detected the fix
+        assert!(action.detected());
     }
 }

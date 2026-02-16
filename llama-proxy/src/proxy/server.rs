@@ -7,6 +7,7 @@ use axum::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
+use std::time::Duration;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
@@ -24,17 +25,51 @@ pub struct ProxyState {
     pub exporter_manager: Arc<ExporterManager>,
 }
 
+/// Build an HTTP client with TLS configuration
+fn build_http_client(config: &AppConfig) -> Result<reqwest::Client, Box<dyn std::error::Error>> {
+    let mut client_builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(config.backend.timeout_seconds))
+        .pool_max_idle_per_host(10);
+
+    // Apply TLS configuration if present
+    if let Some(ref tls) = config.backend.tls {
+        if tls.accept_invalid_certs {
+            client_builder = client_builder.danger_accept_invalid_certs(true);
+            tracing::warn!("TLS: Accepting invalid certificates (use only for development/testing)");
+        }
+
+        // Load custom CA certificate if provided
+        if let Some(ref ca_path) = tls.ca_cert_path {
+            let ca_cert = std::fs::read(ca_path)?;
+            let ca_cert = reqwest::Certificate::from_pem(&ca_cert)?;
+            client_builder = client_builder.add_root_certificate(ca_cert);
+            tracing::info!("TLS: Loaded custom CA certificate from {}", ca_path);
+        }
+
+        // Load client certificate for mTLS if both cert and key are provided
+        if let (Some(cert_path), Some(key_path)) =
+            (&tls.client_cert_path, &tls.client_key_path)
+        {
+            let cert_pem = std::fs::read(cert_path)?;
+            let key_pem = std::fs::read(key_path)?;
+
+            let identity = reqwest::Identity::from_pem(&[cert_pem, key_pem].concat())?;
+            client_builder = client_builder.identity(identity);
+            tracing::info!("TLS: Loaded client certificate from {} for mTLS", cert_path);
+        }
+    }
+
+    Ok(client_builder.build()?)
+}
+
 /// Run the proxy server
 pub async fn run_server(
     config: AppConfig,
     fix_registry: FixRegistry,
     exporter_manager: ExporterManager,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create HTTP client for backend connections
-    let http_client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(config.backend.timeout_seconds))
-        .pool_max_idle_per_host(10)
-        .build()?;
+    // Create HTTP client for backend connections with TLS config
+    let http_client = build_http_client(&config)?;
 
     let state = ProxyState {
         config: Arc::new(config.clone()),
@@ -64,11 +99,9 @@ pub async fn run_server(
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     tracing::info!("llama-proxy listening on {}", addr);
-    tracing::info!("Proxying to {}", config.backend.url());
+    tracing::info!("Proxying to {}", config.backend.base_url());
 
-    axum::serve(listener, app).await?;
-
-    Ok(())
+    Ok(axum::serve(listener, app).await?)
 }
 
 /// Health check endpoint

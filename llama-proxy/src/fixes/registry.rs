@@ -1,6 +1,6 @@
 //! Fix module registry
 
-use super::ResponseFix;
+use super::{FixAction, ResponseFix, ToolCallAccumulator};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -49,64 +49,142 @@ impl FixRegistry {
         self.fixes.iter().find(|f| f.name() == name)
     }
 
-    /// Apply all enabled fixes that apply to the response
+    /// Apply all enabled fixes that apply to the response, with centralized logging
     pub fn apply_fixes(&self, response: Value) -> Value {
         let mut result = response;
 
         for fix in &self.fixes {
             if self.is_enabled(fix.name()) && fix.applies(&result) {
-                tracing::debug!(
-                    fix_name = fix.name(),
-                    "Applying response fix"
-                );
-                result = fix.apply(result);
+                let (new_result, action) = fix.apply(result);
+                Self::log_fix_action(fix.name(), &action);
+                result = new_result;
             }
         }
 
         result
     }
 
-    /// Apply fixes to a streaming chunk
+    /// Apply fixes to a streaming chunk, with centralized logging
     pub fn apply_fixes_stream(&self, chunk: Value) -> Value {
         let mut result = chunk;
 
         for fix in &self.fixes {
             if self.is_enabled(fix.name()) {
-                result = fix.apply_stream(result);
+                let (new_result, action) = fix.apply_stream(result);
+                Self::log_fix_action(fix.name(), &action);
+                result = new_result;
             }
         }
 
         result
     }
 
-    /// Apply all enabled fixes with request context
+    /// Apply all enabled fixes with request context, with centralized logging
     pub fn apply_fixes_with_context(&self, response: Value, request: &Value) -> Value {
         let mut result = response;
 
         for fix in &self.fixes {
             if self.is_enabled(fix.name()) && fix.applies_with_context(&result, request) {
-                tracing::debug!(
-                    fix_name = fix.name(),
-                    "Applying response fix with context"
-                );
-                result = fix.apply_with_context(result, request);
+                let (new_result, action) = fix.apply_with_context(result, request);
+                Self::log_fix_action(fix.name(), &action);
+                result = new_result;
             }
         }
 
         result
     }
 
-    /// Apply fixes to a streaming chunk with request context
+    /// Apply fixes to a streaming chunk with request context, with centralized logging
     pub fn apply_fixes_stream_with_context(&self, chunk: Value, request: &Value) -> Value {
         let mut result = chunk;
 
         for fix in &self.fixes {
             if self.is_enabled(fix.name()) {
-                result = fix.apply_stream_with_context(result, request);
+                let (new_result, action) = fix.apply_stream_with_context(result, request);
+                Self::log_fix_action(fix.name(), &action);
+                result = new_result;
             }
         }
 
         result
+    }
+
+    /// Apply fixes to a streaming chunk with tool call accumulation, with centralized logging
+    pub fn apply_fixes_stream_with_accumulation(
+        &self,
+        chunk: Value,
+        request: &Value,
+        accumulator: &mut ToolCallAccumulator,
+    ) -> Value {
+        let mut result = chunk;
+
+        for fix in &self.fixes {
+            if self.is_enabled(fix.name()) {
+                let (new_result, action) = fix.apply_stream_with_accumulation(result, request, accumulator);
+                Self::log_fix_action(fix.name(), &action);
+                result = new_result;
+            }
+        }
+
+        result
+    }
+
+    /// Apply fixes without request context but with accumulation, with centralized logging
+    pub fn apply_fixes_stream_with_accumulation_default(
+        &self,
+        chunk: Value,
+        accumulator: &mut ToolCallAccumulator,
+    ) -> Value {
+        let mut result = chunk;
+
+        for fix in &self.fixes {
+            if self.is_enabled(fix.name()) {
+                let (new_result, action) = fix.apply_stream_with_accumulation_default(result, accumulator);
+                Self::log_fix_action(fix.name(), &action);
+                result = new_result;
+            }
+        }
+
+        result
+    }
+
+    /// Centralized logging for fix actions
+    fn log_fix_action(fix_name: &str, action: &FixAction) {
+        match action {
+            FixAction::NotApplicable => {
+                tracing::trace!(fix_name = fix_name, "Fix did not apply");
+            }
+            FixAction::Fixed { original_snippet, fixed_snippet } => {
+                // 1. WARN on detection
+                tracing::warn!(
+                    fix_name = fix_name,
+                    original = %original_snippet,
+                    "Detected malformed content"
+                );
+                // 2. INFO on successful fix
+                tracing::info!(
+                    fix_name = fix_name,
+                    original = %original_snippet,
+                    fixed = %fixed_snippet,
+                    "Successfully fixed malformed content"
+                );
+            }
+            FixAction::Failed { original_snippet, attempted_fix } => {
+                // 1. WARN on detection
+                tracing::warn!(
+                    fix_name = fix_name,
+                    original = %original_snippet,
+                    "Detected malformed content"
+                );
+                // 2. ERROR on failed fix
+                tracing::error!(
+                    fix_name = fix_name,
+                    original = %original_snippet,
+                    attempted = %attempted_fix,
+                    "Failed to fix malformed content"
+                );
+            }
+        }
     }
 
     /// Configure from config map
