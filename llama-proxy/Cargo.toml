@@ -50,6 +50,11 @@ anyhow = "1"
 uuid = { version = "1", features = ["v4", "serde"] }
 url = "2.5"
 
+# Compression
+flate2 = "1"
+brotli = "7"
+zstd = "0.13"
+
 [features]
 default = []
 influxdb = ["influxdb2"]

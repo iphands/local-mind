@@ -5,6 +5,7 @@ use axum::{
     http::{header, Method, Request, StatusCode},
     response::{IntoResponse, Response},
 };
+use std::io::Read;
 use std::time::Instant;
 
 use super::server::ProxyState;
@@ -14,6 +15,73 @@ use crate::api::{AnthropicMessage, ChatCompletionResponse};
 use crate::config::StatsFormat;
 use crate::proxy::fetch_context_total;
 use crate::stats::{format_metrics, format_request_log, RequestMetrics};
+
+/// Decompress response body based on Content-Encoding header
+fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<Vec<u8>, String> {
+    let encoding = match content_encoding {
+        Some(enc) => enc,
+        None => return Ok(body_bytes.to_vec()), // No compression
+    };
+
+    match encoding.to_lowercase().as_str() {
+        "gzip" => {
+            use flate2::read::GzDecoder;
+            let mut decoder = GzDecoder::new(body_bytes);
+            let mut decompressed = Vec::new();
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|e| format!("gzip decompression failed: {}", e))?;
+            tracing::debug!(
+                original_size = body_bytes.len(),
+                decompressed_size = decompressed.len(),
+                "Decompressed gzip response"
+            );
+            Ok(decompressed)
+        }
+        "deflate" => {
+            use flate2::read::DeflateDecoder;
+            let mut decoder = DeflateDecoder::new(body_bytes);
+            let mut decompressed = Vec::new();
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|e| format!("deflate decompression failed: {}", e))?;
+            tracing::debug!(
+                original_size = body_bytes.len(),
+                decompressed_size = decompressed.len(),
+                "Decompressed deflate response"
+            );
+            Ok(decompressed)
+        }
+        "br" => {
+            let mut decompressed = Vec::new();
+            brotli::BrotliDecompress(&mut std::io::Cursor::new(body_bytes), &mut decompressed)
+                .map_err(|e| format!("brotli decompression failed: {}", e))?;
+            tracing::debug!(
+                original_size = body_bytes.len(),
+                decompressed_size = decompressed.len(),
+                "Decompressed brotli response"
+            );
+            Ok(decompressed)
+        }
+        "zstd" => {
+            let decompressed = zstd::decode_all(body_bytes)
+                .map_err(|e| format!("zstd decompression failed: {}", e))?;
+            tracing::debug!(
+                original_size = body_bytes.len(),
+                decompressed_size = decompressed.len(),
+                "Decompressed zstd response"
+            );
+            Ok(decompressed)
+        }
+        other => {
+            tracing::warn!(
+                encoding = other,
+                "Unsupported Content-Encoding, returning original body"
+            );
+            Ok(body_bytes.to_vec())
+        }
+    }
+}
 
 /// Proxy request handler
 pub struct ProxyHandler {
@@ -35,8 +103,9 @@ impl ProxyHandler {
         let method = req.method().clone();
         let uri = req.uri().clone();
         let path = uri.path();
+        let query = uri.query();
 
-        tracing::debug!(method = %method, path = %path, "Processing request");
+        tracing::debug!(method = %method, path = %path, query = ?query, "Processing request");
 
         let is_anthropic_api = path.starts_with("/v1/messages");
         tracing::debug!(is_anthropic_api = is_anthropic_api, "Detected API format");
@@ -90,20 +159,35 @@ impl ProxyHandler {
             tracing::info!("{}", format_request_log(req_json));
         }
 
-        // Build backend URL
-        let backend_url = format!("{}{}", self.state.config.backend.base_url(), path);
+        // Build complete URL with query string as-is (don't parse/re-encode)
+        let backend_url = if let Some(q) = query {
+            format!("{}{}?{}", self.state.config.backend.base_url(), path, q)
+        } else {
+            format!("{}{}", self.state.config.backend.base_url(), path)
+        };
 
-        // Forward request to backend
+        tracing::debug!(
+            backend_url = %backend_url,
+            has_query = query.is_some(),
+            "Building backend request"
+        );
+
+        // Create request with complete URL (query string included)
         let mut backend_req = self.state.http_client.request(
             Method::from_bytes(method.as_str().as_bytes()).unwrap(),
             &backend_url,
         );
 
-        // Copy headers (skip Content-Length and Host as body may change)
+        // Copy headers (skip Content-Length, Host, and Authorization as we'll set those explicitly)
         for (name, value) in headers.iter() {
-            if name != header::HOST && name != header::CONTENT_LENGTH {
-                backend_req = backend_req.header(name, value);
+            // Skip headers that will be set explicitly or handled by reqwest
+            if name == header::HOST
+                || name == header::CONTENT_LENGTH
+                || name == header::AUTHORIZATION {
+                continue;
             }
+
+            backend_req = backend_req.header(name, value);
         }
 
         // Add Authorization header if api_key is configured
@@ -141,6 +225,14 @@ impl ProxyHandler {
                     .into_response();
             }
         };
+
+        // Log backend response status and headers for debugging
+        let backend_status = backend_response.status();
+        tracing::debug!(
+            status = %backend_status,
+            headers = ?backend_response.headers(),
+            "Received response from backend"
+        );
 
         // Check if streaming response
         let is_streaming_response = backend_response
@@ -192,7 +284,7 @@ impl ProxyHandler {
         let headers = backend_response.headers().clone();
 
         // Read response body
-        let body_bytes = match backend_response.bytes().await {
+        let raw_body_bytes = match backend_response.bytes().await {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to read backend response");
@@ -204,6 +296,37 @@ impl ProxyHandler {
             }
         };
 
+        // Check for Content-Encoding and decompress if needed
+        let content_encoding = headers
+            .get(header::CONTENT_ENCODING)
+            .and_then(|ce| ce.to_str().ok());
+
+        let body_bytes = match decompress_body(&raw_body_bytes, content_encoding) {
+            Ok(decompressed) => decompressed,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    content_encoding = ?content_encoding,
+                    "Failed to decompress response body"
+                );
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to decompress response: {}", e),
+                )
+                    .into_response();
+            }
+        };
+
+        // If error status, log the full response body for debugging
+        if status.is_client_error() || status.is_server_error() {
+            let error_body = String::from_utf8_lossy(&body_bytes);
+            tracing::error!(
+                status = %status,
+                error_body = %error_body,
+                "Backend returned error response"
+            );
+        }
+
         // Debug: Log received response details
         let content_type = headers
             .get(header::CONTENT_TYPE)
@@ -214,6 +337,7 @@ impl ProxyHandler {
             backend_status = %status,
             body_size = body_bytes.len(),
             content_type = %content_type,
+            content_encoding = ?content_encoding,
             body_preview = %body_preview,
             "Received non-streaming response from backend"
         );
@@ -413,8 +537,9 @@ impl ProxyHandler {
         let uri = req.uri().clone();
         let headers = req.headers().clone();
         let path = uri.path();
+        let query = uri.query();
 
-        tracing::debug!(method = %method, path = %path, "Pass-through request");
+        tracing::debug!(method = %method, path = %path, query = ?query, "Pass-through request");
 
         // Read body
         let body_bytes = match to_bytes(req.into_body(), 1024 * 1024 * 10).await {
@@ -425,21 +550,35 @@ impl ProxyHandler {
             }
         };
 
-        // Build backend URL
-        let backend_url = format!("{}{}", self.state.config.backend.base_url(), path);
+        // Build complete URL with query string as-is (don't parse/re-encode)
+        let backend_url = if let Some(q) = query {
+            format!("{}{}?{}", self.state.config.backend.base_url(), path, q)
+        } else {
+            format!("{}{}", self.state.config.backend.base_url(), path)
+        };
 
-        // Forward to backend
+        tracing::debug!(
+            backend_url = %backend_url,
+            has_query = query.is_some(),
+            "Building pass-through request"
+        );
+
+        // Create request with complete URL (query string included)
         let mut backend_req = self.state.http_client.request(
             Method::from_bytes(method.as_str().as_bytes()).unwrap(),
             &backend_url,
         );
 
-        // Copy headers
+        // Copy headers (skip Host and Authorization as we'll set those explicitly)
         for (name, value) in headers.iter() {
-            if name != header::HOST {
-                backend_req = backend_req.header(name, value);
+            // Skip headers that will be set explicitly or handled by reqwest
+            if name == header::HOST || name == header::AUTHORIZATION {
+                continue;
             }
+
+            backend_req = backend_req.header(name, value);
         }
+
         // Add Authorization header if api_key is configured
         if let Some(ref api_key) = self.state.config.backend.api_key {
             backend_req = backend_req.header(header::AUTHORIZATION, format!("Bearer {}", api_key));
@@ -457,10 +596,31 @@ impl ProxyHandler {
         // Pass through response
         let status = backend_response.status();
         let headers = backend_response.headers().clone();
-        let body = match backend_response.bytes().await {
+        let raw_body = match backend_response.bytes().await {
             Ok(b) => b,
             Err(e) => {
                 return (StatusCode::BAD_GATEWAY, format!("Failed to read response: {}", e))
+                    .into_response();
+            }
+        };
+
+        // Check for Content-Encoding and decompress if needed
+        let content_encoding = headers
+            .get(header::CONTENT_ENCODING)
+            .and_then(|ce| ce.to_str().ok());
+
+        let body = match decompress_body(&raw_body, content_encoding) {
+            Ok(decompressed) => decompressed,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    content_encoding = ?content_encoding,
+                    "Failed to decompress pass-through response"
+                );
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    format!("Failed to decompress response: {}", e),
+                )
                     .into_response();
             }
         };
