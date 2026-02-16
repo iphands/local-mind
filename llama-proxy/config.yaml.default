@@ -29,6 +29,11 @@ fixes:
       # If true, remove duplicate keys; if false, fix and keep both
       remove_duplicate: true
 
+    # Fix malformed tool call arguments with invalid property names like `{}":`
+    # Uses tool schemas from request to determine correct parameter names
+    toolcall_malformed_arguments:
+      enabled: true
+
 # Stats logging to STDOUT
 stats:
   # Enable stats logging

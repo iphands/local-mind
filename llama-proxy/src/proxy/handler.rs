@@ -172,8 +172,12 @@ impl ProxyHandler {
         // Try to parse as JSON and apply fixes
         let (body_bytes, metrics) =
             if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
-                // Apply fixes
-                json = self.state.fix_registry.apply_fixes(json);
+                // Apply fixes with request context if available
+                json = if let Some(ref req_json) = request_json {
+                    self.state.fix_registry.apply_fixes_with_context(json, req_json)
+                } else {
+                    self.state.fix_registry.apply_fixes(json)
+                };
 
                 // Collect stats if enabled
                 let mut metrics = if self.state.config.stats.enabled {

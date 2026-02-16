@@ -43,11 +43,15 @@ pub async fn handle_streaming_response(
     let completion_tx = Arc::new(tokio::sync::Mutex::new(Some(completion_tx)));
     let completion_tx_clone = completion_tx.clone();
 
+    // Clone request_json for use in stream processing
+    let request_json_for_stream = request_json.clone();
+
     let processed_stream = stream.then(move |chunk_result| {
         let fix_registry = fix_registry.clone();
         let accumulated = accumulated_clone.clone();
         let stats_enabled = stats_enabled;
         let completion_tx = completion_tx_clone.clone();
+        let request_json = request_json_for_stream.clone();
 
         async move {
             let chunk = match chunk_result {
@@ -123,7 +127,12 @@ pub async fn handle_streaming_response(
 
                     // Try to parse as JSON and apply fixes
                     if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(data) {
-                        json = fix_registry.apply_fixes_stream(json);
+                        // Apply fixes with request context if available
+                        json = if let Some(ref req_json) = request_json {
+                            fix_registry.apply_fixes_stream_with_context(json, req_json)
+                        } else {
+                            fix_registry.apply_fixes_stream(json)
+                        };
 
                         // Accumulate for stats (include event type for Anthropic format)
                         if stats_enabled {
