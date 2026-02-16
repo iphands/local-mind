@@ -75,6 +75,12 @@ enum Commands {
         /// Override backend URL (e.g., "https://example.com:4234")
         #[arg(long)]
         backend_url: Option<String>,
+        /// Disable all streaming (force non-streaming responses)
+        #[arg(long)]
+        disable_streaming: bool,
+        /// Disable streaming for requests with tools
+        #[arg(long)]
+        disable_streaming_on_tools: bool,
     },
 
     /// List all available response fix modules
@@ -111,8 +117,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Commands::Run {
             port,
             backend_url,
+            disable_streaming,
+            disable_streaming_on_tools,
         } => {
-            run_proxy(cli.config, port, backend_url).await?;
+            run_proxy(cli.config, port, backend_url, disable_streaming, disable_streaming_on_tools)
+                .await?;
         }
         Commands::ListFixes { verbose } => {
             list_fixes(verbose);
@@ -133,6 +142,8 @@ async fn run_proxy(
     config_path: PathBuf,
     port_override: Option<u16>,
     backend_url_override: Option<String>,
+    disable_streaming: bool,
+    disable_streaming_on_tools: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = load_config_or_exit(&config_path);
@@ -144,8 +155,17 @@ async fn run_proxy(
     if let Some(url) = backend_url_override {
         config.backend.url = url;
     }
+    if disable_streaming {
+        config.streaming.enabled = false;
+    }
+    if disable_streaming_on_tools {
+        config.streaming.streaming_on_tools = false;
+    }
 
     tracing::info!("Loading configuration from {:?}", config_path);
+
+    // Log all configuration settings
+    log_config_settings(&config);
 
     // Create fix registry
     let mut fix_registry = create_default_registry();
@@ -198,6 +218,91 @@ async fn run_proxy(
     run_server(config, fix_registry, exporter_manager).await?;
 
     Ok(())
+}
+
+/// Log all configuration settings at startup (masks sensitive values)
+fn log_config_settings(config: &AppConfig) {
+    tracing::info!("=== Configuration ===");
+
+    // Server
+    tracing::info!(
+        host = %config.server.host,
+        port = config.server.port,
+        "Server"
+    );
+
+    // Backend
+    tracing::info!(
+        url = %config.backend.base_url(),
+        timeout_seconds = config.backend.timeout_seconds,
+        "Backend"
+    );
+    if let Some(ref tls) = config.backend.tls {
+        tracing::info!(
+            accept_invalid_certs = tls.accept_invalid_certs,
+            ca_cert = tls.ca_cert_path.as_deref().unwrap_or("none"),
+            client_cert = tls.client_cert_path.as_deref().unwrap_or("none"),
+            "Backend TLS"
+        );
+    }
+
+    // Fixes
+    tracing::info!(
+        enabled = config.fixes.enabled,
+        module_count = config.fixes.modules.len(),
+        "Fixes"
+    );
+    for (name, module) in &config.fixes.modules {
+        tracing::info!(
+            module = %name,
+            enabled = module.enabled,
+            "Fix module"
+        );
+    }
+
+    // Detection
+    tracing::info!(
+        enabled = config.detection.enabled,
+        log_level = %config.detection.log_level,
+        "Detection"
+    );
+
+    // Streaming
+    tracing::info!(
+        enabled = config.streaming.enabled,
+        streaming_on_tools = config.streaming.streaming_on_tools,
+        client_rules_count = config.streaming.client_rules.len(),
+        "Streaming"
+    );
+    for (pattern, enabled) in &config.streaming.client_rules {
+        tracing::info!(
+            pattern = %pattern,
+            enabled = enabled,
+            "Streaming client rule"
+        );
+    }
+
+    // Stats
+    tracing::info!(
+        enabled = config.stats.enabled,
+        format = ?config.stats.format,
+        log_interval = config.stats.log_interval,
+        "Stats"
+    );
+
+    // Exporters
+    tracing::info!(
+        enabled = config.exporters.influxdb.enabled,
+        url = %config.exporters.influxdb.url,
+        org = %config.exporters.influxdb.org,
+        bucket = %config.exporters.influxdb.bucket,
+        batch_size = config.exporters.influxdb.batch_size,
+        flush_interval_seconds = config.exporters.influxdb.flush_interval_seconds,
+        "InfluxDB exporter"
+        // Note: token is intentionally NOT logged
+    );
+
+    tracing::info!("=== End Configuration ===");
 }
 
 /// List all available fix modules
@@ -263,6 +368,15 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
             println!("\nStats:");
             println!("  Enabled: {}", config.stats.enabled);
             println!("  Format: {:?}", config.stats.format);
+            println!("\nStreaming:");
+            println!("  Enabled: {}", config.streaming.enabled);
+            println!("  Streaming on tools: {}", config.streaming.streaming_on_tools);
+            if !config.streaming.client_rules.is_empty() {
+                println!("  Client rules:");
+                for (pattern, enabled) in &config.streaming.client_rules {
+                    println!("    {} : {}", pattern, enabled);
+                }
+            }
             println!("\nExporters:");
             println!("  InfluxDB: {}", config.exporters.influxdb.enabled);
             Ok(())

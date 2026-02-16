@@ -3,6 +3,7 @@
 mod registry;
 mod toolcall_bad_filepath_fix;
 mod toolcall_malformed_arguments_fix;
+mod toolcall_null_index_fix;
 
 use async_trait::async_trait;
 use serde_json::Value;
@@ -12,6 +13,20 @@ use std::sync::Arc;
 pub use registry::{AsAny, FixRegistry};
 pub use toolcall_bad_filepath_fix::ToolcallBadFilepathFix;
 pub use toolcall_malformed_arguments_fix::ToolcallMalformedArgumentsFix;
+pub use toolcall_null_index_fix::ToolCallNullIndexFix;
+
+/// Log level for fix detection/success messages
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FixLogLevel {
+    /// Log at TRACE level (most verbose)
+    Trace,
+    /// Log at DEBUG level
+    Debug,
+    /// Log at INFO level (default)
+    Info,
+    /// Log at WARN level
+    Warn,
+}
 
 /// Result of applying a fix, used for standardized logging
 #[derive(Debug, Clone)]
@@ -64,6 +79,9 @@ impl Default for FixAction {
 pub struct ToolCallAccumulator {
     /// Map of tool call index -> accumulated arguments string
     accumulated: HashMap<usize, String>,
+    /// Map of tool call index -> whether this index has been fixed
+    /// After a fix is applied, subsequent chunks for this index are suppressed
+    fixed: HashMap<usize, bool>,
 }
 
 impl ToolCallAccumulator {
@@ -128,6 +146,27 @@ impl ToolCallAccumulator {
         self.accumulated.remove(&index);
     }
 
+    /// Mark a tool call index as fixed (after sending completion delta)
+    /// Subsequent chunks for this index will be suppressed
+    pub fn mark_fixed(&mut self, index: usize) {
+        self.fixed.insert(index, true);
+        // Also clear accumulated content since we've sent the completion
+        self.accumulated.remove(&index);
+    }
+
+    /// Check if a tool call index has been fixed
+    /// Returns true if this index should have subsequent chunks suppressed
+    pub fn is_fixed(&self, index: usize) -> bool {
+        self.fixed.get(&index).copied().unwrap_or(false)
+    }
+
+    /// Reset both accumulated and fixed state for a tool call index
+    /// Used when a new tool call starts (new index or finish_reason indicates completion)
+    pub fn reset(&mut self, index: usize) {
+        self.accumulated.remove(&index);
+        self.fixed.remove(&index);
+    }
+
     /// Get the accumulated arguments for a tool call index (for testing)
     #[cfg(test)]
     pub fn get(&self, index: usize) -> Option<&str> {
@@ -136,6 +175,13 @@ impl ToolCallAccumulator {
 }
 
 /// Trait for response fix modules
+///
+/// PRIMARY PATH: We now work with complete JSON responses (via `apply()` method).
+/// All client streaming is synthesized after fixes are applied to complete JSON.
+///
+/// LEGACY PATH: Streaming methods below are kept ONLY for the fallback streaming handler
+/// that handles unexpected streaming responses from the backend. New fixes should focus
+/// on implementing `apply()` for complete JSON only.
 #[async_trait]
 pub trait ResponseFix: Send + Sync {
     /// Unique identifier for the fix
@@ -144,40 +190,43 @@ pub trait ResponseFix: Send + Sync {
     /// Human-readable description
     fn description(&self) -> &str;
 
+    /// Return the log level for successful fix actions
+    /// Default: Info (WARN on detection, INFO on success)
+    fn log_level(&self) -> FixLogLevel {
+        FixLogLevel::Info
+    }
+
     /// Check if this fix applies to the response
     fn applies(&self, response: &Value) -> bool;
 
-    /// Apply the fix to the response (non-streaming), returning modified value AND action taken
+    /// **PRIMARY METHOD**: Apply the fix to a complete response
     /// Implementations MUST return appropriate FixAction for logging
     fn apply(&self, response: Value) -> (Value, FixAction);
 
-    /// Apply fix to a streaming chunk, returning modified value AND action taken
+    /// **LEGACY**: Apply fix to streaming chunk (ONLY used by fallback streaming handler)
+    /// Default: no-op. Most fixes should not need to implement this anymore.
     fn apply_stream(&self, chunk: Value) -> (Value, FixAction) {
-        (chunk, FixAction::NotApplicable) // Default: no action
+        (chunk, FixAction::NotApplicable)
     }
 
-    // Context-aware methods with default implementations for backward compatibility
+    // Context-aware methods
 
     /// Check if this fix applies to the response with request context
-    /// Default implementation delegates to applies() for backward compatibility
     fn applies_with_context(&self, response: &Value, _request: &Value) -> bool {
         self.applies(response)
     }
 
-    /// Apply the fix to the response with request context (non-streaming)
-    /// Default implementation delegates to apply() for backward compatibility
+    /// Apply the fix to the response with request context
     fn apply_with_context(&self, response: Value, _request: &Value) -> (Value, FixAction) {
         self.apply(response)
     }
 
-    /// Apply fix to a streaming chunk with request context (optional)
-    /// Default implementation delegates to apply_stream() for backward compatibility
+    /// **LEGACY**: Apply fix to streaming chunk with request context
     fn apply_stream_with_context(&self, chunk: Value, _request: &Value) -> (Value, FixAction) {
         self.apply_stream(chunk)
     }
 
-    /// Apply fix to a streaming chunk with accumulation support (with request context)
-    /// Default implementation delegates to context-aware version without accumulation
+    /// **LEGACY**: Apply fix to streaming chunk with accumulation support (with request context)
     fn apply_stream_with_accumulation(
         &self,
         chunk: Value,
@@ -187,8 +236,7 @@ pub trait ResponseFix: Send + Sync {
         self.apply_stream_with_context(chunk, request)
     }
 
-    /// Apply fix to a streaming chunk with accumulation support (without request context)
-    /// Default implementation delegates to regular stream version without accumulation
+    /// **LEGACY**: Apply fix to streaming chunk with accumulation support (without request context)
     fn apply_stream_with_accumulation_default(
         &self,
         chunk: Value,
@@ -201,7 +249,10 @@ pub trait ResponseFix: Send + Sync {
 /// Create the default fix registry with all available fixes
 pub fn create_default_registry() -> FixRegistry {
     let mut registry = FixRegistry::new();
-    // Register malformed arguments fix first - it handles the more specific {}":" pattern
+    // Register null index fix FIRST - it's foundational
+    // Other fixes may assume valid indices exist
+    registry.register(Arc::new(ToolCallNullIndexFix::new(true)));
+    // Register malformed arguments fix - it handles the more specific {}":" pattern
     // This ensures it runs before the broader filepath fix
     registry.register(Arc::new(ToolcallMalformedArgumentsFix::new()));
     registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));

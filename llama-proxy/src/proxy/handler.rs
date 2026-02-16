@@ -9,6 +9,8 @@ use std::time::Instant;
 
 use super::server::ProxyState;
 use super::streaming::handle_streaming_response;
+use super::synthesize_streaming_response;
+use crate::api::ChatCompletionResponse;
 use crate::config::StatsFormat;
 use crate::proxy::fetch_context_total;
 use crate::stats::{format_metrics, format_request_log, RequestMetrics};
@@ -22,6 +24,10 @@ impl ProxyHandler {
     pub fn new(state: ProxyState) -> Self {
         Self { state }
     }
+
+    // REMOVED: should_stream() method
+    // We now ALWAYS force non-streaming backend requests and synthesize streaming responses
+    // when clients request them. This simplifies fix application significantly.
 
     /// Handle an incoming request
     pub async fn handle(&self, req: Request<Body>) -> Response {
@@ -54,6 +60,8 @@ impl ProxyHandler {
         // Save headers before consuming the request
         let headers = req.headers().clone();
 
+        // User-Agent no longer needed since we always force non-streaming
+
         // Read request body
         let body_bytes = match to_bytes(req.into_body(), 1024 * 1024 * 100).await {
             Ok(bytes) => bytes,
@@ -70,7 +78,8 @@ impl ProxyHandler {
         // Parse request for stats (if JSON)
         let request_json: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
 
-        let is_streaming = request_json
+        // Remember if client wants streaming (for synthesis later)
+        let client_wants_streaming = request_json
             .as_ref()
             .and_then(|j| j.get("stream"))
             .and_then(|s| s.as_bool())
@@ -90,12 +99,25 @@ impl ProxyHandler {
             &backend_url,
         );
 
-        // Copy headers
+        // Copy headers (skip Content-Length and Host as body may change)
         for (name, value) in headers.iter() {
-            if name != header::HOST {
+            if name != header::HOST && name != header::CONTENT_LENGTH {
                 backend_req = backend_req.header(name, value);
             }
         }
+
+        // ALWAYS force stream: false for backend request
+        let body_bytes = if let Some(mut json) = request_json.clone() {
+            json["stream"] = serde_json::Value::Bool(false);
+            if client_wants_streaming {
+                tracing::debug!(
+                    "Forcing non-streaming backend request (will synthesize streaming response)"
+                );
+            }
+            serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()).into()
+        } else {
+            body_bytes
+        };
 
         backend_req = backend_req.body(body_bytes.clone());
 
@@ -120,7 +142,9 @@ impl ProxyHandler {
             .unwrap_or(false);
 
         if is_streaming_response {
-            // Handle streaming response (auto-detects Anthropic vs OpenAI format)
+            // Unexpected! We forced stream:false but got streaming response
+            tracing::warn!("Backend returned streaming response despite stream:false request");
+            // Fall back to old streaming handler
             handle_streaming_response(
                 backend_response,
                 self.state.fix_registry.clone(),
@@ -134,11 +158,11 @@ impl ProxyHandler {
             )
             .await
         } else {
-            // Handle non-streaming response
+            // Handle non-streaming response (expected path)
             self.handle_non_streaming_response(
                 backend_response,
                 request_json,
-                is_streaming,
+                client_wants_streaming,
                 start,
             )
             .await
@@ -150,7 +174,7 @@ impl ProxyHandler {
         &self,
         backend_response: reqwest::Response,
         request_json: Option<serde_json::Value>,
-        is_streaming_request: bool,
+        client_wants_streaming: bool,
         start: Instant,
     ) -> Response {
         let status = backend_response.status();
@@ -169,15 +193,36 @@ impl ProxyHandler {
             }
         };
 
+        // Debug: Log received response details
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|ct| ct.to_str().ok())
+            .unwrap_or("unknown");
+        let body_preview = String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(500)]);
+        tracing::debug!(
+            backend_status = %status,
+            body_size = body_bytes.len(),
+            content_type = %content_type,
+            body_preview = %body_preview,
+            "Received non-streaming response from backend"
+        );
+
         // Try to parse as JSON and apply fixes
-        let (body_bytes, metrics) =
+        let (json_value, metrics) =
             if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                tracing::debug!("Response parsed as JSON successfully");
                 // Apply fixes with request context if available
+                let original_json = json.clone();
                 json = if let Some(ref req_json) = request_json {
                     self.state.fix_registry.apply_fixes_with_context(json, req_json)
                 } else {
                     self.state.fix_registry.apply_fixes(json)
                 };
+                if json != original_json {
+                    tracing::debug!("Fixes applied to non-streaming response");
+                } else {
+                    tracing::debug!("No fixes applied to response");
+                }
 
                 // Collect stats if enabled
                 let mut metrics = if self.state.config.stats.enabled {
@@ -185,7 +230,7 @@ impl ProxyHandler {
                         Some(RequestMetrics::from_response(
                             &json,
                             req_json,
-                            is_streaming_request,
+                            false, // We forced non-streaming
                             start.elapsed().as_millis() as f64,
                         ))
                     } else {
@@ -208,16 +253,15 @@ impl ProxyHandler {
                     }
                 }
 
-                // Serialize back to bytes
-                match serde_json::to_vec(&json) {
-                    Ok(bytes) => (bytes.into(), metrics),
-                    Err(e) => {
-                        tracing::error!(error = %e, "Failed to serialize fixed response");
-                        (body_bytes, None)
-                    }
-                }
+                (Some(json), metrics)
             } else {
-                (body_bytes, None)
+                // JSON parsing failed - log warning with body preview
+                tracing::warn!(
+                    body_size = body_bytes.len(),
+                    body_preview = %String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(200)]),
+                    "Failed to parse response as JSON - returning original body unchanged"
+                );
+                (None, None)
             };
 
         // Log stats
@@ -235,18 +279,69 @@ impl ProxyHandler {
             tokio::spawn(async move {
                 exporters.export_all(&metrics_clone).await;
             });
+        } else {
+            // Debug: Log why stats weren't collected
+            tracing::debug!(
+                stats_enabled = self.state.config.stats.enabled,
+                has_request_json = request_json.is_some(),
+                "No metrics collected for non-streaming response"
+            );
         }
 
-        // Build response
+        // If client wants streaming, synthesize it from complete JSON
+        if client_wants_streaming {
+            if let Some(ref json) = json_value {
+                // Try to parse as ChatCompletionResponse for synthesis
+                match serde_json::from_value::<ChatCompletionResponse>(json.clone()) {
+                    Ok(chat_response) => {
+                        tracing::debug!("Synthesizing streaming response from complete JSON");
+                        match synthesize_streaming_response(chat_response).await {
+                            Ok(response) => return response,
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to synthesize streaming response");
+                                // Fall through to return JSON
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(error = %e, "Cannot parse as ChatCompletionResponse for synthesis");
+                        // Fall through to return JSON
+                    }
+                }
+            }
+        }
+
+        // Return complete JSON response (either client wants non-streaming, or synthesis failed)
+        let final_body = if let Some(ref json) = json_value {
+            serde_json::to_vec(json).unwrap_or_else(|_| body_bytes.to_vec())
+        } else {
+            body_bytes.to_vec()
+        };
+
         let mut response = Response::builder().status(status);
+
+        // Only set JSON content-type if we successfully parsed/modified as JSON
+        // Otherwise preserve backend's content-type
+        if json_value.is_some() {
+            response = response.header(header::CONTENT_TYPE, "application/json");
+        }
 
         for (name, value) in headers {
             if let Some(name) = name {
+                // Skip headers that Axum will handle
+                if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING {
+                    continue;
+                }
+                // Skip content-type ONLY if we already set it (json_value.is_some())
+                // Otherwise preserve backend's content-type
+                if name == header::CONTENT_TYPE && json_value.is_some() {
+                    continue;
+                }
                 response = response.header(name, value);
             }
         }
 
-        response.body(Body::from(body_bytes)).unwrap().into_response()
+        response.body(Body::from(final_body)).unwrap().into_response()
     }
 
     /// Simple pass-through with no fix application or stats collection
@@ -307,9 +402,75 @@ impl ProxyHandler {
         let mut response = Response::builder().status(status);
         for (name, value) in headers {
             if let Some(name) = name {
+                // Skip Content-Length and Transfer-Encoding - Axum will handle these
+                // This ensures consistent behavior with handle_non_streaming_response
+                if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING {
+                    continue;
+                }
                 response = response.header(name, value);
             }
         }
         response.body(Body::from(body)).unwrap()
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::{AppConfig, BackendConfig, StreamingConfig};
+    use crate::fixes::FixRegistry;
+    use crate::exporters::ExporterManager;
+    use std::collections::HashMap;
+
+    fn create_test_handler_with_streaming(streaming_config: StreamingConfig) -> ProxyHandler {
+        let config = AppConfig {
+            server: crate::config::ServerConfig {
+                port: 8066,
+                host: "0.0.0.0".to_string(),
+            },
+            backend: BackendConfig::default(),
+            fixes: crate::config::FixesConfig {
+                enabled: false,
+                modules: HashMap::new(),
+            },
+            stats: crate::config::StatsConfig {
+                enabled: false,
+                format: crate::config::StatsFormat::Pretty,
+                log_interval: 1,
+            },
+            exporters: crate::config::ExportersConfig {
+                influxdb: crate::config::InfluxDbConfig {
+                    enabled: false,
+                    url: "http://localhost:8086".to_string(),
+                    org: "test".to_string(),
+                    bucket: "test".to_string(),
+                    token: "test".to_string(),
+                    batch_size: 1,
+                    flush_interval_seconds: 1,
+                },
+            },
+            detection: crate::config::DetectionConfig::default(),
+            streaming: streaming_config,
+        };
+
+        let http_client = reqwest::Client::new();
+        let fix_registry = FixRegistry::new();
+        let exporter_manager = ExporterManager::new();
+
+        ProxyHandler::new(ProxyState {
+            config: std::sync::Arc::new(config),
+            http_client,
+            fix_registry: std::sync::Arc::new(fix_registry),
+            exporter_manager: std::sync::Arc::new(exporter_manager),
+        })
+    }
+
+    // REMOVED: Tests for should_stream() method
+    // The method has been removed since we now always force non-streaming backend requests
+    // and synthesize streaming responses when clients request them.
+    //
+    // New architecture:
+    // - All backend requests: stream = false
+    // - Client wants streaming: synthesize from complete JSON
+    // - Client wants non-streaming: return complete JSON as-is
 }

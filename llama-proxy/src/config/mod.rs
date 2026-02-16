@@ -16,6 +16,8 @@ pub struct AppConfig {
     pub exporters: ExportersConfig,
     #[serde(default)]
     pub detection: DetectionConfig,
+    #[serde(default)]
+    pub streaming: StreamingConfig,
 }
 
 /// Proxy server configuration
@@ -137,6 +139,41 @@ impl Default for DetectionConfig {
         Self {
             enabled: default_detection_enabled(),
             log_level: default_log_level(),
+        }
+    }
+}
+
+/// Streaming control configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StreamingConfig {
+    /// Enable streaming responses globally (when false, all requests use non-streaming)
+    #[serde(default = "default_streaming_enabled")]
+    pub enabled: bool,
+
+    /// Allow streaming when request contains tools (default: true)
+    /// Set to false to disable streaming for tool requests
+    #[serde(default = "default_streaming_on_tools")]
+    pub streaming_on_tools: bool,
+
+    /// Per-client streaming rules (User-Agent pattern -> enabled)
+    #[serde(default)]
+    pub client_rules: HashMap<String, bool>,
+}
+
+fn default_streaming_on_tools() -> bool {
+    true
+}
+
+fn default_streaming_enabled() -> bool {
+    true
+}
+
+impl Default for StreamingConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_streaming_enabled(),
+            streaming_on_tools: default_streaming_on_tools(),
+            client_rules: HashMap::new(),
         }
     }
 }
@@ -401,5 +438,31 @@ mod tests {
         assert!(config.enabled);
         assert_eq!(config.url, "http://localhost:8086");
         assert_eq!(config.batch_size, 10);
+    }
+
+    #[test]
+    fn test_streaming_config_default() {
+        let config = StreamingConfig::default();
+        assert!(config.enabled);
+        assert!(config.streaming_on_tools);
+        assert!(config.client_rules.is_empty());
+    }
+
+    #[test]
+    fn test_streaming_config_with_rules() {
+        let mut client_rules = HashMap::new();
+        client_rules.insert("claude-code".to_string(), false);
+        client_rules.insert("opencode".to_string(), true);
+
+        let config = StreamingConfig {
+            enabled: true,
+            streaming_on_tools: false,
+            client_rules,
+        };
+        assert!(config.enabled);
+        assert!(!config.streaming_on_tools);
+        assert_eq!(config.client_rules.len(), 2);
+        assert!(!config.client_rules["claude-code"]);
+        assert!(config.client_rules["opencode"]);
     }
 }

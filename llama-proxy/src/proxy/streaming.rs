@@ -799,14 +799,254 @@ mod tests {
         let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"usage\":{\"input_tokens\":100,\"output_tokens\":0}}}\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"Let me think\"}}\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"Answer\"}}\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":50}}\n";
 
         let result = parse_accumulated_sse(sse).unwrap();
-        
+
         assert_eq!(result["model"].as_str().unwrap(), "claude-3");
         assert_eq!(result["usage"]["input_tokens"].as_u64().unwrap(), 100);
         assert_eq!(result["usage"]["output_tokens"].as_u64().unwrap(), 50);
-        
+
         let content = result["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
         assert_eq!(content[0]["thinking"].as_str().unwrap(), "Let me think");
         assert_eq!(content[1]["text"].as_str().unwrap(), "Answer");
+    }
+
+    // ============================================================
+    // PHASE 1.1: High-Level Integration Tests (Bug Reproduction)
+    // ============================================================
+    // These tests check the full SSE streaming pipeline with fixes applied
+    // to reproduce the duplicate filePath bug at a higher level
+
+    mod integration_tests {
+        use crate::fixes::{ToolcallBadFilepathFix, FixRegistry, ToolCallAccumulator, ResponseFix};
+        use std::sync::Arc;
+
+        #[test]
+        fn test_streaming_toolcall_fix_with_sse_chunks() {
+            // Test full SSE stream with tool call fix applied
+            // This simulates what happens when llama.cpp streams malformed tool calls
+
+            let fix_registry = {
+                let mut registry = FixRegistry::new();
+                registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+                Arc::new(registry)
+            };
+
+            let mut accumulator = ToolCallAccumulator::new();
+
+            // SSE chunks as they would come from llama.cpp
+            let sse_chunk1 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"content\\\":\\\"code\\\",\"}}]}}]}\n\n";
+            let sse_chunk2 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\":\\\"/path1\\\",\"}}]}}]}\n\n";
+            let sse_chunk3 = "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\"/path2\\\"}\"}}]}}]}\n\n";
+            let _sse_chunk4 = "data: [DONE]\n\n";
+
+            // Track what the client would accumulate
+            let mut client_args_accumulated = String::new();
+
+            // Process chunk 1
+            for line in sse_chunk1.lines() {
+                if line.starts_with("data: ") {
+                    let data = &line[6..];
+                    if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(data) {
+                        json = fix_registry.apply_fixes_stream_with_accumulation_default(json, &mut accumulator);
+
+                        if let Some(args) = json["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str() {
+                            client_args_accumulated.push_str(args);
+                            println!("After chunk 1, client has: {}", client_args_accumulated);
+                        }
+                    }
+                }
+            }
+
+            // Process chunk 2
+            for line in sse_chunk2.lines() {
+                if line.starts_with("data: ") {
+                    let data = &line[6..];
+                    if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(data) {
+                        json = fix_registry.apply_fixes_stream_with_accumulation_default(json, &mut accumulator);
+
+                        if let Some(args) = json["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str() {
+                            client_args_accumulated.push_str(args);
+                            println!("After chunk 2, client has: {}", client_args_accumulated);
+                        }
+                    }
+                }
+            }
+
+            // Process chunk 3 - THIS IS WHERE THE BUG OCCURS
+            for line in sse_chunk3.lines() {
+                if line.starts_with("data: ") {
+                    let data = &line[6..];
+                    if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(data) {
+                        json = fix_registry.apply_fixes_stream_with_accumulation_default(json, &mut accumulator);
+
+                        if let Some(args) = json["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str() {
+                            println!("Chunk 3 delta from proxy: {}", args);
+                            client_args_accumulated.push_str(args);
+                            println!("After chunk 3, client has: {}", client_args_accumulated);
+                        }
+                    }
+                }
+            }
+
+            // Verify client's final accumulated arguments are valid JSON
+            println!("\nFinal client-accumulated arguments: {}", client_args_accumulated);
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&client_args_accumulated).is_ok(),
+                "BUG REPRODUCED: Client-side SSE accumulation resulted in INVALID JSON: {}",
+                client_args_accumulated
+            );
+
+            // Verify no duplicate filePath fields in the final result
+            let filepath_count = client_args_accumulated.matches(r#""filePath""#).count();
+            assert!(
+                filepath_count <= 1,
+                "BUG: Client accumulated {} filePath fields (should be at most 1): {}",
+                filepath_count,
+                client_args_accumulated
+            );
+        }
+
+        #[test]
+        fn test_opencode_streaming_pattern() {
+            // Test with the exact SSE format that opencode receives
+            // This reproduces the user's reported bug
+
+            let fix_registry = {
+                let mut registry = FixRegistry::new();
+                registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+                Arc::new(registry)
+            };
+
+            let mut accumulator = ToolCallAccumulator::new();
+
+            // Real-world SSE chunks from opencode session (with malformed filePath)
+            let chunks = vec![
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"content\\\":\\\"#!/usr/bin/perl\\\\n# test\\\\n\\\",\"}}]}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\":\\\"/home/iphands/prog/slop/trash/primes.pl\\\",\"}}]}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\"/home/iphands/prog/slop/llama-proxy/trash/primes.pl\\\"}\"}}]}}]}\n\n",
+                "data: [DONE]\n\n",
+            ];
+
+            let mut client_args = String::new();
+
+            for (i, sse_chunk) in chunks.iter().enumerate() {
+                for line in sse_chunk.lines() {
+                    if line.starts_with("data: ") {
+                        let data = &line[6..];
+                        if data == "[DONE]" {
+                            continue;
+                        }
+                        if let Ok(mut json) = serde_json::from_str::<serde_json::Value>(data) {
+                            json = fix_registry.apply_fixes_stream_with_accumulation_default(json, &mut accumulator);
+
+                            if let Some(args) = json["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str() {
+                                println!("Chunk {} delta: {}", i + 1, args);
+                                client_args.push_str(args);
+                                println!("Client accumulated: {}", client_args);
+                            }
+                        }
+                    }
+                }
+            }
+
+            println!("\nFinal opencode client arguments: {}", client_args);
+
+            // Critical test: opencode must receive valid JSON
+            let parse_result = serde_json::from_str::<serde_json::Value>(&client_args);
+            assert!(
+                parse_result.is_ok(),
+                "BUG REPRODUCED (opencode pattern): Invalid JSON: {}\nParse error: {:?}",
+                client_args,
+                parse_result.err()
+            );
+
+            // Verify structure
+            if let Ok(parsed) = parse_result {
+                assert!(parsed.get("content").is_some(), "Missing content field");
+                assert!(parsed.get("filePath").is_some(), "Missing filePath field");
+
+                // Should only have ONE filePath field
+                let json_str = serde_json::to_string(&parsed).unwrap();
+                let filepath_count = json_str.matches(r#""filePath""#).count();
+                assert_eq!(filepath_count, 1, "Should have exactly 1 filePath field, got {}", filepath_count);
+            }
+        }
+
+        #[test]
+        fn test_client_server_delta_consistency() {
+            // This test verifies that:
+            // 1. The proxy's delta calculation matches what the client expects
+            // 2. Client-side accumulation == server-side fixed JSON
+
+            let fix = ToolcallBadFilepathFix::new(true);
+            let mut accumulator = ToolCallAccumulator::new();
+
+            // Simulate streaming chunks
+            let chunk1 = serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": r#"{"content":"test","#
+                            }
+                        }]
+                    }
+                }]
+            });
+
+            let chunk2 = serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                "arguments": r#""filePath":"/path1","#
+                            }
+                        }]
+                    }
+                }]
+            });
+
+            let chunk3 = serde_json::json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "function": {
+                                // Malformed - duplicate filePath without colon
+                                "arguments": r#""filePath"/path2"}"#
+                            }
+                        }]
+                    }
+                }]
+            });
+
+            let (result1, _) = fix.apply_stream_with_accumulation_default(chunk1, &mut accumulator);
+            let (result2, _) = fix.apply_stream_with_accumulation_default(chunk2, &mut accumulator);
+            let (result3, _) = fix.apply_stream_with_accumulation_default(chunk3, &mut accumulator);
+
+            let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+            let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+            let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+
+            // Client-side accumulation
+            let client_accumulated = format!("{}{}{}", delta1, delta2, delta3);
+            println!("Client accumulated: {}", client_accumulated);
+
+            // The accumulated JSON on client should be valid
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&client_accumulated).is_ok(),
+                "Client-server delta consistency FAILED: {}",
+                client_accumulated
+            );
+
+            // Additional check: verify the deltas make sense
+            // Delta 3 should NOT be a full JSON object (shouldn't start with '{')
+            if delta3.starts_with('{') {
+                println!("WARNING: Delta 3 is full JSON (probable bug): {}", delta3);
+                println!("This will duplicate content client already has!");
+            }
+        }
     }
 }

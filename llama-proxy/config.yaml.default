@@ -31,6 +31,11 @@ fixes:
   enabled: true
   # Individual fix toggles
   modules:
+    # Fix null or missing index fields in tool calls
+    # llama.cpp sometimes sends index=null which causes client validation errors
+    toolcall_null_index:
+      enabled: true
+
     # Fix duplicate/malformed filePath in Qwen3-Coder tool calls
     toolcall_bad_filepath:
       enabled: true
@@ -49,6 +54,24 @@ detection:
   enabled: true
   # Log level for detections: "warn" | "error" | "info"
   log_level: "warn"
+
+# Streaming control
+streaming:
+  # Enable streaming responses globally
+  # Set to false to force all requests to use non-streaming
+  enabled: true
+
+  # Allow streaming when request contains tools
+  # Set to false to disable streaming for tool requests
+  streaming_on_tools: true
+
+  # Per-client streaming rules (optional)
+  # Map User-Agent substrings to streaming enabled/disabled
+  # Example:
+  #   client_rules:
+  #     "claude-code": false
+  #     "opencode": true
+  client_rules: {}
 
 # Stats logging to STDOUT
 stats:

@@ -1,6 +1,6 @@
 //! Fix module registry
 
-use super::{FixAction, ResponseFix, ToolCallAccumulator};
+use super::{FixAction, FixLogLevel, ResponseFix, ToolCallAccumulator};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -56,7 +56,7 @@ impl FixRegistry {
         for fix in &self.fixes {
             if self.is_enabled(fix.name()) && fix.applies(&result) {
                 let (new_result, action) = fix.apply(result);
-                Self::log_fix_action(fix.name(), &action);
+                Self::log_fix_action(fix.name(), &action, fix.log_level());
                 result = new_result;
             }
         }
@@ -71,7 +71,7 @@ impl FixRegistry {
         for fix in &self.fixes {
             if self.is_enabled(fix.name()) {
                 let (new_result, action) = fix.apply_stream(result);
-                Self::log_fix_action(fix.name(), &action);
+                Self::log_fix_action(fix.name(), &action, fix.log_level());
                 result = new_result;
             }
         }
@@ -86,7 +86,7 @@ impl FixRegistry {
         for fix in &self.fixes {
             if self.is_enabled(fix.name()) && fix.applies_with_context(&result, request) {
                 let (new_result, action) = fix.apply_with_context(result, request);
-                Self::log_fix_action(fix.name(), &action);
+                Self::log_fix_action(fix.name(), &action, fix.log_level());
                 result = new_result;
             }
         }
@@ -101,7 +101,7 @@ impl FixRegistry {
         for fix in &self.fixes {
             if self.is_enabled(fix.name()) {
                 let (new_result, action) = fix.apply_stream_with_context(result, request);
-                Self::log_fix_action(fix.name(), &action);
+                Self::log_fix_action(fix.name(), &action, fix.log_level());
                 result = new_result;
             }
         }
@@ -121,7 +121,7 @@ impl FixRegistry {
         for fix in &self.fixes {
             if self.is_enabled(fix.name()) {
                 let (new_result, action) = fix.apply_stream_with_accumulation(result, request, accumulator);
-                Self::log_fix_action(fix.name(), &action);
+                Self::log_fix_action(fix.name(), &action, fix.log_level());
                 result = new_result;
             }
         }
@@ -140,7 +140,7 @@ impl FixRegistry {
         for fix in &self.fixes {
             if self.is_enabled(fix.name()) {
                 let (new_result, action) = fix.apply_stream_with_accumulation_default(result, accumulator);
-                Self::log_fix_action(fix.name(), &action);
+                Self::log_fix_action(fix.name(), &action, fix.log_level());
                 result = new_result;
             }
         }
@@ -149,34 +149,70 @@ impl FixRegistry {
     }
 
     /// Centralized logging for fix actions
-    fn log_fix_action(fix_name: &str, action: &FixAction) {
+    fn log_fix_action(fix_name: &str, action: &FixAction, log_level: FixLogLevel) {
         match action {
             FixAction::NotApplicable => {
                 tracing::trace!(fix_name = fix_name, "Fix did not apply");
             }
             FixAction::Fixed { original_snippet, fixed_snippet } => {
-                // 1. WARN on detection
-                tracing::warn!(
-                    fix_name = fix_name,
-                    original = %original_snippet,
-                    "Detected malformed content"
-                );
-                // 2. INFO on successful fix
-                tracing::info!(
-                    fix_name = fix_name,
-                    original = %original_snippet,
-                    fixed = %fixed_snippet,
-                    "Successfully fixed malformed content"
-                );
+                // Use log level provided by the fix
+                match log_level {
+                    FixLogLevel::Trace => {
+                        tracing::trace!(
+                            fix_name = fix_name,
+                            original = %original_snippet,
+                            fixed = %fixed_snippet,
+                            "Detected and fixed malformed content"
+                        );
+                    }
+                    FixLogLevel::Debug => {
+                        tracing::debug!(
+                            fix_name = fix_name,
+                            original = %original_snippet,
+                            "Detected malformed content (fixed)"
+                        );
+                        tracing::trace!(
+                            fix_name = fix_name,
+                            original = %original_snippet,
+                            fixed = %fixed_snippet,
+                            "Successfully fixed malformed content"
+                        );
+                    }
+                    FixLogLevel::Info => {
+                        tracing::warn!(
+                            fix_name = fix_name,
+                            original = %original_snippet,
+                            "Detected malformed content"
+                        );
+                        tracing::info!(
+                            fix_name = fix_name,
+                            original = %original_snippet,
+                            fixed = %fixed_snippet,
+                            "Successfully fixed malformed content"
+                        );
+                    }
+                    FixLogLevel::Warn => {
+                        tracing::warn!(
+                            fix_name = fix_name,
+                            original = %original_snippet,
+                            "Detected malformed content"
+                        );
+                        tracing::warn!(
+                            fix_name = fix_name,
+                            original = %original_snippet,
+                            fixed = %fixed_snippet,
+                            "Successfully fixed malformed content"
+                        );
+                    }
+                }
             }
             FixAction::Failed { original_snippet, attempted_fix } => {
-                // 1. WARN on detection
+                // ALWAYS use WARN/ERROR for failures regardless of log level
                 tracing::warn!(
                     fix_name = fix_name,
                     original = %original_snippet,
                     "Detected malformed content"
                 );
-                // 2. ERROR on failed fix
                 tracing::error!(
                     fix_name = fix_name,
                     original = %original_snippet,

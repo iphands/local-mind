@@ -7,7 +7,9 @@
       "Bash(ls:*)",
       "Bash(grep:*)",
       "Bash(cargo run:*)",
-      "Bash(chmod:*)"
+      "Bash(chmod:*)",
+      "Bash(git add:*)",
+      "Bash(/tmp/log_level_demo.md:*)"
     ]
   }
 }

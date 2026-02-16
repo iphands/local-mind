@@ -217,6 +217,39 @@ The proxy requires `config.yaml` (copy from `config.yaml.default`). Key settings
 3. Update formatters in `src/stats/formatter.rs`
 4. Add to InfluxDB fields in `src/exporters/influxdb.rs`
 
+## Streaming Fix Delta Calculation (Important!)
+
+**Critical Implementation Detail**: When fixes are applied to streaming responses, the proxy must calculate and send **completion deltas**, not full fixed JSON.
+
+### The Problem
+Clients (Claude Code, Opencode) accumulate delta strings from SSE chunks. If a fix detects malformed JSON and sends the complete fixed result, the client will append it to what they've already accumulated, creating duplicate fields:
+
+```
+Client has: {"content":"test","filePath":"/path1",
+Proxy (bug): sends full JSON {"content":"test","filePath":"/path1"}
+Client gets: {"content":"test","filePath":"/path1",{"content":"test","filePath":"/path1"}  ← INVALID!
+```
+
+### The Solution
+The fix in `src/fixes/toolcall_bad_filepath_fix.rs` implements robust delta calculation:
+
+1. **Primary method**: Subtract current chunk from accumulated using `ends_with()`
+2. **Fallback method**: Use `rfind()` to handle JSON reformatting edge cases
+3. **Safe default**: If delta calc fails, send minimal completion (`}`) - never send full JSON
+4. **Logging**: Extensive debug logging helps diagnose delta calculation issues
+
+See `../context/pitfalls.md` → "Streaming Response Delta Calculation" for full details and implementation guidance.
+
+### Testing Streaming Fixes
+When modifying streaming fixes:
+- Unit tests: `cargo test toolcall_bad_filepath`
+- Integration tests: `cargo test test_streaming_toolcall`
+- Client accumulation: `cargo test test_client_side_accumulation`
+- Delta calculation: `cargo test test_delta_calculation`
+- Manually test with real clients (Claude Code or Opencode)
+
+**Key test**: Verify that client-accumulated deltas produce valid JSON (see tests in `src/fixes/toolcall_bad_filepath_fix.rs` lines 1318-1615).
+
 ## Maintaining Client Compatibility
 
 When modifying the proxy, ensure these compatibility requirements:

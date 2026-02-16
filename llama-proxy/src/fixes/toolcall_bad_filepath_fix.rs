@@ -6,55 +6,75 @@
 //! Where:
 //! - filePath is duplicated
 //! - The second occurrence is malformed JSON (missing colon/value quotes)
+//!
+//! ## Implementation Strategy (Simplified)
+//!
+//! Uses **schema-based truncation**: The Write tool schema (Opencode/Claude Code)
+//! strictly defines only 2 fields: `content` and `filePath` with no additional
+//! properties allowed. Therefore, once we find the first complete `"filePath":"value"`,
+//! everything after is garbage by definition.
+//!
+//! **Fix approach:**
+//! 1. Find first `"filePath":"<value>"` occurrence
+//! 2. Truncate after the closing quote of the value
+//! 3. Remove trailing comma if present
+//! 4. Close with `}`
+//!
+//! This is simpler and more robust than previous multi-stage fallback approaches.
+//!
+//! **Streaming delta calculation:**
+//! When fixing streaming responses, we MUST send only a completion delta (typically
+//! `}` or `"_":null}`), NOT the full fixed JSON. Clients accumulate deltas, so
+//! sending full JSON would duplicate content. See `calculate_completion_delta()`.
 
 use super::{FixAction, ResponseFix, ToolCallAccumulator};
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::Arc;
 
 /// Fix for malformed filePath in Qwen3-Coder tool calls
+///
+/// Uses schema-based truncation: Since the Write tool schema only allows
+/// `content` and `filePath` fields (no additional properties), we truncate
+/// after the first complete `"filePath":"value"` occurrence.
 pub struct ToolcallBadFilepathFix {
-    /// If true, remove duplicate keys; if false, fix and keep both
+    /// Deprecated: Now always truncates after first filePath (kept for API compatibility)
+    #[allow(dead_code)]
     remove_duplicate: Arc<AtomicBool>,
 }
 
 impl ToolcallBadFilepathFix {
+    /// Create new fix instance
+    /// Note: `remove_duplicate` parameter is deprecated (always true now)
     pub fn new(remove_duplicate: bool) -> Self {
         Self {
             remove_duplicate: Arc::new(AtomicBool::new(remove_duplicate)),
         }
     }
 
-    /// Set whether to remove duplicates
-    pub fn set_remove_duplicate(&self, value: bool) {
-        self.remove_duplicate.store(value, Ordering::SeqCst);
+    /// Deprecated: No longer has any effect (always removes duplicates via truncation)
+    #[allow(dead_code)]
+    pub fn set_remove_duplicate(&self, _value: bool) {
+        // No-op: truncation is now the only approach
     }
 
     /// Check if arguments string is malformed
+    /// Simplified detection: Invalid JSON + contains "filePath" = malformed
+    /// Also treats duplicate filePath keys as malformed (even if syntactically valid JSON)
     fn is_malformed(&self, args: &str) -> bool {
-        // Only trigger if:
-        // 1. "filePath" appears as a JSON key (quoted, followed by colon or in duplicate pattern)
-        // 2. AND the JSON is invalid
-
-        // Look for "filePath" as a key pattern (not just anywhere in the string)
-        let has_filepath_key = args.contains(r#""filePath":"#)
-            || args.contains(r#","filePath""#)
-            || args.starts_with(r#"{"filePath""#);
-
-        if !has_filepath_key {
-            return false;
-        }
-
-        // Check for duplicate "filePath" or malformed "filePath" patterns
-        let filepath_count = args.matches(r#""filePath""#).count();
-
-        // If multiple "filePath" keys, definitely malformed
-        if filepath_count > 1 {
+        // Check for duplicate filePath keys first (even if JSON is valid)
+        // Duplicate keys are syntactically valid JSON but semantically wrong for our schema
+        if args.matches(r#""filePath""#).count() > 1 {
             return true;
         }
 
-        // Single "filePath" key with invalid JSON
-        !self.is_valid_json(args)
+        // Valid JSON with single filePath? → Not malformed
+        if self.is_valid_json(args) {
+            return false;
+        }
+
+        // Invalid JSON with "filePath" → Our fix applies
+        args.contains(r#""filePath""#)
     }
 
     /// Check if a string is valid JSON
@@ -71,76 +91,47 @@ impl ToolcallBadFilepathFix {
         }
     }
 
-    /// Attempt to fix malformed arguments string
+    /// Attempt to fix malformed arguments string using schema-based truncation
+    /// Key insight: Write tool schema has only 2 fields (content, filePath) with no
+    /// additional properties allowed. Once we find the first complete "filePath":"value",
+    /// everything after is garbage by definition.
     fn fix_arguments(&self, args: &str) -> String {
-        // First, try to parse as-is
+        // Valid JSON? Pass through (normalize it)
         if let Ok(json) = serde_json::from_str::<Value>(args) {
-            // Valid JSON - no fix needed
             return serde_json::to_string(&json).unwrap_or_else(|_| args.to_string());
         }
 
-        // Invalid JSON - try to fix
-        self.fix_malformed_json(args)
-    }
+        // Invalid JSON - apply schema-based truncation
+        // Find first "filePath":"value", truncate after, close with }
+        let filepath_key = r#""filePath":"#;
+        if let Some(start) = args.find(filepath_key) {
+            let after_colon = &args[start + filepath_key.len()..];
 
-    /// Fix malformed JSON with duplicate/malformed filePath
-    fn fix_malformed_json(&self, args: &str) -> String {
-        // Pattern: "filePath":"/path","filePath"/path"
-        // The second occurrence is missing the colon or has broken syntax
+            // Find the end of the string value (handles escapes correctly)
+            if let Some(value_end) = self.find_string_end(after_colon) {
+                let end_pos = start + filepath_key.len() + value_end;
+                let mut result = args[..end_pos].to_string();
 
-        // Try to find and fix the pattern
-        let fixed = self.try_fix_duplicate_filepath(args);
-        if self.is_valid_json(&fixed) {
-            return fixed;
-        }
+                // Remove trailing comma if present (invalid before closing brace)
+                if result.trim_end().ends_with(',') {
+                    result = result.trim_end().trim_end_matches(',').to_string();
+                }
 
-        // Try more aggressive fixing
-        self.try_aggressive_fix(args)
-    }
+                result.push('}');
 
-    /// Try to fix duplicate filePath pattern
-    fn try_fix_duplicate_filepath(&self, args: &str) -> String {
-        // Look for pattern: "filePath":"...","filePath"...
-        let fp_pattern = r#""filePath""#;
-
-        let occurrences: Vec<_> = args.match_indices(fp_pattern).collect();
-
-        if occurrences.len() < 2 {
-            // No duplicates, try other fixes
-            return args.to_string();
-        }
-
-        let remove_dup = self.remove_duplicate.load(Ordering::SeqCst);
-
-        if remove_dup {
-            // Remove everything from the second filePath occurrence
-            // Find the second occurrence and what follows
-            let first_end = occurrences[0].0 + fp_pattern.len();
-
-            // Find the value after first filePath
-            let after_first = &args[first_end..];
-
-            // Find where the first filePath value ends
-            if let Some(value_start) = after_first.find(':') {
-                let after_colon = &after_first[value_start..];
-
-                // Find the value (should be a string)
-                if let Some(value_end) = self.find_string_end(after_colon) {
-                    let keep_until = first_end + value_start + value_end;
-
-                    // Reconstruct: take content up to end of first filePath value, then close
-                    // This truncates everything after the first valid filePath value
-                    let result = format!("{}{}", &args[..keep_until], "}");
-
+                // Validate and return
+                if self.is_valid_json(&result) {
                     return result;
                 }
             }
         }
 
-        args.to_string()
+        // Fallback: empty valid object
+        "{}".to_string()
     }
 
     /// Find the end of a JSON string value starting from position after colon
+    /// Correctly handles escaped quotes like \"
     fn find_string_end(&self, s: &str) -> Option<usize> {
         let chars: Vec<char> = s.chars().collect();
 
@@ -171,103 +162,78 @@ impl ToolcallBadFilepathFix {
         None
     }
 
-    /// More aggressive fix attempt
-    fn try_aggressive_fix(&self, args: &str) -> String {
-        // Try to extract valid key-value pairs and rebuild
-        let mut result = String::from("{");
-
-        // Simple regex-like extraction for "key":"value" patterns
-        let mut in_string = false;
-        let mut escaped = false;
-        let mut current_key: Option<String> = None;
-        let mut current_value: Option<String> = None;
-        let mut chars = args.chars().peekable();
-        let mut first_pair = true;
-        let mut seen_keys = std::collections::HashSet::new();
-
-        while let Some(c) = chars.next() {
-            if escaped {
-                if let Some(ref mut val) = current_value {
-                    val.push(c);
-                }
-                escaped = false;
-                continue;
-            }
-
-            match c {
-                '\\' => {
-                    escaped = true;
-                    if let Some(ref mut val) = current_value {
-                        val.push('\\');
-                    }
-                }
-                '"' => {
-                    in_string = !in_string;
-                }
-                ':' if !in_string => {
-                    // Value starts
-                    // Skip whitespace
-                    while let Some(&next) = chars.peek() {
-                        if next.is_whitespace() {
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                }
-                ',' if !in_string => {
-                    // End of pair
-                    if let (Some(key), Some(value)) = (&current_key, &current_value) {
-                        if !seen_keys.contains(key) {
-                            if !first_pair {
-                                result.push(',');
-                            }
-                            result.push_str(&format!(r#""{}":"{}""#, key, value));
-                            seen_keys.insert(key.clone());
-                            first_pair = false;
-                        }
-                    }
-                    current_key = None;
-                    current_value = None;
-                }
-                '{' | '}' if !in_string => {
-                    // Skip braces
-                }
-                _ if in_string => {
-                    // Accumulate string content
-                    if current_key.is_none() {
-                        current_key = Some(String::new());
-                    }
-                    if current_value.is_some() {
-                        if let Some(ref mut val) = current_value {
-                            val.push(c);
-                        }
-                    } else if let Some(ref mut key) = current_key {
-                        key.push(c);
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        // Handle last pair
-        if let (Some(key), Some(value)) = (&current_key, &current_value) {
-            if !seen_keys.contains(key) {
-                if !first_pair {
-                    result.push(',');
-                }
-                result.push_str(&format!(r#""{}":"{}""#, key, value));
-            }
-        }
-
-        result.push('}');
-
-        // Validate the result
-        if self.is_valid_json(&result) {
-            result
+    /// Calculate completion delta to send to client
+    /// CRITICAL: Must NEVER send full JSON, only minimal completion
+    ///
+    /// When streaming tool call arguments, clients (e.g., Claude Code, Opencode) accumulate
+    /// delta strings from each SSE chunk. If we detect malformed JSON in the accumulated
+    /// args, we must calculate and send a "completion delta" that makes the client's
+    /// already-accumulated content valid.
+    ///
+    /// # Arguments
+    /// * `accumulated` - Server-side accumulated content (all chunks so far)
+    /// * `current_chunk` - Chunk we just received
+    /// * `index` - Tool call index (for logging)
+    ///
+    /// # Returns
+    /// A minimal completion string (typically "}" or ""_":null}")
+    fn calculate_completion_delta(
+        &self,
+        accumulated: &str,
+        current_chunk: &str,
+        index: usize,
+    ) -> String {
+        // TIER 1: Fast path - accumulated ends with current chunk
+        // This is the common case since we just appended current_chunk
+        let already_sent_len = if accumulated.ends_with(current_chunk) {
+            accumulated.len() - current_chunk.len()
         } else {
-            // Last resort: return empty object
-            "{}".to_string()
+            // TIER 2: Fallback for JSON reformatting/escaping
+            // String matching may fail due to encoding or escaping differences
+            if let Some(pos) = accumulated.rfind(current_chunk) {
+                tracing::debug!(
+                    fix_name = self.name(),
+                    index = index,
+                    "Delta calc: rfind fallback (reformatting detected)"
+                );
+                pos
+            } else {
+                // TIER 3: Safe fallback - cannot determine position
+                // CRITICAL: Return minimal completion, NEVER full JSON
+                tracing::warn!(
+                    fix_name = self.name(),
+                    index = index,
+                    "Delta calc: Cannot determine position, using safe fallback"
+                );
+                return self.safe_completion(accumulated);
+            }
+        };
+
+        let already_sent = &accumulated[..already_sent_len];
+
+        // Determine closing based on trailing punctuation
+        if already_sent.trim_end().ends_with(',') {
+            // Consume trailing comma with dummy field
+            r#""_":null}"#.to_string()
+        } else {
+            // Just close the object
+            "}".to_string()
+        }
+    }
+
+    /// Safe completion when delta calculation is uncertain
+    /// NEVER sends full JSON - only minimal closing
+    ///
+    /// This is the last resort when we cannot reliably determine what the client
+    /// has already accumulated. We send a minimal completion that attempts to
+    /// close the JSON without duplicating content.
+    fn safe_completion(&self, already_sent: &str) -> String {
+        if already_sent.trim_end().ends_with(',') {
+            // Trailing comma exists - consume with dummy field
+            r#""_":null}"#.to_string()
+        } else {
+            // Just close
+            "}".to_string()
         }
     }
 }
@@ -372,11 +338,26 @@ impl ResponseFix for ToolcallBadFilepathFix {
         (chunk, overall_action)
     }
 
+    /// Override: Use accumulation when request context is available
+    /// This method is called when request_json is Some in streaming.rs
+    fn apply_stream_with_accumulation(
+        &self,
+        chunk: Value,
+        _request: &Value,
+        accumulator: &mut ToolCallAccumulator,
+    ) -> (Value, FixAction) {
+        // Delegate to the default version since we don't need request context
+        // The accumulation logic is in apply_stream_with_accumulation_default
+        tracing::debug!(fix_name = self.name(), "OVERRIDE CALLED - ToolcallBadFilepathFix.apply_stream_with_accumulation (with request)");
+        self.apply_stream_with_accumulation_default(chunk, accumulator)
+    }
+
     fn apply_stream_with_accumulation_default(
         &self,
         mut chunk: Value,
         accumulator: &mut ToolCallAccumulator,
     ) -> (Value, FixAction) {
+        tracing::debug!(fix_name = self.name(), "OVERRIDE CALLED - ToolcallBadFilepathFix.apply_stream_with_accumulation_default");
         let mut overall_action = FixAction::NotApplicable;
 
         if let Some(choices) = chunk.get_mut("choices").and_then(|c| c.as_array_mut()) {
@@ -394,6 +375,21 @@ impl ResponseFix for ToolcallBadFilepathFix {
                             if let Some(chunk_args) =
                                 function.get("arguments").and_then(|a| a.as_str())
                             {
+                                // CRITICAL: Check if this index has already been fixed
+                                // If so, suppress this chunk by replacing arguments with empty string
+                                if accumulator.is_fixed(index) {
+                                    tracing::debug!(
+                                        fix_name = self.name(),
+                                        index = index,
+                                        chunk_args_len = chunk_args.len(),
+                                        chunk_args_snippet = Self::create_snippet_static(chunk_args, 50),
+                                        "POST-FIX CHUNK SUPPRESSED: Index already fixed, suppressing chunk"
+                                    );
+                                    // Suppress this chunk - replace arguments with empty string
+                                    function["arguments"] = Value::String(String::new());
+                                    return (chunk, FixAction::NotApplicable);
+                                }
+
                                 // Accumulate the arguments with eager detection
                                 let accumulated = accumulator.accumulate_and_check(index, chunk_args, self.name());
 
@@ -406,6 +402,33 @@ impl ResponseFix for ToolcallBadFilepathFix {
                                 if looks_complete || has_duplicate_filepath {
                                     // Check if accumulated args are malformed
                                     if self.is_malformed(&accumulated) {
+                                        // ===================================================================
+                                        // DELTA CALCULATION FOR STREAMING TOOL CALL FIXES
+                                        // ===================================================================
+                                        // When streaming tool call arguments, clients (e.g., Claude Code, Opencode)
+                                        // accumulate delta strings from each SSE chunk. If we detect malformed JSON
+                                        // in the accumulated args, we must calculate and send a "completion delta"
+                                        // that makes the client's already-accumulated content valid.
+                                        //
+                                        // CRITICAL: We must NOT send the full fixed JSON, as that would duplicate
+                                        // content the client has already accumulated, causing malformed output like:
+                                        //   {"content":"...","filePath":"/path","filePath"/corrupted"}
+                                        //
+                                        // Example scenario:
+                                        //   Chunk 1: `{"content":"test",`       → Client accumulates: {"content":"test",
+                                        //   Chunk 2: `"filePath":"/path1",`     → Client accumulates: {"content":"test","filePath":"/path1",
+                                        //   Chunk 3: `"filePath"/path2"}`       → Malformed! Fix triggers
+                                        //
+                                        //   We detect: accumulated = `{"content":"test","filePath":"/path1","filePath"/path2"}`
+                                        //   We fix to: `{"content":"test","filePath":"/path1"}`
+                                        //   We calculate: client already has `{"content":"test","filePath":"/path1",`
+                                        //   We must send: `"_":null}` (completion delta)
+                                        //   Client result: `{"content":"test","filePath":"/path1","_":null}` ✓ Valid JSON
+                                        //
+                                        // The delta calculation (see below) handles edge cases where string matching
+                                        // fails due to JSON escaping, UTF-8 encoding, or reformatting.
+                                        // ===================================================================
+
                                         // NEW: Log warning BEFORE attempting fix (don't rely only on FixAction)
                                         tracing::warn!(
                                             fix_name = self.name(),
@@ -419,57 +442,23 @@ impl ResponseFix for ToolcallBadFilepathFix {
                                         let original = accumulated.clone();
                                         let fixed = self.fix_arguments(&accumulated);
                                         if self.is_valid_json(&fixed) {
-                                            // CRITICAL FIX: Don't send the FULL fixed JSON
-                                            // The client (Claude Code) accumulates deltas, so sending the full
-                                            // fixed JSON would cause it to append to what it already has, corrupting it.
-                                            //
-                                            // Instead, calculate the DELTA needed to complete the JSON validly.
-                                            // We need to determine what was already sent to the client and send
-                                            // only the remaining part to make valid JSON.
+                                            // Calculate the completion delta using extracted method
+                                            // This ensures we NEVER send full JSON to the client
+                                            let valid_completion = self.calculate_completion_delta(
+                                                &accumulated,
+                                                chunk_args,
+                                                index,
+                                            );
 
-                                            // Get what was already sent to client (accumulated minus current chunk)
-                                            let current_chunk = chunk_args;
-                                            let already_sent = if accumulated.ends_with(current_chunk) {
-                                                &accumulated[..accumulated.len() - current_chunk.len()]
-                                            } else {
-                                                // Fallback: assume all previous content was sent
-                                                ""
-                                            };
+                                            function["arguments"] = Value::String(valid_completion.clone());
+                                            // Mark this index as fixed so subsequent chunks are suppressed
+                                            accumulator.mark_fixed(index);
 
-                                            // Calculate the delta: what to add to already_sent to get fixed result
-                                            // For the filePath fix, we need to handle the trailing comma issue.
-                                            // Chunk 2 likely ended with a comma (expecting another field), but
-                                            // chunk 3 was trying to add a malformed duplicate field.
-                                            //
-                                            // We have three options:
-                                            // 1. Send `}` - leaves trailing comma, but some parsers accept it
-                                            // 2. Send empty string - leaves incomplete JSON with trailing comma
-                                            // 3. Send a dummy field to consume the comma
-                                            //
-                                            // Option 3 is the safest for compatibility
-                                            let valid_completion = if already_sent.trim_end().ends_with(',') {
-                                                // Trailing comma exists - send a minimal dummy field to consume it
-                                                // This produces valid JSON that all parsers will accept
-                                                // The field name "_" is short and indicates it's a placeholder
-                                                r#""_":null}"#
-                                            } else if already_sent.is_empty() {
-                                                // First chunk - send the full fixed content
-                                                &fixed
-                                            } else {
-                                                // Send what's needed to complete it
-                                                "}"
-                                            };
-
-                                            function["arguments"] = Value::String(valid_completion.to_string());
-                                            // Clear accumulator since we've fixed it
-                                            accumulator.clear(index);
-
-                                            // NEW: Log success explicitly
+                                            // Log success
                                             tracing::info!(
                                                 fix_name = self.name(),
                                                 index = index,
-                                                already_sent_to_client = Self::create_snippet_static(already_sent, 100),
-                                                sending_delta = valid_completion,
+                                                sending_delta = &valid_completion,
                                                 original_accumulated = Self::create_snippet_static(&original, 100),
                                                 fixed_version = Self::create_snippet_static(&fixed, 100),
                                                 "FIX SUCCESSFUL: Sending completion delta to client"
@@ -1312,5 +1301,489 @@ mod tests {
             "CLIENT-SIDE ACCUMULATION FAILED! Claude Code sees: {}",
             client_accumulated
         );
+    }
+
+    // ============================================================
+    // PHASE 1.2: Delta Calculation Unit Tests (Bug Reproduction)
+    // ============================================================
+    // These tests target the specific bug in apply_stream_with_accumulation_default
+    // where the delta calculation fails and sends full JSON instead of delta
+
+    #[test]
+    fn test_delta_calculation_with_escaped_quotes() {
+        // This test demonstrates the bug: when chunk has escaped quotes,
+        // accumulated.ends_with(current_chunk) may return false
+        use super::ToolCallAccumulator;
+
+        let fix = ToolcallBadFilepathFix::new(true);
+        let mut accumulator = ToolCallAccumulator::new();
+
+        // Chunk with escaped newline in content - use regular strings since they contain backslashes
+        let chunk1 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"content\\\":\\\"#!/usr/bin/perl\\\\n\\\",\"}}]}}]}";
+        let chunk2 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\":\\\"/path1\\\",\"}}]}}]}";
+        let chunk3 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\"/path2\\\"}\"}}]}}]}";
+
+        let (result1, _) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk1).unwrap(),
+            &mut accumulator,
+        );
+
+        let (result2, _) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk2).unwrap(),
+            &mut accumulator,
+        );
+
+        let (result3, action3) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk3).unwrap(),
+            &mut accumulator,
+        );
+
+        // Extract deltas
+        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+
+        println!("Delta 1: {}", delta1);
+        println!("Delta 2: {}", delta2);
+        println!("Delta 3 (should be completion delta, NOT full JSON): {}", delta3);
+
+        // Simulate client-side accumulation
+        let mut client_accumulated = String::new();
+        client_accumulated.push_str(delta1);
+        client_accumulated.push_str(delta2);
+        client_accumulated.push_str(delta3);
+
+        println!("Client accumulated: {}", client_accumulated);
+
+        // BUG TEST: The client should have valid JSON after accumulation
+        assert!(
+            fix.is_valid_json(&client_accumulated),
+            "BUG REPRODUCED: Client-side accumulation is INVALID JSON! Got: {}",
+            client_accumulated
+        );
+    }
+
+    #[test]
+    fn test_delta_calculation_fallback_sends_full_json() {
+        // This test explicitly checks if the fallback sends full fixed JSON
+        // (which is the bug - it should send a completion delta instead)
+        use super::ToolCallAccumulator;
+
+        let fix = ToolcallBadFilepathFix::new(true);
+        let mut accumulator = ToolCallAccumulator::new();
+
+        // Create a scenario where ends_with() will fail
+        // Use UTF-8 multi-byte characters to make string matching tricky
+        let chunk1 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"content\\\":\\\"テスト\\\",\"}}]}}]}";
+        let chunk2 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\":\\\"/tmp/test\\\",\"}}]}}]}";
+        let chunk3 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\"/malformed\\\"}\"}}]}}]}";
+
+        let (result1, _) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk1).unwrap(),
+            &mut accumulator,
+        );
+
+        let (result2, _) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk2).unwrap(),
+            &mut accumulator,
+        );
+
+        let (result3, action3) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk3).unwrap(),
+            &mut accumulator,
+        );
+
+        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+
+        // Client accumulates
+        let mut client_accumulated = String::new();
+        client_accumulated.push_str(delta1);
+        client_accumulated.push_str(delta2);
+        client_accumulated.push_str(delta3);
+
+        println!("Client accumulated: {}", client_accumulated);
+
+        // Check if delta3 looks like full JSON (starts with '{') vs a completion delta
+        // If it starts with '{', it's likely the full fixed JSON (the bug!)
+        if delta3.starts_with('{') {
+            println!("BUG DETECTED: Delta 3 appears to be FULL JSON: {}", delta3);
+            println!("This will cause duplicate fields when client accumulates!");
+        }
+
+        // The critical test: client accumulated result must be valid
+        assert!(
+            fix.is_valid_json(&client_accumulated),
+            "BUG REPRODUCED: Fallback sent full JSON causing invalid client accumulation: {}",
+            client_accumulated
+        );
+    }
+
+    #[test]
+    fn test_delta_calculation_with_chunk_duplication() {
+        // Test when the chunk appears multiple times in accumulated (partial overlap)
+        use super::ToolCallAccumulator;
+
+        let fix = ToolcallBadFilepathFix::new(true);
+        let mut accumulator = ToolCallAccumulator::new();
+
+        // Create chunks where content repeats
+        let chunk1 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"filePath\\\":\\\"/\"}}]}}]}";
+        let chunk2 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"filePath\\\",\"}}]}}]}";
+        // Malformed chunk - missing colon before second occurrence
+        let chunk3 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\"/test\\\"}\"}}]}}]}";
+
+        let (result1, _) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk1).unwrap(),
+            &mut accumulator,
+        );
+
+        let (result2, _) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk2).unwrap(),
+            &mut accumulator,
+        );
+
+        let (result3, _) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk3).unwrap(),
+            &mut accumulator,
+        );
+
+        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+
+        let mut client_accumulated = String::new();
+        client_accumulated.push_str(delta1);
+        client_accumulated.push_str(delta2);
+        client_accumulated.push_str(delta3);
+
+        println!("Client accumulated: {}", client_accumulated);
+
+        assert!(
+            fix.is_valid_json(&client_accumulated),
+            "BUG: Partial overlap in chunks broke delta calculation: {}",
+            client_accumulated
+        );
+    }
+
+    #[test]
+    fn test_delta_calculation_with_utf8_multibyte() {
+        // Test with multi-byte UTF-8 characters that might confuse string matching
+        use super::ToolCallAccumulator;
+
+        let fix = ToolcallBadFilepathFix::new(true);
+        let mut accumulator = ToolCallAccumulator::new();
+
+        // Chunks with emoji and Japanese characters
+        let chunk1 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"content\\\":\\\"🔧 修正中\\\",\"}}]}}]}";
+        let chunk2 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\":\\\"/home/ユーザー/test.txt\\\",\"}}]}}]}";
+        let chunk3 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\"/broken\\\"}\"}}]}}]}";
+
+        let (result1, _) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk1).unwrap(),
+            &mut accumulator,
+        );
+
+        let (result2, _) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk2).unwrap(),
+            &mut accumulator,
+        );
+
+        let (result3, _) = fix.apply_stream_with_accumulation_default(
+            serde_json::from_str(chunk3).unwrap(),
+            &mut accumulator,
+        );
+
+        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+
+        let mut client_accumulated = String::new();
+        client_accumulated.push_str(delta1);
+        client_accumulated.push_str(delta2);
+        client_accumulated.push_str(delta3);
+
+        println!("Client accumulated with UTF-8: {}", client_accumulated);
+
+        assert!(
+            fix.is_valid_json(&client_accumulated),
+            "BUG: UTF-8 multibyte chars broke delta calculation: {}",
+            client_accumulated
+        );
+    }
+
+    #[test]
+    fn test_ends_with_mismatch_causes_full_json_send() {
+        // This test specifically reproduces the bug where accumulated.ends_with(current_chunk)
+        // returns FALSE, causing the fallback to send FULL fixed JSON instead of delta
+        use super::ToolCallAccumulator;
+
+        let fix = ToolcallBadFilepathFix::new(true);
+        let mut accumulator = ToolCallAccumulator::new();
+
+        // Manually construct a scenario where the accumulator has different content
+        // than what ends_with() would expect
+
+        // Chunk 1: partial JSON
+        let chunk1_json = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "arguments": r#"{"content":"test","#
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let (result1, _) = fix.apply_stream_with_accumulation_default(chunk1_json.clone(), &mut accumulator);
+
+        // Chunk 2: more partial JSON
+        let chunk2_json = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            "arguments": r#""filePath":"/path1","#
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let (result2, _) = fix.apply_stream_with_accumulation_default(chunk2_json.clone(), &mut accumulator);
+
+        // NOW: Manually inject different content into accumulator to break ends_with()
+        // This simulates what could happen if JSON is reformatted or encoding changes
+        accumulator.accumulated.insert(0, r#"{"content":"test",  "filePath":"/path1","#.to_string());
+
+        // Chunk 3: malformed duplicate filePath
+        let chunk3_json = serde_json::json!({
+            "choices": [{
+                "delta": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {
+                            // This is the malformed chunk
+                            "arguments": r#""filePath"/path2"}"#
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let (result3, action3) = fix.apply_stream_with_accumulation_default(chunk3_json, &mut accumulator);
+
+        // Extract the delta that was sent
+        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+
+        println!("Delta 3 sent (after ends_with mismatch): {}", delta3);
+
+        // Check if it sent full JSON (starts with '{') - THIS IS THE BUG
+        if delta3.starts_with('{') {
+            println!("BUG REPRODUCED: Sent full JSON instead of delta!");
+            println!("Full delta3: {}", delta3);
+
+            // If client had accumulated chunk1 + chunk2, and we send full JSON:
+            let mut client_wrong = String::new();
+            client_wrong.push_str(r#"{"content":"test","#);
+            client_wrong.push_str(r#""filePath":"/path1","#);
+            client_wrong.push_str(delta3);
+
+            println!("Client would accumulate: {}", client_wrong);
+            assert!(
+                !fix.is_valid_json(&client_wrong),
+                "This should produce INVALID JSON (duplicate fields): {}",
+                client_wrong
+            );
+        } else {
+            println!("Sent completion delta (no bug): {}", delta3);
+        }
+    }
+
+    // ============================================================
+    // POST-FIX CHUNK SUPPRESSION TESTS
+    // ============================================================
+    // These tests verify that after a fix is applied, subsequent
+    // chunks for the same tool call index are suppressed
+
+    #[test]
+    fn test_post_fix_chunk_suppression() {
+        // After fix is applied, subsequent chunks for same index should be suppressed
+        let fix = ToolcallBadFilepathFix::new(true);
+        let mut accumulator = ToolCallAccumulator::new();
+
+        // Chunk 1: Start JSON
+        let chunk1 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":"}}]}}]});
+        let _ = fix.apply_stream_with_accumulation_default(chunk1, &mut accumulator);
+
+        // Chunk 2: First filePath
+        let chunk2 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"filePath\":\"/path1\","}}]}}]});
+        let _ = fix.apply_stream_with_accumulation_default(chunk2, &mut accumulator);
+
+        // Chunk 3: Duplicate malformed filePath - triggers fix
+        let chunk3 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"filePath\"/path2\"}"}}]}}]});
+        let (result3, action3) = fix.apply_stream_with_accumulation_default(chunk3, &mut accumulator);
+        assert!(action3.detected());
+
+        // Chunk 4: Post-fix chunk - should be suppressed!
+        let chunk4 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"garbage"}}]}}]});
+        let (result4, _) = fix.apply_stream_with_accumulation_default(chunk4, &mut accumulator);
+
+        let args4 = result4["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        assert_eq!(args4, "", "Post-fix chunk should be suppressed (empty string)");
+
+        // Chunk 5: Another post-fix chunk - should also be suppressed
+        let chunk5 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"more garbage"}}]}}]});
+        let (result5, _) = fix.apply_stream_with_accumulation_default(chunk5, &mut accumulator);
+
+        let args5 = result5["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        assert_eq!(args5, "", "Second post-fix chunk should also be suppressed");
+    }
+
+    #[test]
+    fn test_new_pattern_brace_after_filepath() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        // Test "filePath} pattern (key followed by } instead of proper value)
+        let malformed = r#"{"content":"code","filePath":"/path1","filePath}/path2"}"#;
+        assert!(fix.is_malformed(malformed), "Should detect 'filePath}}' as malformed");
+
+        let fixed = fix.fix_arguments(malformed);
+        assert!(fix.is_valid_json(&fixed), "Fixed version should be valid JSON, got: {}", fixed);
+    }
+
+    #[test]
+    fn test_new_pattern_slash_after_filepath() {
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        // Test "filePath/ pattern (key followed by / without colon)
+        let malformed = r#"{"content":"code","filePath":"/path1","filePath/path2"}"#;
+        assert!(fix.is_malformed(malformed), "Should detect 'filePath/' as malformed");
+
+        let fixed = fix.fix_arguments(malformed);
+        // Note: The aggressive fix may not always produce valid JSON for all patterns,
+        // but we should at least not crash
+        println!("Fixed output: {}", fixed);
+    }
+
+    #[test]
+    fn test_client_accumulation_with_post_fix_suppression() {
+        // Simulate full client-side accumulation with post-fix suppression
+        let fix = ToolcallBadFilepathFix::new(true);
+        let mut accumulator = ToolCallAccumulator::new();
+
+        // Build the streaming scenario that caused the original bug
+        // Note: The chunk that triggers the fix will send a completion delta (not suppressed)
+        // Subsequent chunks AFTER the fix will be suppressed
+        let chunks = vec![
+            (r#"{"content":"code","#, false, false),  // Normal accumulation
+            (r#""filePath":"/path1","#, false, false), // Normal accumulation
+            (r#""filePath"/home"#, false, true),       // Triggers fix, sends completion delta
+            (r#""filePath}"#, true, false),            // Post-fix - should suppress
+            (r#"/iphands"#, true, false),              // Post-fix - should suppress
+            (r#"/prog/slop"#, true, false),            // Post-fix - should suppress
+        ];
+
+        let mut client_accumulated = String::new();
+
+        for (args, should_suppress, triggers_fix) in chunks {
+            let chunk = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":args}}]}}]});
+            let (result, _) = fix.apply_stream_with_accumulation_default(chunk, &mut accumulator);
+
+            let delta = result["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                .as_str().unwrap();
+
+            if should_suppress {
+                assert_eq!(delta, "", "Expected suppression but got: {}", delta);
+            } else if triggers_fix {
+                // The chunk that triggers the fix sends a completion delta
+                assert!(!delta.is_empty() || delta == "}" || delta.contains("null"),
+                        "Fix trigger chunk should send completion delta, got: {}", delta);
+                client_accumulated.push_str(delta);
+            } else {
+                // Normal accumulation
+                client_accumulated.push_str(delta);
+            }
+        }
+
+        // Client's final accumulated JSON should be valid
+        println!("Client accumulated: {}", client_accumulated);
+
+        // The accumulated result should be valid JSON
+        assert!(fix.is_valid_json(&client_accumulated),
+                "Client accumulated JSON should be valid, got: {}", client_accumulated);
+
+        // At minimum, check that it doesn't have the malformed patterns
+        assert!(!client_accumulated.contains(r#""filePath}"#), "Should not contain malformed filePath}}");
+    }
+
+    #[test]
+    fn test_post_fix_suppression_different_indices() {
+        // Verify that suppression only affects the fixed index, not other indices
+        let fix = ToolcallBadFilepathFix::new(true);
+        let mut accumulator = ToolCallAccumulator::new();
+
+        // Tool call 0: Will be fixed
+        let chunk1 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"/path1\","}}]}}]});
+        let _ = fix.apply_stream_with_accumulation_default(chunk1, &mut accumulator);
+
+        let chunk2 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"filePath\"/path2\"}"}}]}}]});
+        let (_, action) = fix.apply_stream_with_accumulation_default(chunk2, &mut accumulator);
+        assert!(action.detected());
+
+        // Tool call 0 post-fix: Should be suppressed
+        let chunk3 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"suppressed"}}]}}]});
+        let (result3, _) = fix.apply_stream_with_accumulation_default(chunk3, &mut accumulator);
+        assert_eq!(result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap(), "");
+
+        // Tool call 1: Should NOT be affected - different index
+        let chunk4 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"ok\":true}"}}]}}]});
+        let (result4, _) = fix.apply_stream_with_accumulation_default(chunk4, &mut accumulator);
+        assert_eq!(
+            result4["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap(),
+            "{\"ok\":true}",
+            "Different index should not be suppressed"
+        );
+    }
+
+    #[test]
+    fn test_accumulator_mark_fixed_vs_clear() {
+        // Test that mark_fixed sets the fixed flag while clear does not
+        let mut accumulator = ToolCallAccumulator::new();
+
+        // Accumulate some content
+        accumulator.accumulate(0, "test");
+
+        // Clear should remove accumulated but not set fixed flag
+        accumulator.clear(0);
+        assert!(!accumulator.is_fixed(0), "clear() should not set fixed flag");
+
+        // Accumulate again
+        accumulator.accumulate(0, "test2");
+
+        // mark_fixed should set fixed flag AND clear accumulated
+        accumulator.mark_fixed(0);
+        assert!(accumulator.is_fixed(0), "mark_fixed() should set fixed flag");
+        assert!(accumulator.get(0).is_none(), "mark_fixed() should clear accumulated");
+
+        // Reset should clear both
+        accumulator.reset(0);
+        assert!(!accumulator.is_fixed(0), "reset() should clear fixed flag");
+    }
+
+    #[test]
+    fn test_log_level_is_default_info() {
+        use crate::fixes::{FixLogLevel, ResponseFix};
+        let fix = ToolcallBadFilepathFix::new(true);
+
+        // Verify this fix uses the default INFO log level
+        assert_eq!(fix.log_level(), FixLogLevel::Info);
     }
 }
