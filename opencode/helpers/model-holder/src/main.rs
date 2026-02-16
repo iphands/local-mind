@@ -138,6 +138,7 @@ fn validate_extensions(extensions: &str) -> Result<(), ModelHolderError> {
 }
 
 /// Sanitize file path to prevent path traversal attacks
+/// Note: This does NOT canonicalize - that happens after glob expansion
 fn sanitize_path(path: &str) -> Result<PathBuf, ModelHolderError> {
     let path = Path::new(path);
 
@@ -151,17 +152,16 @@ fn sanitize_path(path: &str) -> Result<PathBuf, ModelHolderError> {
         ));
     }
 
-    // Resolve to absolute path to prevent relative path tricks
-    match fs::canonicalize(path) {
-        Ok(canonical) => Ok(canonical),
-        Err(_) => {
-            // If canonicalization fails, at least ensure it's not trying to escape
-            if path.is_absolute() {
-                Ok(path.to_path_buf())
-            } else {
-                Ok(std::env::current_dir().unwrap_or_default().join(path))
-            }
-        }
+    // Make absolute if relative, but don't canonicalize yet
+    // (canonicalization happens after glob expansion to properly resolve symlinks)
+    if path.is_absolute() {
+        Ok(path.to_path_buf())
+    } else {
+        Ok(std::env::current_dir()
+            .map_err(|e| {
+                ModelHolderError::NoFilesFound(format!("Cannot get current directory: {}", e))
+            })?
+            .join(path))
     }
 }
 
@@ -225,8 +225,21 @@ fn expand_globs(patterns: &[String]) -> Result<Vec<PathBuf>, ModelHolderError> {
             .collect();
 
         if matches.is_empty() {
-            warn!("No files matched pattern: {}", pattern_str);
-            paths.push(sanitized_pattern);
+            // If glob didn't match, try treating it as a direct file path
+            // But only if the file exists
+            if sanitized_pattern.exists() {
+                warn!(
+                    "No glob matches for '{}', treating as direct path",
+                    pattern_str
+                );
+                paths.push(sanitized_pattern);
+            } else {
+                return Err(ModelHolderError::NoFilesFound(format!(
+                    "File not found: '{}' (resolved to '{}')",
+                    pattern,
+                    pattern_str
+                )));
+            }
         } else {
             info!(
                 "Found {} files matching pattern: {}",
@@ -237,13 +250,29 @@ fn expand_globs(patterns: &[String]) -> Result<Vec<PathBuf>, ModelHolderError> {
         }
     }
 
-    paths.sort();
-    paths.dedup();
+    // Canonicalize all paths to resolve symlinks and relative paths
+    debug!("Canonicalizing {} path(s)", paths.len());
+    let canonical_paths: Result<Vec<PathBuf>, _> = paths
+        .into_iter()
+        .map(|p| {
+            fs::canonicalize(&p).map_err(|e| {
+                ModelHolderError::NoFilesFound(format!(
+                    "Cannot resolve path '{}': {}",
+                    p.display(),
+                    e
+                ))
+            })
+        })
+        .collect();
 
-    if paths.is_empty() {
+    let mut canonical_paths = canonical_paths?;
+    canonical_paths.sort();
+    canonical_paths.dedup();
+
+    if canonical_paths.is_empty() {
         Err(ModelHolderError::NoFilesFound(patterns.join(", ")))
     } else {
-        Ok(paths)
+        Ok(canonical_paths)
     }
 }
 

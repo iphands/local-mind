@@ -11,6 +11,7 @@ git
 glib2-devel
 gtk3-devel
 gtk4-devel
+jq
 less
 lm_sensors-devel
 nasm
