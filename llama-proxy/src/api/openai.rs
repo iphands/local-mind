@@ -285,7 +285,7 @@ pub struct AnthropicMessage {
     pub usage: AnthropicUsage,
 }
 
-/// Anthropic content block (text or thinking)
+/// Anthropic content block (text, thinking, tool_use, or tool_result)
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type")]
 pub enum AnthropicContentBlock {
@@ -296,6 +296,19 @@ pub enum AnthropicContentBlock {
         thinking: String,
         #[serde(default)]
         signature: Option<String>,
+    },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: String,
+        content: serde_json::Value,
+        #[serde(default)]
+        is_error: Option<bool>,
     },
 }
 
@@ -310,25 +323,59 @@ pub struct AnthropicUsage {
 /// This allows us to reuse synthesis logic for Anthropic format
 impl From<AnthropicMessage> for ChatCompletionResponse {
     fn from(msg: AnthropicMessage) -> Self {
-        // Convert content blocks to single text string
-        // Concatenate text and thinking blocks with newlines
-        let content = msg
-            .content
-            .iter()
-            .filter_map(|block| match block {
-                AnthropicContentBlock::Text { text } => Some(text.clone()),
-                AnthropicContentBlock::Thinking { thinking, .. } => Some(thinking.clone()),
-            })
-            .collect::<Vec<_>>()
-            .join("\n");
+        // Convert content blocks to text and tool_calls
+        let mut content_parts = Vec::new();
+        let mut tool_calls = Vec::new();
+
+        for block in &msg.content {
+            match block {
+                AnthropicContentBlock::Text { text } => {
+                    content_parts.push(text.clone());
+                }
+                AnthropicContentBlock::Thinking { thinking, .. } => {
+                    content_parts.push(thinking.clone());
+                }
+                AnthropicContentBlock::ToolUse { id, name, input } => {
+                    // Convert Anthropic tool_use to OpenAI tool_calls format
+                    tool_calls.push(ToolCall {
+                        id: Some(id.clone()),
+                        call_type: Some("function".to_string()),
+                        index: Some(tool_calls.len() as u32),
+                        function: FunctionCall {
+                            name: name.clone(),
+                            arguments: serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string()),
+                        },
+                    });
+                }
+                AnthropicContentBlock::ToolResult { content, .. } => {
+                    // Include tool results as text for now
+                    if let Some(text) = content.as_str() {
+                        content_parts.push(text.to_string());
+                    }
+                }
+            }
+        }
+
+        let content = if content_parts.is_empty() {
+            None
+        } else {
+            Some(content_parts.join("\n"))
+        };
+
+        let tool_calls_opt = if tool_calls.is_empty() {
+            None
+        } else {
+            Some(tool_calls)
+        };
 
         // Map Anthropic stop_reason to OpenAI finish_reason
-        // "end_turn" -> "stop", "max_tokens" -> "length", etc.
+        // "end_turn" -> "stop", "max_tokens" -> "length", "tool_use" -> "tool_calls", etc.
         let finish_reason = msg.stop_reason.as_ref().map(|reason| {
             match reason.as_str() {
                 "end_turn" => "stop".to_string(),
                 "max_tokens" => "length".to_string(),
                 "stop_sequence" => "stop".to_string(),
+                "tool_use" => "tool_calls".to_string(),
                 other => other.to_string(), // Pass through unknown reasons
             }
         });
@@ -342,8 +389,8 @@ impl From<AnthropicMessage> for ChatCompletionResponse {
                 index: 0,
                 message: Some(ResponseMessage {
                     role: msg.role,
-                    content: Some(content),
-                    tool_calls: None,
+                    content,
+                    tool_calls: tool_calls_opt,
                     reasoning_text: None,
                     reasoning_opaque: None,
                 }),
@@ -386,6 +433,23 @@ impl From<ChatCompletionResponse> for AnthropicMessage {
                 if let Some(text) = &m.content {
                     if !text.is_empty() {
                         blocks.push(AnthropicContentBlock::Text { text: text.clone() });
+                    }
+                }
+
+                // Convert OpenAI tool_calls to Anthropic tool_use blocks
+                if let Some(tool_calls) = &m.tool_calls {
+                    for tool_call in tool_calls {
+                        // Parse arguments as JSON value
+                        let input = serde_json::from_str(&tool_call.function.arguments)
+                            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+
+                        blocks.push(AnthropicContentBlock::ToolUse {
+                            id: tool_call.id.clone().unwrap_or_else(|| {
+                                format!("toolu_{}", uuid::Uuid::new_v4().to_string().replace('-', ""))
+                            }),
+                            name: tool_call.function.name.clone(),
+                            input,
+                        });
                     }
                 }
 
@@ -1194,6 +1258,229 @@ mod tests {
                 assert_eq!(text, "Here's the code you requested.");
             }
             _ => panic!("Expected text block"),
+        }
+    }
+
+    #[test]
+    fn test_parse_anthropic_message_with_tool_use() {
+        // Test parsing Anthropic response with tool_use content block
+        let json = serde_json::json!({
+            "id": "msg-tool-123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {
+                    "type": "tool_use",
+                    "id": "toolu_abc123",
+                    "name": "get_weather",
+                    "input": {
+                        "location": "Paris",
+                        "unit": "celsius"
+                    }
+                }
+            ],
+            "model": "test-model",
+            "stop_reason": "tool_use",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 50
+            }
+        });
+
+        let msg: AnthropicMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.id, "msg-tool-123");
+        assert_eq!(msg.stop_reason, Some("tool_use".to_string()));
+        assert_eq!(msg.content.len(), 1);
+
+        match &msg.content[0] {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "toolu_abc123");
+                assert_eq!(name, "get_weather");
+                assert_eq!(input["location"], "Paris");
+                assert_eq!(input["unit"], "celsius");
+            }
+            _ => panic!("Expected tool_use block"),
+        }
+    }
+
+    #[test]
+    fn test_anthropic_tool_use_to_openai_conversion() {
+        // Test conversion of Anthropic tool_use to OpenAI tool_calls
+        let anthropic_msg = AnthropicMessage {
+            id: "msg-tool-456".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::ToolUse {
+                id: "toolu_xyz789".to_string(),
+                name: "calculate".to_string(),
+                input: serde_json::json!({"x": 5, "y": 3, "operation": "add"}),
+            }],
+            model: "test-model".to_string(),
+            stop_reason: Some("tool_use".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 50,
+                output_tokens: 25,
+            },
+        };
+
+        let openai_response: ChatCompletionResponse = anthropic_msg.into();
+        assert_eq!(openai_response.id, "msg-tool-456");
+        assert_eq!(openai_response.choices[0].finish_reason, Some("tool_calls".to_string()));
+
+        let tool_calls = openai_response.choices[0]
+            .message
+            .as_ref()
+            .unwrap()
+            .tool_calls
+            .as_ref()
+            .unwrap();
+
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].id, Some("toolu_xyz789".to_string()));
+        assert_eq!(tool_calls[0].function.name, "calculate");
+
+        let args: serde_json::Value = serde_json::from_str(&tool_calls[0].function.arguments).unwrap();
+        assert_eq!(args["x"], 5);
+        assert_eq!(args["y"], 3);
+        assert_eq!(args["operation"], "add");
+    }
+
+    #[test]
+    fn test_openai_tool_calls_to_anthropic_conversion() {
+        // Test conversion of OpenAI tool_calls to Anthropic tool_use
+        let openai_response = ChatCompletionResponse {
+            id: "chatcmpl-tool-789".to_string(),
+            object: "chat.completion".to_string(),
+            created: 1234567890,
+            model: "test-model".to_string(),
+            choices: vec![Choice {
+                index: 0,
+                message: Some(ResponseMessage {
+                    role: "assistant".to_string(),
+                    content: None,
+                    tool_calls: Some(vec![ToolCall {
+                        id: Some("call_abc123".to_string()),
+                        call_type: Some("function".to_string()),
+                        index: Some(0),
+                        function: FunctionCall {
+                            name: "search".to_string(),
+                            arguments: r#"{"query":"weather","limit":5}"#.to_string(),
+                        },
+                    }]),
+                    reasoning_text: None,
+                    reasoning_opaque: None,
+                }),
+                delta: None,
+                finish_reason: Some("tool_calls".to_string()),
+            }],
+            usage: Some(Usage {
+                prompt_tokens: 75,
+                completion_tokens: 35,
+                total_tokens: 110,
+                completion_tokens_details: None,
+            }),
+            timings: None,
+        };
+
+        let anthropic: AnthropicMessage = openai_response.into();
+        assert_eq!(anthropic.id, "chatcmpl-tool-789");
+        assert_eq!(anthropic.stop_reason, Some("tool_use".to_string()));
+        assert_eq!(anthropic.content.len(), 1);
+
+        match &anthropic.content[0] {
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                assert_eq!(id, "call_abc123");
+                assert_eq!(name, "search");
+                assert_eq!(input["query"], "weather");
+                assert_eq!(input["limit"], 5);
+            }
+            _ => panic!("Expected tool_use block"),
+        }
+    }
+
+    #[test]
+    fn test_anthropic_mixed_content_with_tool_use() {
+        // Test message with both text and tool_use blocks
+        let json = serde_json::json!({
+            "id": "msg-mixed-123",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "text", "text": "Let me check the weather for you."},
+                {
+                    "type": "tool_use",
+                    "id": "toolu_weather_1",
+                    "name": "get_weather",
+                    "input": {"location": "London"}
+                }
+            ],
+            "model": "test-model",
+            "stop_reason": "tool_use",
+            "usage": {
+                "input_tokens": 80,
+                "output_tokens": 40
+            }
+        });
+
+        let msg: AnthropicMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.content.len(), 2);
+
+        match &msg.content[0] {
+            AnthropicContentBlock::Text { text } => {
+                assert_eq!(text, "Let me check the weather for you.");
+            }
+            _ => panic!("Expected text block first"),
+        }
+
+        match &msg.content[1] {
+            AnthropicContentBlock::ToolUse { id, name, .. } => {
+                assert_eq!(id, "toolu_weather_1");
+                assert_eq!(name, "get_weather");
+            }
+            _ => panic!("Expected tool_use block second"),
+        }
+
+        // Convert to OpenAI and verify both content and tool_calls are present
+        let openai_response: ChatCompletionResponse = msg.into();
+        let message = openai_response.choices[0].message.as_ref().unwrap();
+
+        assert_eq!(message.content, Some("Let me check the weather for you.".to_string()));
+        assert!(message.tool_calls.is_some());
+        assert_eq!(message.tool_calls.as_ref().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn test_parse_anthropic_message_with_tool_result() {
+        // Test parsing tool_result content block
+        let json = serde_json::json!({
+            "id": "msg-result-123",
+            "type": "message",
+            "role": "user",
+            "content": [
+                {
+                    "type": "tool_result",
+                    "tool_use_id": "toolu_abc123",
+                    "content": "The weather in Paris is 22°C and sunny."
+                }
+            ],
+            "model": "test-model",
+            "usage": {
+                "input_tokens": 50,
+                "output_tokens": 0
+            }
+        });
+
+        let msg: AnthropicMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.content.len(), 1);
+
+        match &msg.content[0] {
+            AnthropicContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                assert_eq!(tool_use_id, "toolu_abc123");
+                assert_eq!(content.as_str(), Some("The weather in Paris is 22°C and sunny."));
+                assert_eq!(*is_error, None);
+            }
+            _ => panic!("Expected tool_result block"),
         }
     }
 }

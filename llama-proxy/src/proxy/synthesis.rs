@@ -344,6 +344,48 @@ fn synthesize_anthropic_chunks(msg: AnthropicMessage) -> Vec<Result<Event, Infal
                     &build_content_block_stop_event(idx),
                 )));
             }
+            AnthropicContentBlock::ToolUse { id, name, input } => {
+                // Start tool_use block
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_start",
+                    &build_tool_use_block_start_event(idx, id, name),
+                )));
+
+                // Send input as JSON delta
+                let input_json = serde_json::to_string(input).unwrap_or_else(|_| "{}".to_string());
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_delta",
+                    &build_tool_use_block_delta_event(idx, &input_json),
+                )));
+
+                // Stop tool_use block
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_stop",
+                    &build_content_block_stop_event(idx),
+                )));
+            }
+            AnthropicContentBlock::ToolResult { content, .. } => {
+                // Tool results are typically in user messages, not assistant responses
+                // If they appear in responses, treat as text for now
+                if let Some(text) = content.as_str() {
+                    chunks.push(Ok(create_anthropic_sse_event(
+                        "content_block_start",
+                        &build_content_block_start_event(idx, "text"),
+                    )));
+
+                    for text_chunk in chunk_text(text, DEFAULT_CHUNK_SIZE) {
+                        chunks.push(Ok(create_anthropic_sse_event(
+                            "content_block_delta",
+                            &build_content_block_delta_event(idx, "text_delta", &text_chunk),
+                        )));
+                    }
+
+                    chunks.push(Ok(create_anthropic_sse_event(
+                        "content_block_stop",
+                        &build_content_block_stop_event(idx),
+                    )));
+                }
+            }
         }
     }
 
@@ -469,6 +511,32 @@ fn build_message_delta_event(msg: &AnthropicMessage) -> serde_json::Value {
 /// Build message_stop event
 fn build_message_stop_event() -> serde_json::Value {
     json!({"type": "message_stop"})
+}
+
+/// Build content_block_start event for tool_use blocks
+fn build_tool_use_block_start_event(index: usize, id: &str, name: &str) -> serde_json::Value {
+    json!({
+        "type": "content_block_start",
+        "index": index,
+        "content_block": {
+            "type": "tool_use",
+            "id": id,
+            "name": name,
+            "input": {}
+        }
+    })
+}
+
+/// Build content_block_delta event for tool_use (input_json_delta)
+fn build_tool_use_block_delta_event(index: usize, partial_json: &str) -> serde_json::Value {
+    json!({
+        "type": "content_block_delta",
+        "index": index,
+        "delta": {
+            "type": "input_json_delta",
+            "partial_json": partial_json
+        }
+    })
 }
 
 #[cfg(test)]

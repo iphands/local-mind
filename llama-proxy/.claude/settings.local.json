@@ -15,7 +15,9 @@
       "Bash(git -C /home/iphands/prog/slop/vendor/claude-code log --oneline)",
       "Bash(cargo check:*)",
       "WebFetch(domain:docs.anthropic.com)",
-      "WebFetch(domain:opencode.ai)"
+      "WebFetch(domain:opencode.ai)",
+      "Bash(curl:*)",
+      "WebFetch(domain:raw.githubusercontent.com)"
     ]
   },
   "prefersReducedMotion": true
