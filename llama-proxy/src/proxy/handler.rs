@@ -16,6 +16,29 @@ use crate::config::StatsFormat;
 use crate::proxy::fetch_context_total;
 use crate::stats::{format_metrics, format_request_log, RequestMetrics};
 
+/// Create a preview of JSON with nested objects/arrays replaced by "[object]"
+fn json_preview(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut preview_map = serde_json::Map::new();
+            for (key, val) in map {
+                match val {
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        preview_map.insert(key.clone(), serde_json::Value::String("[object]".to_string()));
+                    }
+                    _ => {
+                        preview_map.insert(key.clone(), val.clone());
+                    }
+                }
+            }
+            serde_json::to_string_pretty(&serde_json::Value::Object(preview_map))
+                .unwrap_or_else(|_| "[failed to serialize]".to_string())
+        }
+        _ => serde_json::to_string_pretty(value)
+            .unwrap_or_else(|_| "[failed to serialize]".to_string())
+    }
+}
+
 /// Decompress response body based on Content-Encoding header
 fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<Vec<u8>, String> {
     let encoding = match content_encoding {
@@ -479,6 +502,7 @@ impl ProxyHandler {
                                 Err(e) => {
                                     tracing::error!(
                                         error = %e,
+                                        response_json = %json_preview(json),
                                         "Failed to parse backend response as either Anthropic or OpenAI format"
                                     );
                                     // Fall through to return JSON
