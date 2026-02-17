@@ -664,20 +664,3 @@ RUST_LOG=debug cargo run -- run --config config.yaml
 
 ### Metrics not appearing
 Check that `stats.enabled: true` in your config and verify the format setting.
-
-## Contributing
-
-1. Follow the existing code style (rustfmt)
-2. Add tests for new features
-3. Update CLAUDE.md with architectural changes
-4. Test with real clients (Claude Code or Opencode) before submitting
-
-## License
-
-[Your License Here]
-
-## Acknowledgments
-
-- [llama.cpp](https://github.com/ggerganov/llama.cpp) - The LLM inference engine
-- [axum](https://github.com/tokio-rs/axum) - Web framework
-- [tokio](https://tokio.rs/) - Async runtime
