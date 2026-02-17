@@ -1,0 +1,35 @@
+# e2e test config - all fixes DISABLED
+# Use this to verify raw proxy behavior without fixes applied
+# Useful for negative tests: "when fixes are off, malformed JSON is NOT fixed"
+
+server:
+  port: 18066
+  host: "127.0.0.1"
+
+backend:
+  url: "http://127.0.0.1:18080"
+  timeout_seconds: 10
+
+fixes:
+  enabled: false
+  modules:
+    toolcall_bad_filepath:
+      enabled: false
+    toolcall_malformed_arguments:
+      enabled: false
+    toolcall_null_index:
+      enabled: false
+
+stats:
+  enabled: false
+  format: compact
+  log_interval: 10
+
+exporters:
+  influxdb:
+    enabled: false
+
+detection:
+  enabled: false
+
+streaming: fake
