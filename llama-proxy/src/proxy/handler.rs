@@ -34,8 +34,7 @@ fn json_preview(value: &serde_json::Value) -> String {
             serde_json::to_string_pretty(&serde_json::Value::Object(preview_map))
                 .unwrap_or_else(|_| "[failed to serialize]".to_string())
         }
-        _ => serde_json::to_string_pretty(value)
-            .unwrap_or_else(|_| "[failed to serialize]".to_string())
+        _ => serde_json::to_string_pretty(value).unwrap_or_else(|_| "[failed to serialize]".to_string()),
     }
 }
 
@@ -87,8 +86,7 @@ fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<
             Ok(decompressed)
         }
         "zstd" => {
-            let decompressed = zstd::decode_all(body_bytes)
-                .map_err(|e| format!("zstd decompression failed: {}", e))?;
+            let decompressed = zstd::decode_all(body_bytes).map_err(|e| format!("zstd decompression failed: {}", e))?;
             tracing::debug!(
                 original_size = body_bytes.len(),
                 decompressed_size = decompressed.len(),
@@ -97,10 +95,7 @@ fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<
             Ok(decompressed)
         }
         other => {
-            tracing::warn!(
-                encoding = other,
-                "Unsupported Content-Encoding, returning original body"
-            );
+            tracing::warn!(encoding = other, "Unsupported Content-Encoding, returning original body");
             Ok(body_bytes.to_vec())
         }
     }
@@ -165,11 +160,7 @@ impl ProxyHandler {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to read request body");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    format!("Failed to read request body: {}", e),
-                )
-                    .into_response();
+                return (StatusCode::BAD_REQUEST, format!("Failed to read request body: {}", e)).into_response();
             }
         };
 
@@ -202,17 +193,15 @@ impl ProxyHandler {
         );
 
         // Create request with complete URL (query string included)
-        let mut backend_req = self.state.http_client.request(
-            Method::from_bytes(method.as_str().as_bytes()).unwrap(),
-            &backend_url,
-        );
+        let mut backend_req = self
+            .state
+            .http_client
+            .request(Method::from_bytes(method.as_str().as_bytes()).unwrap(), &backend_url);
 
         // Copy headers (skip Content-Length, Host, and Authorization as we'll set those explicitly)
         for (name, value) in headers.iter() {
             // Skip headers that will be set explicitly or handled by reqwest
-            if name == header::HOST
-                || name == header::CONTENT_LENGTH
-                || name == header::AUTHORIZATION {
+            if name == header::HOST || name == header::CONTENT_LENGTH || name == header::AUTHORIZATION {
                 continue;
             }
 
@@ -232,9 +221,7 @@ impl ProxyHandler {
                 json["model"] = serde_json::Value::String(model.clone());
             }
             if client_wants_streaming {
-                tracing::debug!(
-                    "Forcing non-streaming backend request (will synthesize streaming response)"
-                );
+                tracing::debug!("Forcing non-streaming backend request (will synthesize streaming response)");
             }
             serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()).into()
         } else {
@@ -247,11 +234,7 @@ impl ProxyHandler {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to connect to backend");
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to connect to backend: {}", e),
-                )
-                    .into_response();
+                return (StatusCode::BAD_GATEWAY, format!("Failed to connect to backend: {}", e)).into_response();
             }
         };
 
@@ -317,18 +300,12 @@ impl ProxyHandler {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to read backend response");
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to read backend response: {}", e),
-                )
-                    .into_response();
+                return (StatusCode::BAD_GATEWAY, format!("Failed to read backend response: {}", e)).into_response();
             }
         };
 
         // Check for Content-Encoding and decompress if needed
-        let content_encoding = headers
-            .get(header::CONTENT_ENCODING)
-            .and_then(|ce| ce.to_str().ok());
+        let content_encoding = headers.get(header::CONTENT_ENCODING).and_then(|ce| ce.to_str().ok());
 
         let body_bytes = match decompress_body(&raw_body_bytes, content_encoding) {
             Ok(decompressed) => decompressed,
@@ -338,11 +315,7 @@ impl ProxyHandler {
                     content_encoding = ?content_encoding,
                     "Failed to decompress response body"
                 );
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to decompress response: {}", e),
-                )
-                    .into_response();
+                return (StatusCode::BAD_GATEWAY, format!("Failed to decompress response: {}", e)).into_response();
             }
         };
 
@@ -409,11 +382,8 @@ impl ProxyHandler {
 
                 // Fetch and set context_total for stats
                 if let Some(ref mut m) = metrics {
-                    if let Some(ctx_total) = fetch_context_total(
-                        &self.state.http_client,
-                        &self.state.config.backend.base_url(),
-                    )
-                    .await
+                    if let Some(ctx_total) =
+                        fetch_context_total(&self.state.http_client, &self.state.config.backend.base_url()).await
                     {
                         m.context_total = Some(ctx_total);
                         m.calculate_context_percent();
@@ -525,8 +495,7 @@ impl ProxyHandler {
                         }
                         Err(e) => {
                             // Log full response JSON for diagnosis
-                            let json_preview = serde_json::to_string_pretty(&json)
-                                .unwrap_or_else(|_| format!("{:?}", json));
+                            let json_preview = serde_json::to_string_pretty(&json).unwrap_or_else(|_| format!("{:?}", json));
                             tracing::warn!(
                                 error = %e,
                                 response_json = %json_preview,
@@ -586,8 +555,7 @@ impl ProxyHandler {
         let body_bytes = match to_bytes(req.into_body(), 1024 * 1024 * 10).await {
             Ok(bytes) => bytes,
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, format!("Failed to read body: {}", e))
-                    .into_response();
+                return (StatusCode::BAD_REQUEST, format!("Failed to read body: {}", e)).into_response();
             }
         };
 
@@ -605,10 +573,10 @@ impl ProxyHandler {
         );
 
         // Create request with complete URL (query string included)
-        let mut backend_req = self.state.http_client.request(
-            Method::from_bytes(method.as_str().as_bytes()).unwrap(),
-            &backend_url,
-        );
+        let mut backend_req = self
+            .state
+            .http_client
+            .request(Method::from_bytes(method.as_str().as_bytes()).unwrap(), &backend_url);
 
         // Copy headers (skip Host and Authorization as we'll set those explicitly)
         for (name, value) in headers.iter() {
@@ -629,8 +597,7 @@ impl ProxyHandler {
         let backend_response = match backend_req.send().await {
             Ok(resp) => resp,
             Err(e) => {
-                return (StatusCode::BAD_GATEWAY, format!("Backend error: {}", e))
-                    .into_response();
+                return (StatusCode::BAD_GATEWAY, format!("Backend error: {}", e)).into_response();
             }
         };
 
@@ -640,15 +607,12 @@ impl ProxyHandler {
         let raw_body = match backend_response.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                return (StatusCode::BAD_GATEWAY, format!("Failed to read response: {}", e))
-                    .into_response();
+                return (StatusCode::BAD_GATEWAY, format!("Failed to read response: {}", e)).into_response();
             }
         };
 
         // Check for Content-Encoding and decompress if needed
-        let content_encoding = headers
-            .get(header::CONTENT_ENCODING)
-            .and_then(|ce| ce.to_str().ok());
+        let content_encoding = headers.get(header::CONTENT_ENCODING).and_then(|ce| ce.to_str().ok());
 
         let body = match decompress_body(&raw_body, content_encoding) {
             Ok(decompressed) => decompressed,
@@ -658,11 +622,7 @@ impl ProxyHandler {
                     content_encoding = ?content_encoding,
                     "Failed to decompress pass-through response"
                 );
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    format!("Failed to decompress response: {}", e),
-                )
-                    .into_response();
+                return (StatusCode::BAD_GATEWAY, format!("Failed to decompress response: {}", e)).into_response();
             }
         };
 
@@ -685,8 +645,8 @@ impl ProxyHandler {
 mod tests {
     use super::*;
     use crate::config::{AppConfig, BackendConfig, StreamingConfig};
-    use crate::fixes::FixRegistry;
     use crate::exporters::ExporterManager;
+    use crate::fixes::FixRegistry;
     use std::collections::HashMap;
 
     #[allow(dead_code)]
@@ -752,7 +712,9 @@ mod tests {
         // Vendor-specific JSON types
         assert!(ProxyHandler::is_json_content_type("application/vnd.api+json"));
         assert!(ProxyHandler::is_json_content_type("application/vnd.github.v3+json"));
-        assert!(ProxyHandler::is_json_content_type("application/vnd.custom+json; charset=utf-8"));
+        assert!(ProxyHandler::is_json_content_type(
+            "application/vnd.custom+json; charset=utf-8"
+        ));
 
         // Non-JSON types
         assert!(!ProxyHandler::is_json_content_type("text/html"));

@@ -17,7 +17,7 @@ use futures::stream::{self, StreamExt};
 use serde_json::json;
 use std::convert::Infallible;
 
-use crate::api::{AnthropicContentBlock, AnthropicMessage, ChatCompletionResponse, ToolCall, Usage, Timings};
+use crate::api::{AnthropicContentBlock, AnthropicMessage, ChatCompletionResponse, Timings, ToolCall, Usage};
 
 /// Default text chunk size (chars per SSE chunk when synthesizing)
 /// Can be configured via config in the future
@@ -34,20 +34,16 @@ const DEFAULT_CHUNK_DELAY_MS: u64 = 50; // 50ms between chunks
 ///
 /// Tool calls are sent as a single complete chunk (not incrementally).
 /// Text content is chunked into pieces of DEFAULT_CHUNK_SIZE characters.
-pub async fn synthesize_streaming_response(
-    response: ChatCompletionResponse,
-) -> Result<Response, String> {
+pub async fn synthesize_streaming_response(response: ChatCompletionResponse) -> Result<Response, String> {
     // Extract data from the complete response
     let model = response.model.clone();
     let id = response.id.clone();
     let created = response.created;
 
     // Get the first choice (standard for chat completions)
-    let choice = response.choices.get(0)
-        .ok_or_else(|| "Response has no choices".to_string())?;
+    let choice = response.choices.get(0).ok_or_else(|| "Response has no choices".to_string())?;
 
-    let message = choice.message.as_ref()
-        .ok_or_else(|| "Choice has no message".to_string())?;
+    let message = choice.message.as_ref().ok_or_else(|| "Choice has no message".to_string())?;
 
     let content = message.content.clone();
     let tool_calls = message.tool_calls.clone();
@@ -396,20 +392,14 @@ fn synthesize_anthropic_chunks(msg: AnthropicMessage) -> Vec<Result<Event, Infal
     )));
 
     // Event N: message_stop
-    chunks.push(Ok(create_anthropic_sse_event(
-        "message_stop",
-        &build_message_stop_event(),
-    )));
+    chunks.push(Ok(create_anthropic_sse_event("message_stop", &build_message_stop_event())));
 
     chunks
 }
 
 /// Create an Anthropic SSE Event with event type and data
 fn create_anthropic_sse_event(event_type: &str, data: &serde_json::Value) -> Event {
-    Event::default()
-        .event(event_type)
-        .json_data(data)
-        .unwrap()
+    Event::default().event(event_type).json_data(data).unwrap()
 }
 
 /// Build message_start event
@@ -542,7 +532,7 @@ fn build_tool_use_block_delta_event(index: usize, partial_json: &str) -> serde_j
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{FunctionCall, ToolCall, Usage, Timings};
+    use crate::api::{FunctionCall, Timings, ToolCall, Usage};
 
     #[test]
     fn test_chunk_text_short() {
@@ -857,9 +847,7 @@ mod tests {
             id: "msg-123".to_string(),
             message_type: "message".to_string(),
             role: "assistant".to_string(),
-            content: vec![AnthropicContentBlock::Text {
-                text: "Hi".to_string(),
-            }],
+            content: vec![AnthropicContentBlock::Text { text: "Hi".to_string() }],
             model: "test-model".to_string(),
             stop_reason: Some("end_turn".to_string()),
             stop_sequence: None,
@@ -985,11 +973,9 @@ mod tests {
             id: "msg-test-123".to_string(),
             message_type: "message".to_string(),
             role: "assistant".to_string(),
-            content: vec![
-                AnthropicContentBlock::Text {
-                    text: "Hello, how can I help you?".to_string(),
-                },
-            ],
+            content: vec![AnthropicContentBlock::Text {
+                text: "Hello, how can I help you?".to_string(),
+            }],
             model: "claude-3-5-sonnet".to_string(),
             stop_reason: Some("end_turn".to_string()),
             stop_sequence: None,
@@ -1023,9 +1009,7 @@ mod tests {
             id: "msg-order-test".to_string(),
             message_type: "message".to_string(),
             role: "assistant".to_string(),
-            content: vec![AnthropicContentBlock::Text {
-                text: "Hi".to_string(),
-            }],
+            content: vec![AnthropicContentBlock::Text { text: "Hi".to_string() }],
             model: "test".to_string(),
             stop_reason: Some("end_turn".to_string()),
             stop_sequence: None,

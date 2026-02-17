@@ -44,16 +44,11 @@ impl InfluxDbExporter {
             "InfluxDB exporter requested but 'influxdb' feature is not enabled. \
              Enable with --features influxdb"
         );
-        Ok(Self {
-            config,
-            _phantom: (),
-        })
+        Ok(Self { config, _phantom: () })
     }
 
     /// Create from app config
-    pub fn from_config(
-        config: &crate::config::InfluxDbConfig,
-    ) -> Result<Self, ExportError> {
+    pub fn from_config(config: &crate::config::InfluxDbConfig) -> Result<Self, ExportError> {
         Self::new(InfluxDbConfig {
             url: config.url.clone(),
             org: config.org.clone(),
@@ -117,10 +112,7 @@ impl MetricsExporter for InfluxDbExporter {
         let point = match point.build() {
             Ok(p) => p,
             Err(e) => {
-                return Err(ExportError::Write(format!(
-                    "Failed to build data point: {}",
-                    e
-                )));
+                return Err(ExportError::Write(format!("Failed to build data point: {}", e)));
             }
         };
 

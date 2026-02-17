@@ -313,8 +313,7 @@ impl AppConfig {
                     }
                 }
                 Err(ConfigError::NotFound(
-                    "No config file found. Tried: config.yaml, config.yml, ./config/config.yaml"
-                        .to_string(),
+                    "No config file found. Tried: config.yaml, config.yml, ./config/config.yaml".to_string(),
                 ))
             }
         }
@@ -483,15 +482,9 @@ mod tests {
     #[test]
     fn test_fix_module_config_with_options() {
         let mut options = HashMap::new();
-        options.insert(
-            "remove_duplicate".to_string(),
-            serde_yaml::Value::Bool(true),
-        );
+        options.insert("remove_duplicate".to_string(), serde_yaml::Value::Bool(true));
 
-        let config = FixModuleConfig {
-            enabled: false,
-            options,
-        };
+        let config = FixModuleConfig { enabled: false, options };
         assert!(!config.enabled);
         assert!(config.options.contains_key("remove_duplicate"));
     }

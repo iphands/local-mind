@@ -25,7 +25,8 @@ pub async fn test_valid_toolcall_non_streaming(ctx: TestContext) -> anyhow::Resu
     assert_true(resp.status == 200, &format!("Expected 200, got {}", resp.status))?;
 
     // Arguments should be unchanged and still valid JSON
-    let args = resp.tool_call_args(0, 0)
+    let args = resp
+        .tool_call_args(0, 0)
         .ok_or_else(|| anyhow::anyhow!("No tool call args in response"))?;
     let parsed = assert_valid_json(args, "tool call arguments")?;
 
@@ -74,17 +75,15 @@ pub async fn test_valid_toolcall_streaming(ctx: TestContext) -> anyhow::Result<(
 pub async fn test_bad_filepath_fixed_non_streaming(ctx: TestContext) -> anyhow::Result<()> {
     queue_response(
         &ctx.backend_state,
-        MockResponse::json(backend_duplicate_filepath_response(
-            "console.log('hello');",
-            "/src/index.ts",
-        )),
+        MockResponse::json(backend_duplicate_filepath_response("console.log('hello');", "/src/index.ts")),
     );
 
     let resp = send_non_streaming(&ctx.http_client, &ctx.proxy_addr, request_with_write_tool("write code")).await?;
 
     assert_true(resp.status == 200, &format!("Expected 200, got {}", resp.status))?;
 
-    let args = resp.tool_call_args(0, 0)
+    let args = resp
+        .tool_call_args(0, 0)
         .ok_or_else(|| anyhow::anyhow!("No tool call args - proxy might have dropped the response"))?;
 
     // The fixed args must be valid JSON
@@ -110,7 +109,10 @@ pub async fn test_bad_filepath_fixed_non_streaming(ctx: TestContext) -> anyhow::
     let filepath_count = args.matches("filePath").count();
     assert_true(
         filepath_count == 1,
-        &format!("Fixed JSON should have exactly one filePath, found {} occurrences in: {}", filepath_count, args),
+        &format!(
+            "Fixed JSON should have exactly one filePath, found {} occurrences in: {}",
+            filepath_count, args
+        ),
     )?;
 
     Ok(())
@@ -121,10 +123,7 @@ pub async fn test_bad_filepath_fixed_non_streaming(ctx: TestContext) -> anyhow::
 pub async fn test_bad_filepath_fixed_streaming(ctx: TestContext) -> anyhow::Result<()> {
     queue_response(
         &ctx.backend_state,
-        MockResponse::json(backend_duplicate_filepath_response(
-            "const x = 1;",
-            "/src/app.ts",
-        )),
+        MockResponse::json(backend_duplicate_filepath_response("const x = 1;", "/src/app.ts")),
     );
 
     let resp = send_streaming(&ctx.http_client, &ctx.proxy_addr, request_with_write_tool("write code")).await?;
@@ -133,10 +132,7 @@ pub async fn test_bad_filepath_fixed_streaming(ctx: TestContext) -> anyhow::Resu
 
     // Accumulate tool call args from all delta chunks
     let accumulated = resp.accumulated_tool_args(0);
-    assert_true(
-        !accumulated.is_empty(),
-        "Accumulated tool args should not be empty after fix",
-    )?;
+    assert_true(!accumulated.is_empty(), "Accumulated tool args should not be empty after fix")?;
 
     // Critical: accumulated result must be valid JSON
     let parsed = assert_valid_json(&accumulated, "accumulated tool call args after bad-filepath fix")?;
@@ -174,9 +170,11 @@ pub async fn test_bad_filepath_realworld_paths(ctx: TestContext) -> anyhow::Resu
         &ctx.http_client,
         &ctx.proxy_addr,
         request_with_write_tool("write react component"),
-    ).await?;
+    )
+    .await?;
 
-    let args = resp.tool_call_args(0, 0)
+    let args = resp
+        .tool_call_args(0, 0)
         .ok_or_else(|| anyhow::anyhow!("No tool call args"))?;
 
     let parsed = assert_valid_json(args, "fixed args with real-world path")?;
@@ -198,7 +196,8 @@ pub async fn test_no_fix_when_not_needed(ctx: TestContext) -> anyhow::Result<()>
 
     let resp = send_non_streaming(&ctx.http_client, &ctx.proxy_addr, basic_request("run query")).await?;
 
-    let args = resp.tool_call_args(0, 0)
+    let args = resp
+        .tool_call_args(0, 0)
         .ok_or_else(|| anyhow::anyhow!("No tool call args"))?;
 
     let parsed = assert_valid_json(args, "should-be-unchanged args")?;
@@ -251,14 +250,16 @@ pub async fn test_null_index_fixed_streaming(ctx: TestContext) -> anyhow::Result
     // In the synthesized SSE, check that tool_calls have integer indices
     let data_events = resp.data_events();
     let tool_call_event = data_events.iter().find(|e| {
-        e.parse_json().ok()
+        e.parse_json()
+            .ok()
             .and_then(|j| j.pointer("/choices/0/delta/tool_calls").cloned())
             .is_some()
     });
 
     if let Some(event) = tool_call_event {
         let json = event.parse_json()?;
-        let tool_calls = json.pointer("/choices/0/delta/tool_calls")
+        let tool_calls = json
+            .pointer("/choices/0/delta/tool_calls")
             .and_then(|v| v.as_array())
             .ok_or_else(|| anyhow::anyhow!("Expected tool_calls array"))?;
         for tc in tool_calls {
@@ -283,16 +284,13 @@ pub async fn test_malformed_arguments_fixed(ctx: TestContext) -> anyhow::Result<
     queue_response(&ctx.backend_state, MockResponse::json(backend_malformed_arguments_response()));
 
     // Must use a request WITH tool schemas - the fix needs them to know which param replaces {}
-    let resp = send_non_streaming(
-        &ctx.http_client,
-        &ctx.proxy_addr,
-        request_with_write_tool("write script"),
-    ).await?;
+    let resp = send_non_streaming(&ctx.http_client, &ctx.proxy_addr, request_with_write_tool("write script")).await?;
 
     assert_true(resp.status == 200, &format!("Expected 200, got {}", resp.status))?;
 
     // After fix, arguments should be valid JSON
-    let args = resp.tool_call_args(0, 0)
+    let args = resp
+        .tool_call_args(0, 0)
         .ok_or_else(|| anyhow::anyhow!("No tool call args"))?;
 
     let parsed = assert_valid_json(args, "fixed malformed arguments")?;
@@ -355,9 +353,11 @@ pub async fn test_multiple_tool_calls(ctx: TestContext) -> anyhow::Result<()> {
     let resp = send_non_streaming(&ctx.http_client, &ctx.proxy_addr, request_with_write_tool("write both")).await?;
 
     // Both tool calls should be present and valid
-    let args0 = resp.tool_call_args(0, 0)
+    let args0 = resp
+        .tool_call_args(0, 0)
         .ok_or_else(|| anyhow::anyhow!("No tool_call[0] args"))?;
-    let args1 = resp.tool_call_args(0, 1)
+    let args1 = resp
+        .tool_call_args(0, 1)
         .ok_or_else(|| anyhow::anyhow!("No tool_call[1] args"))?;
 
     let p0 = assert_valid_json(args0, "tool_call[0] args")?;
@@ -396,7 +396,8 @@ pub async fn test_filepath_with_special_chars(ctx: TestContext) -> anyhow::Resul
 
     let resp = send_non_streaming(&ctx.http_client, &ctx.proxy_addr, request_with_write_tool("write")).await?;
 
-    let args = resp.tool_call_args(0, 0)
+    let args = resp
+        .tool_call_args(0, 0)
         .ok_or_else(|| anyhow::anyhow!("No tool call args"))?;
 
     // Minimum requirement: result must be valid JSON (not corrupt/broken)
@@ -412,7 +413,10 @@ pub async fn test_filepath_with_special_chars(ctx: TestContext) -> anyhow::Resul
     if parsed.get("filePath").is_none() {
         // This is the known bug: fix returns {} for Unicode paths
         // We log but don't fail here - use a separate regression test for this specific behavior
-        eprintln!("KNOWN BUG: bad_filepath fix dropped filePath when path contains Unicode: {}", filepath);
+        eprintln!(
+            "KNOWN BUG: bad_filepath fix dropped filePath when path contains Unicode: {}",
+            filepath
+        );
     }
 
     Ok(())
@@ -427,7 +431,8 @@ pub async fn test_empty_arguments(ctx: TestContext) -> anyhow::Result<()> {
 
     let resp = send_non_streaming(&ctx.http_client, &ctx.proxy_addr, basic_request("call tool")).await?;
 
-    let args = resp.tool_call_args(0, 0)
+    let args = resp
+        .tool_call_args(0, 0)
         .ok_or_else(|| anyhow::anyhow!("No tool call args"))?;
 
     assert_valid_json(args, "empty arguments")?;

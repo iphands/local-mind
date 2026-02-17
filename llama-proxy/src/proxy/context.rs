@@ -21,10 +21,7 @@ static CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, u64>>> = OnceLock::new();
 /// # Returns
 /// * `Some(u64)` - The context size if successfully fetched
 /// * `None` - If the fetch failed or the response was malformed
-pub async fn fetch_context_total(
-    client: &reqwest::Client,
-    backend_url: &str,
-) -> Option<u64> {
+pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str) -> Option<u64> {
     let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
 
     // Check cache first

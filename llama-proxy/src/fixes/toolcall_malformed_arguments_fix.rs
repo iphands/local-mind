@@ -44,21 +44,13 @@ impl ToolcallMalformedArgumentsFix {
         if let Some(tools) = request.get("tools").and_then(|t| t.as_array()) {
             for tool in tools {
                 if let Some(function) = tool.get("function") {
-                    let name = function
-                        .get("name")
-                        .and_then(|n| n.as_str())
-                        .unwrap_or("")
-                        .to_string();
+                    let name = function.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
 
                     let parameters = function
                         .get("parameters")
                         .and_then(|p| p.get("properties"))
                         .and_then(|props| props.as_object())
-                        .map(|obj| {
-                            obj.keys()
-                                .map(|k| k.to_string())
-                                .collect::<Vec<String>>()
-                        })
+                        .map(|obj| obj.keys().map(|k| k.to_string()).collect::<Vec<String>>())
                         .unwrap_or_default();
 
                     if !name.is_empty() {
@@ -219,11 +211,7 @@ impl ToolcallMalformedArgumentsFix {
                     if let Some(tool_calls) = message.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
                         for tool_call in tool_calls {
                             if let Some(function) = tool_call.get_mut("function") {
-                                let tool_name = function
-                                    .get("name")
-                                    .and_then(|n| n.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
+                                let tool_name = function.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
 
                                 if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
                                     let original = args.to_string();
@@ -263,11 +251,7 @@ impl ToolcallMalformedArgumentsFix {
                     if let Some(tool_calls) = delta.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
                         for tool_call in tool_calls {
                             if let Some(function) = tool_call.get_mut("function") {
-                                let tool_name = function
-                                    .get("name")
-                                    .and_then(|n| n.as_str())
-                                    .unwrap_or("")
-                                    .to_string();
+                                let tool_name = function.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
 
                                 if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
                                     // For streaming, we might get partial JSON
@@ -408,7 +392,9 @@ mod tests {
         assert!(fix.malformed_pattern.is_match("{{}\":\"value\"}"));
 
         // Should not match valid JSON
-        assert!(!fix.malformed_pattern.is_match("{\"file_path\":\"test\",\"content\":\"data\"}"));
+        assert!(!fix
+            .malformed_pattern
+            .is_match("{\"file_path\":\"test\",\"content\":\"data\"}"));
     }
 
     #[test]
@@ -646,11 +632,7 @@ mod tests {
         // Multiple parameters, but we'll guess file_path
         schemas.insert(
             "write".to_string(),
-            vec![
-                "file_path".to_string(),
-                "content".to_string(),
-                "mode".to_string(),
-            ],
+            vec!["file_path".to_string(), "content".to_string(), "mode".to_string()],
         );
 
         let malformed = "{\"content\":\"data\",\"mode\":\"0755\",{}\":\"/tmp/file\"}";

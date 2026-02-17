@@ -59,7 +59,8 @@ pub fn backend_text_response(content: &str) -> String {
             "completion_tokens": 5,
             "total_tokens": 15
         }
-    }).to_string()
+    })
+    .to_string()
 }
 
 /// Build a valid tool call response (no malformation)
@@ -91,7 +92,8 @@ pub fn backend_valid_tool_call_response(tool_name: &str, args_json: &str) -> Str
             "completion_tokens": 30,
             "total_tokens": 50
         }
-    }).to_string()
+    })
+    .to_string()
 }
 
 /// Build a malformed filePath tool call - duplicate key (the Qwen3 bug)
@@ -99,9 +101,7 @@ pub fn backend_valid_tool_call_response(tool_name: &str, args_json: &str) -> Str
 pub fn backend_duplicate_filepath_response(content: &str, filepath: &str) -> String {
     // Simulates: {"content":"...","filePath":"/foo","filePath""/foo"}
     // This is the actual malformed JSON that Qwen3-Coder emits
-    let malformed_args = format!(
-        r#"{{"content":"{content}","filePath":"{filepath}","filePath""{filepath}"}}"#
-    );
+    let malformed_args = format!(r#"{{"content":"{content}","filePath":"{filepath}","filePath""{filepath}"}}"#);
     json!({
         "id": "chatcmpl-test003",
         "object": "chat.completion",
@@ -129,7 +129,8 @@ pub fn backend_duplicate_filepath_response(content: &str, filepath: &str) -> Str
             "completion_tokens": 50,
             "total_tokens": 70
         }
-    }).to_string()
+    })
+    .to_string()
 }
 
 /// Build a malformed filePath response where there are two valid "filePath" keys (valid JSON, wrong schema)
@@ -138,8 +139,8 @@ pub fn backend_double_filepath_valid_json_response(content: &str, path1: &str, p
     // Build manually because serde_json deduplicates keys
     format!(
         r#"{{"id":"chatcmpl-test004","object":"chat.completion","created":1700000000,"model":"test-model","choices":[{{"index":0,"message":{{"role":"assistant","content":null,"tool_calls":[{{"id":"call-003","type":"function","index":0,"function":{{"name":"write_file","arguments":"{args}"}}}}]}},"finish_reason":"tool_calls"}}],"usage":{{"prompt_tokens":20,"completion_tokens":50,"total_tokens":70}}}}"#,
-        args = format!(r#"{{\"content\":\"{content}\",\"filePath\":\"{path1}\",\"filePath\":\"{path2}\"}}"#)
-            .replace('\\', "\\\\")
+        args =
+            format!(r#"{{\"content\":\"{content}\",\"filePath\":\"{path1}\",\"filePath\":\"{path2}\"}}"#).replace('\\', "\\\\")
     )
 }
 
@@ -174,8 +175,7 @@ pub fn backend_malformed_arguments_response() -> String {
 
 /// Assert that a string is valid JSON, return parsed value
 pub fn assert_valid_json(s: &str, label: &str) -> anyhow::Result<Value> {
-    serde_json::from_str(s)
-        .map_err(|e| anyhow::anyhow!("{} is not valid JSON: {}\nContent: {}", label, e, s))
+    serde_json::from_str(s).map_err(|e| anyhow::anyhow!("{} is not valid JSON: {}\nContent: {}", label, e, s))
 }
 
 /// Assert two strings are equal, with context on failure

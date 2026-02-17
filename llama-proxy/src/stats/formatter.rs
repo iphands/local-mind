@@ -24,15 +24,9 @@ fn format_pretty(m: &RequestMetrics) -> String {
         _ => "N/A".to_string(),
     };
 
-    let client_str = m
-        .client_id
-        .as_ref()
-        .map(|c| format!("Client: {}", truncate(c, 48)));
+    let client_str = m.client_id.as_ref().map(|c| format!("Client: {}", truncate(c, 48)));
 
-    let conv_str = m
-        .conversation_id
-        .as_ref()
-        .map(|c| format!("Conv: {}", truncate(c, 50)));
+    let conv_str = m.conversation_id.as_ref().map(|c| format!("Conv: {}", truncate(c, 50)));
 
     let extra_lines = match (&client_str, &conv_str) {
         (Some(client), Some(conv)) => {

@@ -9,7 +9,9 @@ use crate::types::{SharedBackendState, TestResult};
 pub struct TestCase {
     pub name: &'static str,
     pub description: &'static str,
-    pub run: Box<dyn Fn(TestContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> + Send + Sync>,
+    pub run: Box<
+        dyn Fn(TestContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> + Send + Sync,
+    >,
 }
 
 /// Context passed to each test - contains proxy address and backend state
@@ -21,11 +23,7 @@ pub struct TestContext {
 }
 
 /// Run all provided test cases sequentially and report results
-pub async fn run_tests(
-    cases: Vec<TestCase>,
-    ctx: TestContext,
-    filter: Option<&str>,
-) -> Vec<TestResult> {
+pub async fn run_tests(cases: Vec<TestCase>, ctx: TestContext, filter: Option<&str>) -> Vec<TestResult> {
     let mut results = Vec::new();
     let mut passed = 0;
     let mut failed = 0;
@@ -113,4 +111,3 @@ pub fn list_tests(cases: &[TestCase]) {
     }
     println!();
 }
-

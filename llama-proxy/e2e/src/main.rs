@@ -19,10 +19,7 @@ use runner::{list_tests, run_tests, TestContext};
 use tests::all_tests;
 
 /// Default proxy binary candidates, tried in order
-const DEFAULT_PROXY_BINS: &[&str] = &[
-    "../target/release/llama-proxy",
-    "../target/debug/llama-proxy",
-];
+const DEFAULT_PROXY_BINS: &[&str] = &["../target/release/llama-proxy", "../target/debug/llama-proxy"];
 
 const DEFAULT_PROXY_CONFIG: &str = "test_configs/proxy_fixes_on.yaml";
 const DEFAULT_BACKEND_PORT: u16 = 18080;
@@ -112,7 +109,11 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── run (connect to existing proxy) ───────────────────────────────────
-        Some(Command::Run { proxy_addr, backend_port, filter }) => {
+        Some(Command::Run {
+            proxy_addr,
+            backend_port,
+            filter,
+        }) => {
             let filter = filter.or(cli.filter);
             println!("Starting mock backend on port {}...", backend_port);
             let backend_state = backend::start(backend_port).await?;
@@ -129,7 +130,13 @@ async fn main() -> anyhow::Result<()> {
         }
 
         // ── spawn-and-run ─────────────────────────────────────────────────────
-        Some(Command::SpawnAndRun { proxy_bin, proxy_config, backend_port, proxy_port, filter }) => {
+        Some(Command::SpawnAndRun {
+            proxy_bin,
+            proxy_config,
+            backend_port,
+            proxy_port,
+            filter,
+        }) => {
             let filter = filter.or(cli.filter);
             let proxy_bin = match proxy_bin {
                 Some(p) => p,

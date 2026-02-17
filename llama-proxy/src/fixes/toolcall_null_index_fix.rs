@@ -5,8 +5,8 @@
 //!
 //! This fix assigns sequential indices (0, 1, 2, ...) to tool calls that lack them.
 
-use serde_json::Value;
 use crate::fixes::{FixAction, FixLogLevel, ResponseFix};
+use serde_json::Value;
 
 pub struct ToolCallNullIndexFix {
     enabled: bool,
@@ -34,18 +34,14 @@ impl ToolCallNullIndexFix {
         for choice in choices.iter_mut() {
             // Try message.tool_calls (non-streaming complete response)
             if let Some(message) = choice.get_mut("message") {
-                if let Some(tool_calls) = message.get_mut("tool_calls")
-                    .and_then(|tc| tc.as_array_mut())
-                {
+                if let Some(tool_calls) = message.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
                     fixed_any |= Self::assign_sequential_indices(tool_calls);
                 }
             }
 
             // Try delta.tool_calls (streaming chunks)
             if let Some(delta) = choice.get_mut("delta") {
-                if let Some(tool_calls) = delta.get_mut("tool_calls")
-                    .and_then(|tc| tc.as_array_mut())
-                {
+                if let Some(tool_calls) = delta.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
                     fixed_any |= Self::assign_sequential_indices(tool_calls);
                 }
             }
@@ -95,7 +91,8 @@ impl ResponseFix for ToolCallNullIndexFix {
         if let Some(choices) = response.get("choices").and_then(|c| c.as_array()) {
             for choice in choices {
                 // Check message.tool_calls
-                if let Some(tool_calls) = choice.get("message")
+                if let Some(tool_calls) = choice
+                    .get("message")
                     .and_then(|m| m.get("tool_calls"))
                     .and_then(|tc| tc.as_array())
                 {
@@ -105,7 +102,8 @@ impl ResponseFix for ToolCallNullIndexFix {
                 }
 
                 // Check delta.tool_calls
-                if let Some(tool_calls) = choice.get("delta")
+                if let Some(tool_calls) = choice
+                    .get("delta")
                     .and_then(|d| d.get("tool_calls"))
                     .and_then(|tc| tc.as_array())
                 {

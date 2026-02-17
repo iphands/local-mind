@@ -116,8 +116,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             backend_url,
             streaming_mode,
         } => {
-            run_proxy(cli.config, port, backend_url, streaming_mode)
-                .await?;
+            run_proxy(cli.config, port, backend_url, streaming_mode).await?;
         }
         Commands::ListFixes { verbose } => {
             list_fixes(verbose);
@@ -157,7 +156,10 @@ async fn run_proxy(
             "fake" => StreamingMode::Fake,
             "accumulator" => StreamingMode::Accumulator,
             _ => {
-                eprintln!("Invalid streaming mode: {}. Use 'disabled', 'fake', or 'accumulator'.", mode_str);
+                eprintln!(
+                    "Invalid streaming mode: {}. Use 'disabled', 'fake', or 'accumulator'.",
+                    mode_str
+                );
                 std::process::exit(1);
             }
         };
@@ -184,11 +186,7 @@ async fn run_proxy(
     // Configure fixes from config
     if !config.fixes.enabled {
         // Disable all fixes - collect names first to avoid borrow issues
-        let fix_names: Vec<String> = fix_registry
-            .list_fixes()
-            .iter()
-            .map(|f| f.name().to_string())
-            .collect();
+        let fix_names: Vec<String> = fix_registry.list_fixes().iter().map(|f| f.name().to_string()).collect();
         for name in fix_names {
             fix_registry.set_enabled(&name, false);
         }
@@ -391,8 +389,7 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
 
     println!("Testing connection to backend: {}", health_url);
 
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(5));
+    let mut client_builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5));
 
     // Apply TLS settings for test
     if let Some(ref tls) = config.backend.tls {
@@ -404,9 +401,7 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
             let ca_cert = reqwest::Certificate::from_pem(&ca_cert)?;
             client_builder = client_builder.add_root_certificate(ca_cert);
         }
-        if let (Some(cert_path), Some(key_path)) =
-            (&tls.client_cert_path, &tls.client_key_path)
-        {
+        if let (Some(cert_path), Some(key_path)) = (&tls.client_cert_path, &tls.client_key_path) {
             let cert_pem = std::fs::read(cert_path)?;
             let key_pem = std::fs::read(key_path)?;
             let identity = reqwest::Identity::from_pem(&[cert_pem, key_pem].concat())?;

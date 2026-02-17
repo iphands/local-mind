@@ -39,8 +39,7 @@ pub async fn handle_streaming_response(
     let accumulated_clone = accumulated.clone();
 
     // Accumulator for tool call argument fixing
-    let tool_call_accumulator =
-        Arc::new(tokio::sync::Mutex::new(ToolCallAccumulator::new()));
+    let tool_call_accumulator = Arc::new(tokio::sync::Mutex::new(ToolCallAccumulator::new()));
     let tool_call_accumulator_clone = tool_call_accumulator.clone();
 
     // Create oneshot channel for stream completion signaling
@@ -70,10 +69,7 @@ pub async fn handle_streaming_response(
                 Ok(c) => c,
                 Err(e) => {
                     tracing::error!(error = %e, "Error reading stream chunk");
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        e.to_string(),
-                    ));
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e.to_string()));
                 }
             };
 
@@ -104,11 +100,7 @@ pub async fn handle_streaming_response(
                 if line.starts_with("data: ") {
                     let data = &line[6..];
 
-                    tracing::trace!(
-                        "SSE data (event={:?}): {}",
-                        current_event_type,
-                        data
-                    );
+                    tracing::trace!("SSE data (event={:?}): {}", current_event_type, data);
 
                     // Check for Anthropic completion event (message_stop)
                     if current_event_type.as_deref() == Some("message_stop") {
@@ -198,12 +190,11 @@ pub async fn handle_streaming_response(
 
         tokio::spawn(async move {
             // Adaptive timeout constants
-            const ACTIVITY_TIMEOUT_SECS: u64 = 90;   // Reset on each chunk
-            const ABSOLUTE_TIMEOUT_SECS: u64 = 600;  // 10 minutes hard limit
+            const ACTIVITY_TIMEOUT_SECS: u64 = 90; // Reset on each chunk
+            const ABSOLUTE_TIMEOUT_SECS: u64 = 600; // 10 minutes hard limit
 
             // Wait for stream completion with adaptive timeout
-            let absolute_deadline = tokio::time::Instant::now()
-                + tokio::time::Duration::from_secs(ABSOLUTE_TIMEOUT_SECS);
+            let absolute_deadline = tokio::time::Instant::now() + tokio::time::Duration::from_secs(ABSOLUTE_TIMEOUT_SECS);
 
             let mut completion_rx = completion_rx;
             let mut activity_rx = activity_rx;
@@ -211,9 +202,7 @@ pub async fn handle_streaming_response(
 
             loop {
                 // Create fresh activity timeout each iteration (resets on activity)
-                let activity_timeout_sleep = tokio::time::sleep(
-                    tokio::time::Duration::from_secs(ACTIVITY_TIMEOUT_SECS)
-                );
+                let activity_timeout_sleep = tokio::time::sleep(tokio::time::Duration::from_secs(ACTIVITY_TIMEOUT_SECS));
                 tokio::pin!(activity_timeout_sleep);
 
                 // Calculate remaining time until absolute deadline
@@ -272,10 +261,7 @@ pub async fn handle_streaming_response(
 
             // Log the reason we're extracting metrics
             if completed {
-                tracing::trace!(
-                    duration_ms = start.elapsed().as_millis() as u64,
-                    "Stream completed normally"
-                );
+                tracing::trace!(duration_ms = start.elapsed().as_millis() as u64, "Stream completed normally");
             }
 
             let acc = accumulated.lock().await;
@@ -283,7 +269,7 @@ pub async fn handle_streaming_response(
             if !acc.is_empty() {
                 let preview = if acc.len() > 1000 { &acc[..1000] } else { &acc[..] };
                 tracing::trace!("Accumulated SSE preview:\n{}", preview);
-                
+
                 if let Some(final_event) = parse_accumulated_sse(&acc) {
                     tracing::trace!(
                         "Successfully merged SSE events into final response with keys: {:?}",
@@ -487,16 +473,20 @@ fn merge_anthropic_events(events: Vec<SseEvent>) -> serde_json::Value {
                         while content.len() <= idx {
                             content.push(json!(null));
                         }
-                        
+
                         // If block is null, initialize it based on delta type
                         if content[idx].is_null() {
                             let delta_type = delta.get("type").and_then(|t| t.as_str()).unwrap_or("text_delta");
-                            let block_type = if delta_type == "thinking_delta" { "thinking" } 
-                                           else if delta_type == "input_json_delta" { "tool_use" }
-                                           else { "text" };
+                            let block_type = if delta_type == "thinking_delta" {
+                                "thinking"
+                            } else if delta_type == "input_json_delta" {
+                                "tool_use"
+                            } else {
+                                "text"
+                            };
                             content[idx] = json!({"type": block_type});
                         }
-                        
+
                         let block = &mut content[idx];
                         if let Some(obj) = block.as_object_mut() {
                             // Handle text_delta - use in-place mutation for O(n) performance
@@ -581,41 +571,24 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                         if let Some(acc_choice) = acc_choices.get_mut(i) {
                             if let Some(delta) = choice.get("delta") {
                                 // Merge delta content
-                                if let Some(content) = delta.get("content").and_then(|c| c.as_str())
-                                {
+                                if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                                     if let Some(acc_msg) = acc_choice.get_mut("message") {
-                                        if let Some(existing) =
-                                            acc_msg.get("content").and_then(|c| c.as_str())
-                                        {
-                                            acc_msg["content"] =
-                                                serde_json::Value::String(format!(
-                                                    "{}{}",
-                                                    existing, content
-                                                ));
+                                        if let Some(existing) = acc_msg.get("content").and_then(|c| c.as_str()) {
+                                            acc_msg["content"] = serde_json::Value::String(format!("{}{}", existing, content));
                                         } else {
-                                            acc_msg["content"] =
-                                                serde_json::Value::String(content.to_string());
+                                            acc_msg["content"] = serde_json::Value::String(content.to_string());
                                         }
                                     }
                                 }
 
                                 // Merge reasoning_text (concatenate like content)
-                                if let Some(reasoning) =
-                                    delta.get("reasoning_text").and_then(|r| r.as_str())
-                                {
+                                if let Some(reasoning) = delta.get("reasoning_text").and_then(|r| r.as_str()) {
                                     if let Some(acc_msg) = acc_choice.get_mut("message") {
-                                        if let Some(existing) = acc_msg
-                                            .get("reasoning_text")
-                                            .and_then(|r| r.as_str())
-                                        {
+                                        if let Some(existing) = acc_msg.get("reasoning_text").and_then(|r| r.as_str()) {
                                             acc_msg["reasoning_text"] =
-                                                serde_json::Value::String(format!(
-                                                    "{}{}",
-                                                    existing, reasoning
-                                                ));
+                                                serde_json::Value::String(format!("{}{}", existing, reasoning));
                                         } else {
-                                            acc_msg["reasoning_text"] =
-                                                serde_json::Value::String(reasoning.to_string());
+                                            acc_msg["reasoning_text"] = serde_json::Value::String(reasoning.to_string());
                                         }
                                     }
                                 }
@@ -629,10 +602,7 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
 
                                 // Merge tool calls
                                 if let Some(tool_calls) = delta.get("tool_calls") {
-                                    if let Some(acc_tc) = acc_choice
-                                        .get_mut("message")
-                                        .and_then(|m| m.get_mut("tool_calls"))
-                                    {
+                                    if let Some(acc_tc) = acc_choice.get_mut("message").and_then(|m| m.get_mut("tool_calls")) {
                                         // Append or merge tool calls
                                         if acc_tc.is_null() {
                                             *acc_tc = tool_calls.clone();
@@ -640,9 +610,7 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                                             (acc_tc.as_array_mut(), tool_calls.as_array())
                                         {
                                             for new_call in new_arr {
-                                                if let Some(idx) =
-                                                    new_call.get("index").and_then(|i| i.as_u64())
-                                                {
+                                                if let Some(idx) = new_call.get("index").and_then(|i| i.as_u64()) {
                                                     // Find or create slot for this index
                                                     while acc_arr.len() <= idx as usize {
                                                         acc_arr.push(serde_json::Value::Null);
@@ -659,9 +627,10 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                                                                 acc_func.get("arguments").and_then(|a| a.as_str()),
                                                                 new_func.get("arguments").and_then(|a| a.as_str()),
                                                             ) {
-                                                                acc_func["arguments"] = serde_json::Value::String(
-                                                                    format!("{}{}", acc_args, new_args),
-                                                                );
+                                                                acc_func["arguments"] = serde_json::Value::String(format!(
+                                                                    "{}{}",
+                                                                    acc_args, new_args
+                                                                ));
                                                             }
                                                         }
                                                     }
@@ -783,12 +752,12 @@ mod tests {
         let sse = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"content\":[],\"model\":\"claude-3\",\"stop_reason\":null,\"usage\":{\"input_tokens\":10,\"output_tokens\":0}}}\nevent: content_block_start\ndata: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"Hello\"}}\nevent: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" world\"}}\nevent: content_block_stop\ndata: {\"type\":\"content_block_stop\",\"index\":0}\nevent: message_delta\ndata: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":5}}\nevent: message_stop\ndata: {\"type\":\"message_stop\"}\n";
 
         let result = parse_accumulated_sse(sse).unwrap();
-        
+
         assert_eq!(result["model"].as_str().unwrap(), "claude-3");
         assert_eq!(result["stop_reason"].as_str().unwrap(), "end_turn");
         assert_eq!(result["usage"]["input_tokens"].as_u64().unwrap(), 10);
         assert_eq!(result["usage"]["output_tokens"].as_u64().unwrap(), 5);
-        
+
         let content = result["content"].as_array().unwrap();
         assert_eq!(content.len(), 1);
         assert_eq!(content[0]["text"].as_str().unwrap(), "Hello world");
@@ -817,7 +786,7 @@ mod tests {
     // to reproduce the duplicate filePath bug at a higher level
 
     mod integration_tests {
-        use crate::fixes::{ToolcallBadFilepathFix, FixRegistry, ToolCallAccumulator, ResponseFix};
+        use crate::fixes::{FixRegistry, ResponseFix, ToolCallAccumulator, ToolcallBadFilepathFix};
         use std::sync::Arc;
 
         #[test]
@@ -968,7 +937,11 @@ mod tests {
                 // Should only have ONE filePath field
                 let json_str = serde_json::to_string(&parsed).unwrap();
                 let filepath_count = json_str.matches(r#""filePath""#).count();
-                assert_eq!(filepath_count, 1, "Should have exactly 1 filePath field, got {}", filepath_count);
+                assert_eq!(
+                    filepath_count, 1,
+                    "Should have exactly 1 filePath field, got {}",
+                    filepath_count
+                );
             }
         }
 
@@ -1026,9 +999,15 @@ mod tests {
             let (result2, _) = fix.apply_stream_with_accumulation_default(chunk2, &mut accumulator);
             let (result3, _) = fix.apply_stream_with_accumulation_default(chunk3, &mut accumulator);
 
-            let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
-            let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
-            let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+            let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap();
+            let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap();
+            let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap();
 
             // Client-side accumulation
             let client_accumulated = format!("{}{}{}", delta1, delta2, delta3);

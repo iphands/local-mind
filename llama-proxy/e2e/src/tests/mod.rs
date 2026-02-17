@@ -56,7 +56,6 @@ pub fn all_tests() -> Vec<TestCase> {
             "Backend error responses (5xx) are forwarded to client",
             basic::test_backend_error_passthrough
         ),
-
         // ── Tool call pass-through ─────────────────────────────────────────────
         test!(
             "toolcall/valid_non_streaming",
@@ -83,7 +82,6 @@ pub fn all_tests() -> Vec<TestCase> {
             "Empty {} arguments are valid and pass through",
             toolcall::test_empty_arguments
         ),
-
         // ── Bad filePath fix (Qwen3-Coder bug) ─────────────────────────────────
         test!(
             "toolcall/bad_filepath/fixed_non_streaming",
@@ -105,7 +103,6 @@ pub fn all_tests() -> Vec<TestCase> {
             "Fix handles filePaths with spaces and Unicode",
             toolcall::test_filepath_with_special_chars
         ),
-
         // ── Null index fix ──────────────────────────────────────────────────────
         test!(
             "toolcall/null_index/fixed_non_streaming",
@@ -117,14 +114,12 @@ pub fn all_tests() -> Vec<TestCase> {
             "Tool call with null index gets integer index in synthesized SSE",
             toolcall::test_null_index_fixed_streaming
         ),
-
         // ── Malformed arguments fix ─────────────────────────────────────────────
         test!(
             "toolcall/malformed_args/fixed",
             r#"Tool call with {}"" pattern is fixed to valid JSON"#,
             toolcall::test_malformed_arguments_fixed
         ),
-
         // ── Pass-through endpoints ───────────────────────────────────────────────
         test!(
             "passthrough/health",

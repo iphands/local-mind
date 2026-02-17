@@ -31,11 +31,18 @@ pub async fn send_non_streaming(
         .map_err(|e| anyhow::anyhow!("Failed to send request to proxy: {}", e))?;
 
     let status = resp.status().as_u16();
-    let body_text = resp.text().await
+    let body_text = resp
+        .text()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to read proxy response: {}", e))?;
 
-    let body: serde_json::Value = serde_json::from_str(&body_text)
-        .map_err(|e| anyhow::anyhow!("Proxy response is not valid JSON: {}: {}", e, &body_text[..body_text.len().min(500)]))?;
+    let body: serde_json::Value = serde_json::from_str(&body_text).map_err(|e| {
+        anyhow::anyhow!(
+            "Proxy response is not valid JSON: {}: {}",
+            e,
+            &body_text[..body_text.len().min(500)]
+        )
+    })?;
 
     Ok(ProxyResponse { status, body })
 }
@@ -65,17 +72,15 @@ pub async fn send_streaming(
         return Err(anyhow::anyhow!("Proxy returned error {}: {}", status, body));
     }
 
-    let content_type = resp.headers()
+    let content_type = resp
+        .headers()
         .get("content-type")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
 
     if !content_type.contains("text/event-stream") {
-        return Err(anyhow::anyhow!(
-            "Expected text/event-stream but got: {}",
-            content_type
-        ));
+        return Err(anyhow::anyhow!("Expected text/event-stream but got: {}", content_type));
     }
 
     // Collect all bytes from the stream
@@ -138,11 +143,7 @@ fn parse_sse(text: &str) -> anyhow::Result<Vec<SseEvent>> {
 }
 
 /// Send a GET request to the proxy (for passthrough endpoints like /health, /props, /slots)
-pub async fn send_get(
-    client: &Client,
-    proxy_addr: &str,
-    path: &str,
-) -> anyhow::Result<ProxyResponse> {
+pub async fn send_get(client: &Client, proxy_addr: &str, path: &str) -> anyhow::Result<ProxyResponse> {
     let url = format!("http://{proxy_addr}{path}");
 
     let resp = client
@@ -154,8 +155,7 @@ pub async fn send_get(
     let status = resp.status().as_u16();
     let body_text = resp.text().await.unwrap_or_default();
 
-    let body: serde_json::Value = serde_json::from_str(&body_text)
-        .unwrap_or(serde_json::Value::String(body_text));
+    let body: serde_json::Value = serde_json::from_str(&body_text).unwrap_or(serde_json::Value::String(body_text));
 
     Ok(ProxyResponse { status, body })
 }

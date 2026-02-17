@@ -177,12 +177,7 @@ impl ToolcallBadFilepathFix {
     ///
     /// # Returns
     /// A minimal completion string (typically "}" or ""_":null}")
-    fn calculate_completion_delta(
-        &self,
-        accumulated: &str,
-        current_chunk: &str,
-        index: usize,
-    ) -> String {
+    fn calculate_completion_delta(&self, accumulated: &str, current_chunk: &str, index: usize) -> String {
         // TIER 1: Fast path - accumulated ends with current chunk
         // This is the common case since we just appended current_chunk
         let already_sent_len = if accumulated.ends_with(current_chunk) {
@@ -348,7 +343,10 @@ impl ResponseFix for ToolcallBadFilepathFix {
     ) -> (Value, FixAction) {
         // Delegate to the default version since we don't need request context
         // The accumulation logic is in apply_stream_with_accumulation_default
-        tracing::debug!(fix_name = self.name(), "OVERRIDE CALLED - ToolcallBadFilepathFix.apply_stream_with_accumulation (with request)");
+        tracing::debug!(
+            fix_name = self.name(),
+            "OVERRIDE CALLED - ToolcallBadFilepathFix.apply_stream_with_accumulation (with request)"
+        );
         self.apply_stream_with_accumulation_default(chunk, accumulator)
     }
 
@@ -357,7 +355,10 @@ impl ResponseFix for ToolcallBadFilepathFix {
         mut chunk: Value,
         accumulator: &mut ToolCallAccumulator,
     ) -> (Value, FixAction) {
-        tracing::debug!(fix_name = self.name(), "OVERRIDE CALLED - ToolcallBadFilepathFix.apply_stream_with_accumulation_default");
+        tracing::debug!(
+            fix_name = self.name(),
+            "OVERRIDE CALLED - ToolcallBadFilepathFix.apply_stream_with_accumulation_default"
+        );
         let mut overall_action = FixAction::NotApplicable;
 
         if let Some(choices) = chunk.get_mut("choices").and_then(|c| c.as_array_mut()) {
@@ -372,9 +373,7 @@ impl ResponseFix for ToolcallBadFilepathFix {
                             call.get("index").and_then(|i| i.as_u64()).map(|i| i as usize),
                             call.get_mut("function"),
                         ) {
-                            if let Some(chunk_args) =
-                                function.get("arguments").and_then(|a| a.as_str())
-                            {
+                            if let Some(chunk_args) = function.get("arguments").and_then(|a| a.as_str()) {
                                 // CRITICAL: Check if this index has already been fixed
                                 // If so, suppress this chunk by replacing arguments with empty string
                                 if accumulator.is_fixed(index) {
@@ -396,8 +395,7 @@ impl ResponseFix for ToolcallBadFilepathFix {
                                 // Only try to fix if the accumulated content looks complete
                                 // (ends with } for an object) or has the specific duplicate pattern
                                 let looks_complete = accumulated.trim_end().ends_with('}');
-                                let has_duplicate_filepath =
-                                    accumulated.matches(r#""filePath""#).count() > 1;
+                                let has_duplicate_filepath = accumulated.matches(r#""filePath""#).count() > 1;
 
                                 if looks_complete || has_duplicate_filepath {
                                     // Check if accumulated args are malformed
@@ -444,11 +442,8 @@ impl ResponseFix for ToolcallBadFilepathFix {
                                         if self.is_valid_json(&fixed) {
                                             // Calculate the completion delta using extracted method
                                             // This ensures we NEVER send full JSON to the client
-                                            let valid_completion = self.calculate_completion_delta(
-                                                &accumulated,
-                                                chunk_args,
-                                                index,
-                                            );
+                                            let valid_completion =
+                                                self.calculate_completion_delta(&accumulated, chunk_args, index);
 
                                             function["arguments"] = Value::String(valid_completion.clone());
                                             // Mark this index as fixed so subsequent chunks are suppressed
@@ -809,25 +804,20 @@ mod tests {
         // which has duplicate filePath keys
 
         // Chunk 1: {"content":"code",
-        let chunk1 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"content\":\"code\","}}]}}]}"#;
+        let chunk1 =
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"content\":\"code\","}}]}}]}"#;
         // Chunk 2: "filePath":"/path",
-        let chunk2 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"filePath\":\"/path\","}}]}}]}"#;
+        let chunk2 =
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"filePath\":\"/path\","}}]}}]}"#;
         // Chunk 3: "filePath":"/path"} - duplicate key triggers the fix
-        let chunk3 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"filePath\":\"/path\"}"}}]}}]}"#;
+        let chunk3 =
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"filePath\":\"/path\"}"}}]}}]}"#;
 
         // Apply fix to each chunk
-        let (result1, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk1).unwrap(),
-            &mut accumulator,
-        );
-        let (result2, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk2).unwrap(),
-            &mut accumulator,
-        );
-        let (result3, action3) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk3).unwrap(),
-            &mut accumulator,
-        );
+        let (result1, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk1).unwrap(), &mut accumulator);
+        let (result2, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk2).unwrap(), &mut accumulator);
+        let (result3, action3) =
+            fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk3).unwrap(), &mut accumulator);
 
         // First two chunks should still have their original content (accumulating)
         let args1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
@@ -877,25 +867,16 @@ mod tests {
         let chunk2 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"tent\":\"code\"}"}}]}}]}"#;
 
         // Apply fix to first chunk
-        let _result1 = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk1).unwrap(),
-            &mut accumulator,
-        );
+        let _result1 = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk1).unwrap(), &mut accumulator);
 
         // Accumulator should have content
         assert!(accumulator.get(0).is_some());
 
         // Apply fix to second chunk - now we have valid JSON
-        let _result2 = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk2).unwrap(),
-            &mut accumulator,
-        );
+        let _result2 = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk2).unwrap(), &mut accumulator);
 
         // Accumulator should be cleared after valid JSON detected
-        assert!(
-            accumulator.get(0).is_none(),
-            "Accumulator should be cleared after valid JSON"
-        );
+        assert!(accumulator.get(0).is_none(), "Accumulator should be cleared after valid JSON");
     }
 
     #[test]
@@ -910,25 +891,18 @@ mod tests {
         let chunk1 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":"}},{"index":1,"function":{"arguments":"{\"filePath\":"}}]}}]}"#;
         let chunk2 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"b\"}"}},{"index":1,"function":{"arguments":"\"/first/path\","}}]}}]}"#;
         // Tool 1 now gets duplicate filePath with proper quotes (pattern the fix can handle)
-        let chunk3 = r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"filePath\":\"/second/path\"}"}}]}}]}"#;
+        let chunk3 =
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"\"filePath\":\"/second/path\"}"}}]}}]}"#;
 
-        fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk1).unwrap(),
-            &mut accumulator,
-        );
-        fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk2).unwrap(),
-            &mut accumulator,
-        );
+        fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk1).unwrap(), &mut accumulator);
+        fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk2).unwrap(), &mut accumulator);
 
         // Tool 0 should be cleared (valid JSON), tool 1 should still be accumulating
         assert!(accumulator.get(0).is_none());
         assert!(accumulator.get(1).is_some());
 
-        let (_result3, action3) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk3).unwrap(),
-            &mut accumulator,
-        );
+        let (_result3, action3) =
+            fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk3).unwrap(), &mut accumulator);
 
         // Tool 1 should be fixed - the accumulated content has duplicate filePath
         // {"filePath":"/first/path","filePath":"/second/path"}
@@ -954,11 +928,7 @@ mod tests {
 
         // Verify the fix produces valid JSON
         let fixed = fix.fix_arguments(malformed);
-        assert!(
-            fix.is_valid_json(&fixed),
-            "Fixed output should be valid JSON, got: {}",
-            fixed
-        );
+        assert!(fix.is_valid_json(&fixed), "Fixed output should be valid JSON, got: {}", fixed);
 
         // Verify the fixed output contains the expected content
         let parsed: serde_json::Value = serde_json::from_str(&fixed).unwrap();
@@ -975,28 +945,21 @@ mod tests {
         let mut accumulator = ToolCallAccumulator::new();
 
         // Chunk 1: {"content":"some code",
-        let chunk1 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"content\":\"some code\","}}]}}]}"#;
+        let chunk1 =
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"content\":\"some code\","}}]}}]}"#;
         // Chunk 2: "filePath":"/home/user/file.c",
         let chunk2 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"filePath\":\"/home/user/file.c\","}}]}}]}"#;
         // Chunk 3: "filePath"/home/user/file.c"} - malformed, missing colon
         let chunk3 = r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"filePath\"/home/user/file.c\"}"}}]}}]}"#;
 
-        let (result1, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk1).unwrap(),
-            &mut accumulator,
-        );
-        let (result2, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk2).unwrap(),
-            &mut accumulator,
-        );
+        let (result1, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk1).unwrap(), &mut accumulator);
+        let (result2, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk2).unwrap(), &mut accumulator);
 
         // Before the final chunk, we should be accumulating
         assert!(accumulator.get(0).is_some());
 
-        let (result3, action3) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk3).unwrap(),
-            &mut accumulator,
-        );
+        let (result3, action3) =
+            fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk3).unwrap(), &mut accumulator);
 
         // Extract deltas from each chunk
         let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
@@ -1064,8 +1027,11 @@ mod tests {
 
         // Step 5: Verify we kept the FIRST filePath value
         let filepath = parsed["filePath"].as_str().unwrap();
-        assert_eq!(filepath, "/home/iphands/prog/slop/trash/primes.pl",
-                   "Should keep first filePath value, got: {}", filepath);
+        assert_eq!(
+            filepath, "/home/iphands/prog/slop/trash/primes.pl",
+            "Should keep first filePath value, got: {}",
+            filepath
+        );
     }
 
     #[test]
@@ -1086,20 +1052,14 @@ mod tests {
         let chunk3 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\"/home/iphands/prog/slop/llama-proxy/trash/primes.pl\\\"}\"}}]}}]}";
 
         // Process each chunk
-        let (_result1, _action1) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk1).unwrap(),
-            &mut accumulator,
-        );
+        let (_result1, _action1) =
+            fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk1).unwrap(), &mut accumulator);
 
-        let (_result2, _action2) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk2).unwrap(),
-            &mut accumulator,
-        );
+        let (_result2, _action2) =
+            fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk2).unwrap(), &mut accumulator);
 
-        let (result3, action3) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk3).unwrap(),
-            &mut accumulator,
-        );
+        let (result3, action3) =
+            fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk3).unwrap(), &mut accumulator);
 
         // Verify the fix was detected and applied
         assert!(action3.detected(), "Should detect malformed content on chunk 3");
@@ -1128,8 +1088,11 @@ mod tests {
         println!("Final client accumulated: {}", client_accumulated);
 
         // Verify the client's accumulated content is valid JSON
-        assert!(fix.is_valid_json(&client_accumulated),
-                "Final client accumulated arguments MUST be valid JSON, got: {}", client_accumulated);
+        assert!(
+            fix.is_valid_json(&client_accumulated),
+            "Final client accumulated arguments MUST be valid JSON, got: {}",
+            client_accumulated
+        );
 
         // Parse and verify structure
         let parsed: serde_json::Value = serde_json::from_str(&client_accumulated).unwrap();
@@ -1191,10 +1154,12 @@ mod tests {
 
         // CRITICAL: Verify the fixed arguments are valid JSON
         let parsed_result = serde_json::from_str::<serde_json::Value>(fixed_args);
-        assert!(parsed_result.is_ok(),
-                "Fixed arguments MUST be valid JSON! Parse error: {:?}\nArguments: {}",
-                parsed_result.err(),
-                fixed_args);
+        assert!(
+            parsed_result.is_ok(),
+            "Fixed arguments MUST be valid JSON! Parse error: {:?}\nArguments: {}",
+            parsed_result.err(),
+            fixed_args
+        );
 
         // Verify structure
         let parsed = parsed_result.unwrap();
@@ -1221,15 +1186,21 @@ mod tests {
             println!("\nTesting case: {}", description);
             println!("Input: {}", malformed);
 
-            assert!(fix.is_malformed(malformed),
-                    "Case '{}' should be detected as malformed", description);
+            assert!(
+                fix.is_malformed(malformed),
+                "Case '{}' should be detected as malformed",
+                description
+            );
 
             let fixed = fix.fix_arguments(malformed);
             println!("Fixed: {}", fixed);
 
-            assert!(fix.is_valid_json(&fixed),
-                    "Case '{}' should produce valid JSON after fix, got: {}",
-                    description, fixed);
+            assert!(
+                fix.is_valid_json(&fixed),
+                "Case '{}' should produce valid JSON after fix, got: {}",
+                description,
+                fixed
+            );
         }
     }
 
@@ -1253,10 +1224,8 @@ mod tests {
         let mut client_accumulated = String::new();
 
         // Process chunk 1
-        let (result1, _action1) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk1).unwrap(),
-            &mut accumulator,
-        );
+        let (result1, _action1) =
+            fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk1).unwrap(), &mut accumulator);
         let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
             .as_str()
             .unwrap();
@@ -1265,10 +1234,8 @@ mod tests {
         println!("Client accumulated after chunk 1: {}", client_accumulated);
 
         // Process chunk 2
-        let (result2, _action2) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk2).unwrap(),
-            &mut accumulator,
-        );
+        let (result2, _action2) =
+            fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk2).unwrap(), &mut accumulator);
         let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
             .as_str()
             .unwrap();
@@ -1277,10 +1244,8 @@ mod tests {
         println!("Client accumulated after chunk 2: {}", client_accumulated);
 
         // Process chunk 3 - THIS IS WHERE THE FIX TRIGGERS
-        let (result3, action3) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk3).unwrap(),
-            &mut accumulator,
-        );
+        let (result3, action3) =
+            fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk3).unwrap(), &mut accumulator);
         let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
             .as_str()
             .unwrap();
@@ -1291,7 +1256,10 @@ mod tests {
 
         // CRITICAL TEST: What does Claude Code see?
         println!("\nFinal client-side accumulated content: {}", client_accumulated);
-        println!("Is it valid JSON? {}", serde_json::from_str::<serde_json::Value>(&client_accumulated).is_ok());
+        println!(
+            "Is it valid JSON? {}",
+            serde_json::from_str::<serde_json::Value>(&client_accumulated).is_ok()
+        );
 
         // THIS IS THE BUG: Claude Code will have corrupted accumulated content
         // because the proxy sent the FULL fixed JSON in chunk 3,
@@ -1323,25 +1291,23 @@ mod tests {
         let chunk2 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\":\\\"/path1\\\",\"}}]}}]}";
         let chunk3 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\"/path2\\\"}\"}}]}}]}";
 
-        let (result1, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk1).unwrap(),
-            &mut accumulator,
-        );
+        let (result1, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk1).unwrap(), &mut accumulator);
 
-        let (result2, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk2).unwrap(),
-            &mut accumulator,
-        );
+        let (result2, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk2).unwrap(), &mut accumulator);
 
-        let (result3, _action3) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk3).unwrap(),
-            &mut accumulator,
-        );
+        let (result3, _action3) =
+            fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk3).unwrap(), &mut accumulator);
 
         // Extract deltas
-        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
-        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
-        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
 
         println!("Delta 1: {}", delta1);
         println!("Delta 2: {}", delta2);
@@ -1378,24 +1344,22 @@ mod tests {
         let chunk2 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\":\\\"/tmp/test\\\",\"}}]}}]}";
         let chunk3 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\"/malformed\\\"}\"}}]}}]}";
 
-        let (result1, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk1).unwrap(),
-            &mut accumulator,
-        );
+        let (result1, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk1).unwrap(), &mut accumulator);
 
-        let (result2, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk2).unwrap(),
-            &mut accumulator,
-        );
+        let (result2, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk2).unwrap(), &mut accumulator);
 
-        let (result3, _action3) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk3).unwrap(),
-            &mut accumulator,
-        );
+        let (result3, _action3) =
+            fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk3).unwrap(), &mut accumulator);
 
-        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
-        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
-        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
 
         // Client accumulates
         let mut client_accumulated = String::new();
@@ -1430,28 +1394,26 @@ mod tests {
 
         // Create chunks where content repeats
         let chunk1 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"{\\\"filePath\\\":\\\"/\"}}]}}]}";
-        let chunk2 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"filePath\\\",\"}}]}}]}";
+        let chunk2 =
+            "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"filePath\\\",\"}}]}}]}";
         // Malformed chunk - missing colon before second occurrence
         let chunk3 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\"/test\\\"}\"}}]}}]}";
 
-        let (result1, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk1).unwrap(),
-            &mut accumulator,
-        );
+        let (result1, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk1).unwrap(), &mut accumulator);
 
-        let (result2, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk2).unwrap(),
-            &mut accumulator,
-        );
+        let (result2, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk2).unwrap(), &mut accumulator);
 
-        let (result3, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk3).unwrap(),
-            &mut accumulator,
-        );
+        let (result3, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk3).unwrap(), &mut accumulator);
 
-        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
-        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
-        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
 
         let mut client_accumulated = String::new();
         client_accumulated.push_str(delta1);
@@ -1480,24 +1442,21 @@ mod tests {
         let chunk2 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\":\\\"/home/ユーザー/test.txt\\\",\"}}]}}]}";
         let chunk3 = "{\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"filePath\\\"/broken\\\"}\"}}]}}]}";
 
-        let (result1, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk1).unwrap(),
-            &mut accumulator,
-        );
+        let (result1, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk1).unwrap(), &mut accumulator);
 
-        let (result2, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk2).unwrap(),
-            &mut accumulator,
-        );
+        let (result2, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk2).unwrap(), &mut accumulator);
 
-        let (result3, _) = fix.apply_stream_with_accumulation_default(
-            serde_json::from_str(chunk3).unwrap(),
-            &mut accumulator,
-        );
+        let (result3, _) = fix.apply_stream_with_accumulation_default(serde_json::from_str(chunk3).unwrap(), &mut accumulator);
 
-        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
-        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
-        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let delta1 = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let delta2 = result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
 
         let mut client_accumulated = String::new();
         client_accumulated.push_str(delta1);
@@ -1559,7 +1518,9 @@ mod tests {
 
         // NOW: Manually inject different content into accumulator to break ends_with()
         // This simulates what could happen if JSON is reformatted or encoding changes
-        accumulator.accumulated.insert(0, r#"{"content":"test",  "filePath":"/path1","#.to_string());
+        accumulator
+            .accumulated
+            .insert(0, r#"{"content":"test",  "filePath":"/path1","#.to_string());
 
         // Chunk 3: malformed duplicate filePath
         let chunk3_json = serde_json::json!({
@@ -1636,14 +1597,19 @@ mod tests {
         let chunk4 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"garbage"}}]}}]});
         let (result4, _) = fix.apply_stream_with_accumulation_default(chunk4, &mut accumulator);
 
-        let args4 = result4["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let args4 = result4["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
         assert_eq!(args4, "", "Post-fix chunk should be suppressed (empty string)");
 
         // Chunk 5: Another post-fix chunk - should also be suppressed
-        let chunk5 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"more garbage"}}]}}]});
+        let chunk5 =
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"more garbage"}}]}}]});
         let (result5, _) = fix.apply_stream_with_accumulation_default(chunk5, &mut accumulator);
 
-        let args5 = result5["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap();
+        let args5 = result5["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
         assert_eq!(args5, "", "Second post-fix chunk should also be suppressed");
     }
 
@@ -1656,7 +1622,11 @@ mod tests {
         assert!(fix.is_malformed(malformed), "Should detect 'filePath}}' as malformed");
 
         let fixed = fix.fix_arguments(malformed);
-        assert!(fix.is_valid_json(&fixed), "Fixed version should be valid JSON, got: {}", fixed);
+        assert!(
+            fix.is_valid_json(&fixed),
+            "Fixed version should be valid JSON, got: {}",
+            fixed
+        );
     }
 
     #[test]
@@ -1683,7 +1653,7 @@ mod tests {
         // Note: The chunk that triggers the fix will send a completion delta (not suppressed)
         // Subsequent chunks AFTER the fix will be suppressed
         let chunks = vec![
-            (r#"{"content":"code","#, false, false),  // Normal accumulation
+            (r#"{"content":"code","#, false, false),   // Normal accumulation
             (r#""filePath":"/path1","#, false, false), // Normal accumulation
             (r#""filePath"/home"#, false, true),       // Triggers fix, sends completion delta
             (r#""filePath}"#, true, false),            // Post-fix - should suppress
@@ -1698,14 +1668,18 @@ mod tests {
             let (result, _) = fix.apply_stream_with_accumulation_default(chunk, &mut accumulator);
 
             let delta = result["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
-                .as_str().unwrap();
+                .as_str()
+                .unwrap();
 
             if should_suppress {
                 assert_eq!(delta, "", "Expected suppression but got: {}", delta);
             } else if triggers_fix {
                 // The chunk that triggers the fix sends a completion delta
-                assert!(!delta.is_empty() || delta == "}" || delta.contains("null"),
-                        "Fix trigger chunk should send completion delta, got: {}", delta);
+                assert!(
+                    !delta.is_empty() || delta == "}" || delta.contains("null"),
+                    "Fix trigger chunk should send completion delta, got: {}",
+                    delta
+                );
                 client_accumulated.push_str(delta);
             } else {
                 // Normal accumulation
@@ -1717,11 +1691,17 @@ mod tests {
         println!("Client accumulated: {}", client_accumulated);
 
         // The accumulated result should be valid JSON
-        assert!(fix.is_valid_json(&client_accumulated),
-                "Client accumulated JSON should be valid, got: {}", client_accumulated);
+        assert!(
+            fix.is_valid_json(&client_accumulated),
+            "Client accumulated JSON should be valid, got: {}",
+            client_accumulated
+        );
 
         // At minimum, check that it doesn't have the malformed patterns
-        assert!(!client_accumulated.contains(r#""filePath}"#), "Should not contain malformed filePath}}");
+        assert!(
+            !client_accumulated.contains(r#""filePath}"#),
+            "Should not contain malformed filePath}}"
+        );
     }
 
     #[test]
@@ -1739,15 +1719,24 @@ mod tests {
         assert!(action.detected());
 
         // Tool call 0 post-fix: Should be suppressed
-        let chunk3 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"suppressed"}}]}}]});
+        let chunk3 =
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"suppressed"}}]}}]});
         let (result3, _) = fix.apply_stream_with_accumulation_default(chunk3, &mut accumulator);
-        assert_eq!(result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap(), "");
+        assert_eq!(
+            result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+            ""
+        );
 
         // Tool call 1: Should NOT be affected - different index
-        let chunk4 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"ok\":true}"}}]}}]});
+        let chunk4 =
+            serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":1,"function":{"arguments":"{\"ok\":true}"}}]}}]});
         let (result4, _) = fix.apply_stream_with_accumulation_default(chunk4, &mut accumulator);
         assert_eq!(
-            result4["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"].as_str().unwrap(),
+            result4["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
             "{\"ok\":true}",
             "Different index should not be suppressed"
         );

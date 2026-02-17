@@ -10,7 +10,11 @@ use super::helpers::assert_true;
 /// It does NOT proxy /health to the backend (unlike /v1/health which IS proxied)
 pub async fn test_health_passthrough(ctx: TestContext) -> anyhow::Result<()> {
     let url = format!("http://{}/health", ctx.proxy_addr);
-    let resp = ctx.http_client.get(&url).send().await
+    let resp = ctx
+        .http_client
+        .get(&url)
+        .send()
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to GET /health: {}", e))?;
 
     assert_true(resp.status().as_u16() == 200, &format!("Expected 200, got {}", resp.status()))?;
@@ -98,23 +102,19 @@ pub async fn test_passthrough_not_modified(ctx: TestContext) -> anyhow::Result<(
     assert_true(resp.status == 200, &format!("Expected 200, got {}", resp.status))?;
 
     // The proxy should not add any extra fields (like "fixes_applied")
-    let slots = resp.body.as_array()
+    let slots = resp
+        .body
+        .as_array()
         .ok_or_else(|| anyhow::anyhow!("Expected array from /slots, got: {:?}", resp.body))?;
 
     assert_true(!slots.is_empty(), "/slots array should not be empty")?;
 
     // Each slot should be a plain object from the backend - no proxy-added metadata
     let first_slot = &slots[0];
-    assert_true(
-        first_slot.is_object(),
-        "Slot should be an object",
-    )?;
+    assert_true(first_slot.is_object(), "Slot should be an object")?;
 
     // Should have the standard llama.cpp slot fields (not any proxy-injected fields)
-    assert_true(
-        first_slot.get("n_ctx").is_some(),
-        "Slot should have n_ctx field from backend",
-    )?;
+    assert_true(first_slot.get("n_ctx").is_some(), "Slot should have n_ctx field from backend")?;
 
     Ok(())
 }

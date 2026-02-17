@@ -15,7 +15,8 @@ pub async fn test_simple_text_non_streaming(ctx: TestContext) -> anyhow::Result<
     let resp = send_non_streaming(&ctx.http_client, &ctx.proxy_addr, basic_request("say hello")).await?;
 
     assert_true(resp.status == 200, &format!("Expected 200, got {}", resp.status))?;
-    let content = resp.get_str("choices.0.message.content")
+    let content = resp
+        .get_str("choices.0.message.content")
         .ok_or_else(|| anyhow::anyhow!("Missing choices[0].message.content"))?;
     assert_eq_str(content, "Hello, world!", "message content")?;
 
@@ -80,10 +81,14 @@ pub async fn test_streaming_finish_reason(ctx: TestContext) -> anyhow::Result<()
 
 /// Backend error passes through to client
 pub async fn test_backend_error_passthrough(ctx: TestContext) -> anyhow::Result<()> {
-    queue_response(&ctx.backend_state, MockResponse::error(503, r#"{"error":"model overloaded"}"#));
+    queue_response(
+        &ctx.backend_state,
+        MockResponse::error(503, r#"{"error":"model overloaded"}"#),
+    );
 
     let url = format!("http://{}/v1/chat/completions", ctx.proxy_addr);
-    let resp = ctx.http_client
+    let resp = ctx
+        .http_client
         .post(&url)
         .header("Content-Type", "application/json")
         .json(&basic_request("hi"))
@@ -142,7 +147,8 @@ pub async fn test_sse_chunk_structure(ctx: TestContext) -> anyhow::Result<()> {
 
     // Some chunk should have content
     let has_content = data_events.iter().any(|e| {
-        e.parse_json().ok()
+        e.parse_json()
+            .ok()
             .and_then(|j| j.pointer("/choices/0/delta/content").cloned())
             .and_then(|v| v.as_str().map(|s| !s.is_empty()))
             .unwrap_or(false)

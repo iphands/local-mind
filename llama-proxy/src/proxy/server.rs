@@ -47,9 +47,7 @@ fn build_http_client(config: &AppConfig) -> Result<reqwest::Client, Box<dyn std:
         }
 
         // Load client certificate for mTLS if both cert and key are provided
-        if let (Some(cert_path), Some(key_path)) =
-            (&tls.client_cert_path, &tls.client_key_path)
-        {
+        if let (Some(cert_path), Some(key_path)) = (&tls.client_cert_path, &tls.client_key_path) {
             let cert_pem = std::fs::read(cert_path)?;
             let key_pem = std::fs::read(key_path)?;
 
@@ -86,12 +84,7 @@ pub async fn run_server(
         .route("/v1/*path", any(proxy_handler))
         .route("/*path", any(proxy_handler))
         .fallback(proxy_handler_fallback)
-        .layer(
-            CorsLayer::new()
-                .allow_origin(Any)
-                .allow_methods(Any)
-                .allow_headers(Any),
-        )
+        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 

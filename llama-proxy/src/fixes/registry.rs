@@ -130,11 +130,7 @@ impl FixRegistry {
     }
 
     /// Apply fixes without request context but with accumulation, with centralized logging
-    pub fn apply_fixes_stream_with_accumulation_default(
-        &self,
-        chunk: Value,
-        accumulator: &mut ToolCallAccumulator,
-    ) -> Value {
+    pub fn apply_fixes_stream_with_accumulation_default(&self, chunk: Value, accumulator: &mut ToolCallAccumulator) -> Value {
         let mut result = chunk;
 
         for fix in &self.fixes {
@@ -154,7 +150,10 @@ impl FixRegistry {
             FixAction::NotApplicable => {
                 tracing::trace!(fix_name = fix_name, "Fix did not apply");
             }
-            FixAction::Fixed { original_snippet, fixed_snippet } => {
+            FixAction::Fixed {
+                original_snippet,
+                fixed_snippet,
+            } => {
                 // Use log level provided by the fix
                 match log_level {
                     FixLogLevel::Trace => {
@@ -206,7 +205,10 @@ impl FixRegistry {
                     }
                 }
             }
-            FixAction::Failed { original_snippet, attempted_fix } => {
+            FixAction::Failed {
+                original_snippet,
+                attempted_fix,
+            } => {
                 // ALWAYS use WARN/ERROR for failures regardless of log level
                 tracing::warn!(
                     fix_name = fix_name,
@@ -231,15 +233,8 @@ impl FixRegistry {
 
                 // Apply fix-specific options
                 if name == "toolcall_bad_filepath" {
-                    if let Some(casted) = Arc::clone(fix)
-                        .as_any()
-                        .downcast_ref::<super::ToolcallBadFilepathFix>()
-                    {
-                        if let Some(remove_dup) = module_config
-                            .options
-                            .get("remove_duplicate")
-                            .and_then(|v| v.as_bool())
-                        {
+                    if let Some(casted) = Arc::clone(fix).as_any().downcast_ref::<super::ToolcallBadFilepathFix>() {
+                        if let Some(remove_dup) = module_config.options.get("remove_duplicate").and_then(|v| v.as_bool()) {
                             casted.set_remove_duplicate(remove_dup);
                         }
                     }
@@ -417,18 +412,12 @@ mod tests {
         registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
 
         let mut options = HashMap::new();
-        options.insert(
-            "remove_duplicate".to_string(),
-            serde_yaml::Value::Bool(false),
-        );
+        options.insert("remove_duplicate".to_string(), serde_yaml::Value::Bool(false));
 
         let mut modules = HashMap::new();
         modules.insert(
             "toolcall_bad_filepath".to_string(),
-            crate::config::FixModuleConfig {
-                enabled: false,
-                options,
-            },
+            crate::config::FixModuleConfig { enabled: false, options },
         );
 
         registry.configure(&modules);

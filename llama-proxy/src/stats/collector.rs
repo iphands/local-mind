@@ -92,12 +92,7 @@ impl RequestMetrics {
     }
 
     /// Extract metrics from response and request
-    pub fn from_response(
-        response: &Value,
-        request: &Value,
-        streaming: bool,
-        duration_ms: f64,
-    ) -> Self {
+    pub fn from_response(response: &Value, request: &Value, streaming: bool, duration_ms: f64) -> Self {
         let mut metrics = Self::new();
         metrics.streaming = streaming;
         metrics.duration_ms = duration_ms;
@@ -112,11 +107,7 @@ impl RequestMetrics {
         if let Some(model) = response.get("model").and_then(|m| m.as_str()) {
             tracing::debug!("Found model at top level: {}", model);
             metrics.model = model.to_string();
-        } else if let Some(model) = response
-            .get("message")
-            .and_then(|m| m.get("model"))
-            .and_then(|m| m.as_str())
-        {
+        } else if let Some(model) = response.get("message").and_then(|m| m.get("model")).and_then(|m| m.as_str()) {
             tracing::debug!("Found model in message object: {}", model);
             metrics.model = model.to_string();
         } else {
@@ -130,10 +121,7 @@ impl RequestMetrics {
             // Try OpenAI format first
             if let Some(prompt) = usage.get("prompt_tokens").and_then(|t| t.as_u64()) {
                 metrics.prompt_tokens = prompt;
-                metrics.completion_tokens = usage
-                    .get("completion_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0);
+                metrics.completion_tokens = usage.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                 metrics.total_tokens = usage
                     .get("total_tokens")
                     .and_then(|t| t.as_u64())
@@ -142,22 +130,15 @@ impl RequestMetrics {
             // Try Anthropic format
             else if let Some(input) = usage.get("input_tokens").and_then(|t| t.as_u64()) {
                 metrics.prompt_tokens = input;
-                metrics.completion_tokens = usage
-                    .get("output_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0);
+                metrics.completion_tokens = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
                 metrics.total_tokens = metrics.prompt_tokens + metrics.completion_tokens;
             }
 
             // Extract extended usage details (Opencode/Copilot extensions)
             if let Some(details) = usage.get("completion_tokens_details") {
                 metrics.reasoning_tokens = details.get("reasoning_tokens").and_then(|t| t.as_u64());
-                metrics.accepted_prediction_tokens = details
-                    .get("accepted_prediction_tokens")
-                    .and_then(|t| t.as_u64());
-                metrics.rejected_prediction_tokens = details
-                    .get("rejected_prediction_tokens")
-                    .and_then(|t| t.as_u64());
+                metrics.accepted_prediction_tokens = details.get("accepted_prediction_tokens").and_then(|t| t.as_u64());
+                metrics.rejected_prediction_tokens = details.get("rejected_prediction_tokens").and_then(|t| t.as_u64());
             }
         } else {
             tracing::debug!("No usage field found in response");
@@ -166,22 +147,10 @@ impl RequestMetrics {
         // Extract timings (llama.cpp specific)
         if let Some(timings) = response.get("timings") {
             tracing::debug!("Found timings: {:?}", timings);
-            metrics.prompt_ms = timings
-                .get("prompt_ms")
-                .and_then(|t| t.as_f64())
-                .unwrap_or(0.0);
-            metrics.generation_ms = timings
-                .get("predicted_ms")
-                .and_then(|t| t.as_f64())
-                .unwrap_or(0.0);
-            metrics.prompt_tps = timings
-                .get("prompt_per_second")
-                .and_then(|t| t.as_f64())
-                .unwrap_or(0.0);
-            metrics.generation_tps = timings
-                .get("predicted_per_second")
-                .and_then(|t| t.as_f64())
-                .unwrap_or(0.0);
+            metrics.prompt_ms = timings.get("prompt_ms").and_then(|t| t.as_f64()).unwrap_or(0.0);
+            metrics.generation_ms = timings.get("predicted_ms").and_then(|t| t.as_f64()).unwrap_or(0.0);
+            metrics.prompt_tps = timings.get("prompt_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0);
+            metrics.generation_tps = timings.get("predicted_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0);
 
             // Context info - use prompt_n for actual context consumption
             if let Some(prompt_n) = timings.get("prompt_n").and_then(|t| t.as_u64()) {
@@ -190,14 +159,8 @@ impl RequestMetrics {
 
             // Fallback to timings for token counts when usage is missing (e.g., timeout scenarios)
             if metrics.prompt_tokens == 0 && metrics.completion_tokens == 0 {
-                metrics.prompt_tokens = timings
-                    .get("prompt_n")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0);
-                metrics.completion_tokens = timings
-                    .get("predicted_n")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or(0);
+                metrics.prompt_tokens = timings.get("prompt_n").and_then(|t| t.as_u64()).unwrap_or(0);
+                metrics.completion_tokens = timings.get("predicted_n").and_then(|t| t.as_u64()).unwrap_or(0);
                 metrics.total_tokens = metrics.prompt_tokens + metrics.completion_tokens;
 
                 tracing::debug!(
@@ -223,14 +186,12 @@ impl RequestMetrics {
                 let estimated_generation_ms = duration_ms * 0.8;
 
                 if metrics.prompt_tokens > 0 && estimated_prompt_ms > 0.0 {
-                    metrics.prompt_tps =
-                        (metrics.prompt_tokens as f64 / estimated_prompt_ms) * 1000.0;
+                    metrics.prompt_tps = (metrics.prompt_tokens as f64 / estimated_prompt_ms) * 1000.0;
                     metrics.prompt_ms = estimated_prompt_ms;
                 }
 
                 if metrics.completion_tokens > 0 && estimated_generation_ms > 0.0 {
-                    metrics.generation_tps =
-                        (metrics.completion_tokens as f64 / estimated_generation_ms) * 1000.0;
+                    metrics.generation_tps = (metrics.completion_tokens as f64 / estimated_generation_ms) * 1000.0;
                     metrics.generation_ms = estimated_generation_ms;
                 }
 
@@ -348,10 +309,7 @@ impl ContextInfo {
             let slot_id = slot.get("id").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
             let n_ctx = slot.get("n_ctx").and_then(|n| n.as_u64()).unwrap_or(0);
             let n_tokens = slot.get("n_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
-            let is_processing = slot
-                .get("is_processing")
-                .and_then(|p| p.as_bool())
-                .unwrap_or(false);
+            let is_processing = slot.get("is_processing").and_then(|p| p.as_bool()).unwrap_or(false);
 
             total_context += n_ctx;
             used_context += n_tokens;
@@ -649,12 +607,7 @@ mod tests {
             }
         });
 
-        let metrics = RequestMetrics::from_response(
-            &response,
-            &serde_json::json!({"messages": []}),
-            false,
-            100.0,
-        );
+        let metrics = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), false, 100.0);
 
         assert_eq!(metrics.reasoning_tokens, Some(20));
         assert_eq!(metrics.accepted_prediction_tokens, Some(5));
@@ -678,12 +631,7 @@ mod tests {
             "choices": [{"finish_reason": null, "delta": {"content": null}}]
         });
 
-        let metrics = RequestMetrics::from_response(
-            &response,
-            &serde_json::json!({"messages": []}),
-            true,
-            30181.0,
-        );
+        let metrics = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), true, 30181.0);
 
         assert_eq!(metrics.prompt_tokens, 538);
         assert_eq!(metrics.completion_tokens, 983);

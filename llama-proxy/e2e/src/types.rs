@@ -90,12 +90,14 @@ impl ProxyResponse {
     }
 
     pub fn tool_call_args(&self, choice: usize, tc: usize) -> Option<&str> {
-        self.get(&format!("choices.{choice}.message.tool_calls.{tc}.function.arguments"))?.as_str()
+        self.get(&format!("choices.{choice}.message.tool_calls.{tc}.function.arguments"))?
+            .as_str()
     }
 
     #[allow(dead_code)]
     pub fn tool_call_args_json(&self, choice: usize, tc: usize) -> anyhow::Result<serde_json::Value> {
-        let args = self.tool_call_args(choice, tc)
+        let args = self
+            .tool_call_args(choice, tc)
             .ok_or_else(|| anyhow::anyhow!("No tool call args at choices[{choice}].tool_calls[{tc}]"))?;
         serde_json::from_str(args).map_err(|e| anyhow::anyhow!("Tool call args not valid JSON: {}: {}", e, args))
     }
@@ -123,10 +125,7 @@ impl StreamingResponse {
         let mut result = String::new();
         for event in self.data_events() {
             if let Ok(json) = event.parse_json() {
-                if let Some(content) = json
-                    .pointer("/choices/0/delta/content")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(content) = json.pointer("/choices/0/delta/content").and_then(|v| v.as_str()) {
                     result.push_str(content);
                 }
             }
@@ -158,10 +157,7 @@ impl StreamingResponse {
     pub fn finish_reason(&self) -> Option<String> {
         for event in self.data_events().iter().rev() {
             if let Ok(json) = event.parse_json() {
-                if let Some(reason) = json
-                    .pointer("/choices/0/finish_reason")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(reason) = json.pointer("/choices/0/finish_reason").and_then(|v| v.as_str()) {
                     if reason != "null" {
                         return Some(reason.to_string());
                     }

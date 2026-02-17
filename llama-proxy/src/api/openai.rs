@@ -362,11 +362,7 @@ impl From<AnthropicMessage> for ChatCompletionResponse {
             Some(content_parts.join("\n"))
         };
 
-        let tool_calls_opt = if tool_calls.is_empty() {
-            None
-        } else {
-            Some(tool_calls)
-        };
+        let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls) };
 
         // Map Anthropic stop_reason to OpenAI finish_reason
         // "end_turn" -> "stop", "max_tokens" -> "length", "tool_use" -> "tool_calls", etc.
@@ -444,9 +440,10 @@ impl From<ChatCompletionResponse> for AnthropicMessage {
                             .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
 
                         blocks.push(AnthropicContentBlock::ToolUse {
-                            id: tool_call.id.clone().unwrap_or_else(|| {
-                                format!("toolu_{}", uuid::Uuid::new_v4().to_string().replace('-', ""))
-                            }),
+                            id: tool_call
+                                .id
+                                .clone()
+                                .unwrap_or_else(|| format!("toolu_{}", uuid::Uuid::new_v4().to_string().replace('-', ""))),
                             name: tool_call.function.name.clone(),
                             input,
                         });
@@ -455,21 +452,17 @@ impl From<ChatCompletionResponse> for AnthropicMessage {
 
                 // If no content at all, add empty text block
                 if blocks.is_empty() {
-                    blocks.push(AnthropicContentBlock::Text {
-                        text: String::new(),
-                    });
+                    blocks.push(AnthropicContentBlock::Text { text: String::new() });
                 }
 
                 blocks
             })
-            .unwrap_or_else(|| {
-                vec![AnthropicContentBlock::Text {
-                    text: String::new(),
-                }]
-            });
+            .unwrap_or_else(|| vec![AnthropicContentBlock::Text { text: String::new() }]);
 
         // Convert usage from OpenAI format to Anthropic format
-        let usage = resp.usage.as_ref()
+        let usage = resp
+            .usage
+            .as_ref()
             .map(|u| AnthropicUsage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
@@ -480,14 +473,16 @@ impl From<ChatCompletionResponse> for AnthropicMessage {
             });
 
         // Map OpenAI finish_reason to Anthropic stop_reason
-        let stop_reason = resp.choices.get(0).and_then(|c| c.finish_reason.as_ref()).map(|r| {
-            match r.as_str() {
+        let stop_reason = resp
+            .choices
+            .get(0)
+            .and_then(|c| c.finish_reason.as_ref())
+            .map(|r| match r.as_str() {
                 "stop" => "end_turn".to_string(),
                 "length" => "max_tokens".to_string(),
                 "tool_calls" => "tool_use".to_string(),
                 other => other.to_string(),
-            }
-        });
+            });
 
         AnthropicMessage {
             id: resp.id,
@@ -686,13 +681,7 @@ mod tests {
         }"#;
 
         let response: ChatCompletionResponse = serde_json::from_str(json).unwrap();
-        let tool_calls = response.choices[0]
-            .message
-            .as_ref()
-            .unwrap()
-            .tool_calls
-            .as_ref()
-            .unwrap();
+        let tool_calls = response.choices[0].message.as_ref().unwrap().tool_calls.as_ref().unwrap();
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].function.name, "get_weather");
     }
@@ -1008,11 +997,7 @@ mod tests {
 
     #[test]
     fn test_anthropic_stop_reason_mapping() {
-        let test_cases = vec![
-            ("end_turn", "stop"),
-            ("max_tokens", "length"),
-            ("stop_sequence", "stop"),
-        ];
+        let test_cases = vec![("end_turn", "stop"), ("max_tokens", "length"), ("stop_sequence", "stop")];
 
         for (anthropic_reason, expected_openai) in test_cases {
             let anthropic_msg = AnthropicMessage {
@@ -1177,11 +1162,7 @@ mod tests {
 
     #[test]
     fn test_openai_to_anthropic_finish_reason_mapping() {
-        let test_cases = vec![
-            ("stop", "end_turn"),
-            ("length", "max_tokens"),
-            ("tool_calls", "tool_use"),
-        ];
+        let test_cases = vec![("stop", "end_turn"), ("length", "max_tokens"), ("tool_calls", "tool_use")];
 
         for (openai_reason, expected_anthropic) in test_cases {
             let openai_response = ChatCompletionResponse {
@@ -1475,7 +1456,11 @@ mod tests {
         assert_eq!(msg.content.len(), 1);
 
         match &msg.content[0] {
-            AnthropicContentBlock::ToolResult { tool_use_id, content, is_error } => {
+            AnthropicContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 assert_eq!(tool_use_id, "toolu_abc123");
                 assert_eq!(content.as_str(), Some("The weather in Paris is 22°C and sunny."));
                 assert_eq!(*is_error, None);

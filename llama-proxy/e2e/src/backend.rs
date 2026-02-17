@@ -39,10 +39,7 @@ fn default_completion_response() -> MockResponse {
 }
 
 /// Handle POST /v1/chat/completions - serves pre-configured mock responses
-async fn handle_chat_completions(
-    State(state): State<SharedBackendState>,
-    request: Request<Body>,
-) -> Response {
+async fn handle_chat_completions(State(state): State<SharedBackendState>, request: Request<Body>) -> Response {
     // Read and parse the request body
     let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
         .await
@@ -73,11 +70,7 @@ async fn handle_chat_completions(
 
 /// Handle GET /health and /v1/health
 async fn handle_health() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [("Content-Type", "application/json")],
-        r#"{"status":"ok"}"#,
-    )
+    (StatusCode::OK, [("Content-Type", "application/json")], r#"{"status":"ok"}"#)
 }
 
 /// Handle GET /slots
@@ -128,7 +121,8 @@ pub async fn start(port: u16) -> anyhow::Result<SharedBackendState> {
         .with_state(state.clone());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    let listener = TcpListener::bind(addr).await
+    let listener = TcpListener::bind(addr)
+        .await
         .map_err(|e| anyhow::anyhow!("Failed to bind mock backend to {}: {}", addr, e))?;
 
     tokio::spawn(async move {

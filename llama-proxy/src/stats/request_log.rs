@@ -2,10 +2,7 @@
 
 /// Format a request log message in compact format
 pub fn format_request_log(request_json: &serde_json::Value) -> String {
-    let model = request_json
-        .get("model")
-        .and_then(|m| m.as_str())
-        .unwrap_or("unknown");
+    let model = request_json.get("model").and_then(|m| m.as_str()).unwrap_or("unknown");
 
     let msg_count = request_json
         .get("messages")
@@ -13,15 +10,9 @@ pub fn format_request_log(request_json: &serde_json::Value) -> String {
         .map(|a| a.len())
         .unwrap_or(0);
 
-    let is_streaming = request_json
-        .get("stream")
-        .and_then(|s| s.as_bool())
-        .unwrap_or(false);
+    let is_streaming = request_json.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
 
-    let tools_count = request_json
-        .get("tools")
-        .and_then(|t| t.as_array())
-        .map(|a| a.len());
+    let tools_count = request_json.get("tools").and_then(|t| t.as_array()).map(|a| a.len());
 
     let first_user_msg = extract_first_user_message(request_json);
 
@@ -90,13 +81,7 @@ fn extract_message_content(msg: &serde_json::Value) -> Option<String> {
 /// Convert newlines and tabs to single spaces, collapse multiple spaces
 fn normalize_whitespace(s: &str) -> String {
     s.chars()
-        .map(|c| {
-            if c == '\n' || c == '\r' || c == '\t' {
-                ' '
-            } else {
-                c
-            }
-        })
+        .map(|c| if c == '\n' || c == '\r' || c == '\t' { ' ' } else { c })
         .collect::<String>()
         .split_whitespace()
         .collect::<Vec<_>>()

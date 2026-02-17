@@ -54,9 +54,7 @@ pub struct ExporterManager {
 
 impl ExporterManager {
     pub fn new() -> Self {
-        Self {
-            exporters: Vec::new(),
-        }
+        Self { exporters: Vec::new() }
     }
 
     pub fn add(&mut self, exporter: Arc<dyn MetricsExporter>) {
@@ -67,10 +65,7 @@ impl ExporterManager {
         for exporter in &self.exporters {
             match exporter.export(metrics).await {
                 Ok(()) => {
-                    tracing::debug!(
-                        exporter = exporter.name(),
-                        "Metrics exported successfully"
-                    );
+                    tracing::debug!(exporter = exporter.name(), "Metrics exported successfully");
                 }
                 Err(e) => {
                     tracing::warn!(

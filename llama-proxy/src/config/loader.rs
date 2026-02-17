@@ -21,9 +21,7 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
 
 /// Validate that the backend URL is properly formatted
 fn validate_backend_url(url: &str) -> Result<(), ConfigError> {
-    let parsed = url::Url::parse(url).map_err(|e| {
-        ConfigError::Validation(format!("Invalid backend URL '{}': {}", url, e))
-    })?;
+    let parsed = url::Url::parse(url).map_err(|e| ConfigError::Validation(format!("Invalid backend URL '{}': {}", url, e)))?;
 
     // Ensure scheme is http or https
     let scheme = parsed.scheme();
@@ -36,10 +34,7 @@ fn validate_backend_url(url: &str) -> Result<(), ConfigError> {
 
     // Ensure there's a host
     if parsed.host_str().is_none() {
-        return Err(ConfigError::Validation(format!(
-            "Backend URL must include a host: '{}'",
-            url
-        )));
+        return Err(ConfigError::Validation(format!("Backend URL must include a host: '{}'", url)));
     }
 
     Ok(())
