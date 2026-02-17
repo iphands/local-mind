@@ -689,6 +689,7 @@ mod tests {
     use crate::exporters::ExporterManager;
     use std::collections::HashMap;
 
+    #[allow(dead_code)]
     fn create_test_handler_with_streaming(streaming_config: StreamingConfig) -> ProxyHandler {
         let config = AppConfig {
             server: crate::config::ServerConfig {

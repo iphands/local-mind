@@ -925,7 +925,7 @@ mod tests {
         assert!(accumulator.get(0).is_none());
         assert!(accumulator.get(1).is_some());
 
-        let (result3, action3) = fix.apply_stream_with_accumulation_default(
+        let (_result3, action3) = fix.apply_stream_with_accumulation_default(
             serde_json::from_str(chunk3).unwrap(),
             &mut accumulator,
         );
@@ -1333,7 +1333,7 @@ mod tests {
             &mut accumulator,
         );
 
-        let (result3, action3) = fix.apply_stream_with_accumulation_default(
+        let (result3, _action3) = fix.apply_stream_with_accumulation_default(
             serde_json::from_str(chunk3).unwrap(),
             &mut accumulator,
         );
@@ -1388,7 +1388,7 @@ mod tests {
             &mut accumulator,
         );
 
-        let (result3, action3) = fix.apply_stream_with_accumulation_default(
+        let (result3, _action3) = fix.apply_stream_with_accumulation_default(
             serde_json::from_str(chunk3).unwrap(),
             &mut accumulator,
         );
@@ -1539,7 +1539,7 @@ mod tests {
             }]
         });
 
-        let (result1, _) = fix.apply_stream_with_accumulation_default(chunk1_json.clone(), &mut accumulator);
+        let (_result1, _) = fix.apply_stream_with_accumulation_default(chunk1_json.clone(), &mut accumulator);
 
         // Chunk 2: more partial JSON
         let chunk2_json = serde_json::json!({
@@ -1555,7 +1555,7 @@ mod tests {
             }]
         });
 
-        let (result2, _) = fix.apply_stream_with_accumulation_default(chunk2_json.clone(), &mut accumulator);
+        let (_result2, _) = fix.apply_stream_with_accumulation_default(chunk2_json.clone(), &mut accumulator);
 
         // NOW: Manually inject different content into accumulator to break ends_with()
         // This simulates what could happen if JSON is reformatted or encoding changes
@@ -1576,7 +1576,7 @@ mod tests {
             }]
         });
 
-        let (result3, action3) = fix.apply_stream_with_accumulation_default(chunk3_json, &mut accumulator);
+        let (result3, _action3) = fix.apply_stream_with_accumulation_default(chunk3_json, &mut accumulator);
 
         // Extract the delta that was sent
         let delta3 = result3["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
@@ -1629,7 +1629,7 @@ mod tests {
 
         // Chunk 3: Duplicate malformed filePath - triggers fix
         let chunk3 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"filePath\"/path2\"}"}}]}}]});
-        let (result3, action3) = fix.apply_stream_with_accumulation_default(chunk3, &mut accumulator);
+        let (_result3, action3) = fix.apply_stream_with_accumulation_default(chunk3, &mut accumulator);
         assert!(action3.detected());
 
         // Chunk 4: Post-fix chunk - should be suppressed!
