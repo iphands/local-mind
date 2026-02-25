@@ -1,6 +1,8 @@
 //! InfluxDB v2 metrics exporter
 
 use async_trait::async_trait;
+#[cfg(feature = "influxdb")]
+use futures::stream;
 
 use super::{ExportError, MetricsExporter};
 use crate::stats::RequestMetrics;
@@ -117,7 +119,7 @@ impl MetricsExporter for InfluxDbExporter {
         };
 
         client
-            .write(&self.config.bucket, vec![point])
+            .write(&self.config.bucket, stream::iter(vec![point]))
             .await
             .map_err(|e| ExportError::Write(e.to_string()))?;
 
