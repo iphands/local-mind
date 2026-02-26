@@ -37,8 +37,8 @@ Before you draft ANY code or config change, you MUST:
 
 ## How to Consult While Thinking
 ```
-task(description="Approach check", subagent_type="neckbeard", prompt="I'm thinking about [X]. My approach: [Y]. See any issues? Better ideas?")
-task(description="Approach check", subagent_type="hoodie", prompt="I'm thinking about [X]. My approach: [Y]. Any performance/UX concerns?")
+task(description="Approach check", load_skills=[], run_in_background=true, subagent_type="neckbeard", prompt="I'm thinking about [X]. My approach: [Y]. See any issues? Better ideas?")
+task(description="Approach check", load_skills=[], run_in_background=true, subagent_type="hoodie", prompt="I'm thinking about [X]. My approach: [Y]. Any performance/UX concerns?")
 ```
 
 **WRONG**: Think alone, draft code, then ask for review
@@ -166,6 +166,8 @@ Tool: task
 Parameters:
   description: "Senior code review"
   prompt: "Review this code for bugs, security issues, and style:
+  load_skills: []
+  run_in_background: true
 
 [THE CODE YOU DRAFTED]
 
@@ -179,6 +181,8 @@ Tool: task
 Parameters:
   description: "Junior code review"
   prompt: "Review this code for usability and performance:
+  load_skills: []
+  run_in_background: true
 
 [THE CODE YOU DRAFTED]
 
@@ -278,13 +282,13 @@ For a task like "Fix the alignment bug in banner.rs":
 ```json
 {
   "todos": [
-    {"content": "Analyze the alignment issue in banner code", "status": "pending"},
-    {"content": "Review analysis with neckbeard and hoodie", "status": "pending"},
-    {"content": "Fix the alignment in the Rust code", "status": "pending"},
-    {"content": "Review fix code with neckbeard and hoodie", "status": "pending"},
-    {"content": "Write unit tests for alignment", "status": "pending"},
-    {"content": "Review test code with neckbeard and hoodie", "status": "pending"},
-    {"content": "Review final changeset with neckbeard and hoodie", "status": "pending"}
+    {"content": "Analyze the alignment issue in banner code", "status": "pending", "priority": "high"},
+    {"content": "Review analysis with neckbeard and hoodie", "status": "pending", "priority": "high"},
+    {"content": "Fix the alignment in the Rust code", "status": "pending", "priority": "high"},
+    {"content": "Review fix code with neckbeard and hoodie", "status": "pending", "priority": "high"},
+    {"content": "Write unit tests for alignment", "status": "pending", "priority": "high"},
+    {"content": "Review test code with neckbeard and hoodie", "status": "pending", "priority": "high"},
+    {"content": "Review final changeset with neckbeard and hoodie", "status": "pending, "priority": "high""}
   ]
 }
 ```
@@ -328,8 +332,8 @@ $ ./script.sh "Test"
 ```
 Then IMMEDIATELY call reviewers following **UNIVERSAL REVIEWER RULES**:
 ```
-task(description="Verify test output", subagent_type="neckbeard", prompt="...")
-task(description="Verify test output", subagent_type="hoodie", prompt="...")
+task(description="Verify test output", subagent_type="neckbeard", load_skills=[], run_in_background=true, prompt="...")
+task(description="Verify test output", subagent_type="hoodie", load_skills=[], run_in_background=true, prompt="...")
 ```
 
 Only AFTER summarizing their feedback can you tell the user whether it works.
@@ -419,6 +423,7 @@ Without this statement, you are FORBIDDEN from using Write/Edit or declaring suc
 
 ## General Guidelines
 
+- Call BOTH reviewers simultaneously in ONE message - see PARALLEL EXECUTION in Code Review Protocol for details.
 - Follow existing codebase patterns
 - Use parallel tools when applicable
 - Write clean, readable code
