@@ -5,13 +5,7 @@ set -ue
 # MODEL="$2"
 MODE=${MODE:-vanilla}
 NAME=${NAME:-llama-server-vanilla-both}
-
-echo "SETTINGS:
-PORT:  $PORT
-MODEL: $MODEL
-MODE:  $MODE
-NAME:  $NAME
-"
+SINGLE=${SINGLE:-0}
 
 LAYERS=${LAYERS:-0}
 CTX=${CTX:-65024}
@@ -38,20 +32,23 @@ CONTAINER_ARGS=(
   # --entrypoint /bin/bash
 )
 
+hostname
 case `hostname` in
 "noir")
   echo "## NOIR"
-  ALIAS=noir-model
+  ALIAS=${ALIAS:-noir-model}
   ;;
 "station")
   echo "## STAION"
   ALIAS=station-model
+  ALIAS=${ALIAS:-station-model}
   ;;
 "cosmo")
-  echo "## COSMO"
   RUNNER=docker
-  CONTAINER_ARGS+=(--gpus all)
-  ALIAS=cosmo-both
+  [[ "$SINGLE" == "1" ]] || {
+    CONTAINER_ARGS+=(--gpus all)
+  }
+  ALIAS=${ALIAS:-cosmo-both}
   LAYERS=99
   ;;
 esac
@@ -61,7 +58,7 @@ LLAMA_ARGS=(
   --alias $ALIAS
   --port 8799
   --host 0.0.0.0
-  --n-gpu-layers $LAYERS
+  # --n-gpu-layers $LAYERS
   --batch-size  2048
   --ubatch-size 128
   --cache-type-k q8_0
@@ -88,13 +85,21 @@ case $MODE in
   CONTAINER=ghcr.io/ggml-org/llama.cpp:full-cuda
   CONTAINER_ARGS+=(--entrypoint /app/llama-server)
   LLAMA_ARGS+=(--mmap)
-  # LLAMA_ARGS+=(--fit on --main-gpu 1)
+  LLAMA_ARGS+=(--fit on --main-gpu 1)
   ;;
 *)
   echo "[FATAL] bad MODE: $MODE"
   exit 1
 esac
 
+echo
+echo "## Detected settiongs:
+PORT:  $PORT
+MODEL: $MODEL
+MODE:  $MODE
+NAME:  $NAME
+ALIAS: $ALIAS
+"
 function run_model() {
   echo
   echo "## Run model-holder"

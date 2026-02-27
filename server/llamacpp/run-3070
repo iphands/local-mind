@@ -2,8 +2,9 @@
 export MODEL="$1"
 export PORT=8700
 export NAME=llama-server-3070
+export ALIAS=cosmo-3070
+export SINGLE=1
 source ./run-common
 
 CONTAINER_ARGS+=(--gpus '"device=0"')
-ALIAS=cosmo-3070
 run_model
