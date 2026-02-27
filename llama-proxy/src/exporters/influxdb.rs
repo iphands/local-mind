@@ -109,6 +109,17 @@ impl MetricsExporter for InfluxDbExporter {
             point = point.field("rejected_prediction_tokens", rejected as f64);
         }
 
+        // Context window metrics
+        if let Some(ctx_used) = metrics.context_used {
+            point = point.field("context_used", ctx_used as f64);
+        }
+        if let Some(ctx_total) = metrics.context_total {
+            point = point.field("context_total", ctx_total as f64);
+        }
+        if let Some(ctx_pct) = metrics.context_percent {
+            point = point.field("context_percent", ctx_pct);
+        }
+
         let point = point.timestamp(metrics.timestamp.timestamp_nanos_opt().unwrap_or(0));
 
         let point = match point.build() {

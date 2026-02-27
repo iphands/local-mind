@@ -7,12 +7,13 @@ use axum::{
 };
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::time::Duration;
+
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use super::handler::ProxyHandler;
-use crate::config::AppConfig;
+use crate::backends::{build_balancer, BackendNode, LoadBalancer};
+use crate::config::{resolve_backend_nodes, resolve_strategy, AppConfig};
 use crate::exporters::ExporterManager;
 use crate::fixes::FixRegistry;
 
@@ -20,44 +21,9 @@ use crate::fixes::FixRegistry;
 #[derive(Clone)]
 pub struct ProxyState {
     pub config: Arc<AppConfig>,
-    pub http_client: reqwest::Client,
+    pub load_balancer: Arc<dyn LoadBalancer>,
     pub fix_registry: Arc<FixRegistry>,
     pub exporter_manager: Arc<ExporterManager>,
-}
-
-/// Build an HTTP client with TLS configuration
-fn build_http_client(config: &AppConfig) -> Result<reqwest::Client, Box<dyn std::error::Error>> {
-    let mut client_builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(config.backend.timeout_seconds))
-        .pool_max_idle_per_host(10);
-
-    // Apply TLS configuration if present
-    if let Some(ref tls) = config.backend.tls {
-        if tls.accept_invalid_certs {
-            client_builder = client_builder.danger_accept_invalid_certs(true);
-            tracing::warn!("TLS: Accepting invalid certificates (use only for development/testing)");
-        }
-
-        // Load custom CA certificate if provided
-        if let Some(ref ca_path) = tls.ca_cert_path {
-            let ca_cert = std::fs::read(ca_path)?;
-            let ca_cert = reqwest::Certificate::from_pem(&ca_cert)?;
-            client_builder = client_builder.add_root_certificate(ca_cert);
-            tracing::info!("TLS: Loaded custom CA certificate from {}", ca_path);
-        }
-
-        // Load client certificate for mTLS if both cert and key are provided
-        if let (Some(cert_path), Some(key_path)) = (&tls.client_cert_path, &tls.client_key_path) {
-            let cert_pem = std::fs::read(cert_path)?;
-            let key_pem = std::fs::read(key_path)?;
-
-            let identity = reqwest::Identity::from_pem(&[cert_pem, key_pem].concat())?;
-            client_builder = client_builder.identity(identity);
-            tracing::info!("TLS: Loaded client certificate from {} for mTLS", cert_path);
-        }
-    }
-
-    Ok(client_builder.build()?)
 }
 
 /// Run the proxy server
@@ -66,12 +32,35 @@ pub async fn run_server(
     fix_registry: FixRegistry,
     exporter_manager: ExporterManager,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Create HTTP client for backend connections with TLS config
-    let http_client = build_http_client(&config)?;
+    // Resolve backend nodes and strategy
+    let node_configs = resolve_backend_nodes(&config);
+    let strategy = resolve_strategy(&config);
+
+    // Build BackendNode instances (each owns its own HTTP client)
+    let mut nodes = Vec::with_capacity(node_configs.len());
+    for node_cfg in &node_configs {
+        let node = BackendNode::from_config(
+            node_cfg.url.clone(),
+            node_cfg.timeout_seconds,
+            node_cfg.tls.as_ref(),
+            node_cfg.model.clone(),
+            node_cfg.api_key.clone(),
+        )?;
+        nodes.push(node);
+    }
+
+    // Build load balancer
+    let load_balancer = build_balancer(nodes, &strategy)?;
+
+    // Log backend configuration
+    for node in load_balancer.all_nodes() {
+        tracing::info!(url = %node.base_url(), "Backend node registered");
+    }
+    tracing::info!(strategy = %load_balancer.strategy_name(), "Load balancing strategy");
 
     let state = ProxyState {
         config: Arc::new(config.clone()),
-        http_client,
+        load_balancer,
         fix_registry: Arc::new(fix_registry),
         exporter_manager: Arc::new(exporter_manager),
     };
@@ -92,7 +81,6 @@ pub async fn run_server(
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     tracing::info!("llama-proxy listening on {}", addr);
-    tracing::info!("Proxying to {}", config.backend.base_url());
 
     Ok(axum::serve(listener, app).await?)
 }

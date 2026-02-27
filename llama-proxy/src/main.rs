@@ -32,7 +32,8 @@ impl std::fmt::Display for LogLevel {
 }
 
 use llama_proxy::{
-    config::AppConfig,
+    backends::BackendNode,
+    config::{resolve_backend_nodes, resolve_strategy, AppConfig},
     create_default_registry,
     exporters::{ExporterManager, InfluxDbExporter},
     run_server,
@@ -147,7 +148,11 @@ async fn run_proxy(
         config.server.port = port;
     }
     if let Some(url) = backend_url_override {
-        config.backend.url = url;
+        if config.backends.is_some() {
+            tracing::warn!("--backend-url ignored: multi-backend 'backends:' config is active");
+        } else {
+            config.backend.url = url;
+        }
     }
     if let Some(mode_str) = streaming_mode_override {
         use llama_proxy::config::StreamingMode;
@@ -240,19 +245,33 @@ fn log_config_settings(config: &AppConfig) {
         "Server"
     );
 
-    // Backend
-    tracing::info!(
-        url = %config.backend.base_url(),
-        timeout_seconds = config.backend.timeout_seconds,
-        "Backend"
-    );
-    if let Some(ref tls) = config.backend.tls {
+    // Backend(s)
+    let nodes = resolve_backend_nodes(config);
+    let strategy = resolve_strategy(config);
+    if config.backends.is_some() {
+        tracing::info!(strategy = %strategy, node_count = nodes.len(), "Backends (multi-node mode)");
+        for (i, node) in nodes.iter().enumerate() {
+            tracing::info!(
+                index = i,
+                url = %node.url.trim_end_matches('/'),
+                timeout_seconds = node.timeout_seconds,
+                "Backend node"
+            );
+        }
+    } else {
         tracing::info!(
-            accept_invalid_certs = tls.accept_invalid_certs,
-            ca_cert = tls.ca_cert_path.as_deref().unwrap_or("none"),
-            client_cert = tls.client_cert_path.as_deref().unwrap_or("none"),
-            "Backend TLS"
+            url = %config.backend.base_url(),
+            timeout_seconds = config.backend.timeout_seconds,
+            "Backend"
         );
+        if let Some(ref tls) = config.backend.tls {
+            tracing::info!(
+                accept_invalid_certs = tls.accept_invalid_certs,
+                ca_cert = tls.ca_cert_path.as_deref().unwrap_or("none"),
+                client_cert = tls.client_cert_path.as_deref().unwrap_or("none"),
+                "Backend TLS"
+            );
+        }
     }
 
     // Fixes
@@ -345,21 +364,15 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
             println!("✓ Configuration file is valid\n");
             println!("Server:");
             println!("  Listen: {}:{}", config.server.host, config.server.port);
-            println!("\nBackend:");
-            println!("  URL: {}", config.backend.url);
-            println!("  TLS: {}", if config.backend.is_tls() { "enabled" } else { "disabled" });
-            if let Some(ref tls) = config.backend.tls {
-                if tls.accept_invalid_certs {
-                    println!("  TLS: Accepting invalid certificates");
-                }
-                if let Some(ref ca) = tls.ca_cert_path {
-                    println!("  TLS CA: {}", ca);
-                }
-                if let Some(ref cert) = tls.client_cert_path {
-                    println!("  TLS Client Cert: {}", cert);
-                }
+            let nodes = resolve_backend_nodes(&config);
+            let strategy = resolve_strategy(&config);
+            println!("\nBackend(s):");
+            println!("  Strategy: {}", strategy);
+            println!("  Node count: {}", nodes.len());
+            for (i, node) in nodes.iter().enumerate() {
+                println!("  Node [{}]: {}", i, node.url.trim_end_matches('/'));
+                println!("    Timeout: {}s", node.timeout_seconds);
             }
-            println!("  Timeout: {}s", config.backend.timeout_seconds);
             println!("\nFixes:");
             println!("  Global: {}", config.fixes.enabled);
             for (name, module) in &config.fixes.modules {
@@ -384,79 +397,70 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
 /// Test connection to backend
 async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config_or_exit(&config_path);
-    let base_url = config.backend.base_url();
-    let health_url = format!("{}/health", base_url);
+    let node_configs = resolve_backend_nodes(&config);
 
-    println!("Testing connection to backend: {}", health_url);
+    println!("Testing {} backend node(s)...\n", node_configs.len());
 
-    let mut client_builder = reqwest::Client::builder().timeout(std::time::Duration::from_secs(5));
+    for (i, node_cfg) in node_configs.iter().enumerate() {
+        let node = BackendNode::from_config(
+            node_cfg.url.clone(),
+            5, // short timeout for test
+            node_cfg.tls.as_ref(),
+            node_cfg.model.clone(),
+            node_cfg.api_key.clone(),
+        )?;
 
-    // Apply TLS settings for test
-    if let Some(ref tls) = config.backend.tls {
-        if tls.accept_invalid_certs {
-            client_builder = client_builder.danger_accept_invalid_certs(true);
-        }
-        if let Some(ref ca_path) = tls.ca_cert_path {
-            let ca_cert = std::fs::read(ca_path)?;
-            let ca_cert = reqwest::Certificate::from_pem(&ca_cert)?;
-            client_builder = client_builder.add_root_certificate(ca_cert);
-        }
-        if let (Some(cert_path), Some(key_path)) = (&tls.client_cert_path, &tls.client_key_path) {
-            let cert_pem = std::fs::read(cert_path)?;
-            let key_pem = std::fs::read(key_path)?;
-            let identity = reqwest::Identity::from_pem(&[cert_pem, key_pem].concat())?;
-            client_builder = client_builder.identity(identity);
-        }
-    }
+        let base_url = node.base_url().to_string();
+        println!("Node [{}]: {}", i, base_url);
 
-    let client = client_builder.build()?;
+        let health_url = format!("{}/health", base_url);
+        println!("  Testing /health: {}", health_url);
 
-    match client.get(&health_url).send().await {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                println!("✓ Backend is reachable");
-                println!("  Status: {}", resp.status());
-
-                if let Ok(body) = resp.text().await {
-                    println!("  Response: {}", body.trim());
+        match node.http_client.get(&health_url).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    println!("  ✓ Reachable ({})", resp.status());
+                    if let Ok(body) = resp.text().await {
+                        println!("    Response: {}", body.trim());
+                    }
+                } else {
+                    println!("  ✗ Error status: {}", resp.status());
                 }
-            } else {
-                println!("✗ Backend returned error status: {}", resp.status());
+            }
+            Err(e) => {
+                println!("  ✗ Failed to connect: {}", e);
             }
         }
-        Err(e) => {
-            println!("✗ Failed to connect to backend: {}", e);
-            std::process::exit(1);
-        }
-    }
 
-    // Also try /v1/models
-    let models_url = format!("{}/v1/models", base_url);
-    println!("\nTesting /v1/models endpoint: {}", models_url);
+        let models_url = format!("{}/v1/models", base_url);
+        println!("  Testing /v1/models: {}", models_url);
 
-    match client.get(&models_url).send().await {
-        Ok(resp) => {
-            if resp.status().is_success() {
-                println!("✓ /v1/models endpoint available");
-                if let Ok(body) = resp.text().await {
-                    if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                        if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-                            println!("  Available models: {}", data.len());
-                            for model in data.iter().take(5) {
-                                if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
-                                    println!("    - {}", id);
+        match node.http_client.get(&models_url).send().await {
+            Ok(resp) => {
+                if resp.status().is_success() {
+                    println!("  ✓ /v1/models available");
+                    if let Ok(body) = resp.text().await {
+                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                            if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+                                println!("    Available models: {}", data.len());
+                                for model in data.iter().take(5) {
+                                    if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
+                                        println!("      - {}", id);
+                                    }
                                 }
                             }
                         }
                     }
+                } else {
+                    println!("  /v1/models returned: {}", resp.status());
                 }
-            } else {
-                println!("  /v1/models returned: {}", resp.status());
+            }
+            Err(e) => {
+                println!("  /v1/models error: {}", e);
             }
         }
-        Err(e) => {
-            println!("  /v1/models error: {}", e);
-        }
+
+        println!();
     }
 
     Ok(())

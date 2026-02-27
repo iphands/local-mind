@@ -6,12 +6,14 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use std::io::Read;
+use std::sync::Arc;
 use std::time::Instant;
 
 use super::server::ProxyState;
 use super::streaming::handle_streaming_response;
 use super::{synthesize_anthropic_streaming_response, synthesize_streaming_response};
 use crate::api::{AnthropicMessage, ChatCompletionResponse};
+use crate::backends::BackendNode;
 use crate::config::StatsFormat;
 use crate::proxy::fetch_context_total;
 use crate::stats::{format_metrics, format_request_log, RequestMetrics};
@@ -124,6 +126,10 @@ impl ProxyHandler {
     /// Handle an incoming request
     pub async fn handle(&self, req: Request<Body>) -> Response {
         let start = Instant::now();
+
+        // Select backend node first (round-robin or other strategy)
+        let backend = self.state.load_balancer.select();
+
         let method = req.method().clone();
         let uri = req.uri().clone();
         let path = uri.path();
@@ -143,7 +149,7 @@ impl ProxyHandler {
             | (&Method::GET, "/v1/health")
             | (&Method::GET, "/v1/models")
             | (&Method::GET, "/metrics") => {
-                return self.proxy_passthrough(req).await;
+                return self.proxy_passthrough(req, &backend).await;
             }
 
             // All other routes continue with existing logic
@@ -181,9 +187,9 @@ impl ProxyHandler {
 
         // Build complete URL with query string as-is (don't parse/re-encode)
         let backend_url = if let Some(q) = query {
-            format!("{}{}?{}", self.state.config.backend.base_url(), path, q)
+            format!("{}{}?{}", backend.base_url(), path, q)
         } else {
-            format!("{}{}", self.state.config.backend.base_url(), path)
+            format!("{}{}", backend.base_url(), path)
         };
 
         tracing::debug!(
@@ -193,8 +199,7 @@ impl ProxyHandler {
         );
 
         // Create request with complete URL (query string included)
-        let mut backend_req = self
-            .state
+        let mut backend_req = backend
             .http_client
             .request(Method::from_bytes(method.as_str().as_bytes()).unwrap(), &backend_url);
 
@@ -209,7 +214,7 @@ impl ProxyHandler {
         }
 
         // Add Authorization header if api_key is configured
-        if let Some(ref api_key) = self.state.config.backend.api_key {
+        if let Some(ref api_key) = backend.api_key {
             backend_req = backend_req.header(header::AUTHORIZATION, format!("Bearer {}", api_key));
         }
 
@@ -217,7 +222,7 @@ impl ProxyHandler {
         let body_bytes = if let Some(mut json) = request_json.clone() {
             json["stream"] = serde_json::Value::Bool(false);
             // Override model if configured
-            if let Some(ref model) = self.state.config.backend.model {
+            if let Some(ref model) = backend.model {
                 json["model"] = serde_json::Value::String(model.clone());
             }
             if client_wants_streaming {
@@ -266,8 +271,8 @@ impl ProxyHandler {
                 self.state.exporter_manager.clone(),
                 request_json,
                 start,
-                self.state.http_client.clone(),
-                self.state.config.backend.base_url().to_string(),
+                backend.http_client.clone(),
+                backend.base_url().to_string(),
             )
             .await
         } else {
@@ -278,6 +283,7 @@ impl ProxyHandler {
                 client_wants_streaming,
                 is_anthropic_api,
                 start,
+                &backend,
             )
             .await
         }
@@ -291,6 +297,7 @@ impl ProxyHandler {
         client_wants_streaming: bool,
         is_anthropic_api: bool,
         start: Instant,
+        backend: &Arc<BackendNode>,
     ) -> Response {
         let status = backend_response.status();
         let headers = backend_response.headers().clone();
@@ -382,9 +389,7 @@ impl ProxyHandler {
 
                 // Fetch and set context_total for stats
                 if let Some(ref mut m) = metrics {
-                    if let Some(ctx_total) =
-                        fetch_context_total(&self.state.http_client, &self.state.config.backend.base_url()).await
-                    {
+                    if let Some(ctx_total) = fetch_context_total(&backend.http_client, backend.base_url()).await {
                         m.context_total = Some(ctx_total);
                         m.calculate_context_percent();
                     }
@@ -542,7 +547,7 @@ impl ProxyHandler {
 
     /// Simple pass-through with no fix application or stats collection
     /// Used for monitoring endpoints like /props, /slots, /health
-    async fn proxy_passthrough(&self, req: Request<Body>) -> Response {
+    async fn proxy_passthrough(&self, req: Request<Body>, backend: &Arc<BackendNode>) -> Response {
         let method = req.method().clone();
         let uri = req.uri().clone();
         let headers = req.headers().clone();
@@ -561,9 +566,9 @@ impl ProxyHandler {
 
         // Build complete URL with query string as-is (don't parse/re-encode)
         let backend_url = if let Some(q) = query {
-            format!("{}{}?{}", self.state.config.backend.base_url(), path, q)
+            format!("{}{}?{}", backend.base_url(), path, q)
         } else {
-            format!("{}{}", self.state.config.backend.base_url(), path)
+            format!("{}{}", backend.base_url(), path)
         };
 
         tracing::debug!(
@@ -573,8 +578,7 @@ impl ProxyHandler {
         );
 
         // Create request with complete URL (query string included)
-        let mut backend_req = self
-            .state
+        let mut backend_req = backend
             .http_client
             .request(Method::from_bytes(method.as_str().as_bytes()).unwrap(), &backend_url);
 
@@ -589,7 +593,7 @@ impl ProxyHandler {
         }
 
         // Add Authorization header if api_key is configured
-        if let Some(ref api_key) = self.state.config.backend.api_key {
+        if let Some(ref api_key) = backend.api_key {
             backend_req = backend_req.header(header::AUTHORIZATION, format!("Bearer {}", api_key));
         }
         backend_req = backend_req.body(body_bytes);
@@ -644,6 +648,7 @@ impl ProxyHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backends::{BackendNode, RoundRobinBalancer};
     use crate::config::{AppConfig, BackendConfig, StreamingConfig};
     use crate::exporters::ExporterManager;
     use crate::fixes::FixRegistry;
@@ -657,6 +662,7 @@ mod tests {
                 host: "0.0.0.0".to_string(),
             },
             backend: BackendConfig::default(),
+            backends: None,
             fixes: crate::config::FixesConfig {
                 enabled: false,
                 modules: HashMap::new(),
@@ -681,13 +687,20 @@ mod tests {
             streaming: streaming_config,
         };
 
-        let http_client = reqwest::Client::new();
+        let default_node = BackendNode {
+            url: "http://localhost:8080".to_string(),
+            model: None,
+            api_key: None,
+            timeout_seconds: 300,
+            http_client: reqwest::Client::new(),
+        };
+        let load_balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(default_node)]).unwrap());
         let fix_registry = FixRegistry::new();
         let exporter_manager = ExporterManager::new();
 
         ProxyHandler::new(ProxyState {
             config: std::sync::Arc::new(config),
-            http_client,
+            load_balancer,
             fix_registry: std::sync::Arc::new(fix_registry),
             exporter_manager: std::sync::Arc::new(exporter_manager),
         })

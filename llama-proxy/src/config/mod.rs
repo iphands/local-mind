@@ -12,6 +12,8 @@ pub struct AppConfig {
     pub server: ServerConfig,
     pub backend: BackendConfig,
     #[serde(default)]
+    pub backends: Option<BackendsConfig>,
+    #[serde(default)]
     pub fixes: FixesConfig,
     #[serde(default)]
     pub stats: StatsConfig,
@@ -89,6 +91,65 @@ impl BackendConfig {
     pub fn is_tls(&self) -> bool {
         self.url.to_lowercase().starts_with("https://")
     }
+}
+
+/// Per-node configuration for multi-backend mode
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackendNodeConfig {
+    /// Full backend URL (e.g., "http://localhost:8080")
+    pub url: String,
+    /// Request timeout in seconds
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u64,
+    /// TLS configuration options
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+    /// Model identifier override (e.g., "anthropic/claude-sonnet-4-5")
+    #[serde(default)]
+    pub model: Option<String>,
+    /// API key for backend authentication
+    #[serde(default)]
+    pub api_key: Option<String>,
+}
+
+/// Multi-backend configuration block
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackendsConfig {
+    /// Load balancing strategy (default: "round_robin")
+    #[serde(default = "default_strategy")]
+    pub strategy: String,
+    /// List of backend nodes
+    pub nodes: Vec<BackendNodeConfig>,
+}
+
+fn default_strategy() -> String {
+    "round_robin".to_string()
+}
+
+/// Resolve the list of backend nodes from config.
+/// If `backends.nodes` is present, return those; else wrap `backend` as a 1-element vec.
+pub fn resolve_backend_nodes(config: &AppConfig) -> Vec<BackendNodeConfig> {
+    if let Some(ref backends) = config.backends {
+        if !backends.nodes.is_empty() {
+            return backends.nodes.clone();
+        }
+    }
+    vec![BackendNodeConfig {
+        url: config.backend.url.clone(),
+        timeout_seconds: config.backend.timeout_seconds,
+        tls: config.backend.tls.clone(),
+        model: config.backend.model.clone(),
+        api_key: config.backend.api_key.clone(),
+    }]
+}
+
+/// Resolve the load balancing strategy from config.
+pub fn resolve_strategy(config: &AppConfig) -> String {
+    config
+        .backends
+        .as_ref()
+        .map(|b| b.strategy.clone())
+        .unwrap_or_else(|| "round_robin".to_string())
 }
 
 /// Response fix modules configuration
@@ -609,5 +670,101 @@ mod tests {
         assert_eq!(disabled, StreamingMode::Disabled);
         assert_eq!(fake, StreamingMode::Fake);
         assert_eq!(accumulator, StreamingMode::Accumulator);
+    }
+
+    fn make_single_backend_config() -> AppConfig {
+        AppConfig {
+            server: ServerConfig {
+                port: 8066,
+                host: "0.0.0.0".to_string(),
+            },
+            backend: BackendConfig {
+                url: "http://localhost:8080".to_string(),
+                timeout_seconds: 300,
+                tls: None,
+                model: None,
+                api_key: None,
+            },
+            backends: None,
+            fixes: FixesConfig::default(),
+            stats: StatsConfig::default(),
+            exporters: ExportersConfig::default(),
+            detection: DetectionConfig::default(),
+            streaming: StreamingConfig::default(),
+        }
+    }
+
+    #[test]
+    fn test_resolve_backend_nodes_single() {
+        let config = make_single_backend_config();
+        let nodes = resolve_backend_nodes(&config);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].url, "http://localhost:8080");
+        assert_eq!(nodes[0].timeout_seconds, 300);
+    }
+
+    #[test]
+    fn test_resolve_backend_nodes_multi() {
+        let mut config = make_single_backend_config();
+        config.backends = Some(BackendsConfig {
+            strategy: "round_robin".to_string(),
+            nodes: vec![
+                BackendNodeConfig {
+                    url: "http://localhost:8080".to_string(),
+                    timeout_seconds: 300,
+                    tls: None,
+                    model: None,
+                    api_key: None,
+                },
+                BackendNodeConfig {
+                    url: "http://localhost:8081".to_string(),
+                    timeout_seconds: 200,
+                    tls: None,
+                    model: Some("mymodel".to_string()),
+                    api_key: None,
+                },
+            ],
+        });
+        let nodes = resolve_backend_nodes(&config);
+        assert_eq!(nodes.len(), 2);
+        assert_eq!(nodes[0].url, "http://localhost:8080");
+        assert_eq!(nodes[1].url, "http://localhost:8081");
+        assert_eq!(nodes[1].timeout_seconds, 200);
+        assert_eq!(nodes[1].model, Some("mymodel".to_string()));
+    }
+
+    #[test]
+    fn test_resolve_strategy_default() {
+        let config = make_single_backend_config();
+        assert_eq!(resolve_strategy(&config), "round_robin");
+    }
+
+    #[test]
+    fn test_resolve_strategy_from_backends() {
+        let mut config = make_single_backend_config();
+        config.backends = Some(BackendsConfig {
+            strategy: "round_robin".to_string(),
+            nodes: vec![BackendNodeConfig {
+                url: "http://localhost:8080".to_string(),
+                timeout_seconds: 300,
+                tls: None,
+                model: None,
+                api_key: None,
+            }],
+        });
+        assert_eq!(resolve_strategy(&config), "round_robin");
+    }
+
+    #[test]
+    fn test_resolve_backend_nodes_empty_backends_falls_back() {
+        // If backends.nodes is empty, fall back to single backend config
+        let mut config = make_single_backend_config();
+        config.backends = Some(BackendsConfig {
+            strategy: "round_robin".to_string(),
+            nodes: vec![],
+        });
+        let nodes = resolve_backend_nodes(&config);
+        assert_eq!(nodes.len(), 1);
+        assert_eq!(nodes[0].url, "http://localhost:8080");
     }
 }

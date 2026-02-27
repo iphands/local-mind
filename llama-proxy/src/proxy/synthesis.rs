@@ -229,14 +229,24 @@ fn chunk_text(text: &str, max_size: usize) -> Vec<String> {
     let mut start = 0;
 
     while start < text.len() {
-        let end = (start + max_size).min(text.len());
+        let raw_end = (start + max_size).min(text.len());
+        // Align raw_end backward to a char boundary (avoids panic on multi-byte chars like emojis)
+        let end = floor_char_boundary(text, raw_end);
+        // Guarantee at least one char of progress to prevent an infinite loop
+        let end = if end <= start {
+            text[start..].char_indices().nth(1).map(|(i, _)| start + i).unwrap_or(text.len())
+        } else {
+            end
+        };
 
         // Try to split on whitespace if not at the end
         let chunk_end = if end < text.len() {
-            // Look for last whitespace in the chunk
+            // Use char_indices so the advance past the whitespace char is always correct
             text[start..end]
-                .rfind(|c: char| c.is_whitespace())
-                .map(|i| start + i + 1)
+                .char_indices()
+                .rev()
+                .find(|(_, c)| c.is_whitespace())
+                .map(|(i, c)| start + i + c.len_utf8())
                 .unwrap_or(end)
         } else {
             end
@@ -247,6 +257,18 @@ fn chunk_text(text: &str, max_size: usize) -> Vec<String> {
     }
 
     chunks
+}
+
+/// Return the largest index ≤ `index` that is a UTF-8 char boundary.
+fn floor_char_boundary(s: &str, index: usize) -> usize {
+    if index >= s.len() {
+        return s.len();
+    }
+    let mut i = index;
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Create an SSE Event from JSON
@@ -549,6 +571,26 @@ mod tests {
         assert!(chunks.len() >= 3);
 
         // Verify chunks reconstruct original
+        let reconstructed: String = chunks.concat();
+        assert_eq!(reconstructed, text);
+    }
+
+    #[test]
+    fn test_chunk_text_multibyte_emoji() {
+        // Emojis are 4 bytes each; a chunk boundary mid-emoji must not panic
+        // "💡" is 4 bytes; 12 emojis = 48 bytes, chunk_size=50 puts end at byte 50 (inside emoji 13)
+        let text = "💡".repeat(20); // 80 bytes total
+        let chunks = chunk_text(&text, 50);
+        // All chunks must be valid UTF-8 strings (no panic = pass)
+        let reconstructed: String = chunks.concat();
+        assert_eq!(reconstructed, text);
+    }
+
+    #[test]
+    fn test_chunk_text_mixed_emoji_ascii() {
+        // The actual crashing pattern from production logs
+        let text = "👋 **Hello!** 😊\n\nHow can I assist you today? 🌱\n\nWhether you have a question 💬";
+        let chunks = chunk_text(text, 50);
         let reconstructed: String = chunks.concat();
         assert_eq!(reconstructed, text);
     }

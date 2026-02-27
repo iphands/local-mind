@@ -27,6 +27,16 @@ backend:
   #   # Path to client private key for mTLS
   #   client_key_path: "/path/to/client.key"
 
+# Multi-backend load balancing (optional, overrides 'backend' when present)
+# backends:
+#   strategy: round_robin   # currently only round_robin is supported
+#   nodes:
+#     - url: "http://localhost:8080"
+#       timeout_seconds: 300
+#     - url: "http://localhost:8081"
+#       timeout_seconds: 300
+#       # tls / model / api_key per node are also supported
+
 # === OPTIONAL SECTIONS (defaults shown) ===
 
 # Response fix modules (default: enabled with all fixes active)

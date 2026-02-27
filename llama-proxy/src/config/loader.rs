@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::{AppConfig, ConfigError};
+use super::{resolve_backend_nodes, AppConfig, ConfigError};
 
 /// Load configuration from a YAML file
 pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
@@ -13,8 +13,14 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
     let content = std::fs::read_to_string(path)?;
     let config: AppConfig = serde_yaml::from_str(&content)?;
 
-    // Validate backend URL
-    validate_backend_url(&config.backend.url)?;
+    // Validate all resolved backend node URLs
+    let nodes = resolve_backend_nodes(&config);
+    if nodes.is_empty() {
+        return Err(ConfigError::Validation("No backend nodes configured".to_string()));
+    }
+    for node in &nodes {
+        validate_backend_url(&node.url)?;
+    }
 
     Ok(config)
 }

@@ -7,6 +7,7 @@
 //! - Pluggable exporters (InfluxDB, etc.)
 
 pub mod api;
+pub mod backends;
 pub mod config;
 pub mod exporters;
 pub mod fixes;
