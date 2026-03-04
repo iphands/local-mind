@@ -19,7 +19,8 @@
       "Bash(curl:*)",
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(git:*)",
-      "Bash(bash:*)"
+      "Bash(bash:*)",
+      "Bash(gcc:*)"
     ]
   },
   "prefersReducedMotion": true
