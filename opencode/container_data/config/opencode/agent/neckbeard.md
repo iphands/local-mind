@@ -2,7 +2,7 @@
 name: neckbeard
 description: Senior Engineer - correctness, bugs, code quality
 mode: subagent
-model: cosmo-both/cosmo-both
+model: zai-coding-plan/glm-5
 color: "#FF6B35"
 tools:
   "*": false

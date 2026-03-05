@@ -58,7 +58,7 @@ LLAMA_ARGS=(
   --alias $ALIAS
   --port 8799
   --host 0.0.0.0
-  # --n-gpu-layers $LAYERS
+  --n-gpu-layers $LAYERS
   --batch-size  2048
   --ubatch-size 128
   --cache-type-k q8_0
@@ -73,7 +73,7 @@ LLAMA_ARGS=(
   # --verbose --metrics
   # --temp 0.75 --top_p 0.95 --min-p 0.01   # --top_k 40
   # --temp 0.60 --top_k 0
-  --temp 0.6 --top-p 0.95 --top-k 0 --min-p 0.01
+  --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.01
   --cache-ram 16384
 )
 

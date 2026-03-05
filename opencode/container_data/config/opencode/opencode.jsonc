@@ -1,5 +1,5 @@
 {
-  "model": "cosmo-both/cosmo-both",
+  "model": "zai-coding-plan/glm-5",
   "plugin": ["oh-my-opencode@latest"],
   "$schema": "https://opencode.ai/config.json",
   "default_agent": "local-mind",

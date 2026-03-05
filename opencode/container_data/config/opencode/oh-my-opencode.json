@@ -5,70 +5,70 @@
     "layout": "main-vertical"
   },
   "agents": {
-    "sisyphus": {
-      "model": "cosmo-both/cosmo-both"
-    },
     "momus": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "OpenCode-Builder": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "atlas": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "librarian": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "multimodal-looker": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "oracle": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "zai-coding-plan/glm-5"
     },
     "explore": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "zai-coding-plan/glm-5"
     },
-    "metis": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "sisyphus-junior": {
-      "model": "cosmo-both/cosmo-both"
+    "librarian": {
+      "model": "zai-coding-plan/glm-5"
     },
     "plan": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "zai-coding-plan/glm-5"
     },
-    "build": {
-      "model": "cosmo-both/cosmo-both"
+    "metis": {
+      "model": "zai-coding-plan/glm-5"
+    },
+    "sisyphus": {
+      "model": "zai-coding-plan/glm-5"
     },
     "prometheus": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "zai-coding-plan/glm-5"
+    },
+    "OpenCode-Builder": {
+      "model": "zai-coding-plan/glm-5"
+    },
+    "oracle": {
+      "model": "zai-coding-plan/glm-5"
+    },
+    "multimodal-looker": {
+      "model": "zai-coding-plan/glm-5"
+    },
+    "sisyphus-junior": {
+      "model": "zai-coding-plan/glm-5"
     },
     "big-pickle-agent": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "zai-coding-plan/glm-5"
+    },
+    "build": {
+      "model": "zai-coding-plan/glm-5"
+    },
+    "atlas": {
+      "model": "zai-coding-plan/glm-5"
     }
   },
   "categories": {
-    "quick": {
-      "model": "cosmo-both/cosmo-both"
-    },
     "writing": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "artistry": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "zai-coding-plan/glm-5"
     },
     "unspecified-high": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "zai-coding-plan/glm-5"
+    },
+    "quick": {
+      "model": "zai-coding-plan/glm-5"
     },
     "unspecified-low": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "zai-coding-plan/glm-5"
     },
     "ultrabrain": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "zai-coding-plan/glm-5"
+    },
+    "artistry": {
+      "model": "zai-coding-plan/glm-5"
     },
     "visual-engineering": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "zai-coding-plan/glm-5"
     }
   }
 }
