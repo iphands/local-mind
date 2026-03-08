@@ -1,6 +1,20 @@
 //! OpenAI-compatible API type definitions
 
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
+
+/// Deserialize `arguments` as either a JSON string or a JSON object.
+/// The OpenAI spec requires a string, but some backends (e.g. llama.cpp) may
+/// return a raw object. We normalize to a JSON string either way.
+fn deserialize_arguments<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => Ok(s),
+        other => serde_json::to_string(&other).map_err(serde::de::Error::custom),
+    }
+}
 
 /// Chat completion request
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -178,6 +192,7 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FunctionCall {
     pub name: String,
+    #[serde(deserialize_with = "deserialize_arguments")]
     pub arguments: String,
 }
 
