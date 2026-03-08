@@ -3,7 +3,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use super::balancer::LoadBalancer;
+use super::balancer::{BackendGuard, LoadBalancer};
 use super::node::BackendNode;
 
 /// Round-robin load balancer — cycles through nodes in order
@@ -25,9 +25,9 @@ impl RoundRobinBalancer {
 }
 
 impl LoadBalancer for RoundRobinBalancer {
-    fn select(&self) -> Arc<BackendNode> {
+    fn select(&self) -> BackendGuard {
         let idx = self.counter.fetch_add(1, Ordering::Relaxed) % self.nodes.len();
-        self.nodes[idx].clone()
+        BackendGuard::new(self.nodes[idx].clone())
     }
 
     fn strategy_name(&self) -> &'static str {
@@ -42,6 +42,7 @@ impl LoadBalancer for RoundRobinBalancer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     fn make_test_node(url: &str) -> Arc<BackendNode> {
         Arc::new(BackendNode {
@@ -50,6 +51,7 @@ mod tests {
             api_key: None,
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
+            active_requests: AtomicUsize::new(0),
         })
     }
 
@@ -62,10 +64,10 @@ mod tests {
         ];
         let balancer = RoundRobinBalancer::new(nodes).unwrap();
 
-        assert_eq!(balancer.select().base_url(), "http://localhost:8080");
-        assert_eq!(balancer.select().base_url(), "http://localhost:8081");
-        assert_eq!(balancer.select().base_url(), "http://localhost:8082");
-        assert_eq!(balancer.select().base_url(), "http://localhost:8080");
+        assert_eq!(balancer.select().node.base_url(), "http://localhost:8080");
+        assert_eq!(balancer.select().node.base_url(), "http://localhost:8081");
+        assert_eq!(balancer.select().node.base_url(), "http://localhost:8082");
+        assert_eq!(balancer.select().node.base_url(), "http://localhost:8080");
     }
 
     #[test]
@@ -73,8 +75,8 @@ mod tests {
         let nodes = vec![make_test_node("http://localhost:8080")];
         let balancer = RoundRobinBalancer::new(nodes).unwrap();
 
-        assert_eq!(balancer.select().base_url(), "http://localhost:8080");
-        assert_eq!(balancer.select().base_url(), "http://localhost:8080");
+        assert_eq!(balancer.select().node.base_url(), "http://localhost:8080");
+        assert_eq!(balancer.select().node.base_url(), "http://localhost:8080");
     }
 
     #[test]
@@ -98,5 +100,34 @@ mod tests {
         ];
         let balancer = RoundRobinBalancer::new(nodes).unwrap();
         assert_eq!(balancer.all_nodes().len(), 2);
+    }
+
+    #[test]
+    fn test_guard_increments_and_decrements() {
+        let node = make_test_node("http://localhost:8080");
+        let nodes = vec![node.clone()];
+        let balancer = RoundRobinBalancer::new(nodes).unwrap();
+
+        assert_eq!(node.active_requests.load(Ordering::Relaxed), 0);
+        {
+            let _guard = balancer.select();
+            assert_eq!(node.active_requests.load(Ordering::Relaxed), 1);
+        }
+        assert_eq!(node.active_requests.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn test_guard_multiple_concurrent() {
+        let node = make_test_node("http://localhost:8080");
+        let nodes = vec![node.clone()];
+        let balancer = RoundRobinBalancer::new(nodes).unwrap();
+
+        let g1 = balancer.select();
+        let g2 = balancer.select();
+        assert_eq!(node.active_requests.load(Ordering::Relaxed), 2);
+        drop(g1);
+        assert_eq!(node.active_requests.load(Ordering::Relaxed), 1);
+        drop(g2);
+        assert_eq!(node.active_requests.load(Ordering::Relaxed), 0);
     }
 }

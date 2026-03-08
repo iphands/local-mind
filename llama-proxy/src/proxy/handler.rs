@@ -149,7 +149,7 @@ impl ProxyHandler {
             | (&Method::GET, "/v1/health")
             | (&Method::GET, "/v1/models")
             | (&Method::GET, "/metrics") => {
-                return self.proxy_passthrough(req, &backend).await;
+                return self.proxy_passthrough(req, &backend.node).await;
             }
 
             // All other routes continue with existing logic
@@ -187,9 +187,9 @@ impl ProxyHandler {
 
         // Build complete URL with query string as-is (don't parse/re-encode)
         let backend_url = if let Some(q) = query {
-            format!("{}{}?{}", backend.base_url(), path, q)
+            format!("{}{}?{}", backend.node.base_url(), path, q)
         } else {
-            format!("{}{}", backend.base_url(), path)
+            format!("{}{}", backend.node.base_url(), path)
         };
 
         tracing::debug!(
@@ -200,6 +200,7 @@ impl ProxyHandler {
 
         // Create request with complete URL (query string included)
         let mut backend_req = backend
+            .node
             .http_client
             .request(Method::from_bytes(method.as_str().as_bytes()).unwrap(), &backend_url);
 
@@ -214,7 +215,7 @@ impl ProxyHandler {
         }
 
         // Add Authorization header if api_key is configured
-        if let Some(ref api_key) = backend.api_key {
+        if let Some(ref api_key) = backend.node.api_key {
             backend_req = backend_req.header(header::AUTHORIZATION, format!("Bearer {}", api_key));
         }
 
@@ -222,7 +223,7 @@ impl ProxyHandler {
         let body_bytes = if let Some(mut json) = request_json.clone() {
             json["stream"] = serde_json::Value::Bool(false);
             // Override model if configured
-            if let Some(ref model) = backend.model {
+            if let Some(ref model) = backend.node.model {
                 json["model"] = serde_json::Value::String(model.clone());
             }
             if client_wants_streaming {
@@ -271,8 +272,8 @@ impl ProxyHandler {
                 self.state.exporter_manager.clone(),
                 request_json,
                 start,
-                backend.http_client.clone(),
-                backend.base_url().to_string(),
+                backend.node.http_client.clone(),
+                backend.node.base_url().to_string(),
             )
             .await
         } else {
@@ -283,7 +284,7 @@ impl ProxyHandler {
                 client_wants_streaming,
                 is_anthropic_api,
                 start,
-                &backend,
+                &backend.node,
             )
             .await
         }
@@ -649,6 +650,7 @@ impl ProxyHandler {
 mod tests {
     use super::*;
     use crate::backends::{BackendNode, RoundRobinBalancer};
+    use std::sync::atomic::AtomicUsize;
     use crate::config::{AppConfig, BackendConfig, StreamingConfig};
     use crate::exporters::ExporterManager;
     use crate::fixes::FixRegistry;
@@ -693,6 +695,7 @@ mod tests {
             api_key: None,
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
+            active_requests: AtomicUsize::new(0),
         };
         let load_balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(default_node)]).unwrap());
         let fix_registry = FixRegistry::new();

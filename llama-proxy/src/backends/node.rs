@@ -1,5 +1,6 @@
 //! Runtime handle for a single backend node
 
+use std::sync::atomic::AtomicUsize;
 use std::time::Duration;
 
 use crate::config::TlsConfig;
@@ -11,6 +12,7 @@ pub struct BackendNode {
     pub api_key: Option<String>,
     pub timeout_seconds: u64,
     pub http_client: reqwest::Client,
+    pub active_requests: AtomicUsize,
 }
 
 impl BackendNode {
@@ -29,6 +31,7 @@ impl BackendNode {
             api_key,
             timeout_seconds,
             http_client,
+            active_requests: AtomicUsize::new(0),
         })
     }
 
