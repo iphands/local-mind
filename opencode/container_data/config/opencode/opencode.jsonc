@@ -1,5 +1,5 @@
 {
-  "model": "cosmo-both/cosmo-both",
+  "model": "cosmo-proxy/cosmo-proxy",
   "plugin": ["oh-my-opencode@latest"],
   "$schema": "https://opencode.ai/config.json",
   "default_agent": "local-mind",
@@ -46,10 +46,10 @@
         "apiKey": "deadbeef1234"
       }
     },
-    "cosmo-both": {
-      "name": "cosmo-both",
+    "cosmo-proxy": {
+      "name": "cosmo-proxy",
       "npm": "@ai-sdk/openai-compatible",
-      "models": { "cosmo-both": { "name": "cosmo-both" }, },
+      "models": { "cosmo-proxy": { "name": "cosmo-proxy" }, },
       "options": {
         "baseURL": "http://cosmo.lan:8799/v1",
         "apiKey": "deadbeef1234"

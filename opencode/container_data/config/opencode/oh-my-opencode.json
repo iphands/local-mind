@@ -5,70 +5,70 @@
     "layout": "main-vertical"
   },
   "agents": {
-    "librarian": {
-      "model": "cosmo-both/cosmo-both"
-    },
     "multimodal-looker": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "build": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "big-pickle-agent": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "sisyphus-junior": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "prometheus": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "metis": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "plan": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "sisyphus": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "atlas": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "cosmo-proxy/cosmo-proxy"
     },
     "explore": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "cosmo-proxy/cosmo-proxy"
     },
-    "momus": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "OpenCode-Builder": {
-      "model": "cosmo-both/cosmo-both"
+    "prometheus": {
+      "model": "cosmo-proxy/cosmo-proxy"
     },
     "oracle": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "plan": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "metis": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "big-pickle-agent": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "sisyphus-junior": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "build": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "OpenCode-Builder": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "momus": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "atlas": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "sisyphus": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "librarian": {
+      "model": "cosmo-proxy/cosmo-proxy"
     }
   },
   "categories": {
-    "visual-engineering": {
-      "model": "cosmo-both/cosmo-both"
-    },
-    "writing": {
-      "model": "cosmo-both/cosmo-both"
-    },
     "ultrabrain": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "cosmo-proxy/cosmo-proxy"
     },
     "quick": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "cosmo-proxy/cosmo-proxy"
     },
     "unspecified-high": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "cosmo-proxy/cosmo-proxy"
     },
-    "unspecified-low": {
-      "model": "cosmo-both/cosmo-both"
+    "visual-engineering": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "writing": {
+      "model": "cosmo-proxy/cosmo-proxy"
     },
     "artistry": {
-      "model": "cosmo-both/cosmo-both"
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "unspecified-low": {
+      "model": "cosmo-proxy/cosmo-proxy"
     }
   }
 }

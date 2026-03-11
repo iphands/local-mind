@@ -124,7 +124,7 @@ All providers use OpenAI-compatible APIs served by llama.cpp:
 |----------|----------|-----|---------|
 | cosmo-00 | `http://cosmo.lan:8700/v1` | RTX 3070 | 32k |
 | cosmo-01 | `http://cosmo.lan:8701/v1` | RTX 4060 | 48k |
-| cosmo-both | `http://cosmo.lan:8799/v1` | Load-balanced | - |
+| cosmo-proxy | `http://cosmo.lan:8799/v1` | Load-balanced | - |
 
 ## Helper Tools
 

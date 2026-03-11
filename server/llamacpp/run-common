@@ -48,7 +48,7 @@ case `hostname` in
   [[ "$SINGLE" == "1" ]] || {
     CONTAINER_ARGS+=(--gpus all)
   }
-  ALIAS=${ALIAS:-cosmo-both}
+  ALIAS=${ALIAS:-cosmo-proxy}
   LAYERS=99
   ;;
 esac
