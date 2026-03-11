@@ -2,7 +2,7 @@
 name: hoodie
 description: Junior Engineer - usability, performance, creativity
 mode: subagent
-model: zai-coding-plan/glm-5
+model: cosmo-both/cosmo-both
 color: "#44BA81"
 tools:
   "*": false

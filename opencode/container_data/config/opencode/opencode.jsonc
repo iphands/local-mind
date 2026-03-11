@@ -1,5 +1,5 @@
 {
-  "model": "zai-coding-plan/glm-5",
+  "model": "cosmo-both/cosmo-both",
   "plugin": ["oh-my-opencode@latest"],
   "$schema": "https://opencode.ai/config.json",
   "default_agent": "local-mind",
@@ -31,7 +31,7 @@
     "cosmo-00": {
       "name": "cosmo-00",
       "npm": "@ai-sdk/openai-compatible",
-      "models": { "cosmo-3070": { "name": "cosmo-3070" }, },
+      "models": { "cosmo-rtx-pro-6000": { "name": "cosmo-rtx-pro-6000" }, },
       "options": {
         "baseURL": "http://cosmo.lan:8700/v1",
         "apiKey": "deadbeef1234"

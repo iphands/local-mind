@@ -1,7 +1,10 @@
-cosmo-00/cosmo-3070
+cosmo-00/cosmo-rtx-pro-6000
 cosmo-01/cosmo-4060
 cosmo-both/cosmo-both
 noir-llama/noir-model
+zai-coding-plan/glm-5
+inception/mercury-2
+inception/mercury-code
 opencode/big-pickle
 runpod/runpod-model
 station-llama/station-model
@@ -25,4 +28,3 @@ zai-coding-plan/glm-4.6
 zai-coding-plan/glm-4.6v
 zai-coding-plan/glm-4.7
 zai-coding-plan/glm-4.7-flash
-zai-coding-plan/glm-5

@@ -90,7 +90,7 @@ tools:
 name: hoodie
 description: Junior Engineer code reviewer
 mode: subagent
-model: cosmo-00/cosmo-3070
+model: cosmo-00/cosmo-rtx-pro-6000
 color: "#44BA81"
 tools:
   "*": false
@@ -154,7 +154,7 @@ After researching oh-my-opencode, I found that:
     "cosmo-00": {
       "name": "cosmo-00",
       "npm": "@ai-sdk/openai-compatible",
-      "models": { "cosmo-3070": { "name": "cosmo-3070" } },
+      "models": { "cosmo-rtx-pro-6000": { "name": "cosmo-rtx-pro-6000" } },
       "options": {
         "baseURL": "http://cosmo.lan:8700/v1",
         "apiKey": "deadbeef1234"
@@ -258,7 +258,7 @@ To make reviews optional instead of mandatory:
 
 ### Reviewers Taking Too Long
 
-1. Use cheaper/faster models for reviewers (e.g., cosmo-3070)
+1. Use cheaper/faster models for reviewers (e.g., cosmo-rtx-pro-6000)
 2. Add timeout configuration to Task calls
 3. Limit the scope of what reviewers check
 

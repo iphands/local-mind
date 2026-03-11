@@ -36,7 +36,7 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 ┌──────────────────────────────────────┐
 │  Local LLM Servers (cosmo.lan)       │
 │  ┌────────────┐  ┌────────────┐      │
-│  │ cosmo-3070 │  │ cosmo-4060 │      │
+│  │ cosmo-rtx-pro-6000 │  │ cosmo-4060 │      │
 │  │ :8700      │  │ :8701      │      │
 │  └────────────┘  └────────────┘      │
 │  llama.cpp + CUDA                    │
@@ -72,7 +72,7 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 ├── server/
     └── llamacpp/                 # llama.cpp LLM server infrastructure
         ├── Dockerfile            # CUDA 12.4 build
-        ├── run-3070              # Start cosmo-3070 server (:8700)
+        ├── run-3070              # Start cosmo-rtx-pro-6000 server (:8700)
         ├── run-4060              # Start cosmo-4060 server (:8701)
         ├── run-both              # Start with both GPUs
         └── vendor/ik_llama.cpp/  # ik_llama source code used in container build
@@ -90,7 +90,7 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 
 ```bash
 cd server/llamacpp
-./run-both          # Starts cosmo-3070 on :8700, cosmo-4060 on :8701
+./run-both          # Starts cosmo-rtx-pro-6000 on :8700, cosmo-4060 on :8701
 ```
 
 Or individually:

@@ -2,7 +2,7 @@
 name: local-mind
 description: Primary agent with mandatory peer review before code changes
 mode: primary
-model: zai-coding-plan/glm-5
+model: cosmo-both/cosmo-both
 color: "#38A3EE"
 tools:
   "*": true

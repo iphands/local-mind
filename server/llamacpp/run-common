@@ -67,7 +67,7 @@ LLAMA_ARGS=(
   --ctx-size $CTX
   --flash-attn on
   --jinja
-  --parallel 1
+  --parallel 2
   --threads `cat /proc/cpuinfo | grep MHz | wc -l`
   --kv-offload
   # --verbose --metrics
