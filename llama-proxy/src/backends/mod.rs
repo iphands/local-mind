@@ -10,7 +10,6 @@ pub use node::BackendNode;
 pub use priority_free::PriorityFreeBalancer;
 pub use round_robin::RoundRobinBalancer;
 
-use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 /// Build a load balancer from a list of nodes and a strategy name
@@ -33,6 +32,7 @@ pub fn build_balancer(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::AtomicUsize;
 
     fn make_test_node(url: &str) -> BackendNode {
         BackendNode {
