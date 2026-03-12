@@ -13,6 +13,18 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
     let content = std::fs::read_to_string(path)?;
     let config: AppConfig = serde_yaml::from_str(&content)?;
 
+    // Validate server configuration
+    validate_server_config(&config.server)?;
+
+    // Validate backend configuration
+    validate_backend_config(&config.backend)?;
+
+    // Validate streaming configuration
+    validate_streaming_config(&config.streaming)?;
+
+    // Validate all resolved backend node URLs
+    let config: AppConfig = serde_yaml::from_str(&content)?;
+
     // Validate all resolved backend node URLs
     let nodes = resolve_backend_nodes(&config);
     if nodes.is_empty() {
@@ -41,6 +53,48 @@ fn validate_backend_url(url: &str) -> Result<(), ConfigError> {
     // Ensure there's a host
     if parsed.host_str().is_none() {
         return Err(ConfigError::Validation(format!("Backend URL must include a host: '{}'", url)));
+    }
+
+    Ok(())
+}
+
+/// Validate server configuration
+fn validate_server_config(config: &super::ServerConfig) -> Result<(), ConfigError> {
+    // Validate port range (1-65535)
+    if config.port == 0 {
+        return Err(ConfigError::Validation(format!(
+            "Server port must be between 1-65535, got {}",
+            config.port
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate backend configuration
+fn validate_backend_config(config: &super::BackendConfig) -> Result<(), ConfigError> {
+    // Validate timeout_seconds > 0
+    if config.timeout_seconds == 0 {
+        return Err(ConfigError::Validation(
+            "Backend timeout_seconds must be greater than 0".to_string(),
+        ));
+    }
+
+    Ok(())
+}
+
+/// Validate streaming configuration
+fn validate_streaming_config(config: &super::StreamingMode) -> Result<(), ConfigError> {
+    // Validate streaming mode is implemented
+    if !config.is_implemented() {
+        return Err(ConfigError::Validation(format!(
+            "Streaming mode '{}' is not yet implemented. Use 'disabled' or 'fake'",
+            match config {
+                super::StreamingMode::Disabled => "disabled",
+                super::StreamingMode::Fake => "fake",
+                super::StreamingMode::Accumulator => "accumulator",
+            }
+        )));
     }
 
     Ok(())
@@ -244,4 +298,212 @@ exporters:
         // Missing host
         assert!(validate_backend_url("http://").is_err());
     }
+
+    #[test]
+    fn test_validate_server_config_valid_port() {
+        let config = super::super::ServerConfig {
+            port: 8066,
+            host: "0.0.0.0".to_string(),
+        };
+        assert!(validate_server_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_server_config_zero_port() {
+        let config = super::super::ServerConfig {
+            port: 0,
+            host: "0.0.0.0".to_string(),
+        };
+        let result = validate_server_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("port"));
+        assert!(err.to_string().contains("1-65535"));
+    }
+
+    #[test]
+    fn test_validate_backend_config_valid_timeout() {
+        let config = super::super::BackendConfig {
+            url: "http://localhost:8080".to_string(),
+            timeout_seconds: 300,
+            tls: None,
+            model: None,
+            api_key: None,
+        };
+        assert!(validate_backend_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_backend_config_zero_timeout() {
+        let config = super::super::BackendConfig {
+            url: "http://localhost:8080".to_string(),
+            timeout_seconds: 0,
+            tls: None,
+            model: None,
+            api_key: None,
+        };
+        let result = validate_backend_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("timeout"));
+    }
+
+    #[test]
+    fn test_validate_streaming_config_valid_modes() {
+        // Test disabled mode
+        let config = super::super::StreamingMode::Disabled;
+        assert!(validate_streaming_config(&config).is_ok());
+
+        // Test fake mode
+        let config = super::super::StreamingMode::Fake;
+        assert!(validate_streaming_config(&config).is_ok());
+    }
+
+    #[test]
+    fn test_validate_streaming_config_unimplemented_mode() {
+        let config = super::super::StreamingMode::Accumulator;
+        let result = validate_streaming_config(&config);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("not yet implemented"));
+    }
+    #[test]
+    fn test_invalid_timeout() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_invalid_timeout.yaml");
+
+        let config_content = r#"
+server:
+  port: 8066
+  host: "0.0.0.0"
+
+backend:
+  url: "http://localhost:8080"
+  timeout_seconds: 0
+
+fixes:
+  enabled: true
+  modules: {}
+
+stats:
+  enabled: true
+  format: "json"
+  log_interval: 1
+
+exporters:
+  influxdb:
+    enabled: false
+    url: ""
+    org: ""
+    bucket: ""
+    token: ""
+    batch_size: 0
+    flush_interval_seconds: 0
+"#;
+        std::fs::write(&temp_file, config_content).unwrap();
+
+        let result = load_config(&temp_file);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("timeout_seconds must be greater than 0"));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_load_config_with_invalid_port() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_invalid_port_config.yaml");
+
+        let config_content = r#"
+server:
+  port: 0
+  host: "0.0.0.0"
+
+backend:
+  url: "http://localhost:8080"
+  timeout_seconds: 300
+
+fixes:
+  enabled: true
+  modules: {}
+
+stats:
+  enabled: true
+  format: "json"
+  log_interval: 1
+
+exporters:
+  influxdb:
+    enabled: false
+    url: ""
+    org: ""
+    bucket: ""
+    token: ""
+    batch_size: 0
+    flush_interval_seconds: 0
+"#;
+        std::fs::write(&temp_file, config_content).unwrap();
+
+        let result = load_config(&temp_file);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("port"));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_load_config_with_invalid_timeout() {
+        let temp_dir = std::env::temp_dir();
+        let temp_file = temp_dir.join("test_invalid_timeout_config.yaml");
+
+        let config_content = r#"
+server:
+  port: 8066
+  host: "0.0.0.0"
+
+backend:
+  url: "http://localhost:8080"
+  timeout_seconds: 0
+
+fixes:
+  enabled: true
+  modules: {}
+
+stats:
+  enabled: true
+  format: "json"
+  log_interval: 1
+
+exporters:
+  influxdb:
+    enabled: false
+    url: ""
+    org: ""
+    bucket: ""
+    token: ""
+    batch_size: 0
+    flush_interval_seconds: 0
+"#;
+        std::fs::write(&temp_file, config_content).unwrap();
+
+        let result = load_config(&temp_file);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(matches!(err, ConfigError::Validation(_)));
+        assert!(err.to_string().contains("timeout"));
+
+        // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+
 }

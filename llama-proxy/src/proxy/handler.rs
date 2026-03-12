@@ -222,6 +222,12 @@ impl ProxyHandler {
         // ALWAYS force stream: false for backend request
         let body_bytes = if let Some(mut json) = request_json.clone() {
             json["stream"] = serde_json::Value::Bool(false);
+            // Strip stream_options - backend doesn't need it with stream:false
+            if let Some(obj) = json.as_object_mut() {
+                if obj.remove("stream_options").is_some() {
+                    tracing::debug!("Stripped stream_options from non-streaming backend request");
+                }
+            }
             // Override model if configured
             if let Some(ref model) = backend.node.model {
                 json["model"] = serde_json::Value::String(model.clone());
