@@ -24,6 +24,7 @@ pub struct ProxyState {
     pub load_balancer: Arc<dyn LoadBalancer>,
     pub fix_registry: Arc<FixRegistry>,
     pub exporter_manager: Arc<ExporterManager>,
+    pub hide_requests: bool,
 }
 
 /// Run the proxy server
@@ -31,6 +32,7 @@ pub async fn run_server(
     config: AppConfig,
     fix_registry: FixRegistry,
     exporter_manager: ExporterManager,
+    hide_requests: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Resolve backend nodes and strategy
     let node_configs = resolve_backend_nodes(&config);
@@ -63,6 +65,7 @@ pub async fn run_server(
         load_balancer,
         fix_registry: Arc::new(fix_registry),
         exporter_manager: Arc::new(exporter_manager),
+        hide_requests,
     };
 
     // Build the router

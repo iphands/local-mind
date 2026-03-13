@@ -180,9 +180,11 @@ impl ProxyHandler {
             .and_then(|s| s.as_bool())
             .unwrap_or(false);
 
-        // Log request
-        if let Some(ref req_json) = request_json {
-            tracing::info!("{}", format_request_log(req_json));
+        // Log request (unless hide_requests is set)
+        if !self.state.hide_requests {
+            if let Some(ref req_json) = request_json {
+                tracing::info!("{}", format_request_log(req_json));
+            }
         }
 
         // Build complete URL with query string as-is (don't parse/re-encode)
@@ -712,6 +714,7 @@ mod tests {
             load_balancer,
             fix_registry: std::sync::Arc::new(fix_registry),
             exporter_manager: std::sync::Arc::new(exporter_manager),
+            hide_requests: false,
         })
     }
 

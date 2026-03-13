@@ -79,6 +79,9 @@ enum Commands {
         /// Override streaming mode (disabled, fake, accumulator)
         #[arg(long, value_name = "MODE")]
         streaming_mode: Option<String>,
+        /// Hide request log lines (only show response stats)
+        #[arg(long)]
+        hide_requests: bool,
     },
 
     /// List all available response fix modules
@@ -116,8 +119,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             port,
             backend_url,
             streaming_mode,
+            hide_requests,
         } => {
-            run_proxy(cli.config, port, backend_url, streaming_mode).await?;
+            run_proxy(cli.config, port, backend_url, streaming_mode, hide_requests).await?;
         }
         Commands::ListFixes { verbose } => {
             list_fixes(verbose);
@@ -139,6 +143,7 @@ async fn run_proxy(
     port_override: Option<u16>,
     backend_url_override: Option<String>,
     streaming_mode_override: Option<String>,
+    hide_requests: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = load_config_or_exit(&config_path);
@@ -229,7 +234,7 @@ async fn run_proxy(
     }
 
     // Run the server
-    run_server(config, fix_registry, exporter_manager).await?;
+    run_server(config, fix_registry, exporter_manager, hide_requests).await?;
 
     Ok(())
 }
