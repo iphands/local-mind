@@ -94,9 +94,15 @@ fn format_compact(m: &RequestMetrics) -> String {
         _ => "ctx=null".to_string(),
     };
 
+    let group_str = m.group_name
+        .as_ref()
+        .map(|g| format!(" group={}", g))
+        .unwrap_or_default();
+
     format!(
-        "model={} tokens={}/{} tps={:.2}s/{:.2}s {} {} finish={} dur={:.1}ms",
+        "model={}{} tokens={}/{} tps={:.2}s/{:.2}s {} {} finish={} dur={:.1}ms",
         m.model,
+        group_str,
         m.prompt_tokens,
         m.completion_tokens,
         m.prompt_tps,
@@ -174,6 +180,25 @@ mod tests {
 
         let output = format_compact(&m);
         assert!(output.contains("ctx=null"));
+    }
+
+    #[test]
+    fn test_format_compact_with_group() {
+        let mut m = create_test_metrics();
+        m.group_name = Some("opus".to_string());
+
+        let output = format_compact(&m);
+        assert!(output.contains("group=opus"));
+        assert!(output.contains("test-model"));
+    }
+
+    #[test]
+    fn test_format_compact_no_group() {
+        let m = create_test_metrics();
+
+        let output = format_compact(&m);
+        // Should not contain "group=" when group_name is None
+        assert!(!output.contains("group="));
     }
 
     #[test]

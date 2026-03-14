@@ -27,6 +27,7 @@ pub async fn handle_streaming_response(
     start: Instant,
     http_client: reqwest::Client,
     backend_url: String,
+    group_name: Option<String>,
 ) -> Response {
     let status = backend_response.status();
     let headers = backend_response.headers().clone();
@@ -187,6 +188,7 @@ pub async fn handle_streaming_response(
         let exporter_manager = exporter_manager.clone();
         let client = http_client.clone();
         let backend_url = backend_url.clone();
+        let group_name = group_name; // Already owned, move into closure
 
         tokio::spawn(async move {
             // Adaptive timeout constants
@@ -277,12 +279,15 @@ pub async fn handle_streaming_response(
                     );
                     // Extract metrics from final event
                     let mut metrics = if let Some(ref req_json) = request_json {
-                        RequestMetrics::from_response(
+                        let mut m = RequestMetrics::from_response(
                             &final_event,
                             req_json,
                             true, // streaming
                             start.elapsed().as_millis() as f64,
-                        )
+                        );
+                        // Set group name if we're in multi-backend mode
+                        m.group_name = group_name;
+                        m
                     } else {
                         tracing::trace!(
                             duration_ms = start.elapsed().as_millis() as u64,

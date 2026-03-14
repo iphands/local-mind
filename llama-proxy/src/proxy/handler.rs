@@ -314,6 +314,7 @@ impl ProxyHandler {
                 start,
                 backend.node.http_client.clone(),
                 backend.node.base_url().to_string(),
+                backend.group_name.clone(),
             )
             .await
         } else {
@@ -325,6 +326,7 @@ impl ProxyHandler {
                 is_anthropic_api,
                 start,
                 &backend.node,
+                backend.group_name.as_deref(),
             )
             .await
         }
@@ -339,6 +341,7 @@ impl ProxyHandler {
         is_anthropic_api: bool,
         start: Instant,
         backend: &Arc<BackendNode>,
+        group_name: Option<&str>,
     ) -> Response {
         let status = backend_response.status();
         let headers = backend_response.headers().clone();
@@ -415,12 +418,15 @@ impl ProxyHandler {
                 // Collect stats if enabled
                 let mut metrics = if self.state.config.stats.enabled {
                     if let Some(ref req_json) = request_json {
-                        Some(RequestMetrics::from_response(
+                        let mut m = RequestMetrics::from_response(
                             &json,
                             req_json,
                             false, // We forced non-streaming
                             start.elapsed().as_millis() as f64,
-                        ))
+                        );
+                        // Set group name if we're in multi-backend mode
+                        m.group_name = group_name.map(|s| s.to_string());
+                        Some(m)
                     } else {
                         None
                     }

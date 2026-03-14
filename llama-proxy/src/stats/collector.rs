@@ -14,6 +14,9 @@ pub struct RequestMetrics {
     pub timestamp: DateTime<Utc>,
     /// Model name
     pub model: String,
+    /// Backend group name (only set in multi-backend mode)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub group_name: Option<String>,
     /// Client identifier (from header or generated)
     pub client_id: Option<String>,
     /// Conversation/session ID
@@ -67,6 +70,7 @@ impl RequestMetrics {
             request_id: Uuid::new_v4().to_string(),
             timestamp: Utc::now(),
             model: "unknown".to_string(),
+            group_name: None,
             client_id: None,
             conversation_id: None,
             prompt_tokens: 0,

@@ -112,7 +112,10 @@ impl LoadBalancer for GroupedLoadBalancer {
                     "Routing request to backend group"
                 );
                 // The internal balancer always succeeds (non-empty nodes guaranteed at construction)
-                group.balancer.select(model)
+                let mut guard = group.balancer.select(model)?;
+                // Attach group name to the guard
+                guard.group_name = Some(group.name.clone());
+                Ok(guard)
             }
             None => Err(NoMatchingBackend {
                 requested_model: model.map(|s| s.to_string()),

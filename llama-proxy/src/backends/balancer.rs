@@ -11,12 +11,20 @@ use crate::config::NoMatchingBackend;
 #[derive(Debug)]
 pub struct BackendGuard {
     pub node: Arc<BackendNode>,
+    /// Backend group name (only set in multi-backend mode)
+    pub group_name: Option<String>,
 }
 
 impl BackendGuard {
     pub fn new(node: Arc<BackendNode>) -> Self {
         node.active_requests.fetch_add(1, Ordering::Relaxed);
-        Self { node }
+        Self { node, group_name: None }
+    }
+
+    /// Create a guard with an associated group name
+    pub fn with_group(node: Arc<BackendNode>, group_name: String) -> Self {
+        node.active_requests.fetch_add(1, Ordering::Relaxed);
+        Self { node, group_name: Some(group_name) }
     }
 }
 
