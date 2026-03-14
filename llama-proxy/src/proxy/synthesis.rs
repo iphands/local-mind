@@ -234,7 +234,11 @@ fn chunk_text(text: &str, max_size: usize) -> Vec<String> {
         let end = floor_char_boundary(text, raw_end);
         // Guarantee at least one char of progress to prevent an infinite loop
         let end = if end <= start {
-            text[start..].char_indices().nth(1).map(|(i, _)| start + i).unwrap_or(text.len())
+            text[start..]
+                .char_indices()
+                .nth(1)
+                .map(|(i, _)| start + i)
+                .unwrap_or(text.len())
         } else {
             end
         };

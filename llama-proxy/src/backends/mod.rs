@@ -13,10 +13,7 @@ pub use round_robin::RoundRobinBalancer;
 use std::sync::Arc;
 
 /// Build a load balancer from a list of nodes and a strategy name
-pub fn build_balancer(
-    nodes: Vec<BackendNode>,
-    strategy: &str,
-) -> Result<Arc<dyn LoadBalancer>, Box<dyn std::error::Error>> {
+pub fn build_balancer(nodes: Vec<BackendNode>, strategy: &str) -> Result<Arc<dyn LoadBalancer>, Box<dyn std::error::Error>> {
     let arc_nodes: Vec<Arc<BackendNode>> = nodes.into_iter().map(Arc::new).collect();
     match strategy {
         "round_robin" => Ok(Arc::new(RoundRobinBalancer::new(arc_nodes)?)),

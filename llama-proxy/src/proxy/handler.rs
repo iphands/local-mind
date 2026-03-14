@@ -658,11 +658,11 @@ impl ProxyHandler {
 mod tests {
     use super::*;
     use crate::backends::{BackendNode, RoundRobinBalancer};
-    use std::sync::atomic::AtomicUsize;
     use crate::config::{AppConfig, BackendConfig, StreamingConfig};
     use crate::exporters::ExporterManager;
     use crate::fixes::FixRegistry;
     use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
 
     #[allow(dead_code)]
     fn create_test_handler_with_streaming(streaming_config: StreamingConfig) -> ProxyHandler {

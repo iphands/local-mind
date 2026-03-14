@@ -504,6 +504,4 @@ exporters:
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
     }
-
-
 }

@@ -3,8 +3,8 @@
 //! Always dispatches to the lowest-index backend that is not currently handling a request.
 //! If all backends are busy, picks the one with the fewest active requests (lowest index wins ties).
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::balancer::{BackendGuard, LoadBalancer};
 use super::node::BackendNode;

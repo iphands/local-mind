@@ -1,7 +1,7 @@
 //! Round-robin load balancing strategy
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use super::balancer::{BackendGuard, LoadBalancer};
 use super::node::BackendNode;

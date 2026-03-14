@@ -1,7 +1,7 @@
 //! Load balancer trait and BackendGuard
 
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
 
 use super::node::BackendNode;
 

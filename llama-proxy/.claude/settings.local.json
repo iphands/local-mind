@@ -20,7 +20,8 @@
       "WebFetch(domain:raw.githubusercontent.com)",
       "Bash(git:*)",
       "Bash(bash:*)",
-      "Bash(gcc:*)"
+      "Bash(gcc:*)",
+      "Bash(cargo fmt:*)"
     ]
   },
   "prefersReducedMotion": true

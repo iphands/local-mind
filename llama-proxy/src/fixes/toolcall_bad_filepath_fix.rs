@@ -222,8 +222,8 @@ impl ToolcallBadFilepathFix {
     /// This is the last resort when we cannot reliably determine what the client
     /// has already accumulated. We send a minimal completion that attempts to
     /// close the JSON without duplicating content.
-    fn safe_completion(&self, already_sent: &str) -> String {
-        if already_sent.trim_end().ends_with(',') {
+    fn safe_completion(&self, client_accumulated: &str) -> String {
+        if client_accumulated.trim_end().ends_with(',') {
             // Trailing comma exists - consume with dummy field
             r#""_":null}"#.to_string()
         } else {
