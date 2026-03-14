@@ -33,7 +33,7 @@ impl std::fmt::Display for LogLevel {
 
 use llama_proxy::{
     backends::BackendNode,
-    config::{resolve_backend_nodes, resolve_strategy, AppConfig},
+    config::AppConfig,
     create_default_registry,
     exporters::{ExporterManager, InfluxDbExporter},
     run_server,
@@ -251,30 +251,25 @@ fn log_config_settings(config: &AppConfig) {
     );
 
     // Backend(s)
-    let nodes = resolve_backend_nodes(config);
-    let strategy = resolve_strategy(config);
-    if config.backends.is_some() {
-        tracing::info!(strategy = %strategy, node_count = nodes.len(), "Backends (multi-node mode)");
-        for (i, node) in nodes.iter().enumerate() {
-            if node.mapping.is_empty() {
-                tracing::info!(
-                    index = i,
-                    url = %node.url.trim_end_matches('/'),
-                    timeout_seconds = node.timeout_seconds,
-                    mapping = "all",
-                    "Backend node"
-                );
+    if let Some(ref backends) = config.backends {
+        // Multi-backend mode
+        tracing::info!(group_count = backends.len(), "Backends (multi-group mode)");
+        for (name, group) in backends {
+            let mapping_str = if group.mappings.is_empty() {
+                "catch-all".to_string()
             } else {
-                tracing::info!(
-                    index = i,
-                    url = %node.url.trim_end_matches('/'),
-                    timeout_seconds = node.timeout_seconds,
-                    mapping = ?node.mapping,
-                    "Backend node"
-                );
-            }
+                format!("{:?}", group.mappings)
+            };
+            tracing::info!(
+                group = %name,
+                mappings = %mapping_str,
+                strategy = %group.strategy,
+                node_count = group.nodes.len(),
+                "Backend group"
+            );
         }
     } else {
+        // Single backend mode
         tracing::info!(
             url = %config.backend.base_url(),
             timeout_seconds = config.backend.timeout_seconds,
@@ -380,15 +375,31 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
             println!("✓ Configuration file is valid\n");
             println!("Server:");
             println!("  Listen: {}:{}", config.server.host, config.server.port);
-            let nodes = resolve_backend_nodes(&config);
-            let strategy = resolve_strategy(&config);
+
             println!("\nBackend(s):");
-            println!("  Strategy: {}", strategy);
-            println!("  Node count: {}", nodes.len());
-            for (i, node) in nodes.iter().enumerate() {
-                println!("  Node [{}]: {}", i, node.url.trim_end_matches('/'));
-                println!("    Timeout: {}s", node.timeout_seconds);
+            if let Some(ref backends) = config.backends {
+                println!("  Mode: multi-group");
+                println!("  Groups: {}", backends.len());
+                for (name, group) in backends {
+                    let mapping_str = if group.mappings.is_empty() {
+                        "catch-all".to_string()
+                    } else {
+                        format!("{:?}", group.mappings)
+                    };
+                    println!("  Group [{}]:", name);
+                    println!("    Mappings: {}", mapping_str);
+                    println!("    Strategy: {}", group.strategy);
+                    println!("    Nodes: {}", group.nodes.len());
+                    for (i, node) in group.nodes.iter().enumerate() {
+                        println!("      Node [{}]: {}", i, node.url.trim_end_matches('/'));
+                    }
+                }
+            } else {
+                println!("  Mode: single");
+                println!("  URL: {}", config.backend.base_url());
+                println!("  Timeout: {}s", config.backend.timeout_seconds);
             }
+
             println!("\nFixes:");
             println!("  Global: {}", config.fixes.enabled);
             for (name, module) in &config.fixes.modules {
@@ -413,22 +424,89 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
 /// Test connection to backend
 async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config_or_exit(&config_path);
-    let node_configs = resolve_backend_nodes(&config);
 
-    println!("Testing {} backend node(s)...\n", node_configs.len());
+    // Collect all nodes from all groups (or single backend)
+    if let Some(ref backends) = config.backends {
+        let total_nodes: usize = backends.values().map(|g| g.nodes.len()).sum();
+        println!("Testing {} backend node(s) across {} group(s)...\n", total_nodes, backends.len());
 
-    for (i, node_cfg) in node_configs.iter().enumerate() {
+        for (group_name, group) in backends {
+            for node_cfg in &group.nodes {
+                let node = BackendNode::from_config(
+                    node_cfg.url.clone(),
+                    5, // short timeout for test
+                    node_cfg.tls.as_ref(),
+                    node_cfg.model.clone(),
+                    node_cfg.api_key.clone(),
+                )?;
+
+                let base_url = node.base_url().to_string();
+                println!("[{}]: {}", group_name, base_url);
+
+                let health_url = format!("{}/health", base_url);
+                println!("  Testing /health: {}", health_url);
+
+                match node.http_client.get(&health_url).send().await {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            println!("  ✓ Reachable ({})", resp.status());
+                            if let Ok(body) = resp.text().await {
+                                println!("    Response: {}", body.trim());
+                            }
+                        } else {
+                            println!("  ✗ Error status: {}", resp.status());
+                        }
+                    }
+                    Err(e) => {
+                        println!("  ✗ Failed to connect: {}", e);
+                    }
+                }
+
+                let models_url = format!("{}/v1/models", base_url);
+                println!("  Testing /v1/models: {}", models_url);
+
+                match node.http_client.get(&models_url).send().await {
+                    Ok(resp) => {
+                        if resp.status().is_success() {
+                            println!("  ✓ /v1/models available");
+                            if let Ok(body) = resp.text().await {
+                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+                                    if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
+                                        println!("    Available models: {}", data.len());
+                                        for model in data.iter().take(5) {
+                                            if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
+                                                println!("      - {}", id);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } else {
+                            println!("  /v1/models returned: {}", resp.status());
+                        }
+                    }
+                    Err(e) => {
+                        println!("  /v1/models error: {}", e);
+                    }
+                }
+
+                println!();
+            }
+        }
+    } else {
+        // Single backend mode
+        println!("Testing single backend...\n");
+
         let node = BackendNode::from_config(
-            node_cfg.url.clone(),
+            config.backend.url.clone(),
             5, // short timeout for test
-            node_cfg.tls.as_ref(),
-            node_cfg.model.clone(),
-            node_cfg.api_key.clone(),
-            node_cfg.mapping.clone(),
+            config.backend.tls.as_ref(),
+            config.backend.model.clone(),
+            config.backend.api_key.clone(),
         )?;
 
         let base_url = node.base_url().to_string();
-        println!("Node [{}]: {}", i, base_url);
+        println!("[single]: {}", base_url);
 
         let health_url = format!("{}/health", base_url);
         println!("  Testing /health: {}", health_url);
@@ -476,8 +554,6 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
                 println!("  /v1/models error: {}", e);
             }
         }
-
-        println!();
     }
 
     Ok(())

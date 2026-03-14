@@ -4,6 +4,7 @@ use axum::{
     body::{to_bytes, Body},
     http::{header, Method, Request, StatusCode},
     response::{IntoResponse, Response},
+    Json,
 };
 use std::io::Read;
 use std::sync::Arc;
@@ -161,7 +162,21 @@ impl ProxyHandler {
         tracing::debug!(requested_model = ?requested_model, "Routing request");
 
         // NOW select backend based on model
-        let backend = self.state.load_balancer.select(requested_model);
+        let backend = match self.state.load_balancer.select(requested_model) {
+            Ok(guard) => guard,
+            Err(crate::config::NoMatchingBackend { requested_model }) => {
+                tracing::warn!(
+                    requested_model = ?requested_model,
+                    "No backend configured for model"
+                );
+                return Json(serde_json::json!({
+                    "error": {
+                        "type": "no_backend_configured",
+                        "message": format!("No backend for model: {:?}", requested_model)
+                    }
+                })).into_response();
+            }
+        };
 
         // Route specific endpoints to simple pass-through
         match (&method, path) {
@@ -721,7 +736,6 @@ mod tests {
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
             active_requests: AtomicUsize::new(0),
-            mapping: vec![],
         };
         let load_balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(default_node)]).unwrap());
         let fix_registry = FixRegistry::new();

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use super::{resolve_backend_nodes, AppConfig, ConfigError};
+use super::{AppConfig, ConfigError};
 
 /// Load configuration from a YAML file
 pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
@@ -16,22 +16,44 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
     // Validate server configuration
     validate_server_config(&config.server)?;
 
-    // Validate backend configuration
-    validate_backend_config(&config.backend)?;
-
     // Validate streaming configuration
     validate_streaming_config(&config.streaming)?;
 
-    // Validate all resolved backend node URLs
-    let config: AppConfig = serde_yaml::from_str(&content)?;
-
-    // Validate all resolved backend node URLs
-    let nodes = resolve_backend_nodes(&config);
-    if nodes.is_empty() {
-        return Err(ConfigError::Validation("No backend nodes configured".to_string()));
-    }
-    for node in &nodes {
-        validate_backend_url(&node.url)?;
+    // Validate backend configuration (single or multi-backend)
+    if let Some(ref backends) = config.backends {
+        // Multi-backend mode: validate all groups and their nodes
+        if backends.is_empty() {
+            return Err(ConfigError::Validation("No backend groups configured".to_string()));
+        }
+        for (name, group) in backends {
+            if group.nodes.is_empty() {
+                return Err(ConfigError::Validation(format!(
+                    "Backend group '{}' has no nodes configured",
+                    name
+                )));
+            }
+            // Validate strategy
+            if group.strategy != "round_robin" && group.strategy != "priority_free" {
+                return Err(ConfigError::Validation(format!(
+                    "Backend group '{}' has invalid strategy '{}'. Use 'round_robin' or 'priority_free'",
+                    name, group.strategy
+                )));
+            }
+            // Validate all node URLs
+            for node in &group.nodes {
+                validate_backend_url(&node.url)?;
+                if node.timeout_seconds == 0 {
+                    return Err(ConfigError::Validation(format!(
+                        "Node in group '{}' has timeout_seconds of 0",
+                        name
+                    )));
+                }
+            }
+        }
+    } else {
+        // Single backend mode
+        validate_backend_config(&config.backend)?;
+        validate_backend_url(&config.backend.url)?;
     }
 
     Ok(config)

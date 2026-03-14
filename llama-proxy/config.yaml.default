@@ -10,7 +10,7 @@ server:
   # Bind address
   host: "0.0.0.0"
 
-# Backend llama-server configuration
+# Backend llama-server configuration (single backend mode)
 backend:
   # Full URL to llama-server (supports http:// and https://)
   url: "http://localhost:8080"
@@ -27,25 +27,42 @@ backend:
   #   # Path to client private key for mTLS
   #   client_key_path: "/path/to/client.key"
 
-# Multi-backend load balancing (optional, overrides 'backend' when present)
+# Multi-backend load balancing with named groups (optional, overrides 'backend' when present)
 # backends:
-#   strategy: round_robin   # options: round_robin, priority_free
-#   nodes:
-#     - url: "http://localhost:8080"
-#       timeout_seconds: 300
-#       # mapping: []  # empty = catch-all (handles all models)
-#     - url: "http://localhost:8081"
-#       timeout_seconds: 300
-#       # Model-based routing: only route requests with matching model names
-#       mapping:
-#         - "haiku"
-#         - "claude-haiku-4-5-20251001"
-#       # tls / model / api_key per node are also supported
+#   opus:
+#     # Model names this group handles (empty = catch-all for all models)
+#     mappings: ["opus", "opus4.5"]
+#     # Load balancing strategy: round_robin or priority_free
+#     strategy: priority_free
+#     nodes:
+#       - url: "http://cosmo.lan:8700"
+#         timeout_seconds: 300
+#         # Optional: model override and api_key per node
+#         # model: "anthropic/claude-opus-4"
+#         # api_key: "sk-xxx"
+#
+#   haiku:
+#     mappings: ["haiku", "claude-haiku-4-5-20251001"]
+#     strategy: round_robin
+#     nodes:
+#       - url: "http://cosmo.lan:8701"
+#       - url: "http://foobar.lan:1234"
+#
+#   catch_all:
+#     # Empty mappings = catch-all (handles all unmatched models)
+#     mappings: []
+#     strategy: priority_free
+#     nodes:
+#       - url: "http://example.com:8222"
 #
 # Model-based routing logic:
-#   - If a request's model matches a node's mapping, only those nodes are considered
-#   - If no mapping matches or model is not specified, all nodes are considered
-#   - Empty mapping (or no mapping field) = catch-all node that handles all models
+#   1. If a request's model matches a group's mappings, route to that group
+#   2. If no group matches, look for a catch-all group (mappings: [])
+#   3. If no catch-all exists, return HTTP 404 error
+#
+# Load balancing strategies:
+#   - round_robin: Cycle through nodes in order
+#   - priority_free: Always use lowest-index free node (least requests wins)
 
 # === OPTIONAL SECTIONS (defaults shown) ===
 

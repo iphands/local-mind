@@ -12,8 +12,8 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use super::handler::ProxyHandler;
-use crate::backends::{build_balancer, BackendNode, LoadBalancer};
-use crate::config::{resolve_backend_nodes, resolve_strategy, AppConfig};
+use crate::backends::{build_balancer_from_groups, build_balancer_from_single, LoadBalancer};
+use crate::config::AppConfig;
 use crate::exporters::ExporterManager;
 use crate::fixes::FixRegistry;
 
@@ -34,35 +34,44 @@ pub async fn run_server(
     exporter_manager: ExporterManager,
     hide_requests: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    // Resolve backend nodes and strategy
-    let node_configs = resolve_backend_nodes(&config);
-    let strategy = resolve_strategy(&config);
+    // Build load balancer from configuration
+    let load_balancer = if let Some(ref backends) = config.backends {
+        // Multi-backend mode with named groups
+        tracing::info!("Using multi-backend mode with {} group(s)", backends.len());
 
-    // Build BackendNode instances (each owns its own HTTP client)
-    let mut nodes = Vec::with_capacity(node_configs.len());
-    for node_cfg in &node_configs {
-        let node = BackendNode::from_config(
-            node_cfg.url.clone(),
-            node_cfg.timeout_seconds,
-            node_cfg.tls.as_ref(),
-            node_cfg.model.clone(),
-            node_cfg.api_key.clone(),
-            node_cfg.mapping.clone(),
-        )?;
-        nodes.push(node);
-    }
-
-    // Build load balancer
-    let load_balancer = build_balancer(nodes, &strategy)?;
-
-    // Log backend configuration
-    for node in load_balancer.all_nodes() {
-        if node.mapping.is_empty() {
-            tracing::info!(url = %node.base_url(), mapping = "all", "Backend node registered");
-        } else {
-            tracing::info!(url = %node.base_url(), mapping = ?node.mapping, "Backend node registered");
+        for (name, group) in backends {
+            let mapping_str = if group.mappings.is_empty() {
+                "catch-all".to_string()
+            } else {
+                format!("{:?}", group.mappings)
+            };
+            tracing::info!(
+                group = %name,
+                mappings = %mapping_str,
+                strategy = %group.strategy,
+                node_count = group.nodes.len(),
+                "Backend group configured"
+            );
         }
-    }
+
+        build_balancer_from_groups(backends.clone())?
+    } else {
+        // Single backend mode (backward compatibility)
+        tracing::info!(
+            url = %config.backend.base_url(),
+            timeout_seconds = config.backend.timeout_seconds,
+            "Using single backend mode"
+        );
+
+        build_balancer_from_single(
+            config.backend.url.clone(),
+            config.backend.timeout_seconds,
+            config.backend.tls.as_ref(),
+            config.backend.model.clone(),
+            config.backend.api_key.clone(),
+        )?
+    };
+
     tracing::info!(strategy = %load_balancer.strategy_name(), "Load balancing strategy");
 
     let state = ProxyState {

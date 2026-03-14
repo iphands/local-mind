@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::config::TlsConfig;
 
 /// A single backend node with its own HTTP client
+#[derive(Debug)]
 pub struct BackendNode {
     pub url: String,
     pub model: Option<String>,
@@ -13,8 +14,6 @@ pub struct BackendNode {
     pub timeout_seconds: u64,
     pub http_client: reqwest::Client,
     pub active_requests: AtomicUsize,
-    /// Model names this backend handles (empty = handles all models)
-    pub mapping: Vec<String>,
 }
 
 impl BackendNode {
@@ -25,7 +24,6 @@ impl BackendNode {
         tls: Option<&TlsConfig>,
         model: Option<String>,
         api_key: Option<String>,
-        mapping: Vec<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let http_client = build_node_client(timeout_seconds, tls)?;
         Ok(Self {
@@ -35,24 +33,12 @@ impl BackendNode {
             timeout_seconds,
             http_client,
             active_requests: AtomicUsize::new(0),
-            mapping,
         })
     }
 
     /// Returns the base URL with trailing slash stripped
     pub fn base_url(&self) -> &str {
         self.url.trim_end_matches('/')
-    }
-
-    /// Check if this node can handle the given model
-    /// - If model is None: node handles it (no model specified in request)
-    /// - If mapping is empty: node handles all models (catch-all)
-    /// - If mapping contains the model: node handles it
-    pub fn handles_model(&self, model: Option<&str>) -> bool {
-        match model {
-            None => true,  // No model specified, any node can handle
-            Some(m) => self.mapping.is_empty() || self.mapping.contains(&m.to_string()),
-        }
     }
 }
 

@@ -110,20 +110,17 @@ pub struct BackendNodeConfig {
     /// API key for backend authentication
     #[serde(default)]
     pub api_key: Option<String>,
-    /// Model names this backend handles (empty = handles all models)
-    /// Used for model-based routing: requests with matching model names
-    /// will only be routed to backends with that model in their mapping.
-    #[serde(default)]
-    pub mapping: Vec<String>,
 }
 
-/// Multi-backend configuration block
+/// Configuration for a single backend group
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct BackendsConfig {
-    /// Load balancing strategy (default: "round_robin")
+pub struct BackendGroupConfig {
+    /// Model names this group handles (empty = catch-all)
+    pub mappings: Vec<String>,
+    /// Load balancing strategy (round_robin or priority_free)
     #[serde(default = "default_strategy")]
     pub strategy: String,
-    /// List of backend nodes
+    /// List of backend nodes in this group
     pub nodes: Vec<BackendNodeConfig>,
 }
 
@@ -131,32 +128,25 @@ fn default_strategy() -> String {
     "round_robin".to_string()
 }
 
-/// Resolve the list of backend nodes from config.
-/// If `backends.nodes` is present, return those; else wrap `backend` as a 1-element vec.
-pub fn resolve_backend_nodes(config: &AppConfig) -> Vec<BackendNodeConfig> {
-    if let Some(ref backends) = config.backends {
-        if !backends.nodes.is_empty() {
-            return backends.nodes.clone();
-        }
-    }
-    vec![BackendNodeConfig {
-        url: config.backend.url.clone(),
-        timeout_seconds: config.backend.timeout_seconds,
-        tls: config.backend.tls.clone(),
-        model: config.backend.model.clone(),
-        api_key: config.backend.api_key.clone(),
-        mapping: vec![], // Single backend handles all models
-    }]
+/// Multi-backend configuration - named groups with per-group strategy
+pub type BackendsConfig = HashMap<String, BackendGroupConfig>;
+
+/// Error when no backend matches the requested model
+#[derive(Debug, Clone)]
+pub struct NoMatchingBackend {
+    pub requested_model: Option<String>,
 }
 
-/// Resolve the load balancing strategy from config.
-pub fn resolve_strategy(config: &AppConfig) -> String {
-    config
-        .backends
-        .as_ref()
-        .map(|b| b.strategy.clone())
-        .unwrap_or_else(|| "round_robin".to_string())
+impl std::fmt::Display for NoMatchingBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.requested_model {
+            Some(model) => write!(f, "No backend configured for model: {}", model),
+            None => write!(f, "No backend configured (no model specified and no catch-all)"),
+        }
+    }
 }
+
+impl std::error::Error for NoMatchingBackend {}
 
 /// Response fix modules configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -678,128 +668,106 @@ mod tests {
         assert_eq!(accumulator, StreamingMode::Accumulator);
     }
 
-    fn make_single_backend_config() -> AppConfig {
-        AppConfig {
-            server: ServerConfig {
-                port: 8066,
-                host: "0.0.0.0".to_string(),
-            },
-            backend: BackendConfig {
-                url: "http://localhost:8080".to_string(),
-                timeout_seconds: 300,
-                tls: None,
-                model: None,
-                api_key: None,
-            },
-            backends: None,
-            fixes: FixesConfig::default(),
-            stats: StatsConfig::default(),
-            exporters: ExportersConfig::default(),
-            detection: DetectionConfig::default(),
-            streaming: StreamingConfig::default(),
-        }
+    #[test]
+    fn test_backend_group_config_parsing() {
+        let yaml = r#"
+mappings:
+  - "haiku"
+  - "claude-haiku-4-5-20251001"
+strategy: "priority_free"
+nodes:
+  - url: "http://localhost:8080"
+    timeout_seconds: 300
+  - url: "http://localhost:8081"
+"#;
+        let group: BackendGroupConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(group.mappings, vec!["haiku", "claude-haiku-4-5-20251001"]);
+        assert_eq!(group.strategy, "priority_free");
+        assert_eq!(group.nodes.len(), 2);
+        assert_eq!(group.nodes[0].url, "http://localhost:8080");
+        assert_eq!(group.nodes[1].timeout_seconds, 300); // default
     }
 
     #[test]
-    fn test_resolve_backend_nodes_single() {
-        let config = make_single_backend_config();
-        let nodes = resolve_backend_nodes(&config);
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].url, "http://localhost:8080");
-        assert_eq!(nodes[0].timeout_seconds, 300);
+    fn test_backend_group_config_catch_all() {
+        let yaml = r#"
+mappings: []
+strategy: "round_robin"
+nodes:
+  - url: "http://localhost:8080"
+"#;
+        let group: BackendGroupConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(group.mappings.is_empty());
+        assert_eq!(group.strategy, "round_robin");
     }
 
     #[test]
-    fn test_resolve_backend_nodes_multi() {
-        let mut config = make_single_backend_config();
-        config.backends = Some(BackendsConfig {
-            strategy: "round_robin".to_string(),
-            nodes: vec![
-                BackendNodeConfig {
-                    url: "http://localhost:8080".to_string(),
-                    timeout_seconds: 300,
-                    tls: None,
-                    model: None,
-                    api_key: None,
-                    mapping: vec![],
-                },
-                BackendNodeConfig {
-                    url: "http://localhost:8081".to_string(),
-                    timeout_seconds: 200,
-                    tls: None,
-                    model: Some("mymodel".to_string()),
-                    api_key: None,
-                    mapping: vec!["haiku".to_string(), "claude-haiku".to_string()],
-                },
-            ],
-        });
-        let nodes = resolve_backend_nodes(&config);
-        assert_eq!(nodes.len(), 2);
-        assert_eq!(nodes[0].url, "http://localhost:8080");
-        assert_eq!(nodes[1].url, "http://localhost:8081");
-        assert_eq!(nodes[1].timeout_seconds, 200);
-        assert_eq!(nodes[1].model, Some("mymodel".to_string()));
-        assert_eq!(nodes[1].mapping, vec!["haiku", "claude-haiku"]);
+    fn test_backend_group_config_default_strategy() {
+        let yaml = r#"
+mappings:
+  - "opus"
+nodes:
+  - url: "http://localhost:8080"
+"#;
+        let group: BackendGroupConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(group.strategy, "round_robin"); // default
     }
 
     #[test]
-    fn test_resolve_strategy_default() {
-        let config = make_single_backend_config();
-        assert_eq!(resolve_strategy(&config), "round_robin");
+    fn test_no_matching_backend_display() {
+        let err = NoMatchingBackend { requested_model: Some("gpt-4".to_string()) };
+        assert_eq!(err.to_string(), "No backend configured for model: gpt-4");
+
+        let err = NoMatchingBackend { requested_model: None };
+        assert_eq!(err.to_string(), "No backend configured (no model specified and no catch-all)");
     }
 
     #[test]
-    fn test_resolve_strategy_from_backends() {
-        let mut config = make_single_backend_config();
-        config.backends = Some(BackendsConfig {
-            strategy: "round_robin".to_string(),
-            nodes: vec![BackendNodeConfig {
-                url: "http://localhost:8080".to_string(),
-                timeout_seconds: 300,
-                tls: None,
-                model: None,
-                api_key: None,
-                mapping: vec![],
-            }],
-        });
-        assert_eq!(resolve_strategy(&config), "round_robin");
+    fn test_backends_config_hashmap() {
+        let yaml = r#"
+opus:
+  mappings: ["opus", "opus4.5"]
+  strategy: priority_free
+  nodes:
+    - url: "http://cosmo.lan:8700"
+haiku:
+  mappings: ["haiku"]
+  strategy: round_robin
+  nodes:
+    - url: "http://cosmo.lan:8701"
+    - url: "http://foobar.lan:1234"
+catch_all:
+  mappings: []
+  strategy: priority_free
+  nodes:
+    - url: "http://example.com:8222"
+"#;
+        let backends: BackendsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(backends.len(), 3);
+        assert!(backends.contains_key("opus"));
+        assert!(backends.contains_key("haiku"));
+        assert!(backends.contains_key("catch_all"));
+
+        // Verify catch-all has empty mappings
+        assert!(backends.get("catch_all").unwrap().mappings.is_empty());
+
+        // Verify opus has 1 node
+        assert_eq!(backends.get("opus").unwrap().nodes.len(), 1);
+
+        // Verify haiku has 2 nodes
+        assert_eq!(backends.get("haiku").unwrap().nodes.len(), 2);
     }
 
     #[test]
-    fn test_resolve_backend_nodes_empty_backends_falls_back() {
-        // If backends.nodes is empty, fall back to single backend config
-        let mut config = make_single_backend_config();
-        config.backends = Some(BackendsConfig {
-            strategy: "round_robin".to_string(),
-            nodes: vec![],
-        });
-        let nodes = resolve_backend_nodes(&config);
-        assert_eq!(nodes.len(), 1);
-        assert_eq!(nodes[0].url, "http://localhost:8080");
-    }
-
-    #[test]
-    fn test_backend_node_config_mapping() {
-        // Test that mapping field parses correctly from YAML
+    fn test_backend_node_config_no_mapping_field() {
+        // Test that BackendNodeConfig no longer has mapping field
         let yaml = r#"
 url: "http://localhost:8080"
 timeout_seconds: 300
-mapping:
-  - "haiku"
-  - "claude-haiku-4-5-20251001"
 "#;
         let node: BackendNodeConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(node.url, "http://localhost:8080");
-        assert_eq!(node.mapping, vec!["haiku", "claude-haiku-4-5-20251001"]);
-    }
-
-    #[test]
-    fn test_backend_node_config_empty_mapping() {
-        // Test that empty mapping is default
-        let yaml = r#"
-url: "http://localhost:8080"
-"#;
-        let node: BackendNodeConfig = serde_yaml::from_str(yaml).unwrap();
-        assert!(node.mapping.is_empty());
+        assert_eq!(node.timeout_seconds, 300);
+        // mapping field no longer exists
     }
 }

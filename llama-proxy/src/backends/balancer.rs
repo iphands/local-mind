@@ -4,9 +4,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use super::node::BackendNode;
+use crate::config::NoMatchingBackend;
 
 /// RAII guard that tracks an active request on a backend node.
 /// Increments `active_requests` on creation, decrements on drop.
+#[derive(Debug)]
 pub struct BackendGuard {
     pub node: Arc<BackendNode>,
 }
@@ -27,10 +29,9 @@ impl Drop for BackendGuard {
 /// Trait for load balancing strategies across multiple backend nodes
 pub trait LoadBalancer: Send + Sync {
     /// Select the next backend node according to the strategy.
-    /// If model is provided, only consider backends with matching mapping.
-    /// If model is None or no mapping matches, consider all backends.
+    /// Returns Err(NoMatchingBackend) if no backend is configured for the model.
     /// Returns a BackendGuard that releases the node on drop.
-    fn select(&self, model: Option<&str>) -> BackendGuard;
+    fn select(&self, model: Option<&str>) -> Result<BackendGuard, NoMatchingBackend>;
 
     /// Return the strategy name (for logging)
     fn strategy_name(&self) -> &'static str;
