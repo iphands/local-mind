@@ -27,8 +27,10 @@ impl Drop for BackendGuard {
 /// Trait for load balancing strategies across multiple backend nodes
 pub trait LoadBalancer: Send + Sync {
     /// Select the next backend node according to the strategy.
+    /// If model is provided, only consider backends with matching mapping.
+    /// If model is None or no mapping matches, consider all backends.
     /// Returns a BackendGuard that releases the node on drop.
-    fn select(&self) -> BackendGuard;
+    fn select(&self, model: Option<&str>) -> BackendGuard;
 
     /// Return the strategy name (for logging)
     fn strategy_name(&self) -> &'static str;

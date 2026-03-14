@@ -110,6 +110,11 @@ pub struct BackendNodeConfig {
     /// API key for backend authentication
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Model names this backend handles (empty = handles all models)
+    /// Used for model-based routing: requests with matching model names
+    /// will only be routed to backends with that model in their mapping.
+    #[serde(default)]
+    pub mapping: Vec<String>,
 }
 
 /// Multi-backend configuration block
@@ -140,6 +145,7 @@ pub fn resolve_backend_nodes(config: &AppConfig) -> Vec<BackendNodeConfig> {
         tls: config.backend.tls.clone(),
         model: config.backend.model.clone(),
         api_key: config.backend.api_key.clone(),
+        mapping: vec![], // Single backend handles all models
     }]
 }
 
@@ -715,6 +721,7 @@ mod tests {
                     tls: None,
                     model: None,
                     api_key: None,
+                    mapping: vec![],
                 },
                 BackendNodeConfig {
                     url: "http://localhost:8081".to_string(),
@@ -722,6 +729,7 @@ mod tests {
                     tls: None,
                     model: Some("mymodel".to_string()),
                     api_key: None,
+                    mapping: vec!["haiku".to_string(), "claude-haiku".to_string()],
                 },
             ],
         });
@@ -731,6 +739,7 @@ mod tests {
         assert_eq!(nodes[1].url, "http://localhost:8081");
         assert_eq!(nodes[1].timeout_seconds, 200);
         assert_eq!(nodes[1].model, Some("mymodel".to_string()));
+        assert_eq!(nodes[1].mapping, vec!["haiku", "claude-haiku"]);
     }
 
     #[test]
@@ -750,6 +759,7 @@ mod tests {
                 tls: None,
                 model: None,
                 api_key: None,
+                mapping: vec![],
             }],
         });
         assert_eq!(resolve_strategy(&config), "round_robin");
@@ -766,5 +776,30 @@ mod tests {
         let nodes = resolve_backend_nodes(&config);
         assert_eq!(nodes.len(), 1);
         assert_eq!(nodes[0].url, "http://localhost:8080");
+    }
+
+    #[test]
+    fn test_backend_node_config_mapping() {
+        // Test that mapping field parses correctly from YAML
+        let yaml = r#"
+url: "http://localhost:8080"
+timeout_seconds: 300
+mapping:
+  - "haiku"
+  - "claude-haiku-4-5-20251001"
+"#;
+        let node: BackendNodeConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(node.url, "http://localhost:8080");
+        assert_eq!(node.mapping, vec!["haiku", "claude-haiku-4-5-20251001"]);
+    }
+
+    #[test]
+    fn test_backend_node_config_empty_mapping() {
+        // Test that empty mapping is default
+        let yaml = r#"
+url: "http://localhost:8080"
+"#;
+        let node: BackendNodeConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(node.mapping.is_empty());
     }
 }

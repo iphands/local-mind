@@ -256,12 +256,23 @@ fn log_config_settings(config: &AppConfig) {
     if config.backends.is_some() {
         tracing::info!(strategy = %strategy, node_count = nodes.len(), "Backends (multi-node mode)");
         for (i, node) in nodes.iter().enumerate() {
-            tracing::info!(
-                index = i,
-                url = %node.url.trim_end_matches('/'),
-                timeout_seconds = node.timeout_seconds,
-                "Backend node"
-            );
+            if node.mapping.is_empty() {
+                tracing::info!(
+                    index = i,
+                    url = %node.url.trim_end_matches('/'),
+                    timeout_seconds = node.timeout_seconds,
+                    mapping = "all",
+                    "Backend node"
+                );
+            } else {
+                tracing::info!(
+                    index = i,
+                    url = %node.url.trim_end_matches('/'),
+                    timeout_seconds = node.timeout_seconds,
+                    mapping = ?node.mapping,
+                    "Backend node"
+                );
+            }
         }
     } else {
         tracing::info!(
@@ -413,6 +424,7 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
             node_cfg.tls.as_ref(),
             node_cfg.model.clone(),
             node_cfg.api_key.clone(),
+            node_cfg.mapping.clone(),
         )?;
 
         let base_url = node.base_url().to_string();

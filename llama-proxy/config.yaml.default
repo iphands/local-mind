@@ -29,13 +29,23 @@ backend:
 
 # Multi-backend load balancing (optional, overrides 'backend' when present)
 # backends:
-#   strategy: round_robin   # currently only round_robin is supported
+#   strategy: round_robin   # options: round_robin, priority_free
 #   nodes:
 #     - url: "http://localhost:8080"
 #       timeout_seconds: 300
+#       # mapping: []  # empty = catch-all (handles all models)
 #     - url: "http://localhost:8081"
 #       timeout_seconds: 300
+#       # Model-based routing: only route requests with matching model names
+#       mapping:
+#         - "haiku"
+#         - "claude-haiku-4-5-20251001"
 #       # tls / model / api_key per node are also supported
+#
+# Model-based routing logic:
+#   - If a request's model matches a node's mapping, only those nodes are considered
+#   - If no mapping matches or model is not specified, all nodes are considered
+#   - Empty mapping (or no mapping field) = catch-all node that handles all models
 
 # === OPTIONAL SECTIONS (defaults shown) ===
 

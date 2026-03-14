@@ -39,6 +39,7 @@ mod tests {
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
             active_requests: AtomicUsize::new(0),
+            mapping: vec![],
         }
     }
 
@@ -68,6 +69,6 @@ mod tests {
     fn test_build_balancer_selects_node() {
         let nodes = vec![make_test_node("http://localhost:8080")];
         let balancer = build_balancer(nodes, "priority_free").unwrap();
-        assert_eq!(balancer.select().node.base_url(), "http://localhost:8080");
+        assert_eq!(balancer.select(None).node.base_url(), "http://localhost:8080");
     }
 }

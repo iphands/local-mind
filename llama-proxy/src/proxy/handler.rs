@@ -127,9 +127,6 @@ impl ProxyHandler {
     pub async fn handle(&self, req: Request<Body>) -> Response {
         let start = Instant::now();
 
-        // Select backend node first (round-robin or other strategy)
-        let backend = self.state.load_balancer.select();
-
         let method = req.method().clone();
         let uri = req.uri().clone();
         let path = uri.path();
@@ -140,6 +137,32 @@ impl ProxyHandler {
         let is_anthropic_api = path.starts_with("/v1/messages");
         tracing::debug!(is_anthropic_api = is_anthropic_api, "Detected API format");
 
+        // Save headers before consuming the request
+        let headers = req.headers().clone();
+
+        // Read request body FIRST (needed for model-based routing)
+        let body_bytes = match to_bytes(req.into_body(), 1024 * 1024 * 100).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to read request body");
+                return (StatusCode::BAD_REQUEST, format!("Failed to read request body: {}", e)).into_response();
+            }
+        };
+
+        // Parse request for model extraction and stats (if JSON)
+        let request_json: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
+
+        // Extract model for routing BEFORE selecting backend
+        let requested_model = request_json
+            .as_ref()
+            .and_then(|j| j.get("model"))
+            .and_then(|m| m.as_str());
+
+        tracing::debug!(requested_model = ?requested_model, "Routing request");
+
+        // NOW select backend based on model
+        let backend = self.state.load_balancer.select(requested_model);
+
         // Route specific endpoints to simple pass-through
         match (&method, path) {
             // llama.cpp monitoring/status endpoints (simple pass-through)
@@ -149,29 +172,23 @@ impl ProxyHandler {
             | (&Method::GET, "/v1/health")
             | (&Method::GET, "/v1/models")
             | (&Method::GET, "/metrics") => {
+                // Reconstruct request for passthrough
+                let req = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::from(body_bytes))
+                    .unwrap();
+                // Add headers back
+                let mut req = req;
+                for (name, value) in headers.iter() {
+                    req.headers_mut().insert(name.clone(), value.clone());
+                }
                 return self.proxy_passthrough(req, &backend.node).await;
             }
 
             // All other routes continue with existing logic
             _ => {}
         }
-
-        // Save headers before consuming the request
-        let headers = req.headers().clone();
-
-        // User-Agent no longer needed since we always force non-streaming
-
-        // Read request body
-        let body_bytes = match to_bytes(req.into_body(), 1024 * 1024 * 100).await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to read request body");
-                return (StatusCode::BAD_REQUEST, format!("Failed to read request body: {}", e)).into_response();
-            }
-        };
-
-        // Parse request for stats (if JSON)
-        let request_json: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
 
         // Remember if client wants streaming (for synthesis later)
         let client_wants_streaming = request_json
@@ -704,6 +721,7 @@ mod tests {
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
             active_requests: AtomicUsize::new(0),
+            mapping: vec![],
         };
         let load_balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(default_node)]).unwrap());
         let fix_registry = FixRegistry::new();

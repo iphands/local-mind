@@ -47,6 +47,7 @@ pub async fn run_server(
             node_cfg.tls.as_ref(),
             node_cfg.model.clone(),
             node_cfg.api_key.clone(),
+            node_cfg.mapping.clone(),
         )?;
         nodes.push(node);
     }
@@ -56,7 +57,11 @@ pub async fn run_server(
 
     // Log backend configuration
     for node in load_balancer.all_nodes() {
-        tracing::info!(url = %node.base_url(), "Backend node registered");
+        if node.mapping.is_empty() {
+            tracing::info!(url = %node.base_url(), mapping = "all", "Backend node registered");
+        } else {
+            tracing::info!(url = %node.base_url(), mapping = ?node.mapping, "Backend node registered");
+        }
     }
     tracing::info!(strategy = %load_balancer.strategy_name(), "Load balancing strategy");
 
