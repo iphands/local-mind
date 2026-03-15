@@ -43,7 +43,7 @@ Two local providers on the cosmo.lan network:
 
 | Provider | Endpoint | Model |
 |----------|----------|-------|
-| cosmo-00 | http://cosmo.lan:8700/v1 | cosmo-rtx-pro-6000 |
+| cosmo-00 | http://cosmo.lan:8700/v1 | cosmo-6000 |
 | cosmo-01 | http://cosmo.lan:8701/v1 | cosmo-4060 |
 
 ## Config Location
@@ -57,4 +57,4 @@ The container mounts `container_data/config/` as `~/.config/`, so OpenCode finds
 - `container_data/config/opencode/opencode.jsonc` - Provider config, default_agent setting
 - `container_data/config/opencode/agent/local-mind.md` - Primary agent with delegation rules
 - `container_data/config/opencode/agent/neckbeard.md` - Senior reviewer (model: cosmo-01/cosmo-4060)
-- `container_data/config/opencode/agent/hoodie.md` - Junior reviewer (model: cosmo-00/cosmo-rtx-pro-6000)
+- `container_data/config/opencode/agent/hoodie.md` - Junior reviewer (model: cosmo-00/cosmo-6000)

@@ -561,7 +561,7 @@ mod tests {
         let test_models = vec![
             "openai/gpt-4",
             "anthropic/claude-3",
-            "cosmo-00/cosmo-rtx-pro-6000",
+            "cosmo-00/cosmo-6000",
             "model-with-dashes",
         ];
 

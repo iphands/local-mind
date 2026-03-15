@@ -2,7 +2,7 @@
 name: neckbeard
 description: Senior Engineer - correctness, bugs, code quality
 mode: subagent
-model: cosmo-proxy/cosmo-proxy
+model: cosmo-01/cosmo-4060
 color: "#FF6B35"
 tools:
   "*": false

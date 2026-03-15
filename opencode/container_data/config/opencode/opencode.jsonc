@@ -31,7 +31,7 @@
     "cosmo-00": {
       "name": "cosmo-00",
       "npm": "@ai-sdk/openai-compatible",
-      "models": { "cosmo-rtx-pro-6000": { "name": "cosmo-rtx-pro-6000" }, },
+      "models": { "cosmo-6000": { "name": "cosmo-6000" }, },
       "options": {
         "baseURL": "http://cosmo.lan:8700/v1",
         "apiKey": "deadbeef1234"

@@ -2,7 +2,7 @@
 name: hoodie
 description: Junior Engineer - usability, performance, creativity
 mode: subagent
-model: cosmo-proxy/cosmo-proxy
+model: cosmo-01/cosmo-4060
 color: "#44BA81"
 tools:
   "*": false
