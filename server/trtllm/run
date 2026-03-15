@@ -1,0 +1,69 @@
+#!/bin/bash
+set -e
+NAME=trtllm
+RUNNER=docker
+# [[ -f /usr/bin/podman ]] && RUNNER=podman
+
+MODEL_PATH=$1
+# MODEL_PATH=$(realpath "$MODEL")
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL=${MODEL_PATH##*/}
+
+CONTAINER=nvcr.io/nvidia/tensorrt-llm/release:latest
+CONTAINER=nvcr.io/nvidia/tensorrt-llm/release:1.3.0rc7
+
+$RUNNER pull "$CONTAINER"
+PORT=8700
+
+export CACHE_ROOT=/mnt/noir/scratch/ai/vllm
+mkdir -p "$CACHE_ROOT/trtllm_cache"
+mkdir -p "$CACHE_ROOT/trtllm_tmp"
+mkdir -p "$CACHE_ROOT/dot_cache"
+
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name $NAME
+  --ipc=host --ulimit memlock=-1 --ulimit stack=67108864
+  -p 0.0.0.0:${PORT}:8799
+
+  -e UID=1000
+  -e GID=1000
+  -e APP_UID=1000
+  -e APP_GID=1000
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+  -v "$MODEL_FOLDER":/models:ro
+  -v "$CACHE_ROOT":"$CACHE_ROOT":rw
+  -v "$CACHE_ROOT"/dot_cache:/root/.cache:rw
+
+  # Extra env for cache stuff
+  -e HF_HOME="$CACHE_ROOT/trtllm_cache"
+  -e HUGGINGFACE_HUB_CACHE="$CACHE_ROOT/trtllm_cache"
+  -e TMPDIR="$CACHE_ROOT/trtllm_tmp"
+  -e TEMP="$CACHE_ROOT/trtllm_tmp"
+  -e TMP="$CACHE_ROOT/trtllm_tmp"
+
+  # --entrypoint /bin/bash
+)
+
+# Using cache directory: /root/.cache/vllm/torch_compile_cache/27b8d43369/rank_0_0/backbone for vLLM's torch.compile
+
+LLAMA_ARGS=(
+  trtllm-serve /models/${MODEL}
+  --host 0.0.0.0
+  --port 8799
+  --backend pytorch
+  --max_batch_size 256
+  --tp_size 1 --ep_size 1
+  --max_num_tokens 8576
+  --trust_remote_code
+  --reasoning_parser deepseek-r1 # nano_v3
+  --tool_parser qwen3_coder
+  # --extra_llm_api_options /models/${MODEL}/extra-llm-api-config.yml
+)
+
+echo
+echo "## Running $CONTAINER"
+echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
+"$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"

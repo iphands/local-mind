@@ -1,0 +1,54 @@
+#!/bin/bash
+set -e
+NAME=sglang
+RUNNER=docker
+# [[ -f /usr/bin/podman ]] && RUNNER=podman
+
+MODEL_PATH=$1
+# MODEL_PATH=$(realpath "$MODEL")
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL=${MODEL_PATH##*/}
+
+CONTAINER=docker.io/lmsysorg/sglang:dev-x86-cu13
+
+$RUNNER pull "$CONTAINER"
+PORT=8700
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name $NAME
+  -e UID=1000
+  -e GID=1000
+  -e APP_UID=1000
+  -e APP_GID=1000
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  -p 0.0.0.0:${PORT}:8799
+  -v "$MODEL_FOLDER":/models:ro
+  # --entrypoint /bin/bash
+)
+
+
+LLAMA_ARGS=(
+  sglang
+  serve
+  --model-path /models/$MODEL
+  --served-model-name cosmo-proxy
+  --host 0.0.0.0
+  --port 8799
+  --mem-fraction-static 0.90
+  # --attention-backend triton
+  # --prefill-attention-backend triton
+  # --decode-attention-backend triton
+  # --quantization modelopt_nvfp4
+  --log-level warning
+  --trust-remote-code
+  --tp 1
+  --ep 1
+  --tool-call-parser qwen3_coder
+  --reasoning-parser nemotron_3
+)
+
+echo
+echo "## Running $CONTAINER"
+echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
+"$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"

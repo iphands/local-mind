@@ -1,0 +1,62 @@
+#!/bin/bash
+set -e
+NAME=vllm-tuning
+RUNNER=docker
+
+CARD_ID=$1
+MODEL_PATH=$2
+
+if [[ -z "$CARD_ID" || -z "$MODEL_PATH" ]]; then
+  echo "Usage: $0 <card_id> <model_path>"
+  echo "Example: $0 6000 ./models/vllm/Qwen3.5-foo"
+  exit 1
+fi
+
+# Find GPU index matching CARD_ID substring
+GPU_INDEX=$(nvidia-smi --query-gpu=index,name --format=csv,noheader | grep -i "$CARD_ID" | head -1 | cut -d',' -f1 | tr -d ' ')
+if [[ -z "$GPU_INDEX" ]]; then
+  echo "Error: No GPU found matching '$CARD_ID'"
+  nvidia-smi --query-gpu=index,name --format=csv,noheader
+  exit 1
+fi
+GPU_NAME=$(nvidia-smi --query-gpu=index,name --format=csv,noheader | grep -i "$CARD_ID" | head -1 | cut -d',' -f2- | sed 's/^ *//')
+echo "Found GPU [$GPU_INDEX]: $GPU_NAME"
+
+MODEL_FOLDER=$(realpath "${MODEL_PATH%/*}")
+MODEL=${MODEL_PATH##*/}
+
+CONTAINER=docker.io/vllm/vllm-openai:latest
+
+$RUNNER pull "$CONTAINER"
+
+TUNINGS_DIR="$(dirname "$(realpath "$0")")/tunings"
+mkdir -p "$TUNINGS_DIR"
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name $NAME
+  --entrypoint python3
+  -e UID=1000
+  -e GID=1000
+  -e APP_UID=1000
+  -e APP_GID=1000
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  -e CUDA_VISIBLE_DEVICES=$GPU_INDEX
+  -v "$MODEL_FOLDER":/models:ro
+  -v "$TUNINGS_DIR":/tunings:rw
+  -v /home/iphands/prog/ai/vendor/vllm/benchmarks:/benchmarks
+  --ipc=host
+)
+
+BENCH_ARGS=(
+  /benchmarks/kernels/benchmark_moe.py
+  --model /models/$MODEL
+  --tp-size 1
+  --tune
+  --save-dir /tunings/${CARD_ID}_${MODEL}
+)
+
+echo
+echo "## Running $CONTAINER"
+echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${BENCH_ARGS[@]}"
+"$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${BENCH_ARGS[@]}"

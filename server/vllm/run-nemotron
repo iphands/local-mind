@@ -1,0 +1,63 @@
+#!/bin/bash
+set -e
+NAME=vllm
+RUNNER=docker
+# [[ -f /usr/bin/podman ]] && RUNNER=podman
+
+MODEL_PATH=$1
+MODEL_PATH=/mnt/noir/scratch/ai/llm/models/vllm/nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4
+
+# MODEL_PATH=$(realpath "$MODEL")
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL=${MODEL_PATH##*/}
+
+
+CONTAINER=docker.io/vllm/vllm-openai:latest
+
+$RUNNER pull "$CONTAINER"
+PORT=8700
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name $NAME
+  -e UID=1000
+  -e GID=1000
+  -e APP_UID=1000
+  -e APP_GID=1000
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  -p 0.0.0.0:${PORT}:8799
+  -v "$MODEL_FOLDER":/models:ro
+  -v /mnt/noir/scratch/ai/vllm/cache:/root/.cache:rw
+  --ipc=host
+  # --entrypoint /bin/bash
+)
+
+# Using cache directory: /root/.cache/vllm/torch_compile_cache/27b8d43369/rank_0_0/backbone for vLLM's torch.compile
+
+LLAMA_ARGS=(
+  --model /models/$MODEL
+  --served-model-name cosmo-proxy cosmo-6000 claude-haiku-4-5-20251001
+  --host 0.0.0.0
+  --port 8799
+  --async-scheduling
+  --dtype auto
+  --kv-cache-dtype fp8
+  --tensor-parallel-size 1
+  --pipeline-parallel-size 1
+  --data-parallel-size 1
+  --swap-space 0
+  --trust-remote-code
+  --attention-backend TRITON_ATTN
+  --gpu-memory-utilization 0.9
+  --enable-chunked-prefill
+  --max-num-seqs 512
+  --enable-auto-tool-choice
+  --tool-call-parser qwen3_coder
+  --reasoning-parser-plugin /models/NVIDIA-Nemotron-3-Super-120B-A12B-NVFP4/super_v3_reasoning_parser.py
+  --reasoning-parser super_v3
+)
+
+echo
+echo "## Running $CONTAINER"
+echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
+"$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
