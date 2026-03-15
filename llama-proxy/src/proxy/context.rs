@@ -27,7 +27,7 @@ static CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, u64>>> = OnceLock::new();
 /// # Returns
 /// * `Some(u64)` - The context size if successfully fetched
 /// * `None` - If all fetch attempts failed or responses were malformed
-pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str) -> Option<u64> {
+pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str, strip_path_prefix: Option<&str>) -> Option<u64> {
     let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
 
     // Check cache first
@@ -39,13 +39,13 @@ pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str) ->
     }
 
     // Try llama.cpp /props endpoint first
-    if let Some(n_ctx) = fetch_from_props(client, backend_url).await {
+    if let Some(n_ctx) = fetch_from_props(client, backend_url, strip_path_prefix).await {
         cache_result(cache, backend_url, n_ctx);
         return Some(n_ctx);
     }
 
     // Fallback to vLLM/OpenAI-compatible /v1/models endpoint
-    if let Some(max_model_len) = fetch_from_models(client, backend_url).await {
+    if let Some(max_model_len) = fetch_from_models(client, backend_url, strip_path_prefix).await {
         cache_result(cache, backend_url, max_model_len);
         return Some(max_model_len);
     }
@@ -54,8 +54,13 @@ pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str) ->
 }
 
 /// Fetch context size from llama.cpp `/props` endpoint
-async fn fetch_from_props(client: &reqwest::Client, backend_url: &str) -> Option<u64> {
-    let props_url = format!("{}/props", backend_url);
+async fn fetch_from_props(client: &reqwest::Client, backend_url: &str, strip_path_prefix: Option<&str>) -> Option<u64> {
+    let path = if let Some(prefix) = strip_path_prefix {
+        "/props".strip_prefix(prefix).unwrap_or("/props")
+    } else {
+        "/props"
+    };
+    let props_url = format!("{}{}", backend_url, path);
     match client.get(&props_url).send().await {
         Ok(resp) => {
             if let Ok(props) = resp.json::<serde_json::Value>().await {
@@ -77,8 +82,13 @@ async fn fetch_from_props(client: &reqwest::Client, backend_url: &str) -> Option
 }
 
 /// Fetch context size from vLLM/OpenAI-compatible `/v1/models` endpoint
-async fn fetch_from_models(client: &reqwest::Client, backend_url: &str) -> Option<u64> {
-    let models_url = format!("{}/v1/models", backend_url);
+async fn fetch_from_models(client: &reqwest::Client, backend_url: &str, strip_path_prefix: Option<&str>) -> Option<u64> {
+    let path = if let Some(prefix) = strip_path_prefix {
+        "/v1/models".strip_prefix(prefix).unwrap_or("/v1/models")
+    } else {
+        "/v1/models"
+    };
+    let models_url = format!("{}{}", backend_url, path);
     match client.get(&models_url).send().await {
         Ok(resp) => {
             if let Ok(models) = resp.json::<serde_json::Value>().await {

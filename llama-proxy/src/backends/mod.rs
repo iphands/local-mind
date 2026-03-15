@@ -47,8 +47,9 @@ pub fn build_balancer_from_single(
     tls: Option<&crate::config::TlsConfig>,
     model: Option<String>,
     api_key: Option<String>,
+    strip_path_prefix: Option<String>,
 ) -> Result<Arc<dyn LoadBalancer>, Box<dyn std::error::Error>> {
-    let node = BackendNode::from_config(url, timeout_seconds, tls, model, api_key)?;
+    let node = BackendNode::from_config(url, timeout_seconds, tls, model, api_key, strip_path_prefix)?;
     Ok(Arc::new(RoundRobinBalancer::new(vec![Arc::new(node)])?))
 }
 
@@ -67,6 +68,7 @@ mod tests {
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
             active_requests: AtomicUsize::new(0),
+            strip_path_prefix: None,
         })
     }
 
@@ -113,6 +115,7 @@ mod tests {
                     tls: None,
                     model: None,
                     api_key: None,
+                    strip_path_prefix: None,
                 }],
             },
         );

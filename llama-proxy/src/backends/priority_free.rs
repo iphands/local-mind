@@ -65,6 +65,7 @@ mod tests {
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
             active_requests: AtomicUsize::new(0),
+            strip_path_prefix: None,
         })
     }
 

@@ -14,6 +14,7 @@ pub struct BackendNode {
     pub timeout_seconds: u64,
     pub http_client: reqwest::Client,
     pub active_requests: AtomicUsize,
+    pub strip_path_prefix: Option<String>,
 }
 
 impl BackendNode {
@@ -24,6 +25,7 @@ impl BackendNode {
         tls: Option<&TlsConfig>,
         model: Option<String>,
         api_key: Option<String>,
+        strip_path_prefix: Option<String>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let http_client = build_node_client(timeout_seconds, tls)?;
         Ok(Self {
@@ -33,12 +35,22 @@ impl BackendNode {
             timeout_seconds,
             http_client,
             active_requests: AtomicUsize::new(0),
+            strip_path_prefix,
         })
     }
 
     /// Returns the base URL with trailing slash stripped
     pub fn base_url(&self) -> &str {
         self.url.trim_end_matches('/')
+    }
+
+    /// Returns the effective path after stripping any configured prefix
+    pub fn effective_path<'a>(&self, path: &'a str) -> &'a str {
+        if let Some(ref prefix) = self.strip_path_prefix {
+            path.strip_prefix(prefix.as_str()).unwrap_or(path)
+        } else {
+            path
+        }
     }
 }
 

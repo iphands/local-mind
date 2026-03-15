@@ -76,6 +76,7 @@ pub async fn run_server(
             config.backend.tls.as_ref(),
             config.backend.model.clone(),
             config.backend.api_key.clone(),
+            config.backend.strip_path_prefix.clone(),
         )?
     };
 

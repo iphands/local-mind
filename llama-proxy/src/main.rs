@@ -438,13 +438,14 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
                     node_cfg.tls.as_ref(),
                     node_cfg.model.clone(),
                     node_cfg.api_key.clone(),
+                    node_cfg.strip_path_prefix.clone(),
                 )?;
 
                 let base_url = node.base_url().to_string();
                 println!("[{}]: {}", group_name, base_url);
 
-                let health_url = format!("{}/health", base_url);
-                println!("  Testing /health: {}", health_url);
+                let health_url = format!("{}{}", base_url, node.effective_path("/health"));
+                println!("  Testing {}: {}", node.effective_path("/health"), health_url);
 
                 match node.http_client.get(&health_url).send().await {
                     Ok(resp) => {
@@ -462,8 +463,8 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
                     }
                 }
 
-                let models_url = format!("{}/v1/models", base_url);
-                println!("  Testing /v1/models: {}", models_url);
+                let models_url = format!("{}{}", base_url, node.effective_path("/v1/models"));
+                println!("  Testing {}: {}", node.effective_path("/v1/models"), models_url);
 
                 match node.http_client.get(&models_url).send().await {
                     Ok(resp) => {
@@ -503,13 +504,14 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
             config.backend.tls.as_ref(),
             config.backend.model.clone(),
             config.backend.api_key.clone(),
+            config.backend.strip_path_prefix.clone(),
         )?;
 
         let base_url = node.base_url().to_string();
         println!("[single]: {}", base_url);
 
-        let health_url = format!("{}/health", base_url);
-        println!("  Testing /health: {}", health_url);
+        let health_url = format!("{}{}", base_url, node.effective_path("/health"));
+        println!("  Testing {}: {}", node.effective_path("/health"), health_url);
 
         match node.http_client.get(&health_url).send().await {
             Ok(resp) => {
@@ -527,8 +529,8 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
             }
         }
 
-        let models_url = format!("{}/v1/models", base_url);
-        println!("  Testing /v1/models: {}", models_url);
+        let models_url = format!("{}{}", base_url, node.effective_path("/v1/models"));
+        println!("  Testing {}: {}", node.effective_path("/v1/models"), models_url);
 
         match node.http_client.get(&models_url).send().await {
             Ok(resp) => {

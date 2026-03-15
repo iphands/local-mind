@@ -53,6 +53,7 @@ impl GroupedLoadBalancer {
                     node_cfg.tls.as_ref(),
                     node_cfg.model.clone(),
                     node_cfg.api_key.clone(),
+                    node_cfg.strip_path_prefix.clone(),
                 )?;
                 nodes.push(Arc::new(node));
             }
@@ -154,6 +155,7 @@ mod tests {
                     tls: None,
                     model: None,
                     api_key: None,
+                    strip_path_prefix: None,
                 })
                 .collect(),
         }
@@ -251,6 +253,7 @@ mod tests {
                         tls: None,
                         model: None,
                         api_key: None,
+                        strip_path_prefix: None,
                     },
                     BackendNodeConfig {
                         url: "http://localhost:8081".to_string(),
@@ -258,6 +261,7 @@ mod tests {
                         tls: None,
                         model: None,
                         api_key: None,
+                        strip_path_prefix: None,
                     },
                 ],
             },

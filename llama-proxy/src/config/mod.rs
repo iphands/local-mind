@@ -49,6 +49,9 @@ pub struct BackendConfig {
     /// API key for backend authentication
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Strip this prefix from incoming request path before forwarding (e.g., "/v1" for Z.ai)
+    #[serde(default)]
+    pub strip_path_prefix: Option<String>,
 }
 
 /// TLS configuration for backend connections
@@ -77,6 +80,7 @@ impl Default for BackendConfig {
             tls: None,
             model: None,
             api_key: None,
+            strip_path_prefix: None,
         }
     }
 }
@@ -110,6 +114,9 @@ pub struct BackendNodeConfig {
     /// API key for backend authentication
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Strip this prefix from incoming request path before forwarding (e.g., "/v1" for Z.ai)
+    #[serde(default)]
+    pub strip_path_prefix: Option<String>,
 }
 
 /// Configuration for a single backend group
@@ -404,6 +411,7 @@ mod tests {
             tls: None,
             model: None,
             api_key: None,
+            strip_path_prefix: None,
         };
         assert_eq!(config.base_url(), "http://localhost:8080");
     }
@@ -416,6 +424,7 @@ mod tests {
             tls: None,
             model: None,
             api_key: None,
+            strip_path_prefix: None,
         };
         assert_eq!(config.base_url(), "https://example.com:4234");
         assert!(config.is_tls());
@@ -429,6 +438,7 @@ mod tests {
             tls: None,
             model: None,
             api_key: None,
+            strip_path_prefix: None,
         };
         assert!(!http_config.is_tls());
 
@@ -438,6 +448,7 @@ mod tests {
             tls: None,
             model: None,
             api_key: None,
+            strip_path_prefix: None,
         };
         assert!(https_config.is_tls());
     }
@@ -450,6 +461,7 @@ mod tests {
             tls: None,
             model: None,
             api_key: None,
+            strip_path_prefix: None,
         };
         assert_eq!(config.base_url(), "http://localhost:8080");
     }
@@ -477,6 +489,7 @@ mod tests {
             }),
             model: None,
             api_key: None,
+            strip_path_prefix: None,
         };
         assert!(config.tls.is_some());
         let tls = config.tls.unwrap();
@@ -492,6 +505,7 @@ mod tests {
             tls: None,
             model: Some("anthropic/claude-sonnet-4-5".to_string()),
             api_key: Some("sk-test-key".to_string()),
+            strip_path_prefix: None,
         };
         assert_eq!(config.model, Some("anthropic/claude-sonnet-4-5".to_string()));
         assert_eq!(config.api_key, Some("sk-test-key".to_string()));

@@ -352,6 +352,7 @@ exporters:
             tls: None,
             model: None,
             api_key: None,
+            strip_path_prefix: None,
         };
         assert!(validate_backend_config(&config).is_ok());
     }
@@ -364,6 +365,7 @@ exporters:
             tls: None,
             model: None,
             api_key: None,
+            strip_path_prefix: None,
         };
         let result = validate_backend_config(&config);
         assert!(result.is_err());

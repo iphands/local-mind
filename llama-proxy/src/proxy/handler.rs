@@ -220,10 +220,11 @@ impl ProxyHandler {
         }
 
         // Build complete URL with query string as-is (don't parse/re-encode)
+        let effective_path = backend.node.effective_path(path);
         let backend_url = if let Some(q) = query {
-            format!("{}{}?{}", backend.node.base_url(), path, q)
+            format!("{}{}?{}", backend.node.base_url(), effective_path, q)
         } else {
-            format!("{}{}", backend.node.base_url(), path)
+            format!("{}{}", backend.node.base_url(), effective_path)
         };
 
         tracing::debug!(
@@ -315,6 +316,7 @@ impl ProxyHandler {
                 backend.node.http_client.clone(),
                 backend.node.base_url().to_string(),
                 backend.group_name.clone(),
+                backend.node.strip_path_prefix.clone(),
             )
             .await
         } else {
@@ -437,7 +439,7 @@ impl ProxyHandler {
 
                 // Fetch and set context_total for stats
                 if let Some(ref mut m) = metrics {
-                    if let Some(ctx_total) = fetch_context_total(&backend.http_client, backend.base_url()).await {
+                    if let Some(ctx_total) = fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref()).await {
                         m.context_total = Some(ctx_total);
                         m.calculate_context_percent();
                     }
@@ -613,10 +615,11 @@ impl ProxyHandler {
         };
 
         // Build complete URL with query string as-is (don't parse/re-encode)
+        let effective_path = backend.effective_path(path);
         let backend_url = if let Some(q) = query {
-            format!("{}{}?{}", backend.base_url(), path, q)
+            format!("{}{}?{}", backend.base_url(), effective_path, q)
         } else {
-            format!("{}{}", backend.base_url(), path)
+            format!("{}{}", backend.base_url(), effective_path)
         };
 
         tracing::debug!(
@@ -743,6 +746,7 @@ mod tests {
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
             active_requests: AtomicUsize::new(0),
+            strip_path_prefix: None,
         };
         let load_balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(default_node)]).unwrap());
         let fix_registry = FixRegistry::new();

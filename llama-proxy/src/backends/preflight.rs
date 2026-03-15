@@ -14,7 +14,12 @@ pub async fn run_preflight_multi(backends: &mut BackendsConfig) {
     for (group_name, group) in backends.iter_mut() {
         for node_cfg in group.nodes.iter_mut() {
             let base_url = node_cfg.url.trim_end_matches('/').to_string();
-            let models_url = format!("{}/v1/models", base_url);
+            let models_path = if let Some(ref prefix) = node_cfg.strip_path_prefix {
+                "/v1/models".strip_prefix(prefix.as_str()).unwrap_or("/v1/models")
+            } else {
+                "/v1/models"
+            };
+            let models_url = format!("{}{}", base_url, models_path);
 
             let client = match build_preflight_client(node_cfg.timeout_seconds, node_cfg.tls.as_ref()) {
                 Ok(c) => c,
@@ -101,7 +106,12 @@ pub async fn run_preflight_multi(backends: &mut BackendsConfig) {
 /// Run preflight check for a single-backend configuration.
 pub async fn run_preflight_single(backend: &BackendConfig) {
     let base_url = backend.base_url().to_string();
-    let models_url = format!("{}/v1/models", base_url);
+    let models_path = if let Some(ref prefix) = backend.strip_path_prefix {
+        "/v1/models".strip_prefix(prefix.as_str()).unwrap_or("/v1/models")
+    } else {
+        "/v1/models"
+    };
+    let models_url = format!("{}{}", base_url, models_path);
 
     let client = match build_preflight_client(backend.timeout_seconds, backend.tls.as_ref()) {
         Ok(c) => c,

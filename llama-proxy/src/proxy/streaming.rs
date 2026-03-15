@@ -28,6 +28,7 @@ pub async fn handle_streaming_response(
     http_client: reqwest::Client,
     backend_url: String,
     group_name: Option<String>,
+    strip_path_prefix: Option<String>,
 ) -> Response {
     let status = backend_response.status();
     let headers = backend_response.headers().clone();
@@ -189,6 +190,7 @@ pub async fn handle_streaming_response(
         let client = http_client.clone();
         let backend_url = backend_url.clone();
         let group_name = group_name; // Already owned, move into closure
+        let strip_path_prefix = strip_path_prefix.clone();
 
         tokio::spawn(async move {
             // Adaptive timeout constants
@@ -297,7 +299,7 @@ pub async fn handle_streaming_response(
                     };
 
                     // Fetch and set context_total
-                    if let Some(ctx_total) = fetch_context_total(&client, &backend_url).await {
+                    if let Some(ctx_total) = fetch_context_total(&client, &backend_url, strip_path_prefix.as_deref()).await {
                         metrics.context_total = Some(ctx_total);
                         metrics.calculate_context_percent();
                     }

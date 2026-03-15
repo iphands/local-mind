@@ -16,6 +16,9 @@ backend:
   url: "http://localhost:8080"
   # Request timeout in seconds
   timeout_seconds: 300
+  # Strip this prefix from incoming request path before forwarding (optional)
+  # Use when backend mounts API at a non-/v1 path (e.g., Z.ai: "https://api.z.ai/api/paas/v4")
+  # strip_path_prefix: "/v1"
   # TLS configuration (optional, for https:// backends)
   # tls:
   #   # Accept invalid certificates (self-signed, expired)
@@ -40,6 +43,7 @@ backend:
 #         # Optional: model override and api_key per node
 #         # model: "anthropic/claude-opus-4"
 #         # api_key: "sk-xxx"
+#         # strip_path_prefix: "/v1"  # Strip prefix from incoming path (e.g., for Z.ai: /v1/chat/completions → /chat/completions)
 #
 #   haiku:
 #     mappings: ["haiku", "claude-haiku-4-5-20251001"]
