@@ -3,6 +3,7 @@
 mod balancer;
 mod grouped;
 mod node;
+pub mod preflight;
 mod priority_free;
 mod round_robin;
 

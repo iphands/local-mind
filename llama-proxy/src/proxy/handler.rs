@@ -375,6 +375,7 @@ impl ProxyHandler {
             let error_body = String::from_utf8_lossy(&body_bytes);
             tracing::error!(
                 status = %status,
+                url = %backend.base_url(),
                 error_body = %error_body,
                 "Backend returned error response"
             );

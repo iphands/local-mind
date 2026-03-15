@@ -12,7 +12,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use super::handler::ProxyHandler;
-use crate::backends::{build_balancer_from_groups, build_balancer_from_single, LoadBalancer};
+use crate::backends::{build_balancer_from_groups, build_balancer_from_single, preflight, LoadBalancer};
 use crate::config::AppConfig;
 use crate::exporters::ExporterManager;
 use crate::fixes::FixRegistry;
@@ -34,12 +34,14 @@ pub async fn run_server(
     exporter_manager: ExporterManager,
     hide_requests: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let mut config = config;
+
     // Build load balancer from configuration
-    let load_balancer = if let Some(ref backends) = config.backends {
+    let load_balancer = if let Some(ref mut backends) = config.backends {
         // Multi-backend mode with named groups
         tracing::info!("Using multi-backend mode with {} group(s)", backends.len());
 
-        for (name, group) in backends {
+        for (name, group) in backends.iter() {
             let mapping_str = if group.mappings.is_empty() {
                 "catch-all".to_string()
             } else {
@@ -54,6 +56,9 @@ pub async fn run_server(
             );
         }
 
+        // Run preflight: discover models, auto-set overrides, warn on ambiguity
+        preflight::run_preflight_multi(backends).await;
+
         build_balancer_from_groups(backends.clone())?
     } else {
         // Single backend mode (backward compatibility)
@@ -62,6 +67,8 @@ pub async fn run_server(
             timeout_seconds = config.backend.timeout_seconds,
             "Using single backend mode"
         );
+
+        preflight::run_preflight_single(&config.backend).await;
 
         build_balancer_from_single(
             config.backend.url.clone(),
