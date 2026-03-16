@@ -6,5 +6,3 @@
 pub mod terminal;
 pub mod state;
 pub mod components;
-
-pub use terminal::UIRenderer;

@@ -1,6 +1,6 @@
 use clap::{Parser, Subcommand};
 use glob::glob;
-use log::{debug, error, info, warn};
+use log::{debug, error, warn};
 use memmap2::Mmap;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
@@ -254,11 +254,7 @@ fn expand_globs(patterns: &[String]) -> Result<Vec<PathBuf>, ModelHolderError> {
                 )));
             }
         } else {
-            info!(
-                "Found {} files matching pattern: {}",
-                matches.len(),
-                pattern_str
-            );
+            // Silent - TUI shows files as they're processed
             paths.extend(matches);
         }
     }
@@ -360,7 +356,6 @@ fn hold_models_with_tui(
 
     // Expand glob patterns
     let paths = expand_globs(&model_paths)?;
-    info!("Found {} files to memory map", paths.len());
 
     // Initialize terminal UI
     let mut terminal = UIRenderer::new().map_err(|e| {
@@ -390,7 +385,7 @@ fn hold_models_with_tui(
         let file = match File::open(path) {
             Ok(f) => f,
             Err(e) => {
-                warn!("Failed to open '{}': {}", path.display(), e);
+                println!("Warning: Failed to open '{}': {}", path.display(), e);
                 continue;
             }
         };
@@ -398,7 +393,7 @@ fn hold_models_with_tui(
         let metadata = match file.metadata() {
             Ok(m) => m,
             Err(e) => {
-                warn!("Failed to get metadata for '{}': {}", path.display(), e);
+                println!("Warning: Failed to get metadata for '{}': {}", path.display(), e);
                 continue;
             }
         };
@@ -415,7 +410,7 @@ fn hold_models_with_tui(
         let mmap = match unsafe { Mmap::map(&file) } {
             Ok(m) => m,
             Err(e) => {
-                warn!("Failed to mmap '{}': {}", path.display(), e);
+                println!("Warning: Failed to mmap '{}': {}", path.display(), e);
                 continue;
             }
         };
@@ -435,7 +430,7 @@ fn hold_models_with_tui(
 
     // Handle warmup if not disabled
     if !no_warmup {
-        for (file_index, mapped_file) in mapped_files.iter().enumerate() {
+        for (_file_index, mapped_file) in mapped_files.iter().enumerate() {
             if let Err(e) = warmup_file_with_tui(
                 &mapped_file.mmap,
                 mapped_file.size,
@@ -451,11 +446,7 @@ fn hold_models_with_tui(
                 );
             }
 
-            info!(
-                "File {}/{} warmup complete",
-                file_index + 1,
-                mapped_files.len()
-            );
+            // Silent progress - info logged to TUI only
         }
 
         // Mark all files as complete
@@ -464,13 +455,13 @@ fn hold_models_with_tui(
             eprintln!("UI draw error: {}", e);
         }
     } else {
-        info!("Skipping warmup (pages will be loaded on demand)");
+        // Silent - info shown in TUI status
     }
 
     // Lock pages in RAM if not disabled
     if !no_mlock {
         let lock_start = Instant::now();
-        let mut locked_bytes: u64 = 0;
+        let mut _locked_bytes: u64 = 0;  // Used for potential future stats
         let mut failed_files: Vec<String> = Vec::new();
 
         for mapped_file in &mapped_files {
@@ -482,7 +473,7 @@ fn hold_models_with_tui(
             };
 
             if result == 0 {
-                locked_bytes += mapped_file.size;
+                _locked_bytes += mapped_file.size;
                 if let Some(file) = app.find_file_mut(&mapped_file.path.display().to_string()) {
                     file.mark_locked(0.0, lock_start.elapsed());
                 }
@@ -502,13 +493,9 @@ fn hold_models_with_tui(
             }
         }
 
-        let lock_elapsed = lock_start.elapsed();
+        let _lock_elapsed = lock_start.elapsed();  // Used for potential future stats
         if failed_files.is_empty() {
-            info!(
-                "  Locked {:.2} GB in RAM in {:.2}s",
-                locked_bytes as f64 / BYTES_PER_GB,
-                lock_elapsed.as_secs_f64()
-            );
+            // Silent - info shown in TUI status bar
             app.all_locked();
             if let Err(e) = terminal.draw(&app) {
                 eprintln!("UI draw error: {}", e);
@@ -520,11 +507,11 @@ fn hold_models_with_tui(
             );
         }
     } else {
-        info!("Skipping mlock (pages may be swapped out)");
+        // Silent - info shown in TUI status bar
     }
 
-    // Wait a moment for final display
-    thread::sleep(Duration::from_millis(500));
+    // Keep TUI open until user presses ESC or Ctrl+C
+    terminal.wait_for_exit();
 
     // Cleanup terminal
     if let Err(e) = terminal.cleanup() {
@@ -535,6 +522,7 @@ fn hold_models_with_tui(
 }
 
 /// Hold model files in memory with optional warmup and mlock (legacy version with println)
+#[allow(dead_code)]
 fn hold_models(
     model_paths: Vec<String>,
     no_warmup: bool,
@@ -545,7 +533,6 @@ fn hold_models(
     validate_page_size(page_size)?;
 
     let paths = expand_globs(&model_paths)?;
-    info!("Found {} files to memory map", paths.len());
 
     println!("Files to mmap ({}):", paths.len());
     for path in &paths {
@@ -724,6 +711,7 @@ fn hold_models(
 }
 
 /// Warm up memory-mapped file by reading all pages
+#[allow(dead_code)]
 fn warmup_file(
     mmap: &Mmap,
     file_size: u64,
