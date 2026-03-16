@@ -35,17 +35,22 @@ LLAMA_ARGS=(
   --served-model-name cosmo-proxy
   --host 0.0.0.0
   --port 8799
-  --mem-fraction-static 0.90
-  # --attention-backend triton
-  # --prefill-attention-backend triton
-  # --decode-attention-backend triton
-  # --quantization modelopt_nvfp4
-  --log-level warning
-  --trust-remote-code
-  --tp 1
+
+  --mem-fraction-static 0.80
+  --max-running-requests 2
+  # --attention-backend fa4  # fa4 doesn't support compute capability 12.x (Blackwell)
+
+  --attention-backend triton
+  --disable-cuda-graph
   --ep 1
+  --log-level warning
+  # --mem-fraction-static 0.90
+  --tp 1
+  --trust-remote-code
+
+  --context-length 1024 # 262144
   --tool-call-parser qwen3_coder
-  --reasoning-parser nemotron_3
+  --reasoning-parser qwen3
 )
 
 echo

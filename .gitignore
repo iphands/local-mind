@@ -1,3 +1,6 @@
 /scratch
 /server/llamacpp/vendor
+/server/vllm/scratch/
+/server/vllm/server.log
+/server/vllm/vendor/
 /vendor
