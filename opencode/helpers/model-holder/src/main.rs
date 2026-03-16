@@ -12,6 +12,9 @@ use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
+// libc for mlock support
+use libc::{mlock, madvise, MADV_WILLNEED};
+
 /// Constants for magic numbers and configuration
 const DEFAULT_PAGE_SIZE: usize = 4096;
 const PROGRESS_UPDATE_INTERVAL: usize = 1000;
@@ -78,11 +81,15 @@ struct HoldArgs {
     /// Page size for warmup reads (must be positive power of 2)
     #[arg(long, default_value_t = DEFAULT_PAGE_SIZE)]
     page_size: usize,
+
+    /// Don't lock pages in RAM (allow kernel to swap them out)
+    #[arg(long, default_value_t = false)]
+    no_mlock: bool,
 }
 
 #[derive(Parser, Debug)]
 #[command(name = "model-holder")]
-#[command(about = "Keeps model files mmap'd in memory to speed up llama.cpp restarts")]
+#[command(about = "Keeps model files mmap'd in memory and locked in RAM to speed up llama.cpp restarts")]
 struct Args {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -99,6 +106,10 @@ struct Args {
     /// Page size for warmup reads (must be positive power of 2)
     #[arg(long, default_value_t = DEFAULT_PAGE_SIZE)]
     page_size: usize,
+
+    /// Don't lock pages in RAM (allow kernel to swap them out)
+    #[arg(long, default_value_t = false)]
+    no_mlock: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -342,11 +353,12 @@ fn warmup_file(
     Ok(checksum)
 }
 
-/// Hold model files in memory with optional warmup
+/// Hold model files in memory with optional warmup and mlock
 fn hold_models(
     model_paths: Vec<String>,
     no_warmup: bool,
     page_size: usize,
+    no_mlock: bool,
 ) -> Result<(), ModelHolderError> {
     // Validate inputs
     validate_page_size(page_size)?;
@@ -448,6 +460,60 @@ fn hold_models(
         );
     } else {
         println!("\nSkipping warmup (pages will be loaded on demand)");
+    }
+
+    // Lock pages in RAM if not disabled
+    if !no_mlock {
+        println!("\nLocking pages in RAM...");
+        let mut locked_bytes: u64 = 0;
+        let mut failed_files: Vec<String> = Vec::new();
+
+        for mapped_file in &mapped_files {
+            // Safety: We're locking a valid mmap region
+            let result = unsafe {
+                mlock(
+                    mapped_file.mmap.as_ptr() as *const libc::c_void,
+                    mapped_file.mmap.len(),
+                )
+            };
+
+            if result == 0 {
+                locked_bytes += mapped_file.size;
+            } else {
+                failed_files.push(mapped_file.path.display().to_string());
+            }
+        }
+
+        // Give madvise a hint that we'll need these pages
+        for mapped_file in &mapped_files {
+            unsafe {
+                madvise(
+                    mapped_file.mmap.as_ptr() as *mut libc::c_void,
+                    mapped_file.mmap.len(),
+                    MADV_WILLNEED,
+                );
+            }
+        }
+
+        if failed_files.is_empty() {
+            println!(
+                "  Locked {:.2} GB in RAM",
+                locked_bytes as f64 / BYTES_PER_GB
+            );
+        } else {
+            warn!(
+                "  Failed to lock {} file(s) in RAM (may require ulimit -l or root)",
+                failed_files.len()
+            );
+            for path in &failed_files {
+                println!("    - {}", path);
+            }
+            println!(
+                "  Note: unlockable files will still be mapped but not pinned in RAM."
+            );
+        }
+    } else {
+        println!("\nSkipping mlock (pages may be swapped out)");
     }
 
     let running = Arc::new(AtomicBool::new(true));
@@ -885,6 +951,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hold_args.model_paths,
             hold_args.no_warmup,
             hold_args.page_size,
+            hold_args.no_mlock,
         )
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) }),
         Some(Commands::Check { extensions }) => {
@@ -893,8 +960,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             // Legacy mode: if model_paths provided, run hold
             if !args.model_paths.is_empty() {
-                hold_models(args.model_paths, args.no_warmup, args.page_size)
-                    .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
+                hold_models(
+                    args.model_paths,
+                    args.no_warmup,
+                    args.page_size,
+                    args.no_mlock,
+                )
+                .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
             } else {
                 // No args, show help
                 eprintln!("Usage: model-holder [hold] <MODEL_PATHS>...");
