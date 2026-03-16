@@ -11,19 +11,19 @@ pub enum FileStage {
     Mapped,
     /// File is currently being warmed up
     Warming {
-        progress: f64,      // 0.0 to 100.0
-        speed: f64,         // MB/s
-        elapsed: Duration,  // time spent warming
+        progress: f64,     // 0.0 to 100.0
+        speed: f64,        // MB/s
+        elapsed: Duration, // time spent warming
     },
     /// File warming is complete
     Complete {
         size_mb: f64,
-        speed: f64,         // MB/s average
+        speed: f64, // MB/s average
         elapsed: Duration,
     },
     /// File is being mlocked (blocking syscall in progress)
     Locking {
-        speed: f64,         // preserved from Complete
+        speed: f64, // preserved from Complete
         elapsed: Duration,
     },
     /// File is locked in RAM
@@ -97,7 +97,11 @@ impl FileStatus {
     }
 
     pub fn mark_warming(&mut self, progress: f64, speed: f64, elapsed: Duration) {
-        self.stage = FileStage::Warming { progress, speed, elapsed };
+        self.stage = FileStage::Warming {
+            progress,
+            speed,
+            elapsed,
+        };
     }
 
     pub fn mark_complete(&mut self, speed: f64, elapsed: Duration) {
@@ -123,7 +127,10 @@ impl FileStatus {
     }
 
     pub fn is_complete(&self) -> bool {
-        matches!(self.stage, FileStage::Complete { .. } | FileStage::Locking { .. } | FileStage::Locked { .. })
+        matches!(
+            self.stage,
+            FileStage::Complete { .. } | FileStage::Locking { .. } | FileStage::Locked { .. }
+        )
     }
 
     pub fn current_speed(&self) -> f64 {
@@ -233,19 +240,23 @@ impl AppState {
     /// Returns filtered and sorted files based on current state
     pub fn filtered_files(&self) -> Vec<&FileStatus> {
         let query = self.filter_input.to_lowercase();
-        let mut files: Vec<&FileStatus> = self.files.iter().filter(|f| {
-            if query.is_empty() {
-                return true;
-            }
-            f.filename.to_lowercase().contains(&query)
-                || f.path.to_lowercase().contains(&query)
-        }).collect();
+        let mut files: Vec<&FileStatus> = self
+            .files
+            .iter()
+            .filter(|f| {
+                if query.is_empty() {
+                    return true;
+                }
+                f.filename.to_lowercase().contains(&query) || f.path.to_lowercase().contains(&query)
+            })
+            .collect();
 
         match self.sort_by {
             SortBy::Default => files.sort_by_key(|f| f.process_index),
             SortBy::Size => files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes)),
             SortBy::Speed => files.sort_by(|a, b| {
-                b.current_speed().partial_cmp(&a.current_speed())
+                b.current_speed()
+                    .partial_cmp(&a.current_speed())
                     .unwrap_or(std::cmp::Ordering::Equal)
             }),
         }

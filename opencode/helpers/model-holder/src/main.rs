@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use thiserror::Error;
 
 // libc for mlock support
-use libc::{mlock, madvise, MADV_WILLNEED};
+use libc::{madvise, mlock, MADV_WILLNEED};
 
 // UI modules
 mod ui;
@@ -101,7 +101,9 @@ struct HoldArgs {
 
 #[derive(Parser, Debug)]
 #[command(name = "model-holder")]
-#[command(about = "Keeps model files mmap'd in memory and locked in RAM to speed up llama.cpp restarts")]
+#[command(
+    about = "Keeps model files mmap'd in memory and locked in RAM to speed up llama.cpp restarts"
+)]
 struct Args {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -255,8 +257,7 @@ fn expand_globs(patterns: &[String]) -> Result<Vec<PathBuf>, ModelHolderError> {
             } else {
                 return Err(ModelHolderError::NoFilesFound(format!(
                     "File not found: '{}' (resolved to '{}')",
-                    pattern,
-                    pattern_str
+                    pattern, pattern_str
                 )));
             }
         } else {
@@ -360,9 +361,8 @@ fn hold_models_with_tui(
 
     let paths = expand_globs(&model_paths)?;
 
-    let terminal = UIRenderer::new().map_err(|e| {
-        ModelHolderError::UIError(format!("Failed to initialize terminal: {}", e))
-    })?;
+    let terminal = UIRenderer::new()
+        .map_err(|e| ModelHolderError::UIError(format!("Failed to initialize terminal: {}", e)))?;
 
     let state = Arc::new(Mutex::new(AppState::new()));
     let should_exit = Arc::new(AtomicBool::new(false));
@@ -402,7 +402,11 @@ fn hold_models_with_tui(
         let metadata = match file.metadata() {
             Ok(m) => m,
             Err(e) => {
-                debug!("Warning: Failed to get metadata for '{}': {}", path.display(), e);
+                debug!(
+                    "Warning: Failed to get metadata for '{}': {}",
+                    path.display(),
+                    e
+                );
                 continue;
             }
         };
@@ -476,10 +480,7 @@ fn hold_models_with_tui(
                         let file_path = mf.path.display().to_string();
                         let start = Instant::now();
                         let result = unsafe {
-                            mlock(
-                                mf.mmap.as_ptr() as *const libc::c_void,
-                                mf.mmap.len(),
-                            )
+                            mlock(mf.mmap.as_ptr() as *const libc::c_void, mf.mmap.len())
                         };
                         if result == 0 {
                             _locked_bytes.fetch_add(mf.size, Ordering::Relaxed);
@@ -677,9 +678,7 @@ fn hold_models(
             for path in &failed_files {
                 println!("    - {}", path);
             }
-            println!(
-                "  Note: unlockable files will still be mapped but not pinned in RAM."
-            );
+            println!("  Note: unlockable files will still be mapped but not pinned in RAM.");
         }
     } else {
         println!("\nSkipping mlock (pages may be swapped out)");

@@ -1,6 +1,6 @@
 use std::io::{stdout, Stdout};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyModifiers};
@@ -154,8 +154,7 @@ fn render_title(frame: &mut Frame, area: Rect, app: &AppState) {
 
     let left = " model-holder";
     let right = format!("{}  ", overall);
-    let gap = (area.width as usize)
-        .saturating_sub(left.len() + right.len());
+    let gap = (area.width as usize).saturating_sub(left.len() + right.len());
     let title_text = format!("{}{}{}", left, " ".repeat(gap), right);
 
     let status_color = if app.all_locked {
@@ -250,10 +249,7 @@ fn render_statusbar(frame: &mut Frame, area: Rect, app: &AppState) {
                 "  ↑↓/jk scroll   / filter   x clear   s size   p speed   d default   q quit",
                 Style::default().fg(Color::DarkGray),
             ),
-            Span::styled(
-                lock_hint,
-                Style::default().fg(Color::Yellow),
-            ),
+            Span::styled(lock_hint, Style::default().fg(Color::Yellow)),
         ])
     };
 
@@ -313,15 +309,9 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
             Span::styled(name_padded, Style::default().fg(Color::DarkGray)),
             Span::styled(size_str, Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled(
-                format!("{:<20}", ""),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("{:<20}", ""), Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled(
-                format!("{:>13}", ""),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("{:>13}", ""), Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(" pending ", Style::default().fg(Color::DarkGray)),
         ]),
@@ -330,34 +320,24 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
             Span::styled(name_padded, Style::default().fg(Color::Blue)),
             Span::styled(size_str, Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled(
-                format!("{:<20}", ""),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("{:<20}", ""), Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled(
-                format!("{:>13}", ""),
-                Style::default().fg(Color::DarkGray),
-            ),
+            Span::styled(format!("{:>13}", ""), Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(" mapped  ", Style::default().fg(Color::Blue)),
         ]),
 
-        FileStage::Warming { progress, speed, .. } => {
+        FileStage::Warming {
+            progress, speed, ..
+        } => {
             let bar = progress_bar(*progress, 20);
             let (filled_len, empty_len) = bar;
             Line::from(vec![
                 Span::styled(name_padded, Style::default().fg(Color::Cyan)),
                 Span::styled(size_str, Style::default().fg(Color::DarkGray)),
                 Span::raw("  "),
-                Span::styled(
-                    "█".repeat(filled_len),
-                    Style::default().fg(Color::Cyan),
-                ),
-                Span::styled(
-                    "░".repeat(empty_len),
-                    Style::default().fg(Color::DarkGray),
-                ),
+                Span::styled("█".repeat(filled_len), Style::default().fg(Color::Cyan)),
+                Span::styled("░".repeat(empty_len), Style::default().fg(Color::DarkGray)),
                 Span::raw("  "),
                 Span::styled(
                     format!("{:>8.1} MB/s", speed),
@@ -410,7 +390,9 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
             Span::raw("  "),
             Span::styled(
                 "████████████████████",
-                Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::raw("  "),
             Span::styled(
@@ -443,8 +425,7 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize,
     let track = area.height as usize;
 
     // Thumb size: proportional to visible/total, at least 1 row
-    let thumb = ((visible as f64 / total as f64) * track as f64)
-        .round() as usize;
+    let thumb = ((visible as f64 / total as f64) * track as f64).round() as usize;
     let thumb = thumb.max(1).min(track);
 
     // Thumb position: proportional to how far we've scrolled
@@ -466,7 +447,11 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize,
             break;
         }
         let in_thumb = row >= thumb_start && row < thumb_start + thumb;
-        let (ch, color) = if in_thumb { ("▐", Color::Gray) } else { ("░", Color::DarkGray) };
+        let (ch, color) = if in_thumb {
+            ("▐", Color::Gray)
+        } else {
+            ("░", Color::DarkGray)
+        };
         frame.render_widget(
             Paragraph::new(ch).style(Style::default().fg(color)),
             Rect::new(x, y, 1, 1),
@@ -509,16 +494,27 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
 
     for path in failed {
         let display = if path.len() > inner_w.saturating_sub(2) {
-            format!("  …{}", &path[path.len().saturating_sub(inner_w.saturating_sub(3))..])
+            format!(
+                "  …{}",
+                &path[path.len().saturating_sub(inner_w.saturating_sub(3))..]
+            )
         } else {
             format!("  {}", path)
         };
-        lines.push(Line::from(Span::styled(display, Style::default().fg(Color::Red))));
+        lines.push(Line::from(Span::styled(
+            display,
+            Style::default().fg(Color::Red),
+        )));
     }
 
     lines.push(Line::from(""));
     lines.push(Line::from(vec![
-        Span::styled("Fix: ", Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(
+            "Fix: ",
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("ulimit -l unlimited", Style::default().fg(Color::Cyan)),
     ]));
     lines.push(Line::from(Span::styled(
