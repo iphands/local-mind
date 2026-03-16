@@ -98,10 +98,20 @@ impl UIRenderer {
     }
 
     /// Wait for user to press ESC or Ctrl+C to exit
-    /// Returns true if we should continue (not exited)
-    pub fn wait_for_exit(&mut self) -> bool {
+    /// Continues rendering the UI while waiting
+    pub fn wait_for_exit(&mut self, app: &AppState) -> bool {
+        use std::time::Duration;
+
         loop {
-            if event::poll(std::time::Duration::from_millis(16)).unwrap_or(false) {
+            // Draw the UI while waiting
+            if let Err(e) = self.draw(app) {
+                eprintln!("UI draw error: {}", e);
+            }
+
+            // Small delay to avoid busy-waiting
+            std::thread::sleep(Duration::from_millis(16));
+
+            if event::poll(Duration::from_millis(0)).unwrap_or(false) {
                 if let Ok(Event::Key(key)) = event::read() {
                     match key.code {
                         KeyCode::Char('q') | KeyCode::Esc => return false,
@@ -109,9 +119,6 @@ impl UIRenderer {
                         _ => {}
                     }
                 }
-            } else {
-                // No event, continue waiting
-                continue;
             }
         }
     }

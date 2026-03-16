@@ -241,10 +241,8 @@ fn expand_globs(patterns: &[String]) -> Result<Vec<PathBuf>, ModelHolderError> {
 
         if matches.is_empty() {
             if sanitized_pattern.exists() {
-                warn!(
-                    "No glob matches for '{}', treating as direct path",
-                    pattern_str
-                );
+                // Silent - TUI handles file display
+                // warn!("No glob matches for '{}', treating as direct path", pattern_str);
                 paths.push(sanitized_pattern);
             } else {
                 return Err(ModelHolderError::NoFilesFound(format!(
@@ -431,7 +429,7 @@ fn hold_models_with_tui(
     // Handle warmup if not disabled
     if !no_warmup {
         for (_file_index, mapped_file) in mapped_files.iter().enumerate() {
-            if let Err(e) = warmup_file_with_tui(
+            if let Err(_e) = warmup_file_with_tui(
                 &mapped_file.mmap,
                 mapped_file.size,
                 page_size,
@@ -439,11 +437,8 @@ fn hold_models_with_tui(
                 &mut app,
                 &mapped_file.path.display().to_string(),
             ) {
-                warn!(
-                    "Warmup failed for '{}': {}",
-                    mapped_file.path.display(),
-                    e
-                );
+                // Silent - TUI status bar shows completion
+                // warn!("Warmup failed for '{}': {}", mapped_file.path.display(), e);
             }
 
             // Silent progress - info logged to TUI only
@@ -501,17 +496,15 @@ fn hold_models_with_tui(
                 eprintln!("UI draw error: {}", e);
             }
         } else {
-            warn!(
-                "  Failed to lock {} file(s) in RAM (may require ulimit -l or root)",
-                failed_files.len()
-            );
+            // Silent - TUI status bar shows lock status
+            // warn!("  Failed to lock {} file(s) in RAM (may require ulimit -l or root)", failed_files.len());
         }
     } else {
         // Silent - info shown in TUI status bar
     }
 
     // Keep TUI open until user presses ESC or Ctrl+C
-    terminal.wait_for_exit();
+    terminal.wait_for_exit(&app);
 
     // Cleanup terminal
     if let Err(e) = terminal.cleanup() {
