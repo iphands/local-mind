@@ -2,7 +2,8 @@
   "permissions": {
     "allow": [
       "Bash(cargo build:*)",
-      "Bash(./target/debug/model-holder hold:*)"
+      "Bash(./target/debug/model-holder hold:*)",
+      "Bash(cargo test:*)"
     ]
   }
 }

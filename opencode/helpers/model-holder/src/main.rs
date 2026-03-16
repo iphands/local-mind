@@ -15,6 +15,11 @@ use thiserror::Error;
 // libc for mlock support
 use libc::{mlock, madvise, MADV_WILLNEED};
 
+// UI modules
+mod ui;
+use ui::state::{AppState, FileStage};
+use ui::terminal::UIRenderer;
+
 /// Constants for magic numbers and configuration
 const DEFAULT_PAGE_SIZE: usize = 4096;
 const PROGRESS_UPDATE_INTERVAL: usize = 1000;
@@ -53,6 +58,9 @@ enum ModelHolderError {
 
     #[error("Process {0} disappeared during analysis")]
     ProcessDisappeared(u32),
+
+    #[error("UI error: {0}")]
+    UIError(String),
 }
 
 impl From<ModelHolderError> for io::Error {
@@ -149,11 +157,9 @@ fn validate_extensions(extensions: &str) -> Result<(), ModelHolderError> {
 }
 
 /// Sanitize file path to prevent path traversal attacks
-/// Note: This does NOT canonicalize - that happens after glob expansion
 fn sanitize_path(path: &str) -> Result<PathBuf, ModelHolderError> {
     let path = Path::new(path);
 
-    // Check for path traversal attempts
     if path
         .components()
         .any(|c| matches!(c, std::path::Component::ParentDir))
@@ -163,8 +169,6 @@ fn sanitize_path(path: &str) -> Result<PathBuf, ModelHolderError> {
         ));
     }
 
-    // Make absolute if relative, but don't canonicalize yet
-    // (canonicalization happens after glob expansion to properly resolve symlinks)
     if path.is_absolute() {
         Ok(path.to_path_buf())
     } else {
@@ -236,8 +240,6 @@ fn expand_globs(patterns: &[String]) -> Result<Vec<PathBuf>, ModelHolderError> {
             .collect();
 
         if matches.is_empty() {
-            // If glob didn't match, try treating it as a direct file path
-            // But only if the file exists
             if sanitized_pattern.exists() {
                 warn!(
                     "No glob matches for '{}', treating as direct path",
@@ -261,7 +263,6 @@ fn expand_globs(patterns: &[String]) -> Result<Vec<PathBuf>, ModelHolderError> {
         }
     }
 
-    // Canonicalize all paths to resolve symlinks and relative paths
     debug!("Canonicalizing {} path(s)", paths.len());
     let canonical_paths: Result<Vec<PathBuf>, _> = paths
         .into_iter()
@@ -287,73 +288,253 @@ fn expand_globs(patterns: &[String]) -> Result<Vec<PathBuf>, ModelHolderError> {
     }
 }
 
-/// Warm up memory-mapped file by reading all pages
-///
-/// # Safety
-/// This function safely accesses memory-mapped data by:
-/// 1. Using the mmap's length to bound all accesses
-/// 2. Only reading within the mapped region
-/// 3. Using step_by to ensure proper page alignment
-fn warmup_file(
+/// Warm up memory-mapped file by reading all pages with progress updates
+fn warmup_file_with_tui(
     mmap: &Mmap,
     file_size: u64,
     page_size: usize,
-    file_idx: usize,
-    total_files: usize,
+    terminal: &mut UIRenderer,
+    app: &mut AppState,
+    file_path: &str,
 ) -> io::Result<u64> {
     let total_pages = (file_size as usize + page_size - 1) / page_size;
     let mut checksum: u64 = 0;
     let start_time = Instant::now();
-    let mut last_print_time = Instant::now();
+    let mut last_update_time = Instant::now();
 
     for (page_index, offset) in (0..mmap.len()).step_by(page_size).enumerate() {
         // Safety: mmap.len() ensures we don't read beyond mapped region
         checksum = checksum.wrapping_add(mmap[offset] as u64);
 
+        // Send progress updates
         if page_index % PROGRESS_UPDATE_INTERVAL == 0
-            || last_print_time.elapsed() > Duration::from_millis(PROGRESS_UPDATE_TIMEOUT_MS)
+            || last_update_time.elapsed() > Duration::from_millis(PROGRESS_UPDATE_TIMEOUT_MS)
         {
-            let elapsed = start_time.elapsed().as_secs_f64();
+            let elapsed = start_time.elapsed();
             let bytes_done = (page_index * page_size) as f64;
-            let mb_per_sec = if elapsed > 0.0 {
-                bytes_done / elapsed / BYTES_PER_MB
+            let elapsed_f64 = elapsed.as_secs_f64();
+            let mb_per_sec = if elapsed_f64 > 0.0 {
+                bytes_done / elapsed_f64 / BYTES_PER_MB
             } else {
                 0.0
             };
             let percent = (page_index as f64 / total_pages as f64) * 100.0;
 
-            print!(
-                "\r[{}/{}] Progress: {:5.1}% | {:7.1} MB/s",
-                file_idx + 1,
-                total_files,
-                percent,
-                mb_per_sec
-            );
-            io::stdout().flush()?;
-            last_print_time = Instant::now();
+            if let Some(file) = app.find_file_mut(file_path) {
+                file.mark_warming(percent, mb_per_sec, elapsed);
+            }
+
+            // Draw the UI
+            if let Err(e) = terminal.draw(app) {
+                eprintln!("UI draw error: {}", e);
+            }
+
+            last_update_time = Instant::now();
         }
     }
 
-    let elapsed = start_time.elapsed().as_secs_f64();
-    let mb_per_sec = if elapsed > 0.0 {
-        file_size as f64 / elapsed / BYTES_PER_MB
+    let elapsed = start_time.elapsed();
+    let elapsed_f64 = elapsed.as_secs_f64();
+    let mb_per_sec = if elapsed_f64 > 0.0 {
+        file_size as f64 / elapsed_f64 / BYTES_PER_MB
     } else {
         0.0
     };
 
-    println!(
-        "\r[{}/{}] Complete: {:.2}s @ {:.1} MB/s (checksum: {:#x})        ",
-        file_idx + 1,
-        total_files,
-        elapsed,
-        mb_per_sec,
-        checksum
-    );
+    if let Some(file) = app.find_file_mut(file_path) {
+        file.mark_complete(mb_per_sec, elapsed);
+    }
 
     Ok(checksum)
 }
 
-/// Hold model files in memory with optional warmup and mlock
+/// Hold model files in memory with optional warmup and mlock (TUI version)
+fn hold_models_with_tui(
+    model_paths: Vec<String>,
+    no_warmup: bool,
+    page_size: usize,
+    no_mlock: bool,
+) -> Result<(), ModelHolderError> {
+    // Validate inputs
+    validate_page_size(page_size)?;
+
+    // Expand glob patterns
+    let paths = expand_globs(&model_paths)?;
+    info!("Found {} files to memory map", paths.len());
+
+    // Initialize terminal UI
+    let mut terminal = UIRenderer::new().map_err(|e| {
+        ModelHolderError::UIError(format!("Failed to initialize terminal: {}", e))
+    })?;
+
+    // Create application state
+    let mut app = AppState::new();
+
+    // Add files to state
+    for path in &paths {
+        app.add_file(path.display().to_string());
+    }
+    app.update_total_size();
+
+    // Process files and update UI in main thread
+    let mut mapped_files: Vec<MappedFile> = Vec::new();
+
+    for path in &paths {
+        // Update UI for file found
+        app.find_file_mut(&path.display().to_string())
+            .map(|f| f.stage = FileStage::Found);
+        if let Err(e) = terminal.draw(&app) {
+            eprintln!("UI draw error: {}", e);
+        }
+
+        let file = match File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("Failed to open '{}': {}", path.display(), e);
+                continue;
+            }
+        };
+
+        let metadata = match file.metadata() {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("Failed to get metadata for '{}': {}", path.display(), e);
+                continue;
+            }
+        };
+
+        let size = metadata.len();
+        app.find_file_mut(&path.display().to_string())
+            .map(|f| f.set_size(size));
+        app.update_total_size();
+        if let Err(e) = terminal.draw(&app) {
+            eprintln!("UI draw error: {}", e);
+        }
+
+        // Safety: Mmap::map is safe here because we're mapping a regular file that we just opened
+        let mmap = match unsafe { Mmap::map(&file) } {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("Failed to mmap '{}': {}", path.display(), e);
+                continue;
+            }
+        };
+
+        app.find_file_mut(&path.display().to_string())
+            .map(|f| f.mark_mapped());
+        if let Err(e) = terminal.draw(&app) {
+            eprintln!("UI draw error: {}", e);
+        }
+
+        mapped_files.push(MappedFile {
+            path: path.clone(),
+            mmap,
+            size,
+        });
+    }
+
+    // Handle warmup if not disabled
+    if !no_warmup {
+        for (file_index, mapped_file) in mapped_files.iter().enumerate() {
+            if let Err(e) = warmup_file_with_tui(
+                &mapped_file.mmap,
+                mapped_file.size,
+                page_size,
+                &mut terminal,
+                &mut app,
+                &mapped_file.path.display().to_string(),
+            ) {
+                warn!(
+                    "Warmup failed for '{}': {}",
+                    mapped_file.path.display(),
+                    e
+                );
+            }
+
+            info!(
+                "File {}/{} warmup complete",
+                file_index + 1,
+                mapped_files.len()
+            );
+        }
+
+        // Mark all files as complete
+        app.warmup_complete();
+        if let Err(e) = terminal.draw(&app) {
+            eprintln!("UI draw error: {}", e);
+        }
+    } else {
+        info!("Skipping warmup (pages will be loaded on demand)");
+    }
+
+    // Lock pages in RAM if not disabled
+    if !no_mlock {
+        let lock_start = Instant::now();
+        let mut locked_bytes: u64 = 0;
+        let mut failed_files: Vec<String> = Vec::new();
+
+        for mapped_file in &mapped_files {
+            let result = unsafe {
+                mlock(
+                    mapped_file.mmap.as_ptr() as *const libc::c_void,
+                    mapped_file.mmap.len(),
+                )
+            };
+
+            if result == 0 {
+                locked_bytes += mapped_file.size;
+                if let Some(file) = app.find_file_mut(&mapped_file.path.display().to_string()) {
+                    file.mark_locked(0.0, lock_start.elapsed());
+                }
+            } else {
+                failed_files.push(mapped_file.path.display().to_string());
+            }
+        }
+
+        // Give madvise a hint that we'll need these pages
+        for mapped_file in &mapped_files {
+            unsafe {
+                madvise(
+                    mapped_file.mmap.as_ptr() as *mut libc::c_void,
+                    mapped_file.mmap.len(),
+                    MADV_WILLNEED,
+                );
+            }
+        }
+
+        let lock_elapsed = lock_start.elapsed();
+        if failed_files.is_empty() {
+            info!(
+                "  Locked {:.2} GB in RAM in {:.2}s",
+                locked_bytes as f64 / BYTES_PER_GB,
+                lock_elapsed.as_secs_f64()
+            );
+            app.all_locked();
+            if let Err(e) = terminal.draw(&app) {
+                eprintln!("UI draw error: {}", e);
+            }
+        } else {
+            warn!(
+                "  Failed to lock {} file(s) in RAM (may require ulimit -l or root)",
+                failed_files.len()
+            );
+        }
+    } else {
+        info!("Skipping mlock (pages may be swapped out)");
+    }
+
+    // Wait a moment for final display
+    thread::sleep(Duration::from_millis(500));
+
+    // Cleanup terminal
+    if let Err(e) = terminal.cleanup() {
+        warn!("Failed to cleanup terminal: {}", e);
+    }
+
+    Ok(())
+}
+
+/// Hold model files in memory with optional warmup and mlock (legacy version with println)
 fn hold_models(
     model_paths: Vec<String>,
     no_warmup: bool,
@@ -542,7 +723,65 @@ fn hold_models(
     Ok(())
 }
 
-// === Check command implementation ===
+/// Warm up memory-mapped file by reading all pages
+fn warmup_file(
+    mmap: &Mmap,
+    file_size: u64,
+    page_size: usize,
+    file_idx: usize,
+    total_files: usize,
+) -> io::Result<u64> {
+    let total_pages = (file_size as usize + page_size - 1) / page_size;
+    let mut checksum: u64 = 0;
+    let start_time = Instant::now();
+    let mut last_print_time = Instant::now();
+
+    for (page_index, offset) in (0..mmap.len()).step_by(page_size).enumerate() {
+        // Safety: mmap.len() ensures we don't read beyond mapped region
+        checksum = checksum.wrapping_add(mmap[offset] as u64);
+
+        if page_index % PROGRESS_UPDATE_INTERVAL == 0
+            || last_print_time.elapsed() > Duration::from_millis(PROGRESS_UPDATE_TIMEOUT_MS)
+        {
+            let elapsed = start_time.elapsed().as_secs_f64();
+            let bytes_done = (page_index * page_size) as f64;
+            let mb_per_sec = if elapsed > 0.0 {
+                bytes_done / elapsed / BYTES_PER_MB
+            } else {
+                0.0
+            };
+            let percent = (page_index as f64 / total_pages as f64) * 100.0;
+
+            print!(
+                "\r[{}/{}] Progress: {:5.1}% | {:7.1} MB/s",
+                file_idx + 1,
+                total_files,
+                percent,
+                mb_per_sec
+            );
+            io::stdout().flush()?;
+            last_print_time = Instant::now();
+        }
+    }
+
+    let elapsed = start_time.elapsed().as_secs_f64();
+    let mb_per_sec = if elapsed > 0.0 {
+        file_size as f64 / elapsed / BYTES_PER_MB
+    } else {
+        0.0
+    };
+
+    println!(
+        "\r[{}/{}] Complete: {:.2}s @ {:.1} MB/s (checksum: {:#x})        ",
+        file_idx + 1,
+        total_files,
+        elapsed,
+        mb_per_sec,
+        checksum
+    );
+
+    Ok(checksum)
+}
 
 /// Find processes by name, searching /proc for matching process names
 fn find_processes_by_name(names: &[&str]) -> Result<Vec<u32>, ModelHolderError> {
@@ -695,7 +934,7 @@ fn aggregate_maps(maps: &[MappedRegion]) -> Vec<AggregatedFile> {
 }
 
 /// Format byte count as human-readable string
-fn format_size(bytes: u64) -> String {
+fn format_size_bytes(bytes: u64) -> String {
     if bytes >= BYTES_PER_GB as u64 {
         format!("{:.2} GB", bytes as f64 / BYTES_PER_GB)
     } else if bytes >= BYTES_PER_MB as u64 {
@@ -778,7 +1017,7 @@ fn display_process_info(
                             println!(
                                 "    {} (mapped: {}, inode: {}:{})",
                                 model_file.path,
-                                format_size(model_file.mapped_size),
+                                format_size_bytes(model_file.mapped_size),
                                 model_file.identity.dev,
                                 model_file.identity.inode
                             );
@@ -855,8 +1094,8 @@ fn display_model_comparison(
             println!("       inode {}:{}", file_identity.dev, file_identity.inode);
             println!(
                 "       holder: {} | server: {}",
-                format_size(*holder_size),
-                format_size(*llama_size)
+                format_size_bytes(*holder_size),
+                format_size_bytes(*llama_size)
             );
             if has_mismatch {
                 println!(
@@ -947,7 +1186,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let result = match args.command {
-        Some(Commands::Hold(hold_args)) => hold_models(
+        Some(Commands::Hold(hold_args)) => hold_models_with_tui(
             hold_args.model_paths,
             hold_args.no_warmup,
             hold_args.page_size,
@@ -960,7 +1199,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         None => {
             // Legacy mode: if model_paths provided, run hold
             if !args.model_paths.is_empty() {
-                hold_models(
+                hold_models_with_tui(
                     args.model_paths,
                     args.no_warmup,
                     args.page_size,
@@ -1020,7 +1259,6 @@ mod tests {
 
     #[test]
     fn test_file_identity_hash_same_file_different_paths() {
-        // Same file (same dev:inode) should have same hash regardless of path
         let id1 = FileIdentity {
             dev: "00:3c".to_string(),
             inode: 36281902,
@@ -1033,7 +1271,6 @@ mod tests {
         let mut set: HashSet<FileIdentity> = HashSet::new();
         set.insert(id1.clone());
 
-        // Should find id2 in the set since it's the same file
         assert!(set.contains(&id2));
     }
 
@@ -1051,7 +1288,6 @@ mod tests {
 
     #[test]
     fn test_aggregate_maps_multiple_regions_same_file() {
-        // Same file mapped in multiple regions (common with mmap)
         let regions = vec![
             make_region("/path/to/model.gguf", "00:3c", 12345, 0, 1000),
             make_region("/path/to/model.gguf", "00:3c", 12345, 1000, 3000),
@@ -1061,12 +1297,11 @@ mod tests {
         let aggregated = aggregate_maps(&regions);
 
         assert_eq!(aggregated.len(), 1);
-        assert_eq!(aggregated[0].mapped_size, 1000 + 2000 + 2000); // 5000 total
+        assert_eq!(aggregated[0].mapped_size, 1000 + 2000 + 2000);
     }
 
     #[test]
     fn test_aggregate_maps_same_file_different_paths() {
-        // Same file (same inode) but different paths (e.g., bind mount)
         let regions = vec![
             make_region("/mnt/models/model.gguf", "00:3c", 12345, 0, 1000),
             make_region("/container/models/model.gguf", "00:3c", 12345, 1000, 2000),
@@ -1074,7 +1309,6 @@ mod tests {
 
         let aggregated = aggregate_maps(&regions);
 
-        // Should aggregate to ONE file since same inode
         assert_eq!(aggregated.len(), 1);
         assert_eq!(aggregated[0].mapped_size, 2000);
         assert_eq!(aggregated[0].identity.inode, 12345);
@@ -1097,7 +1331,7 @@ mod tests {
         let extensions: HashSet<&str> = ["gguf", "ggml", "bin"].into_iter().collect();
 
         assert!(is_model_file("/path/to/model.gguf", &extensions));
-        assert!(is_model_file("/path/to/model.GGUF", &extensions)); // case insensitive
+        assert!(is_model_file("/path/to/model.GGUF", &extensions));
         assert!(is_model_file("/path/to/model.ggml", &extensions));
         assert!(is_model_file("/path/to/model.bin", &extensions));
 
@@ -1106,13 +1340,13 @@ mod tests {
     }
 
     #[test]
-    fn test_format_size() {
-        assert_eq!(format_size(500), "500 B");
-        assert_eq!(format_size(1024), "1.00 KB");
-        assert_eq!(format_size(1536), "1.50 KB");
-        assert_eq!(format_size(1_048_576), "1.00 MB");
-        assert_eq!(format_size(1_073_741_824), "1.00 GB");
-        assert_eq!(format_size(10_737_418_240), "10.00 GB");
+    fn test_format_size_bytes() {
+        assert_eq!(format_size_bytes(500), "500 B");
+        assert_eq!(format_size_bytes(1024), "1.00 KB");
+        assert_eq!(format_size_bytes(1536), "1.50 KB");
+        assert_eq!(format_size_bytes(1_048_576), "1.00 MB");
+        assert_eq!(format_size_bytes(1_073_741_824), "1.00 GB");
+        assert_eq!(format_size_bytes(10_737_418_240), "10.00 GB");
     }
 
     #[test]
@@ -1124,7 +1358,6 @@ mod tests {
 
     #[test]
     fn test_comparison_same_file_different_paths() {
-        // Simulate holder and server having same file via different paths
         let holder_id = FileIdentity {
             dev: "00:3c".to_string(),
             inode: 36281902,
@@ -1148,7 +1381,6 @@ mod tests {
 
         let shared: Vec<_> = holder_ids.intersection(&server_ids).collect();
 
-        // Should find 1 shared file even though paths differ
         assert_eq!(shared.len(), 1);
     }
 
@@ -1159,21 +1391,20 @@ mod tests {
             inode: 36281902,
         };
 
-        let holder_size: u64 = 9_000_000_000; // 9 GB
-        let server_size: u64 = 440_000_000; // 440 MB
+        let holder_size: u64 = 9_000_000_000;
+        let server_size: u64 = 440_000_000;
 
         let size_ratio = server_size as f64 / holder_size as f64;
         let has_mismatch = size_ratio < 0.9 || size_ratio > 1.1;
 
-        // 440MB / 9GB = ~4.9%, which is < 90%, so should be flagged
         assert!(has_mismatch);
-        assert!(size_ratio < 0.1); // Actually < 10%
+        assert!(size_ratio < 0.1);
     }
 
     #[test]
     fn test_comparison_no_mismatch_when_sizes_close() {
         let holder_size: u64 = 9_000_000_000;
-        let server_size: u64 = 8_800_000_000; // 97.8%
+        let server_size: u64 = 8_800_000_000;
 
         let size_ratio = server_size as f64 / holder_size as f64;
         let has_mismatch = size_ratio < 0.9 || size_ratio > 1.1;
