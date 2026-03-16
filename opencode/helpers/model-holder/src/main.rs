@@ -6,8 +6,8 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 use thiserror::Error;
@@ -93,6 +93,10 @@ struct HoldArgs {
     /// Don't lock pages in RAM (allow kernel to swap them out)
     #[arg(long, default_value_t = false)]
     no_mlock: bool,
+
+    /// Number of files to mlock in parallel
+    #[arg(long, default_value_t = 4)]
+    lock_threads: usize,
 }
 
 #[derive(Parser, Debug)]
@@ -118,6 +122,10 @@ struct Args {
     /// Don't lock pages in RAM (allow kernel to swap them out)
     #[arg(long, default_value_t = false)]
     no_mlock: bool,
+
+    /// Number of files to mlock in parallel
+    #[arg(long, default_value_t = 4)]
+    lock_threads: usize,
 }
 
 #[derive(Subcommand, Debug)]
@@ -282,13 +290,12 @@ fn expand_globs(patterns: &[String]) -> Result<Vec<PathBuf>, ModelHolderError> {
     }
 }
 
-/// Warm up memory-mapped file by reading all pages with progress updates
+/// Warm up memory-mapped file by reading all pages, updating shared state for the UI thread.
 fn warmup_file_with_tui(
     mmap: &Mmap,
     file_size: u64,
     page_size: usize,
-    terminal: &mut UIRenderer,
-    app: &mut AppState,
+    state: &Arc<Mutex<AppState>>,
     file_path: &str,
 ) -> io::Result<u64> {
     let total_pages = (file_size as usize + page_size - 1) / page_size;
@@ -298,9 +305,9 @@ fn warmup_file_with_tui(
 
     for (page_index, offset) in (0..mmap.len()).step_by(page_size).enumerate() {
         // Safety: mmap.len() ensures we don't read beyond mapped region
+        // NOTE: page read happens outside any lock so the UI thread can draw freely
         checksum = checksum.wrapping_add(mmap[offset] as u64);
 
-        // Send progress updates
         if page_index % PROGRESS_UPDATE_INTERVAL == 0
             || last_update_time.elapsed() > Duration::from_millis(PROGRESS_UPDATE_TIMEOUT_MS)
         {
@@ -314,13 +321,10 @@ fn warmup_file_with_tui(
             };
             let percent = (page_index as f64 / total_pages as f64) * 100.0;
 
-            if let Some(file) = app.find_file_mut(file_path) {
-                file.mark_warming(percent, mb_per_sec, elapsed);
-            }
-
-            // Draw the UI
-            if let Err(e) = terminal.draw(app) {
-                eprintln!("UI draw error: {}", e);
+            if let Ok(mut app) = state.lock() {
+                if let Some(file) = app.find_file_mut(file_path) {
+                    file.mark_warming(percent, mb_per_sec, elapsed);
+                }
             }
 
             last_update_time = Instant::now();
@@ -335,8 +339,10 @@ fn warmup_file_with_tui(
         0.0
     };
 
-    if let Some(file) = app.find_file_mut(file_path) {
-        file.mark_complete(mb_per_sec, elapsed);
+    if let Ok(mut app) = state.lock() {
+        if let Some(file) = app.find_file_mut(file_path) {
+            file.mark_complete(mb_per_sec, elapsed);
+        }
     }
 
     Ok(checksum)
@@ -348,42 +354,47 @@ fn hold_models_with_tui(
     no_warmup: bool,
     page_size: usize,
     no_mlock: bool,
+    lock_threads: usize,
 ) -> Result<(), ModelHolderError> {
-    // Validate inputs
     validate_page_size(page_size)?;
 
-    // Expand glob patterns
     let paths = expand_globs(&model_paths)?;
 
-    // Initialize terminal UI
-    let mut terminal = UIRenderer::new().map_err(|e| {
+    let terminal = UIRenderer::new().map_err(|e| {
         ModelHolderError::UIError(format!("Failed to initialize terminal: {}", e))
     })?;
 
-    // Create application state
-    let mut app = AppState::new();
+    let state = Arc::new(Mutex::new(AppState::new()));
+    let should_exit = Arc::new(AtomicBool::new(false));
 
-    // Add files to state
-    for path in &paths {
-        app.add_file(path.display().to_string());
+    {
+        let mut app = state.lock().unwrap();
+        for path in &paths {
+            app.add_file(path.display().to_string());
+        }
+        app.update_total_size();
     }
-    app.update_total_size();
 
-    // Process files and update UI in main thread
+    // Spawn UI thread — it owns terminal and drives drawing + input
+    let ui_state = Arc::clone(&state);
+    let ui_exit = Arc::clone(&should_exit);
+    let ui_handle = thread::spawn(move || {
+        terminal.run(ui_state, ui_exit);
+    });
+
     let mut mapped_files: Vec<MappedFile> = Vec::new();
 
     for path in &paths {
-        // Update UI for file found
-        app.find_file_mut(&path.display().to_string())
-            .map(|f| f.stage = FileStage::Found);
-        if let Err(e) = terminal.draw(&app) {
-            eprintln!("UI draw error: {}", e);
+        {
+            let mut app = state.lock().unwrap();
+            app.find_file_mut(&path.display().to_string())
+                .map(|f| f.stage = FileStage::Found);
         }
 
         let file = match File::open(path) {
             Ok(f) => f,
             Err(e) => {
-                println!("Warning: Failed to open '{}': {}", path.display(), e);
+                debug!("Warning: Failed to open '{}': {}", path.display(), e);
                 continue;
             }
         };
@@ -391,32 +402,32 @@ fn hold_models_with_tui(
         let metadata = match file.metadata() {
             Ok(m) => m,
             Err(e) => {
-                println!("Warning: Failed to get metadata for '{}': {}", path.display(), e);
+                debug!("Warning: Failed to get metadata for '{}': {}", path.display(), e);
                 continue;
             }
         };
 
         let size = metadata.len();
-        app.find_file_mut(&path.display().to_string())
-            .map(|f| f.set_size(size));
-        app.update_total_size();
-        if let Err(e) = terminal.draw(&app) {
-            eprintln!("UI draw error: {}", e);
+        {
+            let mut app = state.lock().unwrap();
+            app.find_file_mut(&path.display().to_string())
+                .map(|f| f.set_size(size));
+            app.update_total_size();
         }
 
         // Safety: Mmap::map is safe here because we're mapping a regular file that we just opened
         let mmap = match unsafe { Mmap::map(&file) } {
             Ok(m) => m,
             Err(e) => {
-                println!("Warning: Failed to mmap '{}': {}", path.display(), e);
+                debug!("Warning: Failed to mmap '{}': {}", path.display(), e);
                 continue;
             }
         };
 
-        app.find_file_mut(&path.display().to_string())
-            .map(|f| f.mark_mapped());
-        if let Err(e) = terminal.draw(&app) {
-            eprintln!("UI draw error: {}", e);
+        {
+            let mut app = state.lock().unwrap();
+            app.find_file_mut(&path.display().to_string())
+                .map(|f| f.mark_mapped());
         }
 
         mapped_files.push(MappedFile {
@@ -426,58 +437,67 @@ fn hold_models_with_tui(
         });
     }
 
-    // Handle warmup if not disabled
     if !no_warmup {
-        for (_file_index, mapped_file) in mapped_files.iter().enumerate() {
-            if let Err(_e) = warmup_file_with_tui(
+        for mapped_file in mapped_files.iter() {
+            let _ = warmup_file_with_tui(
                 &mapped_file.mmap,
                 mapped_file.size,
                 page_size,
-                &mut terminal,
-                &mut app,
+                &state,
                 &mapped_file.path.display().to_string(),
-            ) {
-                // Silent - TUI status bar shows completion
-                // warn!("Warmup failed for '{}': {}", mapped_file.path.display(), e);
-            }
-
-            // Silent progress - info logged to TUI only
+            );
         }
 
-        // Mark all files as complete
-        app.warmup_complete();
-        if let Err(e) = terminal.draw(&app) {
-            eprintln!("UI draw error: {}", e);
-        }
-    } else {
-        // Silent - info shown in TUI status
+        state.lock().unwrap().warmup_complete();
     }
 
-    // Lock pages in RAM if not disabled
     if !no_mlock {
-        let lock_start = Instant::now();
-        let mut _locked_bytes: u64 = 0;  // Used for potential future stats
-        let mut failed_files: Vec<String> = Vec::new();
+        let concurrency = lock_threads.max(1);
+        let _locked_bytes = AtomicU64::new(0);
+        let failed_files: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-        for mapped_file in &mapped_files {
-            let result = unsafe {
-                mlock(
-                    mapped_file.mmap.as_ptr() as *const libc::c_void,
-                    mapped_file.mmap.len(),
-                )
-            };
-
-            if result == 0 {
-                _locked_bytes += mapped_file.size;
-                if let Some(file) = app.find_file_mut(&mapped_file.path.display().to_string()) {
-                    file.mark_locked(0.0, lock_start.elapsed());
+        for chunk in mapped_files.chunks(concurrency) {
+            // Mark all files in this chunk as Locking before spawning threads
+            for mf in chunk {
+                let fp = mf.path.display().to_string();
+                if let Ok(mut app) = state.lock() {
+                    if let Some(f) = app.find_file_mut(&fp) {
+                        f.mark_locking(Duration::new(0, 0));
+                    }
                 }
-            } else {
-                failed_files.push(mapped_file.path.display().to_string());
             }
+
+            std::thread::scope(|s| {
+                for mf in chunk {
+                    let state = &state;
+                    let failed_files = &failed_files;
+                    let _locked_bytes = &_locked_bytes;
+                    s.spawn(move || {
+                        let file_path = mf.path.display().to_string();
+                        let start = Instant::now();
+                        let result = unsafe {
+                            mlock(
+                                mf.mmap.as_ptr() as *const libc::c_void,
+                                mf.mmap.len(),
+                            )
+                        };
+                        if result == 0 {
+                            _locked_bytes.fetch_add(mf.size, Ordering::Relaxed);
+                            if let Ok(mut app) = state.lock() {
+                                if let Some(f) = app.find_file_mut(&file_path) {
+                                    let speed = f.current_speed();
+                                    f.mark_locked(speed, start.elapsed());
+                                }
+                            }
+                        } else {
+                            failed_files.lock().unwrap().push(file_path);
+                        }
+                    });
+                }
+            });
         }
 
-        // Give madvise a hint that we'll need these pages
+        // madvise pass (sequential is fine here)
         for mapped_file in &mapped_files {
             unsafe {
                 madvise(
@@ -488,28 +508,16 @@ fn hold_models_with_tui(
             }
         }
 
-        let _lock_elapsed = lock_start.elapsed();  // Used for potential future stats
-        if failed_files.is_empty() {
-            // Silent - info shown in TUI status bar
-            app.all_locked();
-            if let Err(e) = terminal.draw(&app) {
-                eprintln!("UI draw error: {}", e);
-            }
-        } else {
-            // Silent - TUI status bar shows lock status
-            // warn!("  Failed to lock {} file(s) in RAM (may require ulimit -l or root)", failed_files.len());
+        let failed = failed_files.into_inner().unwrap();
+        if failed.is_empty() {
+            state.lock().unwrap().all_locked();
+        } else if let Ok(mut app) = state.lock() {
+            app.failed_lock_files = failed;
         }
-    } else {
-        // Silent - info shown in TUI status bar
     }
 
-    // Keep TUI open until user presses ESC or Ctrl+C
-    terminal.wait_for_exit(&app);
-
-    // Cleanup terminal
-    if let Err(e) = terminal.cleanup() {
-        warn!("Failed to cleanup terminal: {}", e);
-    }
+    // Block until user exits (q/ESC sets should_exit in the UI thread)
+    ui_handle.join().ok();
 
     Ok(())
 }
@@ -1172,6 +1180,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hold_args.no_warmup,
             hold_args.page_size,
             hold_args.no_mlock,
+            hold_args.lock_threads,
         )
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) }),
         Some(Commands::Check { extensions }) => {
@@ -1185,6 +1194,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     args.no_warmup,
                     args.page_size,
                     args.no_mlock,
+                    args.lock_threads,
                 )
                 .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
             } else {

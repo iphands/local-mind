@@ -21,6 +21,11 @@ pub enum FileStage {
         speed: f64,         // MB/s average
         elapsed: Duration,
     },
+    /// File is being mlocked (blocking syscall in progress)
+    Locking {
+        speed: f64,         // preserved from Complete
+        elapsed: Duration,
+    },
     /// File is locked in RAM
     Locked {
         size_mb: f64,
@@ -30,7 +35,6 @@ pub enum FileStage {
 }
 
 impl FileStage {
-    /// Get the elapsed time from the stage
     #[allow(dead_code)]
     pub fn elapsed(&self) -> Duration {
         match self {
@@ -38,6 +42,7 @@ impl FileStage {
             FileStage::Mapped => Duration::new(0, 0),
             FileStage::Warming { elapsed, .. } => *elapsed,
             FileStage::Complete { elapsed, .. } => *elapsed,
+            FileStage::Locking { elapsed, .. } => *elapsed,
             FileStage::Locked { elapsed, .. } => *elapsed,
         }
     }
@@ -46,22 +51,9 @@ impl FileStage {
 /// Sort criteria for file list
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortBy {
-    /// Default order (order processed/found)
     Default,
-    /// Sort by size (descending)
     Size,
-    /// Sort by speed (MB/s, descending)
     Speed,
-}
-
-/// Filter criteria for file list
-#[derive(Debug, Clone)]
-pub enum FilterBy {
-    /// Show all files
-    None,
-    /// Filter by name pattern (glob)
-    #[allow(dead_code)]
-    Name(String),
 }
 
 /// Status of a file being processed
@@ -73,7 +65,6 @@ pub struct FileStatus {
     pub size_mb: f64,
     pub stage: FileStage,
     pub warmup_complete: bool,
-    /// Index when files were processed (for default sort)
     pub process_index: usize,
 }
 
@@ -85,14 +76,11 @@ impl FileStatus {
             .unwrap_or("unknown")
             .to_string();
 
-        let size_bytes = 0;
-        let size_mb = 0.0;
-
         Self {
             path,
             filename,
-            size_bytes,
-            size_mb,
+            size_bytes: 0,
+            size_mb: 0.0,
             stage: FileStage::Found,
             warmup_complete: false,
             process_index,
@@ -121,6 +109,11 @@ impl FileStatus {
         self.warmup_complete = true;
     }
 
+    pub fn mark_locking(&mut self, elapsed: Duration) {
+        let speed = self.current_speed();
+        self.stage = FileStage::Locking { speed, elapsed };
+    }
+
     pub fn mark_locked(&mut self, speed: f64, elapsed: Duration) {
         self.stage = FileStage::Locked {
             size_mb: self.size_mb,
@@ -129,17 +122,15 @@ impl FileStatus {
         };
     }
 
-    #[allow(dead_code)]
     pub fn is_complete(&self) -> bool {
-        matches!(self.stage, FileStage::Complete { .. } | FileStage::Locked { .. })
+        matches!(self.stage, FileStage::Complete { .. } | FileStage::Locking { .. } | FileStage::Locked { .. })
     }
 
-    /// Get current MB/s (from stage or 0)
-    #[allow(dead_code)]
     pub fn current_speed(&self) -> f64 {
         match &self.stage {
             FileStage::Warming { speed, .. } => *speed,
             FileStage::Complete { speed, .. } => *speed,
+            FileStage::Locking { speed, .. } => *speed,
             FileStage::Locked { speed, .. } => *speed,
             _ => 0.0,
         }
@@ -154,43 +145,18 @@ pub struct AppState {
     pub warmup_complete: bool,
     pub all_locked: bool,
     pub sort_by: SortBy,
-    pub filter: FilterBy,
     pub scroll_offset: usize,
-    #[allow(dead_code)]
-    pub selected_index: Option<usize>,
+    /// Text typed in filter mode
+    pub filter_input: String,
+    /// Whether we're currently accepting filter keystrokes
+    pub filter_mode: bool,
+    /// Files that could not be mlocked (e.g. ulimit too low)
+    pub failed_lock_files: Vec<String>,
+    /// Whether the lock-failure help overlay is visible
+    pub show_help: bool,
 }
 
 impl AppState {
-    #[allow(dead_code)]
-    pub fn scroll_down(&mut self) {
-        let max_offset = self.visible_file_count().saturating_sub(1);
-        if self.scroll_offset < max_offset {
-            self.scroll_offset += 1;
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn scroll_up(&mut self) {
-        if self.scroll_offset > 0 {
-            self.scroll_offset -= 1;
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn scroll_page_down(&mut self) {
-        // Scroll down by approximately 20 lines
-        self.scroll_offset += 20;
-        let max_offset = self.visible_file_count().saturating_sub(1);
-        if self.scroll_offset > max_offset {
-            self.scroll_offset = max_offset;
-        }
-    }
-
-    #[allow(dead_code)]
-    pub fn scroll_page_up(&mut self) {
-        self.scroll_offset = self.scroll_offset.saturating_sub(20);
-    }
-
     pub fn new() -> Self {
         Self {
             files: Vec::new(),
@@ -198,9 +164,11 @@ impl AppState {
             warmup_complete: false,
             all_locked: false,
             sort_by: SortBy::Default,
-            filter: FilterBy::None,
             scroll_offset: 0,
-            selected_index: None,
+            filter_input: String::new(),
+            filter_mode: false,
+            failed_lock_files: Vec::new(),
+            show_help: false,
         }
     }
 
@@ -214,12 +182,35 @@ impl AppState {
         self.total_size_bytes as f64 / (BYTES_PER_MB * 1024.0)
     }
 
+    pub fn scroll_down(&mut self) {
+        let max_offset = self.visible_file_count().saturating_sub(1);
+        if self.scroll_offset < max_offset {
+            self.scroll_offset += 1;
+        }
+    }
+
+    pub fn scroll_up(&mut self) {
+        if self.scroll_offset > 0 {
+            self.scroll_offset -= 1;
+        }
+    }
+
+    pub fn scroll_page_down(&mut self, page: usize) {
+        self.scroll_offset += page;
+        let max_offset = self.visible_file_count().saturating_sub(1);
+        if self.scroll_offset > max_offset {
+            self.scroll_offset = max_offset;
+        }
+    }
+
+    pub fn scroll_page_up(&mut self, page: usize) {
+        self.scroll_offset = self.scroll_offset.saturating_sub(page);
+    }
+
     pub fn add_file(&mut self, path: String) {
         let process_index = self.files.len();
         let mut file = FileStatus::new(path, process_index);
-        // For display purposes, we'll set a placeholder size
-        // The actual size will be set when we open the file
-        file.set_size(100); // placeholder
+        file.set_size(100); // placeholder until actual size known
         self.files.push(file);
     }
 
@@ -239,38 +230,29 @@ impl AppState {
         self.all_locked = true;
     }
 
-    /// Get filtered and sorted file list
+    /// Returns filtered and sorted files based on current state
     pub fn filtered_files(&self) -> Vec<&FileStatus> {
+        let query = self.filter_input.to_lowercase();
         let mut files: Vec<&FileStatus> = self.files.iter().filter(|f| {
-            match &self.filter {
-                FilterBy::None => true,
-                FilterBy::Name(pattern) => {
-                    // Simple glob matching - check if filename contains pattern
-                    f.filename.contains(pattern) || f.path.contains(pattern)
-                }
+            if query.is_empty() {
+                return true;
             }
+            f.filename.to_lowercase().contains(&query)
+                || f.path.to_lowercase().contains(&query)
         }).collect();
 
-        // Sort based on criteria
         match self.sort_by {
-            SortBy::Default => {
-                // Sort by process index
-                files.sort_by_key(|f| f.process_index);
-            }
-            SortBy::Size => {
-                // Sort by size descending
-                files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes));
-            }
-            SortBy::Speed => {
-                // Sort by current speed descending
-                files.sort_by(|a, b| b.current_speed().partial_cmp(&a.current_speed()).unwrap_or(std::cmp::Ordering::Equal));
-            }
+            SortBy::Default => files.sort_by_key(|f| f.process_index),
+            SortBy::Size => files.sort_by(|a, b| b.size_bytes.cmp(&a.size_bytes)),
+            SortBy::Speed => files.sort_by(|a, b| {
+                b.current_speed().partial_cmp(&a.current_speed())
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            }),
         }
 
         files
     }
 
-    /// Get number of visible files
     pub fn visible_file_count(&self) -> usize {
         self.filtered_files().len()
     }
