@@ -13,7 +13,8 @@ use std::time::Instant;
 use super::server::ProxyState;
 use super::streaming::handle_streaming_response;
 use super::{synthesize_anthropic_streaming_response, synthesize_streaming_response};
-use crate::api::{AnthropicMessage, ChatCompletionResponse};
+use crate::api::{AnthropicMessage, ChatCompletionRequest, ChatCompletionResponse};
+use crate::augment::{extract_user_content_from_json, inject_augmentation};
 use crate::backends::BackendNode;
 use crate::config::StatsFormat;
 use crate::proxy::fetch_context_total;
@@ -124,6 +125,47 @@ impl ProxyHandler {
         ct_lower.contains("application/json") || ct_lower.contains("application/vnd.") && ct_lower.contains("+json")
     }
 
+    /// Inject augmentation into Anthropic messages
+    fn inject_into_anthropic(request: &mut crate::api::AnthropicMessageRequest, request_prompt: &str, augmentation: &str) {
+        if augmentation.is_empty() {
+            return;
+        }
+
+        let suffix = format!("\n\n{}\n\n{}", request_prompt, augmentation);
+
+        // Find the last user message
+        let mut last_user_index = None;
+        for (i, msg) in request.messages.iter().enumerate() {
+            if msg.role == "user" {
+                last_user_index = Some(i);
+            }
+        }
+
+        if let Some(idx) = last_user_index {
+            // Add augmentation as a new text block at the end
+            request.messages[idx].content.push(crate::api::AnthropicContentBlock::Text {
+                text: suffix,
+            });
+
+            tracing::debug!(
+                injected_into = idx,
+                augmentation_length = augmentation.len(),
+                "Injected augmentation into last Anthropic user message"
+            );
+        } else if !request.messages.is_empty() {
+            // Fallback: prepend to first message
+            request.messages[0].content.insert(0, crate::api::AnthropicContentBlock::Text {
+                text: suffix,
+            });
+
+            tracing::debug!(
+                injected_into = 0,
+                augmentation_length = augmentation.len(),
+                "Injected augmentation into first Anthropic message (no user message found)"
+            );
+        }
+    }
+
     /// Handle an incoming request
     pub async fn handle(&self, req: Request<Body>) -> Response {
         let start = Instant::now();
@@ -212,6 +254,96 @@ impl ProxyHandler {
             .and_then(|s| s.as_bool())
             .unwrap_or(false);
 
+        // Check if augment-backend is enabled and extract user content
+        let augmentation = if let Some(ref augment_backend) = self.state.augment_backend {
+            if let Some(ref req_json) = request_json {
+                // Detect API format
+                let is_anthropic_format = is_anthropic_api;
+
+                // Extract user content directly from raw JSON (works for both OpenAI and Anthropic)
+                let user_content = extract_user_content_from_json(req_json);
+                tracing::debug!(
+                    is_anthropic = is_anthropic_format,
+                    content_len = user_content.len(),
+                    "Extracted user content for augmentation"
+                );
+
+                // Only call augment-backend if we have user content
+                if !user_content.is_empty() {
+                    tracing::info!(content_length = user_content.len(), "Calling augment-backend");
+                    match augment_backend.get_augmentation(&user_content).await {
+                        Ok(aug) if !aug.is_empty() => {
+                            tracing::info!(augmentation_length = aug.len(), "Received augmentation");
+                            let request_prompt = augment_backend.load_request_prompt()
+                                .unwrap_or_else(|e| {
+                                    tracing::warn!(error = %e, "Failed to load request_prompt, using empty string");
+                                    String::new()
+                                });
+                            Some((aug, request_prompt, user_content))
+                        }
+                        Ok(_) => None,
+                        Err(e) => {
+                            tracing::error!(error = %e, "Augment backend failed, returning error");
+                            return Json(serde_json::json!({
+                                "error": {
+                                    "type": "augment_backend_error",
+                                    "message": format!("Augment backend error: {}", e)
+                                }
+                            })).into_response();
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Inject augmentation into request if we got one
+        let enriched_body_bytes = if let Some((ref aug, ref request_prompt, _)) = augmentation {
+            if let Some(req_json) = request_json.clone() {
+                let is_anthropic_format = is_anthropic_api;
+
+                if is_anthropic_format {
+                    // Inject into Anthropic format
+                    if let Ok(mut anthropic_req) = serde_json::from_value::<crate::api::AnthropicMessageRequest>(req_json.clone()) {
+                        Self::inject_into_anthropic(&mut anthropic_req, request_prompt, aug);
+                        serde_json::to_vec(&anthropic_req).unwrap_or(body_bytes.to_vec()).into()
+                    } else {
+                        body_bytes.clone()
+                    }
+                } else {
+                    // Inject into OpenAI format
+                    if let Ok(openai_req) = serde_json::from_value::<ChatCompletionRequest>(req_json.clone()) {
+                        match inject_augmentation(openai_req, request_prompt, aug) {
+                            Ok(enriched) => serde_json::to_vec(&enriched).unwrap_or(body_bytes.to_vec()).into(),
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to inject augmentation");
+                                body_bytes.clone()
+                            }
+                        }
+                    } else {
+                        body_bytes.clone()
+                    }
+                }
+            } else {
+                body_bytes.clone()
+            }
+        } else {
+            body_bytes.clone()
+        };
+
+        // Log augmented request text if flag is set and augmentation was applied
+        if self.state.log_augmented_request_text {
+            if let Some((ref aug, ref request_prompt, ref original_content)) = augmentation {
+                let concatenated = format!("{}\n\n{}\n\n{}", original_content, request_prompt, aug);
+                tracing::info!("Augmented user message text:\n{}", concatenated);
+            }
+        }
+
         // Log request (unless hide_requests is set)
         if !self.state.hide_requests {
             if let Some(ref req_json) = request_json {
@@ -255,31 +387,48 @@ impl ProxyHandler {
         }
 
         // ALWAYS force stream: false for backend request
-        let body_bytes = if let Some(mut json) = request_json.clone() {
-            json["stream"] = serde_json::Value::Bool(false);
-            // Strip stream_options - backend doesn't need it with stream:false
-            if let Some(obj) = json.as_object_mut() {
-                if obj.remove("stream_options").is_some() {
-                    tracing::debug!("Stripped stream_options from non-streaming backend request");
+        // Use enriched_body_bytes if augmentation was injected, otherwise use original body
+        let final_body_bytes = if enriched_body_bytes != body_bytes.clone() {
+            // Augmentation was injected, but we still need to set stream:false
+            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&enriched_body_bytes) {
+                json["stream"] = serde_json::Value::Bool(false);
+                if let Some(obj) = json.as_object_mut() {
+                    if obj.remove("stream_options").is_some() {
+                        tracing::debug!("Stripped stream_options from enriched backend request");
+                    }
                 }
+                serde_json::to_vec(&json).unwrap_or_else(|_| enriched_body_bytes.to_vec()).into()
+            } else {
+                enriched_body_bytes
             }
-            // Override model if configured
-            if let Some(ref model) = backend.node.model {
-                json["model"] = serde_json::Value::String(model.clone());
-            }
-            // Override temperature if configured on this node
-            if let Some(temp) = backend.node.temperature {
-                json["temperature"] = serde_json::Value::from(temp);
-            }
-            if client_wants_streaming {
-                tracing::debug!("Forcing non-streaming backend request (will synthesize streaming response)");
-            }
-            serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()).into()
         } else {
-            body_bytes
+            // No augmentation, use original logic
+            if let Some(mut json) = request_json.clone() {
+                json["stream"] = serde_json::Value::Bool(false);
+                // Strip stream_options - backend doesn't need it with stream:false
+                if let Some(obj) = json.as_object_mut() {
+                    if obj.remove("stream_options").is_some() {
+                        tracing::debug!("Stripped stream_options from non-streaming backend request");
+                    }
+                }
+                // Override model if configured
+                if let Some(ref model) = backend.node.model {
+                    json["model"] = serde_json::Value::String(model.clone());
+                }
+                // Override temperature if configured on this node
+                if let Some(temp) = backend.node.temperature {
+                    json["temperature"] = serde_json::Value::from(temp);
+                }
+                if client_wants_streaming {
+                    tracing::debug!("Forcing non-streaming backend request (will synthesize streaming response)");
+                }
+                serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()).into()
+            } else {
+                body_bytes
+            }
         };
 
-        backend_req = backend_req.body(body_bytes.clone());
+        backend_req = backend_req.body(final_body_bytes);
 
         let backend_response = match backend_req.send().await {
             Ok(resp) => resp,
@@ -741,6 +890,7 @@ mod tests {
             },
             detection: crate::config::DetectionConfig::default(),
             streaming: streaming_config,
+            augment_backend: None,
         };
 
         let default_node = BackendNode {
@@ -762,7 +912,9 @@ mod tests {
             load_balancer,
             fix_registry: std::sync::Arc::new(fix_registry),
             exporter_manager: std::sync::Arc::new(exporter_manager),
+            augment_backend: None,
             hide_requests: false,
+            log_augmented_request_text: false,
         })
     }
 

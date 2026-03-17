@@ -23,6 +23,8 @@ pub struct AppConfig {
     pub detection: DetectionConfig,
     #[serde(default)]
     pub streaming: StreamingConfig,
+    #[serde(default, rename = "augment-backend")]
+    pub augment_backend: Option<AugmentBackendConfig>,
 }
 
 /// Proxy server configuration
@@ -291,6 +293,62 @@ impl StreamingMode {
 
 // Keep StreamingConfig as an alias for backward compatibility, but it's now just the enum
 pub type StreamingConfig = StreamingMode;
+
+/// Augment backend configuration - experimental feature for enriching requests
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AugmentBackendConfig {
+    /// Enable augment-backend feature
+    #[serde(default = "default_augment_enabled")]
+    pub enabled: bool,
+    /// Full URL to augment backend (e.g., "http://cosmo.lan:8701")
+    pub url: String,
+    /// Model identifier for augment backend
+    pub model: String,
+    /// Path to backend prompt file (defaults to "./augmenter/backend_prompt.md")
+    #[serde(default = "default_prompt_file")]
+    pub prompt_file: String,
+    /// Path to request prompt file injected into enriched user message (defaults to "./augmenter/request_prompt.md")
+    #[serde(default = "default_request_prompt_file")]
+    pub request_prompt_file: String,
+}
+
+fn default_augment_enabled() -> bool {
+    true
+}
+
+fn default_prompt_file() -> String {
+    "./augmenter/backend_prompt.md".to_string()
+}
+
+fn default_request_prompt_file() -> String {
+    "./augmenter/request_prompt.md".to_string()
+}
+
+impl Default for AugmentBackendConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            url: String::new(),
+            model: String::new(),
+            prompt_file: default_prompt_file(),
+            request_prompt_file: default_request_prompt_file(),
+        }
+    }
+}
+
+/// Error when augment-backend is configured but not properly set up
+#[derive(Debug, Clone)]
+pub struct AugmentBackendError {
+    pub message: String,
+}
+
+impl std::fmt::Display for AugmentBackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AugmentBackendError: {}", self.message)
+    }
+}
+
+impl std::error::Error for AugmentBackendError {}
 
 /// Exporters configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]

@@ -283,6 +283,45 @@ pub struct StreamChoice {
 // Anthropic Messages API Types
 // ============================================================================
 
+/// Anthropic Messages API request format
+/// Used for both requests to and responses from Anthropic-compatible endpoints
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnthropicMessageRequest {
+    #[serde(default)]
+    pub model: Option<String>,
+    pub messages: Vec<AnthropicMessageContent>,
+    #[serde(default)]
+    pub system: Option<String>,
+    #[serde(default)]
+    pub max_tokens: u32,
+    #[serde(default)]
+    pub stream: Option<bool>,
+    #[serde(default)]
+    pub temperature: Option<f32>,
+    #[serde(default)]
+    pub top_p: Option<f32>,
+    #[serde(default)]
+    pub tools: Option<Vec<AnthropicTool>>,
+    #[serde(default)]
+    pub tool_choice: Option<serde_json::Value>,
+}
+
+/// Anthropic message content (user/assistant/system messages)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnthropicMessageContent {
+    pub role: String,
+    pub content: Vec<AnthropicContentBlock>,
+}
+
+/// Anthropic tool definition
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AnthropicTool {
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub input_schema: serde_json::Value,
+}
+
 /// Anthropic Messages API response format
 /// Used by llama.cpp when endpoint is /v1/messages
 #[derive(Debug, Clone, Deserialize, Serialize)]

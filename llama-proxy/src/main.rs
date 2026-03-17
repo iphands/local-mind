@@ -82,6 +82,9 @@ enum Commands {
         /// Hide request log lines (only show response stats)
         #[arg(long)]
         hide_requests: bool,
+        /// Log the full augmented request text at INFO level after augmentation injection
+        #[arg(long)]
+        log_augmented_request_text: bool,
     },
 
     /// List all available response fix modules
@@ -120,8 +123,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             backend_url,
             streaming_mode,
             hide_requests,
+            log_augmented_request_text,
         } => {
-            run_proxy(cli.config, port, backend_url, streaming_mode, hide_requests).await?;
+            run_proxy(cli.config, port, backend_url, streaming_mode, hide_requests, log_augmented_request_text).await?;
         }
         Commands::ListFixes { verbose } => {
             list_fixes(verbose);
@@ -144,6 +148,7 @@ async fn run_proxy(
     backend_url_override: Option<String>,
     streaming_mode_override: Option<String>,
     hide_requests: bool,
+    log_augmented_request_text: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = load_config_or_exit(&config_path);
@@ -234,7 +239,7 @@ async fn run_proxy(
     }
 
     // Run the server
-    run_server(config, fix_registry, exporter_manager, hide_requests).await?;
+    run_server(config, fix_registry, exporter_manager, hide_requests, log_augmented_request_text).await?;
 
     Ok(())
 }
