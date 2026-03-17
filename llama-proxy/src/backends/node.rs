@@ -15,6 +15,8 @@ pub struct BackendNode {
     pub http_client: reqwest::Client,
     pub active_requests: AtomicUsize,
     pub strip_path_prefix: Option<String>,
+    /// Optional temperature override for requests to this node
+    pub temperature: Option<f64>,
 }
 
 impl BackendNode {
@@ -26,6 +28,7 @@ impl BackendNode {
         model: Option<String>,
         api_key: Option<String>,
         strip_path_prefix: Option<String>,
+        temperature: Option<f64>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let http_client = build_node_client(timeout_seconds, tls)?;
         Ok(Self {
@@ -36,6 +39,7 @@ impl BackendNode {
             http_client,
             active_requests: AtomicUsize::new(0),
             strip_path_prefix,
+            temperature,
         })
     }
 

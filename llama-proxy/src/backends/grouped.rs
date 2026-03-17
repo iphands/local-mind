@@ -54,6 +54,7 @@ impl GroupedLoadBalancer {
                     node_cfg.model.clone(),
                     node_cfg.api_key.clone(),
                     node_cfg.strip_path_prefix.clone(),
+                    node_cfg.temperature,
                 )?;
                 nodes.push(Arc::new(node));
             }
@@ -156,6 +157,7 @@ mod tests {
                     model: None,
                     api_key: None,
                     strip_path_prefix: None,
+                    temperature: None,
                 })
                 .collect(),
         }
@@ -254,6 +256,7 @@ mod tests {
                         model: None,
                         api_key: None,
                         strip_path_prefix: None,
+                        temperature: None,
                     },
                     BackendNodeConfig {
                         url: "http://localhost:8081".to_string(),
@@ -262,6 +265,7 @@ mod tests {
                         model: None,
                         api_key: None,
                         strip_path_prefix: None,
+                        temperature: None,
                     },
                 ],
             },

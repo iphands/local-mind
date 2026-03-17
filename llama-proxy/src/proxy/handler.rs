@@ -267,6 +267,10 @@ impl ProxyHandler {
             if let Some(ref model) = backend.node.model {
                 json["model"] = serde_json::Value::String(model.clone());
             }
+            // Override temperature if configured on this node
+            if let Some(temp) = backend.node.temperature {
+                json["temperature"] = serde_json::Value::from(temp);
+            }
             if client_wants_streaming {
                 tracing::debug!("Forcing non-streaming backend request (will synthesize streaming response)");
             }
@@ -747,6 +751,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             active_requests: AtomicUsize::new(0),
             strip_path_prefix: None,
+            temperature: None,
         };
         let load_balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(default_node)]).unwrap());
         let fix_registry = FixRegistry::new();

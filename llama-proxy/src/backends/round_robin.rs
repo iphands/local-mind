@@ -54,6 +54,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             active_requests: AtomicUsize::new(0),
             strip_path_prefix: None,
+            temperature: None,
         })
     }
 

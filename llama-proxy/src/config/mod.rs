@@ -117,6 +117,9 @@ pub struct BackendNodeConfig {
     /// Strip this prefix from incoming request path before forwarding (e.g., "/v1" for Z.ai)
     #[serde(default)]
     pub strip_path_prefix: Option<String>,
+    /// Override temperature for requests to this node (if absent, client value passes through)
+    #[serde(default)]
+    pub temperature: Option<f64>,
 }
 
 /// Configuration for a single backend group

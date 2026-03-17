@@ -49,7 +49,7 @@ pub fn build_balancer_from_single(
     api_key: Option<String>,
     strip_path_prefix: Option<String>,
 ) -> Result<Arc<dyn LoadBalancer>, Box<dyn std::error::Error>> {
-    let node = BackendNode::from_config(url, timeout_seconds, tls, model, api_key, strip_path_prefix)?;
+    let node = BackendNode::from_config(url, timeout_seconds, tls, model, api_key, strip_path_prefix, None)?;
     Ok(Arc::new(RoundRobinBalancer::new(vec![Arc::new(node)])?))
 }
 
@@ -69,6 +69,7 @@ mod tests {
             http_client: reqwest::Client::new(),
             active_requests: AtomicUsize::new(0),
             strip_path_prefix: None,
+            temperature: None,
         })
     }
 
@@ -116,6 +117,7 @@ mod tests {
                     model: None,
                     api_key: None,
                     strip_path_prefix: None,
+                    temperature: None,
                 }],
             },
         );

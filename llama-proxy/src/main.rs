@@ -439,6 +439,7 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
                     node_cfg.model.clone(),
                     node_cfg.api_key.clone(),
                     node_cfg.strip_path_prefix.clone(),
+                    node_cfg.temperature,
                 )?;
 
                 let base_url = node.base_url().to_string();
@@ -505,6 +506,7 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
             config.backend.model.clone(),
             config.backend.api_key.clone(),
             config.backend.strip_path_prefix.clone(),
+            None, // single-backend mode has no temperature override
         )?;
 
         let base_url = node.base_url().to_string();

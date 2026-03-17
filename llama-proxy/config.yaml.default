@@ -44,6 +44,7 @@ backend:
 #         # model: "anthropic/claude-opus-4"
 #         # api_key: "sk-xxx"
 #         # strip_path_prefix: "/v1"  # Strip prefix from incoming path (e.g., for Z.ai: /v1/chat/completions → /chat/completions)
+#         # temperature: 0.45  # Override temperature for requests to this node (if absent, client value passes through)
 #
 #   haiku:
 #     mappings: ["haiku", "claude-haiku-4-5-20251001"]
