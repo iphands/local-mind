@@ -365,19 +365,29 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
             Span::styled(" done    ", Style::default().fg(Color::Green)),
         ]),
 
-        FileStage::Locking { speed, .. } => Line::from(vec![
-            Span::styled(name_padded, Style::default().fg(Color::Yellow)),
-            Span::styled(size_str, Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled("████████████████████", Style::default().fg(Color::Yellow)),
-            Span::raw("  "),
-            Span::styled(
-                format!("{:>8.1} MB/s", speed),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw("  "),
-            Span::styled(" locking…", Style::default().fg(Color::Yellow)),
-        ]),
+        FileStage::Locking {
+            progress, speed, ..
+        } => {
+            let bar = progress_bar(*progress, 20);
+            let (filled_len, empty_len) = bar;
+            Line::from(vec![
+                Span::styled(name_padded, Style::default().fg(Color::Yellow)),
+                Span::styled(size_str, Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled("█".repeat(filled_len), Style::default().fg(Color::Yellow)),
+                Span::styled("░".repeat(empty_len), Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled(
+                    format!("{:>8.1} MB/s", speed),
+                    Style::default().fg(Color::White),
+                ),
+                Span::raw("  "),
+                Span::styled(
+                    format!(" {:>5.1}%  ", progress),
+                    Style::default().fg(Color::Yellow),
+                ),
+            ])
+        }
 
         FileStage::Locked { speed, .. } => Line::from(vec![
             Span::styled(

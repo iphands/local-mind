@@ -23,8 +23,10 @@ pub enum FileStage {
     },
     /// File is being mlocked (blocking syscall in progress)
     Locking {
-        speed: f64, // preserved from Complete
-        elapsed: Duration,
+        progress: f64,     // 0.0 to 100.0
+        speed: f64,        // MB/s
+        elapsed: Duration, // time spent locking
+        file_size_mb: f64, // for speed calculation
     },
     /// File is locked in RAM
     Locked {
@@ -115,7 +117,23 @@ impl FileStatus {
 
     pub fn mark_locking(&mut self, elapsed: Duration) {
         let speed = self.current_speed();
-        self.stage = FileStage::Locking { speed, elapsed };
+        self.stage = FileStage::Locking {
+            progress: 0.0,
+            speed,
+            elapsed,
+            file_size_mb: self.size_mb,
+        };
+    }
+
+    pub fn mark_locking_progress(&mut self, progress: f64, speed: f64, elapsed: Duration) {
+        if let FileStage::Locking { file_size_mb, .. } = self.stage {
+            self.stage = FileStage::Locking {
+                progress,
+                speed,
+                elapsed,
+                file_size_mb,
+            };
+        }
     }
 
     pub fn mark_locked(&mut self, speed: f64, elapsed: Duration) {

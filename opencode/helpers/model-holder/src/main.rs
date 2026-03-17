@@ -6,7 +6,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io::{self, BufRead, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -349,13 +349,93 @@ fn warmup_file_with_tui(
     Ok(checksum)
 }
 
+/// Lock memory-mapped file with mlock, updating shared state for the UI thread.
+/// Uses a touch-based approach: sequentially touches pages with madvise to track progress,
+/// then calls mlock at the end (which should be fast since pages are already hot).
+fn lock_file_with_tui(
+    mmap: &Mmap,
+    file_size: u64,
+    page_size: usize,
+    state: &Arc<Mutex<AppState>>,
+    file_path: &str,
+) -> io::Result<()> {
+    let total_pages = (file_size as usize + page_size - 1) / page_size;
+    let start_time = Instant::now();
+    let mut last_update_time = Instant::now();
+
+    // Touch pages sequentially using MADV_WILLNEED to bring them into RAM
+    for (page_index, offset) in (0..mmap.len()).step_by(page_size).enumerate() {
+        // Touch this page to bring it into RAM
+        unsafe {
+            madvise(
+                mmap.as_ptr().add(offset) as *mut libc::c_void,
+                page_size,
+                MADV_WILLNEED,
+            );
+        }
+
+        // Update progress periodically
+        if page_index % PROGRESS_UPDATE_INTERVAL == 0
+            || last_update_time.elapsed() > Duration::from_millis(PROGRESS_UPDATE_TIMEOUT_MS)
+        {
+            let elapsed = start_time.elapsed();
+            let bytes_done = (page_index * page_size) as f64;
+            let elapsed_f64 = elapsed.as_secs_f64();
+            let mb_per_sec = if elapsed_f64 > 0.0 {
+                bytes_done / elapsed_f64 / BYTES_PER_MB
+            } else {
+                0.0
+            };
+            let percent = (page_index as f64 / total_pages as f64) * 100.0;
+
+            if let Ok(mut app) = state.lock() {
+                if let Some(file) = app.find_file_mut(file_path) {
+                    file.mark_locking_progress(percent, mb_per_sec, elapsed);
+                }
+            }
+
+            last_update_time = Instant::now();
+        }
+    }
+
+    // Final mlock call (should be fast since pages are already hot)
+    let result = unsafe { mlock(mmap.as_ptr() as *const libc::c_void, mmap.len()) };
+
+    if result == 0 {
+        let elapsed = start_time.elapsed();
+        let elapsed_f64 = elapsed.as_secs_f64();
+        let mb_per_sec = if elapsed_f64 > 0.0 {
+            file_size as f64 / elapsed_f64 / BYTES_PER_MB
+        } else {
+            0.0
+        };
+
+        if let Ok(mut app) = state.lock() {
+            if let Some(file) = app.find_file_mut(file_path) {
+                file.mark_locked(mb_per_sec, elapsed);
+            }
+        }
+    } else {
+        // mlock failed, but we still touched the pages
+        let elapsed = start_time.elapsed();
+        if let Ok(mut app) = state.lock() {
+            if let Some(file) = app.find_file_mut(file_path) {
+                // Mark as complete but not locked (will be tracked in failed_lock_files by caller)
+                file.mark_complete(0.0, elapsed);
+            }
+        }
+    }
+
+    Ok(())
+}
+
 /// Hold model files in memory with optional warmup and mlock (TUI version)
 fn hold_models_with_tui(
     model_paths: Vec<String>,
     no_warmup: bool,
     page_size: usize,
     no_mlock: bool,
-    lock_threads: usize,
+    _lock_threads: usize,
 ) -> Result<(), ModelHolderError> {
     validate_page_size(page_size)?;
 
@@ -456,56 +536,24 @@ fn hold_models_with_tui(
     }
 
     if !no_mlock {
-        let concurrency = lock_threads.max(1);
-        let _locked_bytes = AtomicU64::new(0);
         let failed_files: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
-        for chunk in mapped_files.chunks(concurrency) {
-            // Mark all files in this chunk as Locking before spawning threads
-            for mf in chunk {
-                let fp = mf.path.display().to_string();
-                if let Ok(mut app) = state.lock() {
-                    if let Some(f) = app.find_file_mut(&fp) {
-                        f.mark_locking(Duration::new(0, 0));
-                    }
+        // Process files sequentially with progress tracking
+        for mapped_file in &mapped_files {
+            let fp = mapped_file.path.display().to_string();
+            let size = mapped_file.size;
+
+            // Mark as starting to lock (0% progress)
+            if let Ok(mut app) = state.lock() {
+                if let Some(f) = app.find_file_mut(&fp) {
+                    f.mark_locking(Duration::new(0, 0));
                 }
             }
 
-            std::thread::scope(|s| {
-                for mf in chunk {
-                    let state = &state;
-                    let failed_files = &failed_files;
-                    let _locked_bytes = &_locked_bytes;
-                    s.spawn(move || {
-                        let file_path = mf.path.display().to_string();
-                        let start = Instant::now();
-                        let result = unsafe {
-                            mlock(mf.mmap.as_ptr() as *const libc::c_void, mf.mmap.len())
-                        };
-                        if result == 0 {
-                            _locked_bytes.fetch_add(mf.size, Ordering::Relaxed);
-                            if let Ok(mut app) = state.lock() {
-                                if let Some(f) = app.find_file_mut(&file_path) {
-                                    let speed = f.current_speed();
-                                    f.mark_locked(speed, start.elapsed());
-                                }
-                            }
-                        } else {
-                            failed_files.lock().unwrap().push(file_path);
-                        }
-                    });
-                }
-            });
-        }
-
-        // madvise pass (sequential is fine here)
-        for mapped_file in &mapped_files {
-            unsafe {
-                madvise(
-                    mapped_file.mmap.as_ptr() as *mut libc::c_void,
-                    mapped_file.mmap.len(),
-                    MADV_WILLNEED,
-                );
+            // Lock with progress tracking
+            if let Err(e) = lock_file_with_tui(&mapped_file.mmap, size, page_size, &state, &fp) {
+                debug!("Warning: Failed to lock '{}': {}", fp, e);
+                failed_files.lock().unwrap().push(fp);
             }
         }
 
