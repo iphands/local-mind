@@ -3,7 +3,8 @@
     "allow": [
       "Bash(cargo build:*)",
       "Bash(./target/debug/model-holder hold:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(cargo fmt:*)"
     ]
   }
 }
