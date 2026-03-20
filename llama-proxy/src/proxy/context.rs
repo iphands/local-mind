@@ -8,8 +8,14 @@ use std::collections::HashMap;
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
-// Global cache: backend_url -> context_size
-static CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, u64>>> = OnceLock::new();
+// Global cache: backend_url -> (context_size, backend_type)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BackendType {
+    LlamaCpp,
+    Vllm,
+}
+
+static CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, (u64, BackendType)>>> = OnceLock::new();
 
 /// Fetch context total from backend with caching
 ///
@@ -33,20 +39,20 @@ pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str, st
     // Check cache first
     {
         let read_guard = cache.read().await;
-        if let Some(&ctx) = read_guard.get(backend_url) {
+        if let Some(&(ctx, _)) = read_guard.get(backend_url) {
             return Some(ctx);
         }
     }
 
     // Try llama.cpp /props endpoint first
     if let Some(n_ctx) = fetch_from_props(client, backend_url, strip_path_prefix).await {
-        cache_result(cache, backend_url, n_ctx);
+        cache_result(cache, backend_url, n_ctx, BackendType::LlamaCpp);
         return Some(n_ctx);
     }
 
     // Fallback to vLLM/OpenAI-compatible /v1/models endpoint
     if let Some(max_model_len) = fetch_from_models(client, backend_url, strip_path_prefix).await {
-        cache_result(cache, backend_url, max_model_len);
+        cache_result(cache, backend_url, max_model_len, BackendType::Vllm);
         return Some(max_model_len);
     }
 
@@ -73,12 +79,14 @@ async fn fetch_from_props(client: &reqwest::Client, backend_url: &str, strip_pat
                     return Some(n_ctx);
                 }
             }
+            // Props endpoint exists but didn't return expected data - might be vLLM
+            None
         }
         Err(e) => {
             tracing::debug!("Failed to fetch context size from {}: {}", props_url, e);
+            None
         }
     }
-    None
 }
 
 /// Fetch context size from vLLM/OpenAI-compatible `/v1/models` endpoint
@@ -113,9 +121,9 @@ async fn fetch_from_models(client: &reqwest::Client, backend_url: &str, strip_pa
 }
 
 /// Cache the result for future requests
-fn cache_result(cache: &RwLock<HashMap<String, u64>>, backend_url: &str, value: u64) {
+fn cache_result(cache: &RwLock<HashMap<String, (u64, BackendType)>>, backend_url: &str, value: u64, backend_type: BackendType) {
     if let Ok(mut write_guard) = cache.try_write() {
-        write_guard.insert(backend_url.to_string(), value);
+        write_guard.insert(backend_url.to_string(), (value, backend_type));
     }
 }
 
@@ -133,13 +141,13 @@ mod tests {
         // Pre-populate cache
         {
             let mut write_guard = cache.write().await;
-            write_guard.insert("http://test".to_string(), 4096);
+            write_guard.insert("http://test".to_string(), (4096, BackendType::LlamaCpp));
         }
 
         // Verify cache read works
         {
             let read_guard = cache.read().await;
-            assert_eq!(read_guard.get("http://test"), Some(&4096));
+            assert_eq!(read_guard.get("http://test"), Some(&(4096, BackendType::LlamaCpp)));
         }
     }
 }

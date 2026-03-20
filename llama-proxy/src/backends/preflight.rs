@@ -1,8 +1,14 @@
 //! Startup preflight checks for backend nodes
+//!
+//! Queries /v1/models to:
+//! 1. Discover available models
+//! 2. Detect backend type (vLLM vs llama.cpp)
+//! 3. Pre-populate context size cache to avoid /props 404s on vLLM backends
 
 use std::time::Duration;
 
 use crate::config::{BackendsConfig, BackendConfig};
+use crate::proxy::fetch_context_total;
 
 /// Run preflight checks for all backend nodes in multi-backend mode.
 /// Queries /v1/models from each node, logs available models, and auto-sets
@@ -58,6 +64,18 @@ pub async fn run_preflight_multi(backends: &mut BackendsConfig) {
                 models = ?models,
                 "Preflight: node models"
             );
+
+            // Pre-fetch context size to detect backend type and cache it
+            // This prevents /props 404s on vLLM backends during normal requests
+            let context_total = fetch_context_total(&client, &base_url, node_cfg.strip_path_prefix.as_deref()).await;
+            if let Some(ctx) = context_total {
+                tracing::info!(
+                    group = %group_name,
+                    url = %base_url,
+                    context_size = ctx,
+                    "Preflight: cached context size (backend type detected)"
+                );
+            }
 
             match models.len() {
                 0 => {
@@ -137,6 +155,17 @@ pub async fn run_preflight_single(backend: &BackendConfig) {
         Err(e) => {
             tracing::warn!(url = %base_url, error = %e, "Preflight: could not query /v1/models (skipping)");
         }
+    }
+
+    // Pre-fetch context size to detect backend type and cache it
+    // This prevents /props 404s on vLLM backends during normal requests
+    let context_total = fetch_context_total(&client, &base_url, backend.strip_path_prefix.as_deref()).await;
+    if let Some(ctx) = context_total {
+        tracing::info!(
+            url = %base_url,
+            context_size = ctx,
+            "Preflight: cached context size (backend type detected)"
+        );
     }
 }
 
