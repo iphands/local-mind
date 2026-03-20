@@ -25,6 +25,26 @@ pub struct AppConfig {
     pub streaming: StreamingConfig,
     #[serde(default, rename = "augment-backend")]
     pub augment_backend: Option<AugmentBackendConfig>,
+    #[serde(default)]
+    pub dump: DumpConfig,
+}
+
+/// Debug dump configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DumpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub path: String,
+}
+
+impl Default for DumpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: String::new(),
+        }
+    }
 }
 
 /// Proxy server configuration

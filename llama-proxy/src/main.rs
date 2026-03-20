@@ -85,6 +85,9 @@ enum Commands {
         /// Log the full augmented request text at INFO level after augmentation injection
         #[arg(long)]
         log_augmented_request_text: bool,
+        /// Dump request/response pairs to directory for debugging
+        #[arg(long)]
+        dump: Option<PathBuf>,
     },
 
     /// List all available response fix modules
@@ -124,8 +127,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             streaming_mode,
             hide_requests,
             log_augmented_request_text,
+            dump,
         } => {
-            run_proxy(cli.config, port, backend_url, streaming_mode, hide_requests, log_augmented_request_text).await?;
+            run_proxy(cli.config, port, backend_url, streaming_mode, hide_requests, log_augmented_request_text, dump).await?;
         }
         Commands::ListFixes { verbose } => {
             list_fixes(verbose);
@@ -149,6 +153,7 @@ async fn run_proxy(
     streaming_mode_override: Option<String>,
     hide_requests: bool,
     log_augmented_request_text: bool,
+    dump_path: Option<PathBuf>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Load configuration
     let mut config = load_config_or_exit(&config_path);
@@ -194,6 +199,13 @@ async fn run_proxy(
 
     // Log all configuration settings
     log_config_settings(&config);
+
+    // Apply dump path override if provided
+    if let Some(ref dump_path) = dump_path {
+        config.dump.enabled = true;
+        config.dump.path = dump_path.to_string_lossy().to_string();
+        tracing::info!(dump_path = %dump_path.display(), "Debug dump mode enabled");
+    }
 
     // Create fix registry
     let mut fix_registry = create_default_registry();

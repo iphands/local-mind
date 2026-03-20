@@ -28,6 +28,7 @@ pub struct ProxyState {
     pub augment_backend: Option<Arc<AugmentBackend>>,
     pub hide_requests: bool,
     pub log_augmented_request_text: bool,
+    pub dump_path: Option<Arc<std::path::PathBuf>>,
 }
 
 /// Run the proxy server
@@ -120,6 +121,11 @@ pub async fn run_server(
         augment_backend,
         hide_requests,
         log_augmented_request_text,
+        dump_path: if config.dump.enabled && !config.dump.path.is_empty() {
+            Some(Arc::new(std::path::PathBuf::from(&config.dump.path)))
+        } else {
+            None
+        },
     };
 
     // Build the router

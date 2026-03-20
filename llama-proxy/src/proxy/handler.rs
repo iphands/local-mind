@@ -20,6 +20,91 @@ use crate::config::StatsFormat;
 use crate::proxy::fetch_context_total;
 use crate::stats::{format_metrics, format_request_log, RequestMetrics};
 
+/// Dump utilities for request/response debugging
+mod dump {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::fs;
+    use tokio::io::AsyncWriteExt;
+
+    /// Get file extension based on Content-Type header
+    pub fn get_extension(content_type: Option<&str>) -> &'static str {
+        match content_type {
+            Some(ct) => {
+                let ct_lower = ct.to_lowercase();
+                if ct_lower.contains("application/json") {
+                    "json"
+                } else if ct_lower.contains("application/xml") || ct_lower.contains("text/xml") {
+                    "xml"
+                } else {
+                    "txt"
+                }
+            }
+            None => "txt",
+        }
+    }
+
+    /// Dump request/response pair to disk
+    pub async fn dump_request_response(
+        dump_path: &Arc<PathBuf>,
+        request_method: &str,
+        request_uri: &str,
+        request_body: &[u8],
+        request_content_type: Option<&str>,
+        response_status: u16,
+        response_body: &[u8],
+        response_content_type: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Create unique request directory
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_dir = dump_path.join(&request_id);
+        fs::create_dir_all(&request_dir).await?;
+
+        // Determine file extensions
+        let req_ext = get_extension(request_content_type);
+        let res_ext = get_extension(response_content_type);
+
+        // Write request file
+        let req_path = request_dir.join(format!("req.{}", req_ext));
+        let mut req_file = fs::File::create(&req_path).await?;
+        // Write as JSON if possible, otherwise raw bytes
+        if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(request_body) {
+            let json_str = serde_json::to_string_pretty(&json_val)?;
+            req_file.write_all(json_str.as_bytes()).await?;
+            req_file.write_all(b"\n").await?;
+        } else {
+            req_file.write_all(request_body).await?;
+        }
+        req_file.flush().await?;
+
+        // Write response file
+        let res_path = request_dir.join(format!("res.{}", res_ext));
+        let mut res_file = fs::File::create(&res_path).await?;
+        if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(response_body) {
+            let json_str = serde_json::to_string_pretty(&json_val)?;
+            res_file.write_all(json_str.as_bytes()).await?;
+            res_file.write_all(b"\n").await?;
+        } else {
+            res_file.write_all(response_body).await?;
+        }
+        res_file.flush().await?;
+
+        // Write metadata
+        let meta_path = request_dir.join("meta.txt");
+        let mut meta_file = fs::File::create(&meta_path).await?;
+        let meta_str = format!(
+            "Request:\n  Method: {}\n  URI: {}\n  Content-Type: {:?}\n  Body Size: {} bytes\n\nResponse:\n  Status: {}\n  Content-Type: {:?}\n  Body Size: {} bytes\n",
+            request_method, request_uri, request_content_type, request_body.len(), response_status, response_content_type, response_body.len()
+        );
+        meta_file.write_all(meta_str.as_bytes()).await?;
+        meta_file.flush().await?;
+
+        tracing::info!(request_id = %request_id, dump_path = %request_dir.display(), "Dumped request/response pair");
+
+        Ok(())
+    }
+}
+
 /// Create a preview of JSON with nested objects/arrays replaced by "[object]"
 fn json_preview(value: &serde_json::Value) -> String {
     match value {
@@ -422,9 +507,9 @@ impl ProxyHandler {
                 if client_wants_streaming {
                     tracing::debug!("Forcing non-streaming backend request (will synthesize streaming response)");
                 }
-                serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.to_vec()).into()
+                serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.clone().to_vec()).into()
             } else {
-                body_bytes
+                body_bytes.clone()
             }
         };
 
@@ -464,12 +549,16 @@ impl ProxyHandler {
                 self.state.config.stats.enabled,
                 self.state.config.stats.format,
                 self.state.exporter_manager.clone(),
-                request_json,
+                request_json.clone(),
                 start,
                 backend.node.http_client.clone(),
                 backend.node.base_url().to_string(),
                 backend.group_name.clone(),
                 backend.node.strip_path_prefix.clone(),
+                self.state.dump_path.clone(),
+                Some(method.to_string()),
+                Some(uri.to_string()),
+                Some(body_bytes.clone().to_vec()),
             )
             .await
         } else {
@@ -482,6 +571,9 @@ impl ProxyHandler {
                 start,
                 &backend.node,
                 backend.group_name.as_deref(),
+                method.clone(),
+                uri.clone(),
+                body_bytes.to_vec(),
             )
             .await
         }
@@ -497,6 +589,9 @@ impl ProxyHandler {
         start: Instant,
         backend: &Arc<BackendNode>,
         group_name: Option<&str>,
+        request_method: Method,
+        request_uri: axum::http::Uri,
+        _request_body: Vec<u8>,
     ) -> Response {
         let status = backend_response.status();
         let headers = backend_response.headers().clone();
@@ -641,6 +736,43 @@ impl ProxyHandler {
             );
         }
 
+        // Compute final body (used for dump and non-streaming return)
+        let final_body = if let Some(ref json) = json_value {
+            serde_json::to_vec(json).unwrap_or_else(|_| body_bytes.to_vec())
+        } else {
+            body_bytes.to_vec()
+        };
+
+        // Dump request/response if dump mode is enabled (before any early returns)
+        if let Some(ref dump_path) = self.state.dump_path {
+            let request_json_clone = request_json.clone();
+            let dump_path_clone = dump_path.clone();
+            let request_method_str = request_method.to_string();
+            let request_uri_str = request_uri.to_string();
+            let request_content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok().map(|s| s.to_string()));
+            let response_status = status.as_u16();
+            let response_body_clone = final_body.clone();
+            let response_content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok().map(|s| s.to_string()));
+
+            tokio::spawn(async move {
+                if let Some(req_json) = request_json_clone {
+                    let req_bytes = serde_json::to_vec(&req_json).unwrap_or_default();
+                    if let Err(e) = dump::dump_request_response(
+                        &dump_path_clone,
+                        &request_method_str,
+                        &request_uri_str,
+                        &req_bytes,
+                        request_content_type.as_deref(),
+                        response_status,
+                        &response_body_clone,
+                        response_content_type.as_deref(),
+                    ).await {
+                        tracing::warn!(error = %e, "Failed to dump request/response pair");
+                    }
+                }
+            });
+        }
+
         // If client wants streaming, synthesize it from complete JSON
         if client_wants_streaming {
             if let Some(ref json) = json_value {
@@ -716,12 +848,6 @@ impl ProxyHandler {
         }
 
         // Return complete JSON response (either client wants non-streaming, or synthesis failed)
-        let final_body = if let Some(ref json) = json_value {
-            serde_json::to_vec(json).unwrap_or_else(|_| body_bytes.to_vec())
-        } else {
-            body_bytes.to_vec()
-        };
-
         let mut response = Response::builder().status(status);
 
         // Only set JSON content-type if we successfully parsed/modified as JSON
@@ -891,6 +1017,7 @@ mod tests {
             detection: crate::config::DetectionConfig::default(),
             streaming: streaming_config,
             augment_backend: None,
+            dump: crate::config::DumpConfig::default(),
         };
 
         let default_node = BackendNode {
@@ -915,6 +1042,7 @@ mod tests {
             augment_backend: None,
             hide_requests: false,
             log_augmented_request_text: false,
+            dump_path: None,
         })
     }
 

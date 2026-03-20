@@ -14,6 +14,93 @@ use crate::exporters::ExporterManager;
 use crate::fixes::{FixRegistry, ToolCallAccumulator};
 use crate::proxy::fetch_context_total;
 use crate::stats::{format_metrics, RequestMetrics};
+use axum::http::header;
+
+/// Dump utilities for request/response debugging
+pub mod dump {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::fs;
+
+    /// Get file extension based on Content-Type header
+    pub fn get_extension(content_type: Option<&str>) -> &'static str {
+        match content_type {
+            Some(ct) => {
+                let ct_lower = ct.to_lowercase();
+                if ct_lower.contains("application/json") {
+                    "json"
+                } else if ct_lower.contains("application/xml") || ct_lower.contains("text/xml") {
+                    "xml"
+                } else {
+                    "txt"
+                }
+            }
+            None => "txt",
+        }
+    }
+
+    /// Dump request/response pair to disk
+    pub async fn dump_request_response(
+        dump_path: &Arc<PathBuf>,
+        request_method: &str,
+        request_uri: &str,
+        request_body: &[u8],
+        request_content_type: Option<&str>,
+        response_status: u16,
+        response_body: &[u8],
+        response_content_type: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        use tokio::io::AsyncWriteExt;
+
+        // Create unique request directory
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_dir = dump_path.join(&request_id);
+        fs::create_dir_all(&request_dir).await?;
+
+        // Determine file extensions
+        let req_ext = get_extension(request_content_type);
+        let res_ext = get_extension(response_content_type);
+
+        // Write request file
+        let req_path = request_dir.join(format!("req.{}", req_ext));
+        let mut req_file = fs::File::create(&req_path).await?;
+        // Write as JSON if possible, otherwise raw bytes
+        if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(request_body) {
+            let json_str = serde_json::to_string_pretty(&json_val)?;
+            req_file.write_all(json_str.as_bytes()).await?;
+            req_file.write_all(b"\n").await?;
+        } else {
+            req_file.write_all(request_body).await?;
+        }
+        req_file.flush().await?;
+
+        // Write response file
+        let res_path = request_dir.join(format!("res.{}", res_ext));
+        let mut res_file = fs::File::create(&res_path).await?;
+        if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(response_body) {
+            let json_str = serde_json::to_string_pretty(&json_val)?;
+            res_file.write_all(json_str.as_bytes()).await?;
+            res_file.write_all(b"\n").await?;
+        } else {
+            res_file.write_all(response_body).await?;
+        }
+        res_file.flush().await?;
+
+        // Write metadata
+        let meta_path = request_dir.join("meta.txt");
+        let mut meta_file = fs::File::create(&meta_path).await?;
+        let meta_str = format!(
+            "Request:\n  Method: {}\n  URI: {}\n  Content-Type: {:?}\n  Body Size: {} bytes\n\nResponse:\n  Status: {}\n  Content-Type: {:?}\n  Body Size: {} bytes\n",
+            request_method, request_uri, request_content_type, request_body.len(), response_status, response_content_type, response_body.len()
+        );
+        meta_file.write_all(meta_str.as_bytes()).await?;
+        meta_file.flush().await?;
+
+        tracing::info!(request_id = %request_id, dump_path = %request_dir.display(), "Dumped request/response pair");
+
+        Ok(())
+    }
+}
 
 /// Handle a streaming (SSE) response from the backend
 #[allow(clippy::too_many_arguments)]
@@ -29,9 +116,15 @@ pub async fn handle_streaming_response(
     backend_url: String,
     group_name: Option<String>,
     strip_path_prefix: Option<String>,
+    dump_path: Option<Arc<std::path::PathBuf>>,
+    request_method: Option<String>,
+    request_uri: Option<String>,
+    request_body: Option<Vec<u8>>,
 ) -> Response {
     let status = backend_response.status();
     let headers = backend_response.headers().clone();
+    let response_status = status.as_u16();
+    let response_headers = headers.clone();
 
     // Create a stream that processes each SSE event
     let stream = backend_response.bytes_stream();
@@ -54,14 +147,14 @@ pub async fn handle_streaming_response(
     let activity_tx = Arc::new(tokio::sync::Mutex::new(activity_tx));
     let activity_tx_clone = activity_tx.clone();
 
-    // Clone request_json for use in stream processing
+    // Clone request_json for use in stream processing and dump
     let request_json_for_stream = request_json.clone();
+    let request_json_for_dump = request_json.clone();
 
     let processed_stream = stream.then(move |chunk_result| {
         let fix_registry = fix_registry.clone();
         let accumulated = accumulated_clone.clone();
         let tool_call_accumulator = tool_call_accumulator_clone.clone();
-        let stats_enabled = stats_enabled;
         let completion_tx = completion_tx_clone.clone();
         let activity_tx = activity_tx_clone.clone();
         let request_json = request_json_for_stream.clone();
@@ -107,21 +200,17 @@ pub async fn handle_streaming_response(
                     // Check for Anthropic completion event (message_stop)
                     if current_event_type.as_deref() == Some("message_stop") {
                         // Signal completion for Anthropic streams
-                        if stats_enabled {
-                            tracing::trace!("Anthropic stream completion detected (message_stop event)");
-                            if let Some(tx) = completion_tx.lock().await.take() {
-                                let _ = tx.send(());
-                            }
+                        tracing::trace!("Anthropic stream completion detected (message_stop event)");
+                        if let Some(tx) = completion_tx.lock().await.take() {
+                            let _ = tx.send(());
                         }
                     }
 
                     if data == "[DONE]" {
                         // Signal completion to metrics task (OpenAI format)
-                        if stats_enabled {
-                            tracing::trace!("OpenAI stream completion detected ([DONE] marker)");
-                            if let Some(tx) = completion_tx.lock().await.take() {
-                                let _ = tx.send(());
-                            }
+                        tracing::trace!("OpenAI stream completion detected ([DONE] marker)");
+                        if let Some(tx) = completion_tx.lock().await.take() {
+                            let _ = tx.send(());
                         }
 
                         output.push_str(line);
@@ -142,8 +231,8 @@ pub async fn handle_streaming_response(
                             fix_registry.apply_fixes_stream_with_accumulation_default(json, &mut acc)
                         };
 
-                        // Accumulate for stats (include event type for Anthropic format)
-                        if stats_enabled {
+                        // Accumulate for stats/dump (include event type for Anthropic format)
+                        {
                             let mut acc = accumulated.lock().await;
                             // Store event type if present (Anthropic format)
                             if let Some(ref event_type) = current_event_type {
@@ -184,13 +273,18 @@ pub async fn handle_streaming_response(
         }
     });
 
-    // Spawn task to collect stats after stream completes
-    if stats_enabled {
+    // Spawn task to collect stats and/or dump after stream completes
+    if stats_enabled || dump_path.is_some() {
         let exporter_manager = exporter_manager.clone();
         let client = http_client.clone();
         let backend_url = backend_url.clone();
         let group_name = group_name; // Already owned, move into closure
         let strip_path_prefix = strip_path_prefix.clone();
+        let dump_path = dump_path.clone();
+        let request_method = request_method.clone();
+        let request_uri = request_uri.clone();
+        let _request_body = request_body.clone();
+        let request_json_for_dump = request_json_for_dump.clone();
 
         tokio::spawn(async move {
             // Adaptive timeout constants
@@ -279,41 +373,75 @@ pub async fn handle_streaming_response(
                         "Successfully merged SSE events into final response with keys: {:?}",
                         final_event.as_object().map(|o| o.keys().collect::<Vec<_>>())
                     );
+
+                    // Dump request/response if dump mode is enabled (independent of stats)
+                    if let Some(ref dump_path) = dump_path {
+                        if let (Some(req_method), Some(req_uri), Some(req_json)) =
+                            (request_method, request_uri, request_json_for_dump) {
+                            let dump_path_clone = dump_path.clone();
+                            let response_headers = response_headers.clone();
+                            let req_json_clone = req_json.clone();
+                            let final_event_clone = final_event.clone();
+
+                            tokio::spawn(async move {
+                                let request_body = serde_json::to_vec(&req_json_clone).unwrap_or_default();
+                                let response_body = serde_json::to_vec(&final_event_clone).unwrap_or_default();
+                                let req_content_type = Some("application/json");
+                                let res_content_type = response_headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
+
+                                if let Err(e) = dump::dump_request_response(
+                                    &dump_path_clone,
+                                    &req_method,
+                                    &req_uri,
+                                    &request_body,
+                                    req_content_type,
+                                    response_status,
+                                    &response_body,
+                                    res_content_type,
+                                ).await {
+                                    tracing::warn!(error = %e, "Failed to dump streaming request/response pair");
+                                }
+                            });
+                        }
+                    }
+
                     // Extract metrics from final event
-                    let mut metrics = if let Some(ref req_json) = request_json {
-                        let mut m = RequestMetrics::from_response(
-                            &final_event,
-                            req_json,
-                            true, // streaming
-                            start.elapsed().as_millis() as f64,
-                        );
-                        // Set group name if we're in multi-backend mode
-                        m.group_name = group_name;
-                        m
-                    } else {
-                        tracing::trace!(
-                            duration_ms = start.elapsed().as_millis() as u64,
-                            "Streaming completed (no request JSON)"
-                        );
-                        return;
-                    };
+                    if stats_enabled {
+                        let mut metrics = if let Some(ref req_json) = request_json {
+                            let mut m = RequestMetrics::from_response(
+                                &final_event,
+                                req_json,
+                                true, // streaming
+                                start.elapsed().as_millis() as f64,
+                            );
+                            // Set group name if we're in multi-backend mode
+                            m.group_name = group_name;
+                            m
+                        } else {
+                            tracing::trace!(
+                                duration_ms = start.elapsed().as_millis() as u64,
+                                "Streaming completed (no request JSON)"
+                            );
+                            return;
+                        };
 
-                    // Fetch and set context_total
-                    if let Some(ctx_total) = fetch_context_total(&client, &backend_url, strip_path_prefix.as_deref()).await {
-                        metrics.context_total = Some(ctx_total);
-                        metrics.calculate_context_percent();
+                        // Fetch and set context_total
+                        if let Some(ctx_total) = fetch_context_total(&client, &backend_url, strip_path_prefix.as_deref()).await {
+                            metrics.context_total = Some(ctx_total);
+                            metrics.calculate_context_percent();
+                        }
+
+                        // Format and log stats
+                        let formatted = format_metrics(&metrics, stats_format);
+                        if stats_format == StatsFormat::Compact {
+                            tracing::info!("{}", formatted);
+                        } else {
+                            tracing::info!("\n{}", formatted);
+                        }
+
+                        // Export to remote systems
+                        exporter_manager.export_all(&metrics).await;
                     }
-
-                    // Format and log stats
-                    let formatted = format_metrics(&metrics, stats_format);
-                    if stats_format == StatsFormat::Compact {
-                        tracing::info!("{}", formatted);
-                    } else {
-                        tracing::info!("\n{}", formatted);
-                    }
-
-                    // Export to remote systems
-                    exporter_manager.export_all(&metrics).await;
                 } else {
                     tracing::trace!(
                         duration_ms = start.elapsed().as_millis() as u64,
