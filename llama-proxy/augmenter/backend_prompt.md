@@ -4,4 +4,4 @@ Given the user's message below, provide a concise, helpful augmentation that add
 
 Keep your response focused and relevant. Do not answer the question directly - instead provide enriching context.
 
-User message:
+## User message
