@@ -10,7 +10,9 @@ An HTTP reverse proxy for [llama.cpp](https://github.com/ggerganov/llama.cpp) se
 ### For Users
 
 - **Response Fixing**: Automatically repairs malformed tool calls and other LLM output issues
-  - Fixes invalid JSON in tool call arguments (common with models like Qwen3-Coder)
+  - `toolcall_null_index`: Fixes null tool call indices (required by strict clients)
+  - `toolcall_bad_filepath`: Removes duplicate `filePath` keys in tool call arguments
+  - `toolcall_malformed_arguments`: Repairs malformed JSON argument patterns
   - Pluggable fix system - enable/disable fixes per your needs
 
 - **Performance Metrics**: Real-time monitoring of LLM performance
@@ -27,6 +29,21 @@ An HTTP reverse proxy for [llama.cpp](https://github.com/ggerganov/llama.cpp) se
 - **Remote Telemetry Export**: Send metrics to external systems
   - InfluxDB v2 support with batching
   - Extensible exporter architecture for other backends
+
+- **Multi-Backend Load Balancing**: Route requests across multiple backends
+  - Model-based routing: map model names to backend groups
+  - Strategies: `round_robin` (cycle through) or `priority_free` (least-busy wins)
+  - Per-node model override, API key, and TLS configuration
+  - Catch-all group for unmatched models
+
+- **Streaming Synthesis**: Improved streaming reliability
+  - `fake` mode: fetches complete JSON from backend, synthesizes SSE for clients
+  - Eliminates delta calculation complexity and streaming fix edge cases
+  - Tool calls delivered as single complete chunks
+
+- **Request Augmentation** (experimental): Enrich requests before forwarding
+  - Calls a fast LLM backend to generate additional context
+  - Injects context into user messages transparently
 
 - **Client Compatibility**: Works seamlessly with AI coding tools
   - Full OpenAI Chat Completions API support
@@ -66,24 +83,53 @@ server:
   host: "0.0.0.0"
   port: 8066
 
-# Backend llama-server location
+# Single backend llama-server location
 backend:
-  host: "localhost"
-  port: 8080
+  url: "http://localhost:8080"
   timeout_seconds: 300
+  # Optional TLS settings for https:// backends
+  # tls:
+  #   accept_invalid_certs: false
+  #   ca_cert_path: "/path/to/ca.pem"
+
+# Multi-backend load balancing (overrides 'backend' when present)
+# backends:
+#   local:
+#     mappings: ["qwen3", "llama"]  # empty = catch-all
+#     strategy: priority_free       # or round_robin
+#     nodes:
+#       - url: "http://localhost:8080"
+#         timeout_seconds: 300
+#   remote:
+#     mappings: []  # catch-all
+#     strategy: round_robin
+#     nodes:
+#       - url: "http://remote-host:8080"
+#         api_key: "sk-xxx"
+#         model: "gpt-4o"           # override model name sent to backend
 
 # Enable/disable response fixes
 fixes:
   enabled: true
   modules:
+    toolcall_null_index:
+      enabled: true
     toolcall_bad_filepath:
       enabled: true
       remove_duplicate: true
+    toolcall_malformed_arguments:
+      enabled: true
+
+# Streaming mode (default: fake)
+#   fake: request non-streaming from backend, synthesize SSE for client
+#   disabled: force streaming off completely
+# streaming: fake
 
 # Metrics logging
 stats:
   enabled: true
   format: pretty  # pretty | json | compact
+  log_interval: 1  # log every N requests
 
 # Remote exporters
 exporters:
@@ -93,6 +139,14 @@ exporters:
     org: "my-org"
     bucket: "llm-metrics"
     token: "your-token-here"
+
+# Augment backend - enriches requests with additional context before forwarding (experimental)
+# augment-backend:
+#   enabled: true
+#   url: "http://localhost:8701"
+#   model: "fast-model"
+#   prompt_file: "./augmenter/backend_prompt.md"
+#   request_prompt_file: "./augmenter/request_prompt.md"
 ```
 
 ### Running the Proxy
@@ -101,11 +155,18 @@ exporters:
 # Start the proxy server
 cargo run --release -- run --config config.yaml
 
-# Or with debug logging
-RUST_LOG=debug cargo run -- run --config config.yaml
+# Or with explicit log level
+cargo run -- run --config config.yaml --log-level debug
 
-# Override port from CLI
+# Override port or backend from CLI
 cargo run -- run --config config.yaml --port 8066
+cargo run -- run --config config.yaml --backend-url http://other-host:8080
+
+# Override streaming mode
+cargo run -- run --config config.yaml --streaming-mode fake
+
+# Dump request/response pairs for debugging
+cargo run -- run --config config.yaml --dump ./debug-dumps
 ```
 
 ### Usage with Clients
@@ -136,7 +197,11 @@ llama-proxy check-config --config config.yaml
 llama-proxy test-backend --config config.yaml
 
 # Override settings from CLI
-llama-proxy run --port 8066 --backend-host localhost --backend-port 8080
+llama-proxy run --port 8066 --backend-url http://localhost:8080
+llama-proxy run --log-level debug
+llama-proxy run --streaming-mode fake
+llama-proxy run --hide-requests        # suppress per-request log lines
+llama-proxy run --dump ./debug-dumps   # dump request/response pairs
 ```
 
 ## Example Metrics Output
@@ -196,7 +261,7 @@ model=Qwen3-14B toks=538/983 tps=1698.07/33.13 ctx:=38/4096 stream finish=stop d
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                        Client                               │
-│              (Claude Code, Opencode, curl                   │
+│              (Claude Code, Opencode, curl)                  │
 └──────────────────────┬──────────────────────────────────────┘
                        │
                        ▼
@@ -205,12 +270,23 @@ model=Qwen3-14B toks=538/983 tps=1698.07/33.13 ctx:=38/4096 stream finish=stop d
 │  ┌────────────────────────────────────────────────────────┐ │
 │  │  Handler: Routes requests                              │ │
 │  │  - Pass-through: /props, /slots, /health, /v1/models   │ │
-│  │  - Fix + Stats: /v1/chat/completions, /v1/messages     │ │
+│  │  - Fix + Stats: /v1/chat/completions                   │ │
+│  └────────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  Augment Backend (optional): Enrich requests           │ │
+│  │  - Calls fast LLM to generate context                  │ │
+│  │  - Injects context into user messages                  │ │
 │  └────────────────────────────────────────────────────────┘ │
 │  ┌────────────────────────────────────────────────────────┐ │
 │  │  Fix Registry: Apply response fixes                    │ │
-│  │  - toolcall_bad_filepath_fix (remove duplicate keys)   │ │
-│  │  - [Your custom fix here]                              │ │
+│  │  - toolcall_null_index (fix null indices)              │ │
+│  │  - toolcall_bad_filepath (remove duplicate keys)       │ │
+│  │  - toolcall_malformed_arguments (fix broken JSON args) │ │
+│  └────────────────────────────────────────────────────────┘ │
+│  ┌────────────────────────────────────────────────────────┐ │
+│  │  Streaming Synthesis: SSE from complete JSON           │ │
+│  │  - Eliminates streaming delta complexity               │ │
+│  │  - Tool calls sent as single complete chunks           │ │
 │  └────────────────────────────────────────────────────────┘ │
 │  ┌────────────────────────────────────────────────────────┐ │
 │  │  Stats Collector: Gather metrics                       │ │
@@ -220,14 +296,19 @@ model=Qwen3-14B toks=538/983 tps=1698.07/33.13 ctx:=38/4096 stream finish=stop d
 │  ┌────────────────────────────────────────────────────────┐ │
 │  │  Exporters: Send metrics to external systems           │ │
 │  │  - InfluxDB (with batching)                            │ │
-│  │  - [Your custom exporter here]                         │ │
 │  └────────────────────────────────────────────────────────┘ │
 └──────────────────────┬──────────────────────────────────────┘
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                  llama.cpp server                           │
-│              (OpenAI-compatible API)                        │
+│           Load Balancer (single or multi-backend)           │
+│  GroupedLoadBalancer → model routing → RoundRobin /         │
+│                                        PriorityFree         │
+└──────────────────────┬──────────────────────────────────────┘
+                       │
+                       ▼
+┌─────────────────────────────────────────────────────────────┐
+│          llama.cpp server / OpenAI-compatible API           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -237,18 +318,30 @@ model=Qwen3-14B toks=538/983 tps=1698.07/33.13 ctx:=38/4096 stream finish=stop d
 src/
 ├── main.rs              # CLI and application entry point
 ├── lib.rs               # Library exports
+├── augment.rs           # Request augmentation backend client
 ├── config/              # Configuration loading and types
 │   ├── mod.rs           # AppConfig, ServerConfig, BackendConfig, etc.
 │   └── loader.rs        # YAML config file parsing
 ├── proxy/               # HTTP proxy server
 │   ├── server.rs        # Axum server setup, ProxyState
 │   ├── handler.rs       # Request routing and response handling
-│   ├── streaming.rs     # SSE stream processing with fix application
+│   ├── streaming.rs     # SSE stream processing (legacy fallback path)
+│   ├── synthesis.rs     # SSE synthesis from complete JSON (fake streaming)
 │   └── context.rs       # Context fetching from /slots endpoint
+├── backends/            # Multi-backend load balancing
+│   ├── mod.rs           # Builder functions
+│   ├── balancer.rs      # LoadBalancer trait and BackendGuard
+│   ├── node.rs          # BackendNode (URL, TLS, model override, etc.)
+│   ├── grouped.rs       # GroupedLoadBalancer (model-based routing)
+│   ├── round_robin.rs   # RoundRobin strategy
+│   ├── priority_free.rs # PriorityFree strategy (least-busy node)
+│   └── preflight.rs     # Backend preflight/health checks
 ├── fixes/               # Pluggable response fix system
-│   ├── mod.rs           # ResponseFix trait definition
+│   ├── mod.rs           # ResponseFix trait, ToolCallAccumulator
 │   ├── registry.rs      # Fix registration and management
-│   └── toolcall_bad_filepath_fix.rs  # Example fix implementation
+│   ├── toolcall_null_index_fix.rs        # Fix null tool call indices
+│   ├── toolcall_bad_filepath_fix.rs      # Fix duplicate filePath keys
+│   └── toolcall_malformed_arguments_fix.rs  # Fix malformed JSON args
 ├── stats/               # Metrics collection and formatting
 │   ├── collector.rs     # RequestMetrics extraction from responses
 │   ├── formatter.rs     # pretty/json/compact output formatting
@@ -304,37 +397,24 @@ impl ResponseFix for MyCustomFix {
 
     fn applies(&self, response: &Value) -> bool {
         // Return true if this fix should apply to the response
-        // Example: check if response has a specific structure
         response.get("choices")
             .and_then(|c| c.as_array())
             .map(|arr| !arr.is_empty())
             .unwrap_or(false)
     }
 
-    fn apply(&self, mut response: Value) -> Value {
-        // Apply fix to non-streaming response
-        // Modify response as needed
+    fn apply(&self, mut response: Value) -> (Value, FixAction) {
+        // Apply fix to complete response (primary method)
+        // Return (modified_response, FixAction) for standardized logging
 
         tracing::debug!("Applying my_custom_fix");
 
-        // Example: modify some field
         if let Some(choices) = response.get_mut("choices") {
             // ... your fix logic here ...
+            return (response, FixAction::fixed("original snippet", "fixed snippet"));
         }
 
-        response
-    }
-
-    fn apply_stream(&self, mut chunk: Value) -> Value {
-        // Apply fix to streaming chunk (SSE)
-        // Default implementation just passes through
-
-        // Example: modify streaming delta
-        if let Some(choices) = chunk.get_mut("choices") {
-            // ... your streaming fix logic here ...
-        }
-
-        chunk
+        (response, FixAction::NotApplicable)
     }
 }
 ```
@@ -659,7 +739,7 @@ cargo run -- test-backend --config config.yaml
 cargo run -- list-fixes --verbose
 
 # Enable debug logging
-RUST_LOG=debug cargo run -- run --config config.yaml
+cargo run -- run --config config.yaml --log-level debug
 ```
 
 ### Metrics not appearing
