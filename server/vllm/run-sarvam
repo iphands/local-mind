@@ -41,7 +41,8 @@ LLAMA_ARGS=(
   --port 8799
 
   --async-scheduling
-  --attention-backend flashinfer
+  # --attention-backend torch
+  # --attention-backend flashinfer
   # --moe-backend flashinfer_trtllm
 
   --data-parallel-size 1
@@ -54,15 +55,17 @@ LLAMA_ARGS=(
   # --kv-cache-dtype fp8
   --kv-cache-dtype auto
   --language-model-only
-  --max-model-len 262144
+  --max-model-len 65536
   # --max-num-batched-tokens 32768
   --max-num-seqs 96
   --pipeline-parallel-size 1
   --tensor-parallel-size 1
   --trust-remote-code
 
-  # --reasoning-parser qwen3
-  --tool-call-parser qwen3_coder
+  --reasoning-parser deepseek_r1
+  # --reasoning-parser deepseek_v3
+  --tool-parser-plugin /models/${MODEL}/tool_parser/sarvam_tool_call_parser.py
+  --tool-call-parser sarvam
 )
 
 echo

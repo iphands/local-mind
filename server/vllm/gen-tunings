@@ -49,11 +49,17 @@ CONTAINER_ARGS=(
 )
 
 BENCH_ARGS=(
+  # /vllm-workspace/benchmarks/kernels/benchmark_moe.py
   /benchmarks/kernels/benchmark_moe.py
   --model /models/$MODEL
   --tp-size 1
   --tune
   --save-dir /tunings/${CARD_ID}_${MODEL}
+
+  --dtype auto
+  --enable-expert-parallel
+  --tensor-parallel-size 1
+  --trust-remote-code
 )
 
 echo

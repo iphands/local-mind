@@ -3,7 +3,8 @@
     "allow": [
       "Bash(chmod:*)",
       "Bash(find:*)",
-      "WebFetch(domain:docs.vllm.ai)"
+      "WebFetch(domain:docs.vllm.ai)",
+      "Bash(/home/iphands/prog/ai/local-mind/server/vllm/primes.sh)"
     ]
   }
 }
