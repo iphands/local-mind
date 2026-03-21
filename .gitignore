@@ -1,3 +1,8 @@
+/llama-proxy/config.yaml
+/llama-proxy/debug
+/llama-proxy/e2e/target
+/llama-proxy/target
+/llama-proxy/trash
 /scratch
 /server/llamacpp/vendor
 /server/vllm/scratch/
