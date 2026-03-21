@@ -1,0 +1,31 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo test:*)",
+      "Bash(cargo build:*)",
+      "Bash(find:*)",
+      "Bash(ls:*)",
+      "Bash(grep:*)",
+      "Bash(cargo run:*)",
+      "Bash(chmod:*)",
+      "Bash(git add:*)",
+      "Bash(/tmp/log_level_demo.md:*)",
+      "Bash(else echo \"config.yaml not found\")",
+      "Bash(fi)",
+      "Bash(git -C /home/iphands/prog/slop/vendor/claude-code log --oneline)",
+      "Bash(cargo check:*)",
+      "WebFetch(domain:docs.anthropic.com)",
+      "WebFetch(domain:opencode.ai)",
+      "Bash(curl:*)",
+      "WebFetch(domain:raw.githubusercontent.com)",
+      "Bash(git:*)",
+      "Bash(bash:*)",
+      "Bash(gcc:*)",
+      "Bash(cargo fmt:*)",
+      "Bash(wc:*)",
+      "Bash(python3 -m json.tool)",
+      "Bash(python3:*)"
+    ]
+  },
+  "prefersReducedMotion": true
+}

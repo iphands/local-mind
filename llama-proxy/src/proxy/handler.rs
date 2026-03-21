@@ -1,0 +1,1082 @@
+//! Request/response handler for the proxy
+
+use axum::{
+    body::{to_bytes, Body},
+    http::{header, Method, Request, StatusCode},
+    response::{IntoResponse, Response},
+    Json,
+};
+use std::io::Read;
+use std::sync::Arc;
+use std::time::Instant;
+
+use super::server::ProxyState;
+use super::streaming::handle_streaming_response;
+use super::{synthesize_anthropic_streaming_response, synthesize_streaming_response};
+use crate::api::{AnthropicMessage, ChatCompletionRequest, ChatCompletionResponse};
+use crate::augment::{extract_user_content_from_json, inject_augmentation};
+use crate::backends::BackendNode;
+use crate::config::StatsFormat;
+use crate::proxy::fetch_context_total;
+use crate::stats::{format_metrics, format_request_log, RequestMetrics};
+
+/// Dump utilities for request/response debugging
+mod dump {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::fs;
+    use tokio::io::AsyncWriteExt;
+
+    /// Get file extension based on Content-Type header
+    pub fn get_extension(content_type: Option<&str>) -> &'static str {
+        match content_type {
+            Some(ct) => {
+                let ct_lower = ct.to_lowercase();
+                if ct_lower.contains("application/json") {
+                    "json"
+                } else if ct_lower.contains("application/xml") || ct_lower.contains("text/xml") {
+                    "xml"
+                } else {
+                    "txt"
+                }
+            }
+            None => "txt",
+        }
+    }
+
+    /// Dump request/response pair to disk
+    pub async fn dump_request_response(
+        dump_path: &Arc<PathBuf>,
+        request_method: &str,
+        request_uri: &str,
+        request_body: &[u8],
+        request_content_type: Option<&str>,
+        response_status: u16,
+        response_body: &[u8],
+        response_content_type: Option<&str>,
+    ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // Create unique request directory
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let request_dir = dump_path.join(&request_id);
+        fs::create_dir_all(&request_dir).await?;
+
+        // Determine file extensions
+        let req_ext = get_extension(request_content_type);
+        let res_ext = get_extension(response_content_type);
+
+        // Write request file
+        let req_path = request_dir.join(format!("req.{}", req_ext));
+        let mut req_file = fs::File::create(&req_path).await?;
+        // Write as JSON if possible, otherwise raw bytes
+        if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(request_body) {
+            let json_str = serde_json::to_string_pretty(&json_val)?;
+            req_file.write_all(json_str.as_bytes()).await?;
+            req_file.write_all(b"\n").await?;
+        } else {
+            req_file.write_all(request_body).await?;
+        }
+        req_file.flush().await?;
+
+        // Write response file
+        let res_path = request_dir.join(format!("res.{}", res_ext));
+        let mut res_file = fs::File::create(&res_path).await?;
+        if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(response_body) {
+            let json_str = serde_json::to_string_pretty(&json_val)?;
+            res_file.write_all(json_str.as_bytes()).await?;
+            res_file.write_all(b"\n").await?;
+        } else {
+            res_file.write_all(response_body).await?;
+        }
+        res_file.flush().await?;
+
+        // Write metadata
+        let meta_path = request_dir.join("meta.txt");
+        let mut meta_file = fs::File::create(&meta_path).await?;
+        let meta_str = format!(
+            "Request:\n  Method: {}\n  URI: {}\n  Content-Type: {:?}\n  Body Size: {} bytes\n\nResponse:\n  Status: {}\n  Content-Type: {:?}\n  Body Size: {} bytes\n",
+            request_method, request_uri, request_content_type, request_body.len(), response_status, response_content_type, response_body.len()
+        );
+        meta_file.write_all(meta_str.as_bytes()).await?;
+        meta_file.flush().await?;
+
+        tracing::info!(request_id = %request_id, dump_path = %request_dir.display(), "Dumped request/response pair");
+
+        Ok(())
+    }
+}
+
+/// Create a preview of JSON with nested objects/arrays replaced by "[object]"
+fn json_preview(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::Object(map) => {
+            let mut preview_map = serde_json::Map::new();
+            for (key, val) in map {
+                match val {
+                    serde_json::Value::Object(_) | serde_json::Value::Array(_) => {
+                        preview_map.insert(key.clone(), serde_json::Value::String("[object]".to_string()));
+                    }
+                    _ => {
+                        preview_map.insert(key.clone(), val.clone());
+                    }
+                }
+            }
+            serde_json::to_string_pretty(&serde_json::Value::Object(preview_map))
+                .unwrap_or_else(|_| "[failed to serialize]".to_string())
+        }
+        _ => serde_json::to_string_pretty(value).unwrap_or_else(|_| "[failed to serialize]".to_string()),
+    }
+}
+
+/// Decompress response body based on Content-Encoding header
+fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<Vec<u8>, String> {
+    let encoding = match content_encoding {
+        Some(enc) => enc,
+        None => return Ok(body_bytes.to_vec()), // No compression
+    };
+
+    match encoding.to_lowercase().as_str() {
+        "gzip" => {
+            use flate2::read::GzDecoder;
+            let mut decoder = GzDecoder::new(body_bytes);
+            let mut decompressed = Vec::new();
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|e| format!("gzip decompression failed: {}", e))?;
+            tracing::debug!(
+                original_size = body_bytes.len(),
+                decompressed_size = decompressed.len(),
+                "Decompressed gzip response"
+            );
+            Ok(decompressed)
+        }
+        "deflate" => {
+            use flate2::read::DeflateDecoder;
+            let mut decoder = DeflateDecoder::new(body_bytes);
+            let mut decompressed = Vec::new();
+            decoder
+                .read_to_end(&mut decompressed)
+                .map_err(|e| format!("deflate decompression failed: {}", e))?;
+            tracing::debug!(
+                original_size = body_bytes.len(),
+                decompressed_size = decompressed.len(),
+                "Decompressed deflate response"
+            );
+            Ok(decompressed)
+        }
+        "br" => {
+            let mut decompressed = Vec::new();
+            brotli::BrotliDecompress(&mut std::io::Cursor::new(body_bytes), &mut decompressed)
+                .map_err(|e| format!("brotli decompression failed: {}", e))?;
+            tracing::debug!(
+                original_size = body_bytes.len(),
+                decompressed_size = decompressed.len(),
+                "Decompressed brotli response"
+            );
+            Ok(decompressed)
+        }
+        "zstd" => {
+            let decompressed = zstd::decode_all(body_bytes).map_err(|e| format!("zstd decompression failed: {}", e))?;
+            tracing::debug!(
+                original_size = body_bytes.len(),
+                decompressed_size = decompressed.len(),
+                "Decompressed zstd response"
+            );
+            Ok(decompressed)
+        }
+        other => {
+            tracing::warn!(encoding = other, "Unsupported Content-Encoding, returning original body");
+            Ok(body_bytes.to_vec())
+        }
+    }
+}
+
+/// Proxy request handler
+pub struct ProxyHandler {
+    state: ProxyState,
+}
+
+impl ProxyHandler {
+    pub fn new(state: ProxyState) -> Self {
+        Self { state }
+    }
+
+    // REMOVED: should_stream() method
+    // We now ALWAYS force non-streaming backend requests and synthesize streaming responses
+    // when clients request them. This simplifies fix application significantly.
+
+    /// Check if Content-Type indicates JSON response
+    fn is_json_content_type(content_type: &str) -> bool {
+        let ct_lower = content_type.to_lowercase();
+        ct_lower.contains("application/json") || ct_lower.contains("application/vnd.") && ct_lower.contains("+json")
+    }
+
+    /// Inject augmentation into Anthropic messages
+    fn inject_into_anthropic(request: &mut crate::api::AnthropicMessageRequest, request_prompt: &str, augmentation: &str) {
+        if augmentation.is_empty() {
+            return;
+        }
+
+        let suffix = format!("\n\n{}\n\n{}", request_prompt, augmentation);
+
+        // Find the last user message
+        let mut last_user_index = None;
+        for (i, msg) in request.messages.iter().enumerate() {
+            if msg.role == "user" {
+                last_user_index = Some(i);
+            }
+        }
+
+        if let Some(idx) = last_user_index {
+            // Add augmentation as a new text block at the end
+            request.messages[idx].content.push(crate::api::AnthropicContentBlock::Text {
+                text: suffix,
+            });
+
+            tracing::debug!(
+                injected_into = idx,
+                augmentation_length = augmentation.len(),
+                "Injected augmentation into last Anthropic user message"
+            );
+        } else if !request.messages.is_empty() {
+            // Fallback: prepend to first message
+            request.messages[0].content.insert(0, crate::api::AnthropicContentBlock::Text {
+                text: suffix,
+            });
+
+            tracing::debug!(
+                injected_into = 0,
+                augmentation_length = augmentation.len(),
+                "Injected augmentation into first Anthropic message (no user message found)"
+            );
+        }
+    }
+
+    /// Handle an incoming request
+    pub async fn handle(&self, req: Request<Body>) -> Response {
+        let start = Instant::now();
+
+        let method = req.method().clone();
+        let uri = req.uri().clone();
+        let path = uri.path();
+        let query = uri.query();
+
+        tracing::debug!(method = %method, path = %path, query = ?query, "Processing request");
+
+        let is_anthropic_api = path.starts_with("/v1/messages");
+        tracing::debug!(is_anthropic_api = is_anthropic_api, "Detected API format");
+
+        // Save headers before consuming the request
+        let headers = req.headers().clone();
+
+        // Read request body FIRST (needed for model-based routing)
+        let body_bytes = match to_bytes(req.into_body(), 1024 * 1024 * 100).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to read request body");
+                return (StatusCode::BAD_REQUEST, format!("Failed to read request body: {}", e)).into_response();
+            }
+        };
+
+        // Parse request for model extraction and stats (if JSON)
+        let request_json: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
+
+        // Extract model for routing BEFORE selecting backend
+        let requested_model = request_json
+            .as_ref()
+            .and_then(|j| j.get("model"))
+            .and_then(|m| m.as_str());
+
+        tracing::debug!(requested_model = ?requested_model, "Routing request");
+
+        // NOW select backend based on model
+        let backend = match self.state.load_balancer.select(requested_model) {
+            Ok(guard) => guard,
+            Err(crate::config::NoMatchingBackend { requested_model }) => {
+                tracing::warn!(
+                    requested_model = ?requested_model,
+                    "No backend configured for model"
+                );
+                return Json(serde_json::json!({
+                    "error": {
+                        "type": "no_backend_configured",
+                        "message": format!("No backend for model: {:?}", requested_model)
+                    }
+                })).into_response();
+            }
+        };
+
+        // Route specific endpoints to simple pass-through
+        match (&method, path) {
+            // llama.cpp monitoring/status endpoints (simple pass-through)
+            (&Method::GET, "/props")
+            | (&Method::GET, "/slots")
+            | (&Method::GET, "/health")
+            | (&Method::GET, "/v1/health")
+            | (&Method::GET, "/v1/models")
+            | (&Method::GET, "/metrics") => {
+                // Reconstruct request for passthrough
+                let req = Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::from(body_bytes))
+                    .unwrap();
+                // Add headers back
+                let mut req = req;
+                for (name, value) in headers.iter() {
+                    req.headers_mut().insert(name.clone(), value.clone());
+                }
+                return self.proxy_passthrough(req, &backend.node).await;
+            }
+
+            // All other routes continue with existing logic
+            _ => {}
+        }
+
+        // Remember if client wants streaming (for synthesis later)
+        let client_wants_streaming = request_json
+            .as_ref()
+            .and_then(|j| j.get("stream"))
+            .and_then(|s| s.as_bool())
+            .unwrap_or(false);
+
+        // Check if augment-backend is enabled and extract user content
+        let augmentation = if let Some(ref augment_backend) = self.state.augment_backend {
+            if let Some(ref req_json) = request_json {
+                // Detect API format
+                let is_anthropic_format = is_anthropic_api;
+
+                // Extract user content directly from raw JSON (works for both OpenAI and Anthropic)
+                let user_content = extract_user_content_from_json(req_json);
+                tracing::debug!(
+                    is_anthropic = is_anthropic_format,
+                    content_len = user_content.len(),
+                    "Extracted user content for augmentation"
+                );
+
+                // Only call augment-backend if we have user content
+                if !user_content.is_empty() {
+                    tracing::info!(content_length = user_content.len(), "Calling augment-backend");
+                    match augment_backend.get_augmentation(&user_content).await {
+                        Ok(aug) if !aug.is_empty() => {
+                            tracing::info!(augmentation_length = aug.len(), "Received augmentation");
+                            let request_prompt = augment_backend.load_request_prompt()
+                                .unwrap_or_else(|e| {
+                                    tracing::warn!(error = %e, "Failed to load request_prompt, using empty string");
+                                    String::new()
+                                });
+                            Some((aug, request_prompt, user_content))
+                        }
+                        Ok(_) => None,
+                        Err(e) => {
+                            tracing::error!(error = %e, "Augment backend failed, returning error");
+                            return Json(serde_json::json!({
+                                "error": {
+                                    "type": "augment_backend_error",
+                                    "message": format!("Augment backend error: {}", e)
+                                }
+                            })).into_response();
+                        }
+                    }
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Inject augmentation into request if we got one
+        let enriched_body_bytes = if let Some((ref aug, ref request_prompt, _)) = augmentation {
+            if let Some(req_json) = request_json.clone() {
+                let is_anthropic_format = is_anthropic_api;
+
+                if is_anthropic_format {
+                    // Inject into Anthropic format
+                    if let Ok(mut anthropic_req) = serde_json::from_value::<crate::api::AnthropicMessageRequest>(req_json.clone()) {
+                        Self::inject_into_anthropic(&mut anthropic_req, request_prompt, aug);
+                        serde_json::to_vec(&anthropic_req).unwrap_or(body_bytes.to_vec()).into()
+                    } else {
+                        body_bytes.clone()
+                    }
+                } else {
+                    // Inject into OpenAI format
+                    if let Ok(openai_req) = serde_json::from_value::<ChatCompletionRequest>(req_json.clone()) {
+                        match inject_augmentation(openai_req, request_prompt, aug) {
+                            Ok(enriched) => serde_json::to_vec(&enriched).unwrap_or(body_bytes.to_vec()).into(),
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to inject augmentation");
+                                body_bytes.clone()
+                            }
+                        }
+                    } else {
+                        body_bytes.clone()
+                    }
+                }
+            } else {
+                body_bytes.clone()
+            }
+        } else {
+            body_bytes.clone()
+        };
+
+        // Log augmented request text if flag is set and augmentation was applied
+        if self.state.log_augmented_request_text {
+            if let Some((ref aug, ref request_prompt, ref original_content)) = augmentation {
+                let concatenated = format!("{}\n\n{}\n\n{}", original_content, request_prompt, aug);
+                tracing::info!("Augmented user message text:\n{}", concatenated);
+            }
+        }
+
+        // Log request (unless hide_requests is set)
+        if !self.state.hide_requests {
+            if let Some(ref req_json) = request_json {
+                tracing::info!("{}", format_request_log(req_json));
+            }
+        }
+
+        // Build complete URL with query string as-is (don't parse/re-encode)
+        let effective_path = backend.node.effective_path(path);
+        let backend_url = if let Some(q) = query {
+            format!("{}{}?{}", backend.node.base_url(), effective_path, q)
+        } else {
+            format!("{}{}", backend.node.base_url(), effective_path)
+        };
+
+        tracing::debug!(
+            backend_url = %backend_url,
+            has_query = query.is_some(),
+            "Building backend request"
+        );
+
+        // Create request with complete URL (query string included)
+        let mut backend_req = backend
+            .node
+            .http_client
+            .request(Method::from_bytes(method.as_str().as_bytes()).unwrap(), &backend_url);
+
+        // Copy headers (skip Content-Length, Host, and Authorization as we'll set those explicitly)
+        for (name, value) in headers.iter() {
+            // Skip headers that will be set explicitly or handled by reqwest
+            if name == header::HOST || name == header::CONTENT_LENGTH || name == header::AUTHORIZATION {
+                continue;
+            }
+
+            backend_req = backend_req.header(name, value);
+        }
+
+        // Add Authorization header if api_key is configured
+        if let Some(ref api_key) = backend.node.api_key {
+            backend_req = backend_req.header(header::AUTHORIZATION, format!("Bearer {}", api_key));
+        }
+
+        // ALWAYS force stream: false for backend request
+        // Use enriched_body_bytes if augmentation was injected, otherwise use original body
+        let final_body_bytes = if enriched_body_bytes != body_bytes.clone() {
+            // Augmentation was injected, but we still need to set stream:false
+            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&enriched_body_bytes) {
+                json["stream"] = serde_json::Value::Bool(false);
+                if let Some(obj) = json.as_object_mut() {
+                    if obj.remove("stream_options").is_some() {
+                        tracing::debug!("Stripped stream_options from enriched backend request");
+                    }
+                }
+                serde_json::to_vec(&json).unwrap_or_else(|_| enriched_body_bytes.to_vec()).into()
+            } else {
+                enriched_body_bytes
+            }
+        } else {
+            // No augmentation, use original logic
+            if let Some(mut json) = request_json.clone() {
+                json["stream"] = serde_json::Value::Bool(false);
+                // Strip stream_options - backend doesn't need it with stream:false
+                if let Some(obj) = json.as_object_mut() {
+                    if obj.remove("stream_options").is_some() {
+                        tracing::debug!("Stripped stream_options from non-streaming backend request");
+                    }
+                }
+                // Override model if configured
+                if let Some(ref model) = backend.node.model {
+                    json["model"] = serde_json::Value::String(model.clone());
+                }
+                // Override temperature if configured on this node
+                if let Some(temp) = backend.node.temperature {
+                    json["temperature"] = serde_json::Value::from(temp);
+                }
+                if client_wants_streaming {
+                    tracing::debug!("Forcing non-streaming backend request (will synthesize streaming response)");
+                }
+                serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.clone().to_vec()).into()
+            } else {
+                body_bytes.clone()
+            }
+        };
+
+        backend_req = backend_req.body(final_body_bytes);
+
+        let backend_response = match backend_req.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to connect to backend");
+                return (StatusCode::BAD_GATEWAY, format!("Failed to connect to backend: {}", e)).into_response();
+            }
+        };
+
+        // Log backend response status and headers for debugging
+        let backend_status = backend_response.status();
+        tracing::debug!(
+            status = %backend_status,
+            headers = ?backend_response.headers(),
+            "Received response from backend"
+        );
+
+        // Check if streaming response
+        let is_streaming_response = backend_response
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|ct| ct.to_str().ok())
+            .map(|ct| ct.contains("text/event-stream"))
+            .unwrap_or(false);
+
+        if is_streaming_response {
+            // Unexpected! We forced stream:false but got streaming response
+            tracing::warn!("Backend returned streaming response despite stream:false request");
+            // Fall back to old streaming handler
+            handle_streaming_response(
+                backend_response,
+                self.state.fix_registry.clone(),
+                self.state.config.stats.enabled,
+                self.state.config.stats.format,
+                self.state.exporter_manager.clone(),
+                request_json.clone(),
+                start,
+                backend.node.http_client.clone(),
+                backend.node.base_url().to_string(),
+                backend.group_name.clone(),
+                backend.node.strip_path_prefix.clone(),
+                self.state.dump_path.clone(),
+                Some(method.to_string()),
+                Some(uri.to_string()),
+                Some(body_bytes.clone().to_vec()),
+            )
+            .await
+        } else {
+            // Handle non-streaming response (expected path)
+            self.handle_non_streaming_response(
+                backend_response,
+                request_json,
+                client_wants_streaming,
+                is_anthropic_api,
+                start,
+                &backend.node,
+                backend.group_name.as_deref(),
+                method.clone(),
+                uri.clone(),
+                body_bytes.to_vec(),
+            )
+            .await
+        }
+    }
+
+    /// Handle a non-streaming response
+    async fn handle_non_streaming_response(
+        &self,
+        backend_response: reqwest::Response,
+        request_json: Option<serde_json::Value>,
+        client_wants_streaming: bool,
+        is_anthropic_api: bool,
+        start: Instant,
+        backend: &Arc<BackendNode>,
+        group_name: Option<&str>,
+        request_method: Method,
+        request_uri: axum::http::Uri,
+        _request_body: Vec<u8>,
+    ) -> Response {
+        let status = backend_response.status();
+        let headers = backend_response.headers().clone();
+
+        // Read response body
+        let raw_body_bytes = match backend_response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to read backend response");
+                return (StatusCode::BAD_GATEWAY, format!("Failed to read backend response: {}", e)).into_response();
+            }
+        };
+
+        // Check for Content-Encoding and decompress if needed
+        let content_encoding = headers.get(header::CONTENT_ENCODING).and_then(|ce| ce.to_str().ok());
+
+        let body_bytes = match decompress_body(&raw_body_bytes, content_encoding) {
+            Ok(decompressed) => decompressed,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    content_encoding = ?content_encoding,
+                    "Failed to decompress response body"
+                );
+                return (StatusCode::BAD_GATEWAY, format!("Failed to decompress response: {}", e)).into_response();
+            }
+        };
+
+        // If error status, log the full response body for debugging
+        if status.is_client_error() || status.is_server_error() {
+            let error_body = String::from_utf8_lossy(&body_bytes);
+            tracing::error!(
+                status = %status,
+                url = %backend.base_url(),
+                error_body = %error_body,
+                "Backend returned error response"
+            );
+        }
+
+        // Debug: Log received response details
+        let content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|ct| ct.to_str().ok())
+            .unwrap_or("unknown");
+        let body_preview = String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(500)]);
+        tracing::debug!(
+            backend_status = %status,
+            body_size = body_bytes.len(),
+            content_type = %content_type,
+            content_encoding = ?content_encoding,
+            body_preview = %body_preview,
+            "Received non-streaming response from backend"
+        );
+
+        // Only try to parse as JSON if Content-Type indicates JSON
+        let is_json_response = Self::is_json_content_type(content_type);
+
+        // Try to parse as JSON and apply fixes (only if Content-Type is JSON)
+        let (json_value, metrics) = if is_json_response {
+            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+                tracing::debug!("Response parsed as JSON successfully");
+                // Apply fixes with request context if available
+                let original_json = json.clone();
+                json = if let Some(ref req_json) = request_json {
+                    self.state.fix_registry.apply_fixes_with_context(json, req_json)
+                } else {
+                    self.state.fix_registry.apply_fixes(json)
+                };
+                if json != original_json {
+                    tracing::debug!("Fixes applied to non-streaming response");
+                } else {
+                    tracing::debug!("No fixes applied to response");
+                }
+
+                // Collect stats if enabled
+                let mut metrics = if self.state.config.stats.enabled {
+                    if let Some(ref req_json) = request_json {
+                        let mut m = RequestMetrics::from_response(
+                            &json,
+                            req_json,
+                            false, // We forced non-streaming
+                            start.elapsed().as_millis() as f64,
+                        );
+                        // Set group name if we're in multi-backend mode
+                        m.group_name = group_name.map(|s| s.to_string());
+                        Some(m)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+
+                // Fetch and set context_total for stats
+                if let Some(ref mut m) = metrics {
+                    if let Some(ctx_total) = fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref()).await {
+                        m.context_total = Some(ctx_total);
+                        m.calculate_context_percent();
+                    }
+                }
+
+                (Some(json), metrics)
+            } else {
+                // Content-Type says JSON but parsing failed - log warning
+                tracing::warn!(
+                    body_size = body_bytes.len(),
+                    body_preview = %String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(200)]),
+                    "Content-Type indicates JSON but parsing failed - returning original body unchanged"
+                );
+                (None, None)
+            }
+        } else {
+            // Content-Type is not JSON - this is expected, just passthrough
+            tracing::debug!(
+                content_type = %content_type,
+                "Non-JSON content type, passing through unchanged"
+            );
+            (None, None)
+        };
+
+        // Log stats
+        if let Some(ref m) = metrics {
+            let formatted = format_metrics(m, self.state.config.stats.format);
+            if self.state.config.stats.format == StatsFormat::Compact {
+                tracing::info!("{}", formatted);
+            } else {
+                tracing::info!("\n{}", formatted);
+            }
+
+            // Export to remote systems
+            let exporters = self.state.exporter_manager.clone();
+            let metrics_clone = m.clone();
+            tokio::spawn(async move {
+                exporters.export_all(&metrics_clone).await;
+            });
+        } else {
+            // Debug: Log why stats weren't collected
+            tracing::debug!(
+                stats_enabled = self.state.config.stats.enabled,
+                has_request_json = request_json.is_some(),
+                "No metrics collected for non-streaming response"
+            );
+        }
+
+        // Compute final body (used for dump and non-streaming return)
+        let final_body = if let Some(ref json) = json_value {
+            serde_json::to_vec(json).unwrap_or_else(|_| body_bytes.to_vec())
+        } else {
+            body_bytes.to_vec()
+        };
+
+        // Dump request/response if dump mode is enabled (before any early returns)
+        if let Some(ref dump_path) = self.state.dump_path {
+            let request_json_clone = request_json.clone();
+            let dump_path_clone = dump_path.clone();
+            let request_method_str = request_method.to_string();
+            let request_uri_str = request_uri.to_string();
+            let request_content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok().map(|s| s.to_string()));
+            let response_status = status.as_u16();
+            let response_body_clone = final_body.clone();
+            let response_content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok().map(|s| s.to_string()));
+
+            tokio::spawn(async move {
+                if let Some(req_json) = request_json_clone {
+                    let req_bytes = serde_json::to_vec(&req_json).unwrap_or_default();
+                    if let Err(e) = dump::dump_request_response(
+                        &dump_path_clone,
+                        &request_method_str,
+                        &request_uri_str,
+                        &req_bytes,
+                        request_content_type.as_deref(),
+                        response_status,
+                        &response_body_clone,
+                        response_content_type.as_deref(),
+                    ).await {
+                        tracing::warn!(error = %e, "Failed to dump request/response pair");
+                    }
+                }
+            });
+        }
+
+        // If client wants streaming, synthesize it from complete JSON
+        if client_wants_streaming {
+            if let Some(ref json) = json_value {
+                if is_anthropic_api {
+                    // Anthropic API: try parsing as Anthropic format first
+                    match serde_json::from_value::<AnthropicMessage>(json.clone()) {
+                        Ok(anthropic_msg) => {
+                            tracing::debug!("Backend returned Anthropic format, synthesizing streaming response");
+                            match synthesize_anthropic_streaming_response(anthropic_msg).await {
+                                Ok(response) => return response,
+                                Err(e) => {
+                                    tracing::error!(error = %e, "Failed to synthesize Anthropic streaming response");
+                                    // Fall through to return JSON
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            // Backend returned OpenAI format - convert to Anthropic and synthesize
+                            tracing::debug!("Backend returned OpenAI format, converting to Anthropic for streaming synthesis");
+                            match serde_json::from_value::<ChatCompletionResponse>(json.clone()) {
+                                Ok(openai_response) => {
+                                    // Convert OpenAI → Anthropic format
+                                    let anthropic_msg = AnthropicMessage::from(openai_response);
+                                    tracing::debug!(
+                                        converted_tokens = anthropic_msg.usage.input_tokens + anthropic_msg.usage.output_tokens,
+                                        content_blocks = anthropic_msg.content.len(),
+                                        "Converted OpenAI response to Anthropic format"
+                                    );
+                                    match synthesize_anthropic_streaming_response(anthropic_msg).await {
+                                        Ok(response) => return response,
+                                        Err(e) => {
+                                            tracing::error!(error = %e, "Failed to synthesize after OpenAI→Anthropic conversion");
+                                            // Fall through to return JSON
+                                        }
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::error!(
+                                        error = %e,
+                                        response_json = %json_preview(json),
+                                        "Failed to parse backend response as either Anthropic or OpenAI format"
+                                    );
+                                    // Fall through to return JSON
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    // OpenAI API: synthesize in OpenAI SSE format
+                    match serde_json::from_value::<ChatCompletionResponse>(json.clone()) {
+                        Ok(response) => {
+                            tracing::debug!("Synthesizing OpenAI streaming response from complete JSON");
+                            match synthesize_streaming_response(response).await {
+                                Ok(response) => return response,
+                                Err(e) => {
+                                    tracing::error!(error = %e, "Failed to synthesize OpenAI streaming response");
+                                    // Fall through to return JSON
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            // Log full response JSON for diagnosis
+                            let json_preview = serde_json::to_string_pretty(&json).unwrap_or_else(|_| format!("{:?}", json));
+                            tracing::warn!(
+                                error = %e,
+                                response_json = %json_preview,
+                                "Cannot parse as ChatCompletionResponse for synthesis - dumping full response"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        // Return complete JSON response (either client wants non-streaming, or synthesis failed)
+        let mut response = Response::builder().status(status);
+
+        // Only set JSON content-type if we successfully parsed/modified as JSON
+        // Otherwise preserve backend's content-type
+        if json_value.is_some() {
+            response = response.header(header::CONTENT_TYPE, "application/json");
+        }
+
+        for (name, value) in headers {
+            if let Some(name) = name {
+                // Skip headers that Axum will handle
+                if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING {
+                    continue;
+                }
+                // Skip content-type ONLY if we already set it (json_value.is_some())
+                // Otherwise preserve backend's content-type
+                if name == header::CONTENT_TYPE && json_value.is_some() {
+                    continue;
+                }
+                response = response.header(name, value);
+            }
+        }
+
+        response.body(Body::from(final_body)).unwrap().into_response()
+    }
+
+    /// Simple pass-through with no fix application or stats collection
+    /// Used for monitoring endpoints like /props, /slots, /health
+    async fn proxy_passthrough(&self, req: Request<Body>, backend: &Arc<BackendNode>) -> Response {
+        let method = req.method().clone();
+        let uri = req.uri().clone();
+        let headers = req.headers().clone();
+        let path = uri.path();
+        let query = uri.query();
+
+        tracing::debug!(method = %method, path = %path, query = ?query, "Pass-through request");
+
+        // Read body
+        let body_bytes = match to_bytes(req.into_body(), 1024 * 1024 * 10).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return (StatusCode::BAD_REQUEST, format!("Failed to read body: {}", e)).into_response();
+            }
+        };
+
+        // Build complete URL with query string as-is (don't parse/re-encode)
+        let effective_path = backend.effective_path(path);
+        let backend_url = if let Some(q) = query {
+            format!("{}{}?{}", backend.base_url(), effective_path, q)
+        } else {
+            format!("{}{}", backend.base_url(), effective_path)
+        };
+
+        tracing::debug!(
+            backend_url = %backend_url,
+            has_query = query.is_some(),
+            "Building pass-through request"
+        );
+
+        // Create request with complete URL (query string included)
+        let mut backend_req = backend
+            .http_client
+            .request(Method::from_bytes(method.as_str().as_bytes()).unwrap(), &backend_url);
+
+        // Copy headers (skip Host and Authorization as we'll set those explicitly)
+        for (name, value) in headers.iter() {
+            // Skip headers that will be set explicitly or handled by reqwest
+            if name == header::HOST || name == header::AUTHORIZATION {
+                continue;
+            }
+
+            backend_req = backend_req.header(name, value);
+        }
+
+        // Add Authorization header if api_key is configured
+        if let Some(ref api_key) = backend.api_key {
+            backend_req = backend_req.header(header::AUTHORIZATION, format!("Bearer {}", api_key));
+        }
+        backend_req = backend_req.body(body_bytes);
+
+        let backend_response = match backend_req.send().await {
+            Ok(resp) => resp,
+            Err(e) => {
+                return (StatusCode::BAD_GATEWAY, format!("Backend error: {}", e)).into_response();
+            }
+        };
+
+        // Pass through response
+        let status = backend_response.status();
+        let headers = backend_response.headers().clone();
+        let raw_body = match backend_response.bytes().await {
+            Ok(b) => b,
+            Err(e) => {
+                return (StatusCode::BAD_GATEWAY, format!("Failed to read response: {}", e)).into_response();
+            }
+        };
+
+        // Check for Content-Encoding and decompress if needed
+        let content_encoding = headers.get(header::CONTENT_ENCODING).and_then(|ce| ce.to_str().ok());
+
+        let body = match decompress_body(&raw_body, content_encoding) {
+            Ok(decompressed) => decompressed,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    content_encoding = ?content_encoding,
+                    "Failed to decompress pass-through response"
+                );
+                return (StatusCode::BAD_GATEWAY, format!("Failed to decompress response: {}", e)).into_response();
+            }
+        };
+
+        let mut response = Response::builder().status(status);
+        for (name, value) in headers {
+            if let Some(name) = name {
+                // Skip Content-Length and Transfer-Encoding - Axum will handle these
+                // This ensures consistent behavior with handle_non_streaming_response
+                if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING {
+                    continue;
+                }
+                response = response.header(name, value);
+            }
+        }
+        response.body(Body::from(body)).unwrap()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::backends::{BackendNode, RoundRobinBalancer};
+    use crate::config::{AppConfig, BackendConfig, StreamingConfig};
+    use crate::exporters::ExporterManager;
+    use crate::fixes::FixRegistry;
+    use std::collections::HashMap;
+    use std::sync::atomic::AtomicUsize;
+
+    #[allow(dead_code)]
+    fn create_test_handler_with_streaming(streaming_config: StreamingConfig) -> ProxyHandler {
+        let config = AppConfig {
+            server: crate::config::ServerConfig {
+                port: 8066,
+                host: "0.0.0.0".to_string(),
+            },
+            backend: BackendConfig::default(),
+            backends: None,
+            fixes: crate::config::FixesConfig {
+                enabled: false,
+                modules: HashMap::new(),
+            },
+            stats: crate::config::StatsConfig {
+                enabled: false,
+                format: crate::config::StatsFormat::Pretty,
+                log_interval: 1,
+            },
+            exporters: crate::config::ExportersConfig {
+                influxdb: crate::config::InfluxDbConfig {
+                    enabled: false,
+                    url: "http://localhost:8086".to_string(),
+                    org: "test".to_string(),
+                    bucket: "test".to_string(),
+                    token: "test".to_string(),
+                    batch_size: 1,
+                    flush_interval_seconds: 1,
+                },
+            },
+            detection: crate::config::DetectionConfig::default(),
+            streaming: streaming_config,
+            augment_backend: None,
+            dump: crate::config::DumpConfig::default(),
+        };
+
+        let default_node = BackendNode {
+            url: "http://localhost:8080".to_string(),
+            model: None,
+            api_key: None,
+            timeout_seconds: 300,
+            http_client: reqwest::Client::new(),
+            active_requests: AtomicUsize::new(0),
+            strip_path_prefix: None,
+            temperature: None,
+        };
+        let load_balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(default_node)]).unwrap());
+        let fix_registry = FixRegistry::new();
+        let exporter_manager = ExporterManager::new();
+
+        ProxyHandler::new(ProxyState {
+            config: std::sync::Arc::new(config),
+            load_balancer,
+            fix_registry: std::sync::Arc::new(fix_registry),
+            exporter_manager: std::sync::Arc::new(exporter_manager),
+            augment_backend: None,
+            hide_requests: false,
+            log_augmented_request_text: false,
+            dump_path: None,
+        })
+    }
+
+    // REMOVED: Tests for should_stream() method
+    // The method has been removed since we now always force non-streaming backend requests
+    // and synthesize streaming responses when clients request them.
+    //
+    // New architecture:
+    // - All backend requests: stream = false
+    // - Client wants streaming: synthesize from complete JSON
+    // - Client wants non-streaming: return complete JSON as-is
+
+    #[test]
+    fn test_is_json_content_type() {
+        // Standard JSON content types
+        assert!(ProxyHandler::is_json_content_type("application/json"));
+        assert!(ProxyHandler::is_json_content_type("application/json; charset=utf-8"));
+        assert!(ProxyHandler::is_json_content_type("APPLICATION/JSON"));
+
+        // Vendor-specific JSON types
+        assert!(ProxyHandler::is_json_content_type("application/vnd.api+json"));
+        assert!(ProxyHandler::is_json_content_type("application/vnd.github.v3+json"));
+        assert!(ProxyHandler::is_json_content_type(
+            "application/vnd.custom+json; charset=utf-8"
+        ));
+
+        // Non-JSON types
+        assert!(!ProxyHandler::is_json_content_type("text/html"));
+        assert!(!ProxyHandler::is_json_content_type("text/plain"));
+        assert!(!ProxyHandler::is_json_content_type("text/javascript"));
+        assert!(!ProxyHandler::is_json_content_type("application/javascript"));
+        assert!(!ProxyHandler::is_json_content_type("image/png"));
+        assert!(!ProxyHandler::is_json_content_type("image/jpeg"));
+        assert!(!ProxyHandler::is_json_content_type("text/css"));
+        assert!(!ProxyHandler::is_json_content_type("application/octet-stream"));
+    }
+}

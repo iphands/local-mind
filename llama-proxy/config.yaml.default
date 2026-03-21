@@ -1,0 +1,121 @@
+# llama-proxy configuration
+# Copy to config.yaml and modify as needed
+
+# === REQUIRED SECTIONS ===
+
+# Proxy server settings
+server:
+  # Port to listen on
+  port: 8066
+  # Bind address
+  host: "0.0.0.0"
+
+# Backend llama-server configuration (single backend mode)
+backend:
+  # Full URL to llama-server (supports http:// and https://)
+  url: "http://localhost:8080"
+  # Request timeout in seconds
+  timeout_seconds: 300
+  # Strip this prefix from incoming request path before forwarding (optional)
+  # Use when backend mounts API at a non-/v1 path (e.g., Z.ai: "https://api.z.ai/api/paas/v4")
+  # strip_path_prefix: "/v1"
+  # TLS configuration (optional, for https:// backends)
+  # tls:
+  #   # Accept invalid certificates (self-signed, expired)
+  #   accept_invalid_certs: false
+  #   # Path to custom CA certificate (PEM format)
+  #   ca_cert_path: "/path/to/ca.pem"
+  #   # Path to client certificate for mTLS
+  #   client_cert_path: "/path/to/client.pem"
+  #   # Path to client private key for mTLS
+  #   client_key_path: "/path/to/client.key"
+
+# Multi-backend load balancing with named groups (optional, overrides 'backend' when present)
+# backends:
+#   opus:
+#     # Model names this group handles (empty = catch-all for all models)
+#     mappings: ["opus", "opus4.5"]
+#     # Load balancing strategy: round_robin or priority_free
+#     strategy: priority_free
+#     nodes:
+#       - url: "http://cosmo.lan:8700"
+#         timeout_seconds: 300
+#         # Optional: model override and api_key per node
+#         # model: "anthropic/claude-opus-4"
+#         # api_key: "sk-xxx"
+#         # strip_path_prefix: "/v1"  # Strip prefix from incoming path (e.g., for Z.ai: /v1/chat/completions → /chat/completions)
+#         # temperature: 0.45  # Override temperature for requests to this node (if absent, client value passes through)
+#
+#   haiku:
+#     mappings: ["haiku", "claude-haiku-4-5-20251001"]
+#     strategy: round_robin
+#     nodes:
+#       - url: "http://cosmo.lan:8701"
+#       - url: "http://foobar.lan:1234"
+#
+#   catch_all:
+#     # Empty mappings = catch-all (handles all unmatched models)
+#     mappings: []
+#     strategy: priority_free
+#     nodes:
+#       - url: "http://example.com:8222"
+#
+# Model-based routing logic:
+#   1. If a request's model matches a group's mappings, route to that group
+#   2. If no group matches, look for a catch-all group (mappings: [])
+#   3. If no catch-all exists, return HTTP 404 error
+#
+# Load balancing strategies:
+#   - round_robin: Cycle through nodes in order
+#   - priority_free: Always use lowest-index free node (least requests wins)
+
+# === OPTIONAL SECTIONS (defaults shown) ===
+
+# Augment backend (experimental) - enriches user requests with additional context
+# augment-backend:
+#   enabled: true
+#   url: "http://cosmo.lan:8701"
+#   model: "cosmo-6000"
+#   prompt_file: "./augmenter/backend_prompt.md"
+#   request_prompt_file: "./augmenter/request_prompt.md"
+
+# Response fix modules (default: enabled with all fixes active)
+# fixes:
+#   enabled: true
+#   modules:
+#     toolcall_null_index:
+#       enabled: true
+#     toolcall_bad_filepath:
+#       enabled: true
+#       remove_duplicate: true
+#     toolcall_malformed_arguments:
+#       enabled: true
+
+# Pre-parse detection (default: enabled with warn level)
+# detection:
+#   enabled: true
+#   log_level: "warn"
+
+# Streaming mode (default: fake)
+# Controls how the proxy handles streaming responses:
+#   disabled: Forces streaming off completely
+#   fake: Forces non-streaming to backend, synthesizes streaming to frontend
+#   accumulator: NOT IMPLEMENTED - will error if used
+# streaming: fake
+
+# Stats logging (default: enabled, pretty format, log every request)
+# stats:
+#   enabled: true
+#   format: "pretty"
+#   log_interval: 1
+
+# Remote exporters (default: all disabled)
+# exporters:
+#   influxdb:
+#     enabled: false
+#     url: "http://localhost:8086"
+#     org: "my-org"
+#     bucket: "llama-metrics"
+#     token: "your-token-here"
+#     batch_size: 10
+#     flush_interval_seconds: 5

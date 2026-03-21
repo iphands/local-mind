@@ -1,0 +1,868 @@
+mod loader;
+
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::path::Path;
+
+pub use loader::load_config;
+
+/// Main application configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AppConfig {
+    pub server: ServerConfig,
+    pub backend: BackendConfig,
+    #[serde(default)]
+    pub backends: Option<BackendsConfig>,
+    #[serde(default)]
+    pub fixes: FixesConfig,
+    #[serde(default)]
+    pub stats: StatsConfig,
+    #[serde(default)]
+    pub exporters: ExportersConfig,
+    #[serde(default)]
+    pub detection: DetectionConfig,
+    #[serde(default)]
+    pub streaming: StreamingConfig,
+    #[serde(default, rename = "augment-backend")]
+    pub augment_backend: Option<AugmentBackendConfig>,
+    #[serde(default)]
+    pub dump: DumpConfig,
+}
+
+/// Debug dump configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DumpConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default)]
+    pub path: String,
+}
+
+impl Default for DumpConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            path: String::new(),
+        }
+    }
+}
+
+/// Proxy server configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServerConfig {
+    pub port: u16,
+    pub host: String,
+}
+
+/// Backend llama-server configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackendConfig {
+    /// Full backend URL (e.g., "https://example.com:4234" or "http://localhost:8080")
+    pub url: String,
+    /// Request timeout in seconds
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u64,
+    /// TLS configuration options
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+    /// Model identifier in provider/model format (e.g., "anthropic/claude-sonnet-4-5")
+    #[serde(default)]
+    pub model: Option<String>,
+    /// API key for backend authentication
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Strip this prefix from incoming request path before forwarding (e.g., "/v1" for Z.ai)
+    #[serde(default)]
+    pub strip_path_prefix: Option<String>,
+}
+
+/// TLS configuration for backend connections
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct TlsConfig {
+    /// Accept invalid certificates (self-signed, expired)
+    #[serde(default)]
+    pub accept_invalid_certs: bool,
+    /// Path to custom CA certificate (PEM format)
+    pub ca_cert_path: Option<String>,
+    /// Path to client certificate for mTLS
+    pub client_cert_path: Option<String>,
+    /// Path to client private key for mTLS
+    pub client_key_path: Option<String>,
+}
+
+fn default_timeout() -> u64 {
+    300
+}
+
+impl Default for BackendConfig {
+    fn default() -> Self {
+        Self {
+            url: "http://localhost:8080".to_string(),
+            timeout_seconds: default_timeout(),
+            tls: None,
+            model: None,
+            api_key: None,
+            strip_path_prefix: None,
+        }
+    }
+}
+
+impl BackendConfig {
+    /// Returns the base URL with trailing slash stripped
+    pub fn base_url(&self) -> &str {
+        self.url.trim_end_matches('/')
+    }
+
+    /// Returns true if the URL uses HTTPS
+    pub fn is_tls(&self) -> bool {
+        self.url.to_lowercase().starts_with("https://")
+    }
+}
+
+/// Per-node configuration for multi-backend mode
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackendNodeConfig {
+    /// Full backend URL (e.g., "http://localhost:8080")
+    pub url: String,
+    /// Request timeout in seconds
+    #[serde(default = "default_timeout")]
+    pub timeout_seconds: u64,
+    /// TLS configuration options
+    #[serde(default)]
+    pub tls: Option<TlsConfig>,
+    /// Model identifier override (e.g., "anthropic/claude-sonnet-4-5")
+    #[serde(default)]
+    pub model: Option<String>,
+    /// API key for backend authentication
+    #[serde(default)]
+    pub api_key: Option<String>,
+    /// Strip this prefix from incoming request path before forwarding (e.g., "/v1" for Z.ai)
+    #[serde(default)]
+    pub strip_path_prefix: Option<String>,
+    /// Override temperature for requests to this node (if absent, client value passes through)
+    #[serde(default)]
+    pub temperature: Option<f64>,
+}
+
+/// Configuration for a single backend group
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct BackendGroupConfig {
+    /// Model names this group handles (empty = catch-all)
+    pub mappings: Vec<String>,
+    /// Load balancing strategy (round_robin or priority_free)
+    #[serde(default = "default_strategy")]
+    pub strategy: String,
+    /// List of backend nodes in this group
+    pub nodes: Vec<BackendNodeConfig>,
+}
+
+fn default_strategy() -> String {
+    "round_robin".to_string()
+}
+
+/// Multi-backend configuration - named groups with per-group strategy
+pub type BackendsConfig = HashMap<String, BackendGroupConfig>;
+
+/// Error when no backend matches the requested model
+#[derive(Debug, Clone)]
+pub struct NoMatchingBackend {
+    pub requested_model: Option<String>,
+}
+
+impl std::fmt::Display for NoMatchingBackend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.requested_model {
+            Some(model) => write!(f, "No backend configured for model: {}", model),
+            None => write!(f, "No backend configured (no model specified and no catch-all)"),
+        }
+    }
+}
+
+impl std::error::Error for NoMatchingBackend {}
+
+/// Response fix modules configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FixesConfig {
+    #[serde(default = "default_fixes_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub modules: HashMap<String, FixModuleConfig>,
+}
+
+fn default_fixes_enabled() -> bool {
+    true
+}
+
+impl Default for FixesConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_fixes_enabled(),
+            modules: HashMap::new(),
+        }
+    }
+}
+
+/// Individual fix module configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct FixModuleConfig {
+    pub enabled: bool,
+    #[serde(flatten)]
+    pub options: HashMap<String, serde_yaml::Value>,
+}
+
+/// Stats logging configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct StatsConfig {
+    #[serde(default = "default_stats_enabled")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub format: StatsFormat,
+    #[serde(default = "default_log_interval")]
+    pub log_interval: u32,
+}
+
+fn default_stats_enabled() -> bool {
+    true
+}
+
+fn default_log_interval() -> u32 {
+    1
+}
+
+impl Default for StatsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_stats_enabled(),
+            format: StatsFormat::default(),
+            log_interval: default_log_interval(),
+        }
+    }
+}
+
+/// Stats output format
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum StatsFormat {
+    #[default]
+    Pretty,
+    Json,
+    Compact,
+}
+
+/// Pre-parse detection configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct DetectionConfig {
+    /// Enable pre-parse malformed pattern detection
+    /// This runs BEFORE JSON parsing and logs warnings immediately
+    #[serde(default = "default_detection_enabled")]
+    pub enabled: bool,
+
+    /// Log level for detections: "warn" | "error" | "info"
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
+}
+
+fn default_detection_enabled() -> bool {
+    true
+}
+
+fn default_log_level() -> String {
+    "warn".to_string()
+}
+
+impl Default for DetectionConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_detection_enabled(),
+            log_level: default_log_level(),
+        }
+    }
+}
+
+/// Streaming mode configuration
+///
+/// Controls how the proxy handles streaming responses:
+/// - `Disabled`: Forces streaming off completely (both frontend and backend)
+/// - `Fake`: Current behavior - forces non-streaming to backend, synthesizes streaming to frontend
+/// - `Accumulator`: Not yet implemented - will error if used
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum StreamingMode {
+    Disabled,
+    #[default]
+    Fake,
+    Accumulator,
+}
+
+impl StreamingMode {
+    /// Returns true if this mode is implemented
+    pub fn is_implemented(&self) -> bool {
+        matches!(self, StreamingMode::Disabled | StreamingMode::Fake)
+    }
+
+    /// Returns true if streaming is completely disabled
+    pub fn is_disabled(&self) -> bool {
+        matches!(self, StreamingMode::Disabled)
+    }
+
+    /// Returns true if using fake streaming mode
+    pub fn is_fake(&self) -> bool {
+        matches!(self, StreamingMode::Fake)
+    }
+}
+
+// Keep StreamingConfig as an alias for backward compatibility, but it's now just the enum
+pub type StreamingConfig = StreamingMode;
+
+/// Augment backend configuration - experimental feature for enriching requests
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AugmentBackendConfig {
+    /// Enable augment-backend feature
+    #[serde(default = "default_augment_enabled")]
+    pub enabled: bool,
+    /// Full URL to augment backend (e.g., "http://cosmo.lan:8701")
+    pub url: String,
+    /// Model identifier for augment backend
+    pub model: String,
+    /// Path to backend prompt file (defaults to "./augmenter/backend_prompt.md")
+    #[serde(default = "default_prompt_file")]
+    pub prompt_file: String,
+    /// Path to request prompt file injected into enriched user message (defaults to "./augmenter/request_prompt.md")
+    #[serde(default = "default_request_prompt_file")]
+    pub request_prompt_file: String,
+}
+
+fn default_augment_enabled() -> bool {
+    true
+}
+
+fn default_prompt_file() -> String {
+    "./augmenter/backend_prompt.md".to_string()
+}
+
+fn default_request_prompt_file() -> String {
+    "./augmenter/request_prompt.md".to_string()
+}
+
+impl Default for AugmentBackendConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            url: String::new(),
+            model: String::new(),
+            prompt_file: default_prompt_file(),
+            request_prompt_file: default_request_prompt_file(),
+        }
+    }
+}
+
+/// Error when augment-backend is configured but not properly set up
+#[derive(Debug, Clone)]
+pub struct AugmentBackendError {
+    pub message: String,
+}
+
+impl std::fmt::Display for AugmentBackendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "AugmentBackendError: {}", self.message)
+    }
+}
+
+impl std::error::Error for AugmentBackendError {}
+
+/// Exporters configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ExportersConfig {
+    #[serde(default)]
+    pub influxdb: InfluxDbConfig,
+}
+
+impl Default for ExportersConfig {
+    fn default() -> Self {
+        Self {
+            influxdb: InfluxDbConfig::default(),
+        }
+    }
+}
+
+/// InfluxDB exporter configuration
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct InfluxDbConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_influxdb_url")]
+    pub url: String,
+    #[serde(default = "default_influxdb_org")]
+    pub org: String,
+    #[serde(default = "default_influxdb_bucket")]
+    pub bucket: String,
+    #[serde(default)]
+    pub token: String,
+    #[serde(default = "default_batch_size")]
+    pub batch_size: usize,
+    #[serde(default = "default_flush_interval")]
+    pub flush_interval_seconds: u64,
+}
+
+fn default_influxdb_url() -> String {
+    "http://localhost:8086".to_string()
+}
+
+fn default_influxdb_org() -> String {
+    "my-org".to_string()
+}
+
+fn default_influxdb_bucket() -> String {
+    "llama-metrics".to_string()
+}
+
+fn default_batch_size() -> usize {
+    10
+}
+
+fn default_flush_interval() -> u64 {
+    5
+}
+
+impl Default for InfluxDbConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            url: default_influxdb_url(),
+            org: default_influxdb_org(),
+            bucket: default_influxdb_bucket(),
+            token: String::new(),
+            batch_size: default_batch_size(),
+            flush_interval_seconds: default_flush_interval(),
+        }
+    }
+}
+
+impl AppConfig {
+    /// Load configuration from a YAML file
+    pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
+        load_config(path)
+    }
+
+    /// Load configuration with fallback to default path
+    pub fn load_or_default(config_path: Option<&Path>) -> Result<Self, ConfigError> {
+        match config_path {
+            Some(path) => Self::from_file(path),
+            None => {
+                // Try default locations
+                let default_paths = ["config.yaml", "config.yml", "./config/config.yaml"];
+                for p in default_paths {
+                    let path = Path::new(p);
+                    if path.exists() {
+                        return Self::from_file(path);
+                    }
+                }
+                Err(ConfigError::NotFound(
+                    "No config file found. Tried: config.yaml, config.yml, ./config/config.yaml".to_string(),
+                ))
+            }
+        }
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConfigError {
+    #[error("Configuration file not found: {0}")]
+    NotFound(String),
+
+    #[error("Failed to read configuration file: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Failed to parse configuration: {0}")]
+    Parse(#[from] serde_yaml::Error),
+
+    #[error("Configuration validation error: {0}")]
+    Validation(String),
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_backend_config_base_url() {
+        let config = BackendConfig {
+            url: "http://localhost:8080".to_string(),
+            timeout_seconds: 300,
+            tls: None,
+            model: None,
+            api_key: None,
+            strip_path_prefix: None,
+        };
+        assert_eq!(config.base_url(), "http://localhost:8080");
+    }
+
+    #[test]
+    fn test_backend_config_https() {
+        let config = BackendConfig {
+            url: "https://example.com:4234".to_string(),
+            timeout_seconds: 300,
+            tls: None,
+            model: None,
+            api_key: None,
+            strip_path_prefix: None,
+        };
+        assert_eq!(config.base_url(), "https://example.com:4234");
+        assert!(config.is_tls());
+    }
+
+    #[test]
+    fn test_backend_config_is_tls() {
+        let http_config = BackendConfig {
+            url: "http://localhost:8080".to_string(),
+            timeout_seconds: 300,
+            tls: None,
+            model: None,
+            api_key: None,
+            strip_path_prefix: None,
+        };
+        assert!(!http_config.is_tls());
+
+        let https_config = BackendConfig {
+            url: "https://secure.example.com".to_string(),
+            timeout_seconds: 300,
+            tls: None,
+            model: None,
+            api_key: None,
+            strip_path_prefix: None,
+        };
+        assert!(https_config.is_tls());
+    }
+
+    #[test]
+    fn test_backend_config_trailing_slash() {
+        let config = BackendConfig {
+            url: "http://localhost:8080/".to_string(),
+            timeout_seconds: 300,
+            tls: None,
+            model: None,
+            api_key: None,
+            strip_path_prefix: None,
+        };
+        assert_eq!(config.base_url(), "http://localhost:8080");
+    }
+
+    #[test]
+    fn test_backend_config_default() {
+        let config = BackendConfig::default();
+        assert_eq!(config.url, "http://localhost:8080");
+        assert_eq!(config.timeout_seconds, 300);
+        assert!(config.tls.is_none());
+        assert!(config.model.is_none());
+        assert!(config.api_key.is_none());
+    }
+
+    #[test]
+    fn test_backend_config_tls_options() {
+        let config = BackendConfig {
+            url: "https://secure.example.com".to_string(),
+            timeout_seconds: 300,
+            tls: Some(TlsConfig {
+                accept_invalid_certs: true,
+                ca_cert_path: Some("/path/to/ca.pem".to_string()),
+                client_cert_path: None,
+                client_key_path: None,
+            }),
+            model: None,
+            api_key: None,
+            strip_path_prefix: None,
+        };
+        assert!(config.tls.is_some());
+        let tls = config.tls.unwrap();
+        assert!(tls.accept_invalid_certs);
+        assert_eq!(tls.ca_cert_path, Some("/path/to/ca.pem".to_string()));
+    }
+
+    #[test]
+    fn test_backend_config_model_and_api_key() {
+        let config = BackendConfig {
+            url: "https://api.example.com".to_string(),
+            timeout_seconds: 300,
+            tls: None,
+            model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            api_key: Some("sk-test-key".to_string()),
+            strip_path_prefix: None,
+        };
+        assert_eq!(config.model, Some("anthropic/claude-sonnet-4-5".to_string()));
+        assert_eq!(config.api_key, Some("sk-test-key".to_string()));
+    }
+
+    #[test]
+    fn test_stats_format_default() {
+        let format = StatsFormat::default();
+        assert!(matches!(format, StatsFormat::Pretty));
+    }
+
+    #[test]
+    fn test_stats_format_serde() {
+        // Test serialization
+        let pretty = StatsFormat::Pretty;
+        let json = StatsFormat::Json;
+        let compact = StatsFormat::Compact;
+
+        assert_eq!(serde_json::to_string(&pretty).unwrap(), "\"pretty\"");
+        assert_eq!(serde_json::to_string(&json).unwrap(), "\"json\"");
+        assert_eq!(serde_json::to_string(&compact).unwrap(), "\"compact\"");
+    }
+
+    #[test]
+    fn test_stats_format_deserialize() {
+        let pretty: StatsFormat = serde_json::from_str("\"pretty\"").unwrap();
+        let json: StatsFormat = serde_json::from_str("\"json\"").unwrap();
+        let compact: StatsFormat = serde_json::from_str("\"compact\"").unwrap();
+
+        assert!(matches!(pretty, StatsFormat::Pretty));
+        assert!(matches!(json, StatsFormat::Json));
+        assert!(matches!(compact, StatsFormat::Compact));
+    }
+
+    #[test]
+    fn test_fix_module_config() {
+        let config = FixModuleConfig {
+            enabled: true,
+            options: HashMap::new(),
+        };
+        assert!(config.enabled);
+        assert!(config.options.is_empty());
+    }
+
+    #[test]
+    fn test_fix_module_config_with_options() {
+        let mut options = HashMap::new();
+        options.insert("remove_duplicate".to_string(), serde_yaml::Value::Bool(true));
+
+        let config = FixModuleConfig { enabled: false, options };
+        assert!(!config.enabled);
+        assert!(config.options.contains_key("remove_duplicate"));
+    }
+
+    #[test]
+    fn test_config_error_display() {
+        let err = ConfigError::NotFound("test.yaml".to_string());
+        assert!(err.to_string().contains("test.yaml"));
+
+        let err = ConfigError::Parse(serde_yaml::from_str::<AppConfig>("invalid").unwrap_err());
+        assert!(err.to_string().contains("parse"));
+
+        let err = ConfigError::Validation("invalid URL".to_string());
+        assert!(err.to_string().contains("invalid URL"));
+    }
+
+    #[test]
+    fn test_load_or_default_none() {
+        // Create a temporary directory without config files to test error case
+        let temp_dir = tempfile::TempDir::new().unwrap();
+        let _ = std::env::set_current_dir(temp_dir.path());
+
+        // When no path is provided and no default files exist, should return NotFound error
+        let result = AppConfig::load_or_default(None);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), ConfigError::NotFound(_)));
+    }
+
+    #[test]
+    fn test_load_or_default_with_path() {
+        let result = AppConfig::load_or_default(Some(Path::new("/nonexistent/config.yaml")));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_server_config() {
+        let config = ServerConfig {
+            port: 8066,
+            host: "0.0.0.0".to_string(),
+        };
+        assert_eq!(config.port, 8066);
+        assert_eq!(config.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn test_stats_config() {
+        let config = StatsConfig {
+            enabled: true,
+            format: StatsFormat::Json,
+            log_interval: 5,
+        };
+        assert!(config.enabled);
+        assert!(matches!(config.format, StatsFormat::Json));
+        assert_eq!(config.log_interval, 5);
+    }
+
+    #[test]
+    fn test_influxdb_config() {
+        let config = InfluxDbConfig {
+            enabled: true,
+            url: "http://localhost:8086".to_string(),
+            org: "my-org".to_string(),
+            bucket: "metrics".to_string(),
+            token: "secret".to_string(),
+            batch_size: 10,
+            flush_interval_seconds: 5,
+        };
+        assert!(config.enabled);
+        assert_eq!(config.url, "http://localhost:8086");
+        assert_eq!(config.batch_size, 10);
+    }
+
+    #[test]
+    fn test_streaming_mode_default() {
+        let mode = StreamingMode::default();
+        assert_eq!(mode, StreamingMode::Fake);
+        assert!(mode.is_implemented());
+        assert!(mode.is_fake());
+        assert!(!mode.is_disabled());
+    }
+
+    #[test]
+    fn test_streaming_mode_disabled() {
+        let mode = StreamingMode::Disabled;
+        assert!(mode.is_implemented());
+        assert!(mode.is_disabled());
+        assert!(!mode.is_fake());
+    }
+
+    #[test]
+    fn test_streaming_mode_fake() {
+        let mode = StreamingMode::Fake;
+        assert!(mode.is_implemented());
+        assert!(mode.is_fake());
+        assert!(!mode.is_disabled());
+    }
+
+    #[test]
+    fn test_streaming_mode_accumulator() {
+        let mode = StreamingMode::Accumulator;
+        assert!(!mode.is_implemented());
+        assert!(!mode.is_disabled());
+        assert!(!mode.is_fake());
+    }
+
+    #[test]
+    fn test_streaming_mode_serde() {
+        // Test serialization
+        let disabled = StreamingMode::Disabled;
+        let fake = StreamingMode::Fake;
+        let accumulator = StreamingMode::Accumulator;
+
+        assert_eq!(serde_json::to_string(&disabled).unwrap(), "\"disabled\"");
+        assert_eq!(serde_json::to_string(&fake).unwrap(), "\"fake\"");
+        assert_eq!(serde_json::to_string(&accumulator).unwrap(), "\"accumulator\"");
+
+        // Test deserialization
+        let disabled: StreamingMode = serde_json::from_str("\"disabled\"").unwrap();
+        let fake: StreamingMode = serde_json::from_str("\"fake\"").unwrap();
+        let accumulator: StreamingMode = serde_json::from_str("\"accumulator\"").unwrap();
+
+        assert_eq!(disabled, StreamingMode::Disabled);
+        assert_eq!(fake, StreamingMode::Fake);
+        assert_eq!(accumulator, StreamingMode::Accumulator);
+    }
+
+    #[test]
+    fn test_backend_group_config_parsing() {
+        let yaml = r#"
+mappings:
+  - "haiku"
+  - "claude-haiku-4-5-20251001"
+strategy: "priority_free"
+nodes:
+  - url: "http://localhost:8080"
+    timeout_seconds: 300
+  - url: "http://localhost:8081"
+"#;
+        let group: BackendGroupConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(group.mappings, vec!["haiku", "claude-haiku-4-5-20251001"]);
+        assert_eq!(group.strategy, "priority_free");
+        assert_eq!(group.nodes.len(), 2);
+        assert_eq!(group.nodes[0].url, "http://localhost:8080");
+        assert_eq!(group.nodes[1].timeout_seconds, 300); // default
+    }
+
+    #[test]
+    fn test_backend_group_config_catch_all() {
+        let yaml = r#"
+mappings: []
+strategy: "round_robin"
+nodes:
+  - url: "http://localhost:8080"
+"#;
+        let group: BackendGroupConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(group.mappings.is_empty());
+        assert_eq!(group.strategy, "round_robin");
+    }
+
+    #[test]
+    fn test_backend_group_config_default_strategy() {
+        let yaml = r#"
+mappings:
+  - "opus"
+nodes:
+  - url: "http://localhost:8080"
+"#;
+        let group: BackendGroupConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(group.strategy, "round_robin"); // default
+    }
+
+    #[test]
+    fn test_no_matching_backend_display() {
+        let err = NoMatchingBackend { requested_model: Some("gpt-4".to_string()) };
+        assert_eq!(err.to_string(), "No backend configured for model: gpt-4");
+
+        let err = NoMatchingBackend { requested_model: None };
+        assert_eq!(err.to_string(), "No backend configured (no model specified and no catch-all)");
+    }
+
+    #[test]
+    fn test_backends_config_hashmap() {
+        let yaml = r#"
+opus:
+  mappings: ["opus", "opus4.5"]
+  strategy: priority_free
+  nodes:
+    - url: "http://cosmo.lan:8700"
+haiku:
+  mappings: ["haiku"]
+  strategy: round_robin
+  nodes:
+    - url: "http://cosmo.lan:8701"
+    - url: "http://foobar.lan:1234"
+catch_all:
+  mappings: []
+  strategy: priority_free
+  nodes:
+    - url: "http://example.com:8222"
+"#;
+        let backends: BackendsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(backends.len(), 3);
+        assert!(backends.contains_key("opus"));
+        assert!(backends.contains_key("haiku"));
+        assert!(backends.contains_key("catch_all"));
+
+        // Verify catch-all has empty mappings
+        assert!(backends.get("catch_all").unwrap().mappings.is_empty());
+
+        // Verify opus has 1 node
+        assert_eq!(backends.get("opus").unwrap().nodes.len(), 1);
+
+        // Verify haiku has 2 nodes
+        assert_eq!(backends.get("haiku").unwrap().nodes.len(), 2);
+    }
+
+    #[test]
+    fn test_backend_node_config_no_mapping_field() {
+        // Test that BackendNodeConfig no longer has mapping field
+        let yaml = r#"
+url: "http://localhost:8080"
+timeout_seconds: 300
+"#;
+        let node: BackendNodeConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(node.url, "http://localhost:8080");
+        assert_eq!(node.timeout_seconds, 300);
+        // mapping field no longer exists
+    }
+}
