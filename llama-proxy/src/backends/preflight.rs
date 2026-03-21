@@ -8,7 +8,7 @@
 use std::time::Duration;
 
 use crate::config::{BackendsConfig, BackendConfig};
-use crate::proxy::fetch_context_total;
+use crate::proxy::cache_context_from_preflight;
 
 /// Run preflight checks for all backend nodes in multi-backend mode.
 /// Queries /v1/models from each node, logs available models, and auto-sets
@@ -45,7 +45,7 @@ pub async fn run_preflight_multi(backends: &mut BackendsConfig) {
                 req = req.header("Authorization", format!("Bearer {}", api_key));
             }
 
-            let models = match fetch_models(req).await {
+            let models_result = match fetch_models(req).await {
                 Ok(m) => m,
                 Err(e) => {
                     tracing::warn!(
@@ -61,13 +61,19 @@ pub async fn run_preflight_multi(backends: &mut BackendsConfig) {
             tracing::info!(
                 group = %group_name,
                 url = %base_url,
-                models = ?models,
+                models = ?models_result.model_ids,
+                is_llama_cpp = models_result.is_llama_cpp,
                 "Preflight: node models"
             );
 
-            // Pre-fetch context size to detect backend type and cache it
-            // This prevents /props 404s on vLLM backends during normal requests
-            let context_total = fetch_context_total(&client, &base_url, node_cfg.strip_path_prefix.as_deref()).await;
+            // Cache context size using already-fetched models info — avoids redundant HTTP calls
+            let context_total = cache_context_from_preflight(
+                &client,
+                &base_url,
+                node_cfg.strip_path_prefix.as_deref(),
+                models_result.is_llama_cpp,
+                models_result.max_model_len,
+            ).await;
             if let Some(ctx) = context_total {
                 tracing::info!(
                     group = %group_name,
@@ -77,7 +83,7 @@ pub async fn run_preflight_multi(backends: &mut BackendsConfig) {
                 );
             }
 
-            match models.len() {
+            match models_result.model_ids.len() {
                 0 => {
                     tracing::warn!(
                         group = %group_name,
@@ -86,7 +92,7 @@ pub async fn run_preflight_multi(backends: &mut BackendsConfig) {
                     );
                 }
                 1 if node_cfg.model.is_none() => {
-                    let discovered = models.into_iter().next().unwrap();
+                    let discovered = models_result.model_ids.into_iter().next().unwrap();
                     tracing::info!(
                         group = %group_name,
                         url = %base_url,
@@ -144,22 +150,30 @@ pub async fn run_preflight_single(backend: &BackendConfig) {
         req = req.header("Authorization", format!("Bearer {}", api_key));
     }
 
-    match fetch_models(req).await {
-        Ok(models) => {
+    let (is_llama_cpp, max_model_len) = match fetch_models(req).await {
+        Ok(result) => {
             tracing::info!(
                 url = %base_url,
-                models = ?models,
+                models = ?result.model_ids,
+                is_llama_cpp = result.is_llama_cpp,
                 "Preflight: single backend models"
             );
+            (result.is_llama_cpp, result.max_model_len)
         }
         Err(e) => {
             tracing::warn!(url = %base_url, error = %e, "Preflight: could not query /v1/models (skipping)");
+            (false, None)
         }
-    }
+    };
 
-    // Pre-fetch context size to detect backend type and cache it
-    // This prevents /props 404s on vLLM backends during normal requests
-    let context_total = fetch_context_total(&client, &base_url, backend.strip_path_prefix.as_deref()).await;
+    // Cache context size using already-fetched models info — avoids redundant HTTP calls
+    let context_total = cache_context_from_preflight(
+        &client,
+        &base_url,
+        backend.strip_path_prefix.as_deref(),
+        is_llama_cpp,
+        max_model_len,
+    ).await;
     if let Some(ctx) = context_total {
         tracing::info!(
             url = %base_url,
@@ -169,23 +183,43 @@ pub async fn run_preflight_single(backend: &BackendConfig) {
     }
 }
 
+struct ModelsResult {
+    model_ids: Vec<String>,
+    max_model_len: Option<u64>,
+    is_llama_cpp: bool,
+}
+
 /// Fetch model IDs from a /v1/models request builder.
-async fn fetch_models(req: reqwest::RequestBuilder) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+/// Also captures the Server header and max_model_len for backend type detection.
+async fn fetch_models(req: reqwest::RequestBuilder) -> Result<ModelsResult, Box<dyn std::error::Error>> {
     let resp = req.send().await?;
     if !resp.status().is_success() {
         return Err(format!("/v1/models returned HTTP {}", resp.status()).into());
     }
+
+    // Detect llama.cpp from Server header before consuming body
+    let is_llama_cpp = resp
+        .headers()
+        .get("server")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.contains("llama.cpp"))
+        .unwrap_or(false);
+
     let body: serde_json::Value = resp.json().await?;
-    let ids = body
-        .get("data")
-        .and_then(|d| d.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
-                .collect()
-        })
-        .unwrap_or_default();
-    Ok(ids)
+
+    let (model_ids, max_model_len) = if let Some(arr) = body.get("data").and_then(|d| d.as_array()) {
+        let ids = arr.iter()
+            .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
+            .collect();
+        let max_len = arr.first()
+            .and_then(|m| m.get("max_model_len"))
+            .and_then(|v| v.as_u64());
+        (ids, max_len)
+    } else {
+        (vec![], None)
+    };
+
+    Ok(ModelsResult { model_ids, max_model_len, is_llama_cpp })
 }
 
 fn build_preflight_client(

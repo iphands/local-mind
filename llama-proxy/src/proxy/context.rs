@@ -59,6 +59,46 @@ pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str, st
     None
 }
 
+/// Cache context size from preflight data, avoiding redundant HTTP calls.
+///
+/// Called by preflight after it has already fetched /v1/models and inspected
+/// the `Server` response header to determine backend type.
+///
+/// - llama.cpp (`is_llama_cpp = true`): fetches `/props` for the actual configured n_ctx
+///   (max_model_len from /v1/models is the training context, not the server's -c setting)
+/// - Other backends: uses `max_model_len` already extracted from the /v1/models response
+pub async fn cache_context_from_preflight(
+    client: &reqwest::Client,
+    backend_url: &str,
+    strip_path_prefix: Option<&str>,
+    is_llama_cpp: bool,
+    max_model_len: Option<u64>,
+) -> Option<u64> {
+    let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+
+    // Check cache first (shouldn't be populated yet during preflight, but be safe)
+    {
+        let read_guard = cache.read().await;
+        if let Some(&(ctx, _)) = read_guard.get(backend_url) {
+            return Some(ctx);
+        }
+    }
+
+    if is_llama_cpp {
+        // Need /props for the actual runtime n_ctx (distinct from model's n_ctx_train)
+        if let Some(n_ctx) = fetch_from_props(client, backend_url, strip_path_prefix).await {
+            cache_result(cache, backend_url, n_ctx, BackendType::LlamaCpp);
+            return Some(n_ctx);
+        }
+        None
+    } else if let Some(ctx) = max_model_len {
+        cache_result(cache, backend_url, ctx, BackendType::Vllm);
+        Some(ctx)
+    } else {
+        None
+    }
+}
+
 /// Fetch context size from llama.cpp `/props` endpoint
 async fn fetch_from_props(client: &reqwest::Client, backend_url: &str, strip_path_prefix: Option<&str>) -> Option<u64> {
     let path = if let Some(prefix) = strip_path_prefix {
