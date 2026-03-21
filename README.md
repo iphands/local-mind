@@ -33,14 +33,21 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 └──────────────┬──────────────────────────────┘
                │ OpenAI-compatible API
                v
-┌──────────────────────────────────────┐
-│  Local LLM Servers (cosmo.lan)       │
-│  ┌────────────┐  ┌────────────┐      │
-│  │ cosmo-6000 │  │ cosmo-4060 │      │
-│  │ :8700      │  │ :8701      │      │
-│  └────────────┘  └────────────┘      │
-│  llama.cpp + CUDA                    │
-└──────────────────────────────────────┘
+┌──────────────────────────────────────────────┐
+│  llama-proxy (cosmo.lan:8799)                │
+│  Rust reverse proxy with response fixing,    │
+│  metrics, and multi-backend load balancing   │
+└──────────────┬───────────────────────────────┘
+               │
+               v
+┌──────────────────────────────────────────────┐
+│  Local LLM Servers (cosmo.lan)               │
+│  ┌────────────┐  ┌────────────┐              │
+│  │ cosmo-6000 │  │ cosmo-4060 │              │
+│  │ :8700      │  │ :8701      │              │
+│  └────────────┘  └────────────┘              │
+│  ikllama / llama.cpp + CUDA                  │
+└──────────────────────────────────────────────┘
 ```
 
 ## Project Structure
@@ -51,7 +58,14 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 │   ├── opencode                # Launch the dev container
 │   ├── build-container-opencode
 │   ├── model-holder            # Lock model files in memory
-│   └── model-switcher          # Switch agent models
+│   ├── model-switcher          # Switch agent models
+│   ├── ocm                     # OpenCode model management
+│   └── count-subagent-calls    # Count subagent usage
+│
+├── llama-proxy/                # Rust HTTP reverse proxy
+│   ├── src/                    # Proxy source code
+│   ├── config.yaml.default     # Config template
+│   └── README.md               # Full proxy documentation
 │
 ├── opencode/                   # Main dev environment
 │   ├── Dockerfile              # Fedora-based container
@@ -69,13 +83,23 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 │   ├── vendor/                 # Read-only reference: OpenCode & oh-my-opencode source
 │   └── plans/                  # Planning documents
 │
-├── server/
-    └── llamacpp/                 # llama.cpp LLM server infrastructure
-        ├── Dockerfile            # CUDA 12.4 build
-        ├── run-3070              # Start cosmo-6000 server (:8700)
-        ├── run-4060              # Start cosmo-4060 server (:8701)
-        ├── run-both              # Start with both GPUs
-        └── vendor/ik_llama.cpp/  # ik_llama source code used in container build
+└── server/
+    ├── proxy -> ../llama-proxy  # Symlink to llama-proxy
+    ├── llamacpp/                # llama.cpp LLM server infrastructure
+    │   ├── Dockerfile           # CUDA build
+    │   ├── run-6000             # Start cosmo-6000 server (:8700, RTX 3070)
+    │   ├── run-4060             # Start cosmo-4060 server (:8701, RTX 4060)
+    │   ├── run-both             # Start with both GPUs
+    │   ├── run-common           # Shared startup logic
+    │   └── vendor/              # llama.cpp source
+    ├── ikllama/                 # ik_llama.cpp server (alternative backend)
+    │   ├── Dockerfile
+    │   ├── run-6000
+    │   ├── run-4060
+    │   └── vendor/
+    ├── vllm/                    # vLLM server infrastructure
+    ├── sglang/                  # SGLang server infrastructure
+    └── trtllm/                  # TensorRT-LLM infrastructure
 ```
 
 ## Prerequisites
@@ -89,18 +113,29 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 ### 1. Build and Start LLM Servers
 
 ```bash
-cd server/llamacpp
-./run-both          # Starts cosmo-6000 on :8700, cosmo-4060 on :8701
+cd server/llamacpp       # or server/ikllama
+./run-both               # Starts cosmo-6000 on :8700, cosmo-4060 on :8701
 ```
 
 Or individually:
 
 ```bash
-./run-3070          # RTX 3070 - 32k context
-./run-4060          # RTX 4060 - 48k context
+./run-6000               # RTX 3070 (GPU 0) - port 8700
+./run-4060               # RTX 4060 - port 8701
 ```
 
-### 2. Launch the Dev Container
+### 2. Start llama-proxy
+
+```bash
+cd llama-proxy
+cp config.yaml.default config.yaml
+# Edit config.yaml to set backend URL(s)
+cargo run --release -- run --config config.yaml
+```
+
+The proxy listens on `:8799` by default and routes to the backend LLM servers.
+
+### 3. Launch the Dev Container
 
 ```bash
 bin/opencode
@@ -108,7 +143,7 @@ bin/opencode
 
 This builds the Docker image (if needed) and drops you into a Fedora container with OpenCode, oh-my-opencode, and all development tools pre-installed. Your `~/prog` directory is mounted read-write.
 
-### 3. Start OpenCode Inside the Container
+### 4. Start OpenCode Inside the Container
 
 ```bash
 opencode
@@ -118,13 +153,26 @@ The `local-mind` agent is configured as the default. It will automatically coord
 
 ## LLM Providers
 
-All providers use OpenAI-compatible APIs served by llama.cpp:
+All providers use OpenAI-compatible APIs:
 
-| Provider | Endpoint | GPU | Context |
-|----------|----------|-----|---------|
-| cosmo-00 | `http://cosmo.lan:8700/v1` | RTX 3070 | 32k |
-| cosmo-01 | `http://cosmo.lan:8701/v1` | RTX 4060 | 48k |
-| cosmo-proxy | `http://cosmo.lan:8799/v1` | Load-balanced | - |
+| Provider | Endpoint | GPU | Notes |
+|----------|----------|-----|-------|
+| cosmo-00 | `http://cosmo.lan:8700/v1` | RTX 3070 | Direct backend |
+| cosmo-01 | `http://cosmo.lan:8701/v1` | RTX 4060 | Direct backend |
+| cosmo-proxy | `http://cosmo.lan:8799/v1` | Load-balanced | Via llama-proxy |
+| runpod | RunPod proxy URL | Cloud | Remote fallback |
+
+## llama-proxy
+
+The `llama-proxy/` directory contains a Rust reverse proxy that sits between OpenCode and the LLM backends. Features:
+
+- **Response fixing**: Repairs malformed tool calls and JSON from LLM outputs
+- **Multi-backend routing**: Route requests to different backends by model name
+- **Load balancing**: `round_robin` or `priority_free` strategies
+- **Metrics**: Tokens/sec, context usage, request timing
+- **InfluxDB export**: Remote telemetry for monitoring
+
+See `llama-proxy/README.md` for full documentation.
 
 ## Helper Tools
 
@@ -162,6 +210,7 @@ Reviews are also mandatory after running commands to verify changes -- `local-mi
 
 - **Container**: Fedora with development tools, PHP/Composer, Node.js/Bun, Rust
 - **AI Framework**: OpenCode + oh-my-opencode plugin system
-- **LLM Inference**: llama.cpp with CUDA GPU acceleration
+- **LLM Inference**: ikllama/llama.cpp, vLLM, SGLang, or TensorRT-LLM with CUDA GPU acceleration
+- **Proxy**: llama-proxy (Rust) with response fixing, load balancing, and metrics
 - **Helper Tools**: Rust (clap, crossterm, memmap2, serde)
 - **Agent Definitions**: Markdown with YAML frontmatter
