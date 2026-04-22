@@ -1,5 +1,5 @@
 FROM fedora AS builder
-RUN echo "bump_003"
+RUN echo "bump_004"
 RUN dnf group install -y development-tools
 
 COPY .dnf-deps /dnf-deps
