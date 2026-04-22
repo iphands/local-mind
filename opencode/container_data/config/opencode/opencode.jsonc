@@ -49,7 +49,11 @@
     "cosmo-proxy": {
       "name": "cosmo-proxy",
       "npm": "@ai-sdk/openai-compatible",
-      "models": { "cosmo-proxy": { "name": "cosmo-proxy" }, },
+      "models": {
+        "cosmo-proxy": { "name": "cosmo-proxy" },
+        "cosmo-heavy": { "name": "cosmo-heavy" },
+        "cosmo-light": { "name": "cosmo-light" },
+      },
       "options": {
         "baseURL": "http://cosmo.lan:8799/v1",
         "apiKey": "deadbeef1234"

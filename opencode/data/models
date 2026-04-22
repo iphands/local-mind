@@ -1,6 +1,8 @@
 cosmo-00/cosmo-6000
 cosmo-01/cosmo-4060
 cosmo-proxy/cosmo-proxy
+cosmo-proxy/cosmo-heavy
+cosmo-proxy/cosmo-light
 noir-llama/noir-model
 zai-coding-plan/glm-5
 inception/mercury-2

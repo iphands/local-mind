@@ -5,19 +5,28 @@
     "layout": "main-vertical"
   },
   "agents": {
-    "build": {
+    "big-pickle-agent": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
-    "oracle": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "plan": {
+    "librarian": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
     "OpenCode-Builder": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
-    "explore": {
+    "oracle": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "atlas": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "sisyphus-junior": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "sisyphus": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "multimodal-looker": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
     "metis": {
@@ -26,25 +35,16 @@
     "momus": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
+    "plan": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "explore": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "build": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
     "prometheus": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "atlas": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "big-pickle-agent": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "sisyphus-junior": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "multimodal-looker": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "sisyphus": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "librarian": {
       "model": "cosmo-proxy/cosmo-proxy"
     }
   },
@@ -52,22 +52,22 @@
     "visual-engineering": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
-    "writing": {
+    "ultrabrain": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "artistry": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
     "unspecified-low": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
-    "artistry": {
+    "writing": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
     "quick": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
     "unspecified-high": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "ultrabrain": {
       "model": "cosmo-proxy/cosmo-proxy"
     }
   }
