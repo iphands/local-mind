@@ -17,20 +17,20 @@ pub struct BackendGuard {
 
 impl BackendGuard {
     pub fn new(node: Arc<BackendNode>) -> Self {
-        node.active_requests.fetch_add(1, Ordering::Relaxed);
+        node.active_requests.fetch_add(1, Ordering::Release);
         Self { node, group_name: None }
     }
 
     /// Create a guard with an associated group name
     pub fn with_group(node: Arc<BackendNode>, group_name: String) -> Self {
-        node.active_requests.fetch_add(1, Ordering::Relaxed);
+        node.active_requests.fetch_add(1, Ordering::Release);
         Self { node, group_name: Some(group_name) }
     }
 }
 
 impl Drop for BackendGuard {
     fn drop(&mut self) {
-        self.node.active_requests.fetch_sub(1, Ordering::Relaxed);
+        self.node.active_requests.fetch_sub(1, Ordering::AcqRel);
     }
 }
 

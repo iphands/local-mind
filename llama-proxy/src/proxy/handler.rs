@@ -474,43 +474,9 @@ impl ProxyHandler {
         // ALWAYS force stream: false for backend request
         // Use enriched_body_bytes if augmentation was injected, otherwise use original body
         let final_body_bytes = if enriched_body_bytes != body_bytes.clone() {
-            // Augmentation was injected, but we still need to set stream:false
-            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&enriched_body_bytes) {
-                json["stream"] = serde_json::Value::Bool(false);
-                if let Some(obj) = json.as_object_mut() {
-                    if obj.remove("stream_options").is_some() {
-                        tracing::debug!("Stripped stream_options from enriched backend request");
-                    }
-                }
-                serde_json::to_vec(&json).unwrap_or_else(|_| enriched_body_bytes.to_vec()).into()
-            } else {
-                enriched_body_bytes
-            }
+            Self::apply_backend_overrides_bytes(&enriched_body_bytes, &backend.node)
         } else {
-            // No augmentation, use original logic
-            if let Some(mut json) = request_json.clone() {
-                json["stream"] = serde_json::Value::Bool(false);
-                // Strip stream_options - backend doesn't need it with stream:false
-                if let Some(obj) = json.as_object_mut() {
-                    if obj.remove("stream_options").is_some() {
-                        tracing::debug!("Stripped stream_options from non-streaming backend request");
-                    }
-                }
-                // Override model if configured
-                if let Some(ref model) = backend.node.model {
-                    json["model"] = serde_json::Value::String(model.clone());
-                }
-                // Override temperature if configured on this node
-                if let Some(temp) = backend.node.temperature {
-                    json["temperature"] = serde_json::Value::from(temp);
-                }
-                if client_wants_streaming {
-                    tracing::debug!("Forcing non-streaming backend request (will synthesize streaming response)");
-                }
-                serde_json::to_vec(&json).unwrap_or_else(|_| body_bytes.clone().to_vec()).into()
-            } else {
-                body_bytes.clone()
-            }
+            Self::apply_backend_overrides_bytes(&body_bytes, &backend.node)
         };
 
         backend_req = backend_req.body(final_body_bytes);
@@ -576,6 +542,26 @@ impl ProxyHandler {
                 body_bytes.to_vec(),
             )
             .await
+        }
+    }
+
+    fn apply_backend_overrides_bytes(body: &[u8], backend: &BackendNode) -> Vec<u8> {
+        if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) {
+            json["stream"] = serde_json::Value::Bool(false);
+            if let Some(obj) = json.as_object_mut() {
+                if obj.remove("stream_options").is_some() {
+                    tracing::debug!("Stripped stream_options from backend request");
+                }
+            }
+            if let Some(ref model) = backend.model {
+                json["model"] = serde_json::Value::String(model.clone());
+            }
+            if let Some(temp) = backend.temperature {
+                json["temperature"] = serde_json::Value::from(temp);
+            }
+            serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec())
+        } else {
+            body.to_vec()
         }
     }
 

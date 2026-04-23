@@ -29,33 +29,18 @@
 
 use super::{FixAction, ResponseFix, ToolCallAccumulator};
 use serde_json::Value;
-use std::sync::atomic::AtomicBool;
-use std::sync::Arc;
 
 /// Fix for malformed filePath in Qwen3-Coder tool calls
 ///
 /// Uses schema-based truncation: Since the Write tool schema only allows
 /// `content` and `filePath` fields (no additional properties), we truncate
 /// after the first complete `"filePath":"value"` occurrence.
-pub struct ToolcallBadFilepathFix {
-    /// Deprecated: Now always truncates after first filePath (kept for API compatibility)
-    #[allow(dead_code)]
-    remove_duplicate: Arc<AtomicBool>,
-}
+pub struct ToolcallBadFilepathFix {}
 
 impl ToolcallBadFilepathFix {
     /// Create new fix instance
-    /// Note: `remove_duplicate` parameter is deprecated (always true now)
-    pub fn new(remove_duplicate: bool) -> Self {
-        Self {
-            remove_duplicate: Arc::new(AtomicBool::new(remove_duplicate)),
-        }
-    }
-
-    /// Deprecated: No longer has any effect (always removes duplicates via truncation)
-    #[allow(dead_code)]
-    pub fn set_remove_duplicate(&self, _value: bool) {
-        // No-op: truncation is now the only approach
+    pub fn new() -> Self {
+        Self {}
     }
 
     /// Check if arguments string is malformed
@@ -185,13 +170,22 @@ impl ToolcallBadFilepathFix {
         } else {
             // TIER 2: Fallback for JSON reformatting/escaping
             // String matching may fail due to encoding or escaping differences
+            // IMPORTANT: Only use rfind result if the match is at the very end
+            // of accumulated, otherwise it's an ambiguous match and we must
+            // fall back to safe_completion to avoid wrong delta calculation.
             if let Some(pos) = accumulated.rfind(current_chunk) {
-                tracing::debug!(
-                    fix_name = self.name(),
-                    index = index,
-                    "Delta calc: rfind fallback (reformatting detected)"
-                );
-                pos
+                if pos + current_chunk.len() == accumulated.len() {
+                    pos  // Match at end = safe
+                } else {
+                    // Match found but not at end — ambiguous, could be duplicate
+                    // fragment in the accumulated text. Fall through to safe fallback.
+                    tracing::debug!(
+                        fix_name = self.name(),
+                        index = index,
+                        "Delta calc: rfind found but not at end, falling back"
+                    );
+                    return self.safe_completion(accumulated);
+                }
             } else {
                 // TIER 3: Safe fallback - cannot determine position
                 // CRITICAL: Return minimal completion, NEVER full JSON
@@ -386,7 +380,7 @@ impl ResponseFix for ToolcallBadFilepathFix {
                                     );
                                     // Suppress this chunk - replace arguments with empty string
                                     function["arguments"] = Value::String(String::new());
-                                    return (chunk, FixAction::NotApplicable);
+                                    continue;
                                 }
 
                                 // Accumulate the arguments with eager detection
@@ -495,7 +489,7 @@ mod tests {
 
     #[test]
     fn test_fix_duplicate_filepath() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let malformed = r#"{"content":"code","filePath":"/path/to/file","filePath"/path/to/file"}"#;
         assert!(fix.is_malformed(malformed));
@@ -506,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_valid_json_passthrough() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let valid = r#"{"content":"code","filePath":"/path/to/file"}"#;
         assert!(!fix.is_malformed(valid));
@@ -516,22 +510,8 @@ mod tests {
     }
 
     #[test]
-    fn test_new_with_remove_duplicate() {
-        let fix = ToolcallBadFilepathFix::new(true);
-        assert_eq!(fix.name(), "toolcall_bad_filepath");
-        assert!(fix.description().contains("filePath"));
-    }
-
-    #[test]
-    fn test_set_remove_duplicate() {
-        let fix = ToolcallBadFilepathFix::new(true);
-        fix.set_remove_duplicate(false);
-        // Should not panic, setting works
-    }
-
-    #[test]
     fn test_is_valid_json() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         assert!(fix.is_valid_json("{}"));
         assert!(fix.is_valid_json("{\"key\": \"value\"}"));
@@ -542,7 +522,7 @@ mod tests {
 
     #[test]
     fn test_is_malformed() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         // Valid JSON with filePath - not malformed
         assert!(!fix.is_malformed(r#"{"filePath": "/path"}"#));
@@ -556,7 +536,7 @@ mod tests {
 
     #[test]
     fn test_fix_arguments_empty() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let empty = "{}";
         let fixed = fix.fix_arguments(empty);
@@ -565,7 +545,7 @@ mod tests {
 
     #[test]
     fn test_fix_arguments_complex_valid() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let valid = r#"{"content":"some code","filePath":"/home/user/file.txt"}"#;
         let fixed = fix.fix_arguments(valid);
@@ -575,7 +555,7 @@ mod tests {
 
     #[test]
     fn test_applies_no_choices() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let response = serde_json::json!({"other": "data"});
         assert!(!fix.applies(&response));
@@ -583,7 +563,7 @@ mod tests {
 
     #[test]
     fn test_applies_no_tool_calls() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let response = serde_json::json!({
             "choices": [{
@@ -595,7 +575,7 @@ mod tests {
 
     #[test]
     fn test_applies_valid_tool_call() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let response = serde_json::json!({
             "choices": [{
@@ -615,7 +595,7 @@ mod tests {
 
     #[test]
     fn test_applies_malformed_tool_call() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let response = serde_json::json!({
             "choices": [{
@@ -634,7 +614,7 @@ mod tests {
 
     #[test]
     fn test_apply_no_changes_needed() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let response = serde_json::json!({
             "choices": [{
@@ -652,7 +632,7 @@ mod tests {
 
     #[test]
     fn test_apply_fixes_malformed() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let response = serde_json::json!({
             "choices": [{
@@ -677,7 +657,7 @@ mod tests {
 
     #[test]
     fn test_apply_stream_no_delta() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let chunk = serde_json::json!({
             "choices": [{
@@ -692,7 +672,7 @@ mod tests {
 
     #[test]
     fn test_apply_stream_with_delta() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let chunk = serde_json::json!({
             "choices": [{
@@ -717,7 +697,7 @@ mod tests {
 
     #[test]
     fn test_fix_malformed_json_no_filepath() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         // Malformed JSON but no filePath - should still try to fix
         let malformed = r#"{"key": "value" broken"#;
@@ -727,9 +707,7 @@ mod tests {
 
     #[test]
     fn test_fix_keep_duplicate_mode() {
-        let fix = ToolcallBadFilepathFix::new(false); // Don't remove duplicate
-
-        // This tests the non-removal path
+        let fix = ToolcallBadFilepathFix::new();
         let malformed = r#"{"filePath":"/path","filePath"/broken"}"#;
         let fixed = fix.fix_arguments(malformed);
         // Should still produce valid JSON (via aggressive fix if needed)
@@ -741,7 +719,7 @@ mod tests {
 
     #[test]
     fn test_multiple_tool_calls() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let response = serde_json::json!({
             "choices": [{
@@ -783,7 +761,7 @@ mod tests {
 
     #[test]
     fn test_escaped_characters() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let valid = r#"{"content":"line1\nline2","filePath":"/path/to/file"}"#;
         assert!(!fix.is_malformed(valid));
@@ -796,7 +774,7 @@ mod tests {
     fn test_accumulated_streaming_fix() {
         use super::ToolCallAccumulator;
 
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Simulate streaming chunks where the malformed pattern spans multiple chunks
@@ -859,7 +837,7 @@ mod tests {
     fn test_accumulated_streaming_valid_json_clears_accumulator() {
         use super::ToolCallAccumulator;
 
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Simulate streaming chunks that form valid JSON
@@ -883,7 +861,7 @@ mod tests {
     fn test_accumulated_streaming_multiple_tool_calls() {
         use super::ToolCallAccumulator;
 
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Two different tool calls with different indices
@@ -919,7 +897,7 @@ mod tests {
         // This tests the exact pattern reported by the user:
         // {"content":"...","filePath":"/path","filePath"/path"}
         // Where the second filePath is missing the colon
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         let malformed = r#"{"content":"some code","filePath":"/home/user/file.c","filePath"/home/user/file.c"}"#;
 
@@ -941,7 +919,7 @@ mod tests {
         use super::ToolCallAccumulator;
 
         // Test the user's exact pattern accumulated across streaming chunks
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Chunk 1: {"content":"some code",
@@ -1003,7 +981,7 @@ mod tests {
 
     #[test]
     fn test_user_exact_error_pattern_non_streaming() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         // EXACT pattern from user's error
         let malformed = "{\"content\":\"#!/usr/bin/perl\\n# test\\n\",\"filePath\":\"/home/iphands/prog/slop/trash/primes.pl\",\"filePath\"/home/iphands/prog/slop/llama-proxy/trash/primes.pl\"}";
@@ -1038,7 +1016,7 @@ mod tests {
     fn test_user_exact_error_pattern_streaming() {
         use super::ToolCallAccumulator;
 
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Simulate how llama.cpp would stream this malformed content
@@ -1103,7 +1081,7 @@ mod tests {
 
     #[test]
     fn test_user_pattern_in_full_response() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         // Full non-streaming response with user's exact error
         let response = serde_json::json!({
@@ -1170,7 +1148,7 @@ mod tests {
 
     #[test]
     fn test_simpler_malformed_patterns() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         // Test various malformed patterns
         let test_cases = vec![
@@ -1210,7 +1188,7 @@ mod tests {
         // Claude Code accumulates the delta.tool_calls[].function.arguments strings
         use super::ToolCallAccumulator;
 
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Chunk 1: {"content":"...","
@@ -1283,7 +1261,7 @@ mod tests {
         // accumulated.ends_with(current_chunk) may return false
         use super::ToolCallAccumulator;
 
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Chunk with escaped newline in content - use regular strings since they contain backslashes
@@ -1335,7 +1313,7 @@ mod tests {
         // (which is the bug - it should send a completion delta instead)
         use super::ToolCallAccumulator;
 
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Create a scenario where ends_with() will fail
@@ -1389,7 +1367,7 @@ mod tests {
         // Test when the chunk appears multiple times in accumulated (partial overlap)
         use super::ToolCallAccumulator;
 
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Create chunks where content repeats
@@ -1434,7 +1412,7 @@ mod tests {
         // Test with multi-byte UTF-8 characters that might confuse string matching
         use super::ToolCallAccumulator;
 
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Chunks with emoji and Japanese characters
@@ -1478,7 +1456,7 @@ mod tests {
         // returns FALSE, causing the fallback to send FULL fixed JSON instead of delta
         use super::ToolCallAccumulator;
 
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Manually construct a scenario where the accumulator has different content
@@ -1577,7 +1555,7 @@ mod tests {
     #[test]
     fn test_post_fix_chunk_suppression() {
         // After fix is applied, subsequent chunks for same index should be suppressed
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Chunk 1: Start JSON
@@ -1615,7 +1593,7 @@ mod tests {
 
     #[test]
     fn test_new_pattern_brace_after_filepath() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         // Test "filePath} pattern (key followed by } instead of proper value)
         let malformed = r#"{"content":"code","filePath":"/path1","filePath}/path2"}"#;
@@ -1631,7 +1609,7 @@ mod tests {
 
     #[test]
     fn test_new_pattern_slash_after_filepath() {
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         // Test "filePath/ pattern (key followed by / without colon)
         let malformed = r#"{"content":"code","filePath":"/path1","filePath/path2"}"#;
@@ -1646,7 +1624,7 @@ mod tests {
     #[test]
     fn test_client_accumulation_with_post_fix_suppression() {
         // Simulate full client-side accumulation with post-fix suppression
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Build the streaming scenario that caused the original bug
@@ -1707,7 +1685,7 @@ mod tests {
     #[test]
     fn test_post_fix_suppression_different_indices() {
         // Verify that suppression only affects the fixed index, not other indices
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
         // Tool call 0: Will be fixed
@@ -1770,7 +1748,7 @@ mod tests {
     #[test]
     fn test_log_level_is_default_info() {
         use crate::fixes::{FixLogLevel, ResponseFix};
-        let fix = ToolcallBadFilepathFix::new(true);
+        let fix = ToolcallBadFilepathFix::new();
 
         // Verify this fix uses the default INFO log level
         assert_eq!(fix.log_level(), FixLogLevel::Info);

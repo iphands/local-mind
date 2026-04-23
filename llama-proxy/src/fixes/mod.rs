@@ -255,7 +255,7 @@ pub fn create_default_registry() -> FixRegistry {
     // Register malformed arguments fix - it handles the more specific {}":" pattern
     // This ensures it runs before the broader filepath fix
     registry.register(Arc::new(ToolcallMalformedArgumentsFix::new()));
-    registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+    registry.register(Arc::new(ToolcallBadFilepathFix::new()));
     registry
 }
 

@@ -116,7 +116,6 @@ fixes:
       enabled: true
     toolcall_bad_filepath:
       enabled: true
-      remove_duplicate: true
     toolcall_malformed_arguments:
       enabled: true
 
@@ -429,7 +428,7 @@ pub use my_custom_fix::MyCustomFix;
 
 pub fn create_default_registry() -> FixRegistry {
     let mut registry = FixRegistry::new();
-    registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+    registry.register(Arc::new(ToolcallBadFilepathFix::new()));
     registry.register(Arc::new(MyCustomFix::new(true)));  // Add your fix
     registry
 }

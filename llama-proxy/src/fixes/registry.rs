@@ -228,17 +228,8 @@ impl FixRegistry {
     /// Configure from config map
     pub fn configure(&mut self, config: &HashMap<String, crate::config::FixModuleConfig>) {
         for (name, module_config) in config {
-            if let Some(fix) = self.fixes.iter().find(|f| f.name() == name) {
+            if self.fixes.iter().any(|f| f.name() == name) {
                 self.enabled.insert(name.clone(), module_config.enabled);
-
-                // Apply fix-specific options
-                if name == "toolcall_bad_filepath" {
-                    if let Some(casted) = Arc::clone(fix).as_any().downcast_ref::<super::ToolcallBadFilepathFix>() {
-                        if let Some(remove_dup) = module_config.options.get("remove_duplicate").and_then(|v| v.as_bool()) {
-                            casted.set_remove_duplicate(remove_dup);
-                        }
-                    }
-                }
             }
         }
     }
@@ -282,7 +273,7 @@ mod tests {
     #[test]
     fn test_registry_register() {
         let mut registry = FixRegistry::new();
-        let fix = Arc::new(ToolcallBadFilepathFix::new(true));
+        let fix = Arc::new(ToolcallBadFilepathFix::new());
         registry.register(fix);
 
         assert_eq!(registry.list_fixes().len(), 1);
@@ -292,7 +283,7 @@ mod tests {
     #[test]
     fn test_registry_set_enabled() {
         let mut registry = FixRegistry::new();
-        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
 
         assert!(registry.is_enabled("toolcall_bad_filepath"));
 
@@ -320,7 +311,7 @@ mod tests {
     #[test]
     fn test_registry_get_fix() {
         let mut registry = FixRegistry::new();
-        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
 
         let fix = registry.get_fix("toolcall_bad_filepath");
         assert!(fix.is_some());
@@ -341,7 +332,7 @@ mod tests {
     #[test]
     fn test_registry_apply_fixes_disabled() {
         let mut registry = FixRegistry::new();
-        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
         registry.set_enabled("toolcall_bad_filepath", false);
 
         let response = serde_json::json!({"test": "value"});
@@ -352,7 +343,7 @@ mod tests {
     #[test]
     fn test_registry_apply_fixes_doesnt_apply() {
         let mut registry = FixRegistry::new();
-        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
 
         // Response without tool calls - fix doesn't apply
         let response = serde_json::json!({
@@ -367,7 +358,7 @@ mod tests {
     #[test]
     fn test_registry_apply_fixes_applies() {
         let mut registry = FixRegistry::new();
-        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
 
         // Response with malformed tool call
         let response = serde_json::json!({
@@ -394,7 +385,7 @@ mod tests {
     #[test]
     fn test_registry_apply_fixes_stream() {
         let mut registry = FixRegistry::new();
-        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
 
         let chunk = serde_json::json!({
             "choices": [{
@@ -409,15 +400,12 @@ mod tests {
     #[test]
     fn test_registry_configure() {
         let mut registry = FixRegistry::new();
-        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
-
-        let mut options = HashMap::new();
-        options.insert("remove_duplicate".to_string(), serde_yaml::Value::Bool(false));
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
 
         let mut modules = HashMap::new();
         modules.insert(
             "toolcall_bad_filepath".to_string(),
-            crate::config::FixModuleConfig { enabled: false, options },
+            crate::config::FixModuleConfig { enabled: false, options: HashMap::new() },
         );
 
         registry.configure(&modules);
@@ -444,8 +432,8 @@ mod tests {
     #[test]
     fn test_multiple_fixes() {
         let mut registry = FixRegistry::new();
-        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
-        registry.register(Arc::new(ToolcallBadFilepathFix::new(false)));
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
 
         assert_eq!(registry.list_fixes().len(), 2);
         // Both should be enabled by default
@@ -593,7 +581,7 @@ mod tests {
     fn test_backward_compatibility_with_old_fixes() {
         // Old fixes (like ToolcallBadFilepathFix) should still work with context-aware methods
         let mut registry = FixRegistry::new();
-        registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
 
         let request = serde_json::json!({"model": "test"});
 

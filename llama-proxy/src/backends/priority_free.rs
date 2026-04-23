@@ -30,7 +30,7 @@ impl LoadBalancer for PriorityFreeBalancer {
         // Model routing is handled by GroupedLoadBalancer; this balancer just selects from its nodes
         // Pick the first node with zero active requests
         for node in &self.nodes {
-            if node.active_requests.load(Ordering::Relaxed) == 0 {
+            if node.active_requests.load(Ordering::Acquire) == 0 {
                 return Ok(BackendGuard::new(node.clone()));
             }
         }
@@ -38,7 +38,7 @@ impl LoadBalancer for PriorityFreeBalancer {
         // All busy: pick the node with the fewest active requests (lowest index wins ties)
         let node = self.nodes
             .iter()
-            .min_by_key(|n| n.active_requests.load(Ordering::Relaxed))
+            .min_by_key(|n| n.active_requests.load(Ordering::Acquire))
             .unwrap(); // safe: nodes is non-empty
         Ok(BackendGuard::new(node.clone()))
     }

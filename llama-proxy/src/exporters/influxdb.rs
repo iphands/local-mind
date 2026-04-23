@@ -86,6 +86,10 @@ impl MetricsExporter for InfluxDbExporter {
             builder = builder.tag("conversation_id", conv_id.as_str());
         }
 
+        if let Some(ref group_name) = metrics.group_name {
+            builder = builder.tag("group_name", group_name.as_str());
+        }
+
         let mut point = builder
             .field("prompt_tokens", metrics.prompt_tokens as f64)
             .field("completion_tokens", metrics.completion_tokens as f64)

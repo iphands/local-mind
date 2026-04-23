@@ -85,15 +85,15 @@ impl ToolcallMalformedArgumentsFix {
         let parsed_keys: Vec<String> = parsed.keys().map(|k| k.to_string()).collect();
         let missing_params: Vec<&String> = schema_params
             .iter()
-            .filter(|p| !parsed_keys.contains(p) && *p != "{}")
+            .filter(|p| !parsed_keys.contains(p))
             .collect();
 
         if missing_params.is_empty() {
             return None;
         }
 
-        // If there's exactly one missing parameter and one `{}"` key, it's clear what to do
-        if missing_params.len() == 1 && parsed.contains_key("{}") {
+        // If there's exactly one missing parameter, the {} key holds its value
+        if missing_params.len() == 1 {
             let correct_param = missing_params[0];
 
             // Replace the unquoted {} with quoted correct parameter
@@ -109,7 +109,7 @@ impl ToolcallMalformedArgumentsFix {
         }
 
         // Multiple missing parameters - try heuristic matching
-        if missing_params.len() > 1 && parsed.contains_key("{}") {
+        if missing_params.len() > 1 {
             // Common heuristics for parameter names
             let heuristics = [
                 "file_path",
@@ -159,8 +159,13 @@ impl ToolcallMalformedArgumentsFix {
         // Matches sequences like: ,{}"="value" or {{}":"value"
         let unquoted_str_pattern = Regex::new(r#"[,\{]([^\s"]+)"\s*:\s*"([^"]*)""#).ok()?;
         for cap in unquoted_str_pattern.captures_iter(json_str) {
-            if let (Some(key), Some(val)) = (cap.get(1), cap.get(2)) {
-                result.insert(key.as_str().to_string(), Value::String(val.as_str().to_string()));
+            if let Some(key) = cap.get(1) {
+                if key.as_str() == "{}" {
+                    continue;
+                }
+                if let Some(val) = cap.get(2) {
+                    result.insert(key.as_str().to_string(), Value::String(val.as_str().to_string()));
+                }
             }
         }
 
@@ -469,8 +474,8 @@ mod tests {
         assert!(parsed.contains_key("content"));
         assert_eq!(parsed["content"].as_str().unwrap(), "test value");
 
-        // Should have extracted the malformed key
-        assert!(parsed.contains_key("{}"));
+        // {} garbage key should NOT be extracted (bug #3 fix)
+        assert!(!parsed.contains_key("{}"));
     }
 
     #[test]

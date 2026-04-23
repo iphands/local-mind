@@ -931,7 +931,7 @@ mod tests {
 
             let fix_registry = {
                 let mut registry = FixRegistry::new();
-                registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+                registry.register(Arc::new(ToolcallBadFilepathFix::new()));
                 Arc::new(registry)
             };
 
@@ -1017,7 +1017,7 @@ mod tests {
 
             let fix_registry = {
                 let mut registry = FixRegistry::new();
-                registry.register(Arc::new(ToolcallBadFilepathFix::new(true)));
+                registry.register(Arc::new(ToolcallBadFilepathFix::new()));
                 Arc::new(registry)
             };
 
@@ -1086,7 +1086,7 @@ mod tests {
             // 1. The proxy's delta calculation matches what the client expects
             // 2. Client-side accumulation == server-side fixed JSON
 
-            let fix = ToolcallBadFilepathFix::new(true);
+            let fix = ToolcallBadFilepathFix::new();
             let mut accumulator = ToolCallAccumulator::new();
 
             // Simulate streaming chunks
