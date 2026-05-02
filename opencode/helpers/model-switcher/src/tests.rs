@@ -4,6 +4,23 @@ use std::fs;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
+fn create_temp_config_with_limits(with_input: bool) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "{{").unwrap();
+    writeln!(file, "  \"model\": \"cosmo-proxy/cosmo-proxy\",").unwrap();
+    writeln!(file, "  \"provider\": {{").unwrap();
+    if with_input {
+        writeln!(file, r#"    "cosmo-00": {{ "models": {{ "cosmo-6000": {{ "name": "cosmo-6000", "limit": {{ "context": 262144, "output": 262144, "input": 200000 }} }} }} }},"#).unwrap();
+        writeln!(file, r#"    "noir-llama": {{ "models": {{ "noir-model": {{ "name": "noir-model", "limit": {{ "context": 262144, "output": 32768, "input": 200000 }} }} }} }}"#).unwrap();
+    } else {
+        writeln!(file, r#"    "cosmo-00": {{ "models": {{ "cosmo-6000": {{ "name": "cosmo-6000", "limit": {{ "context": 262144, "output": 262144 }} }} }} }},"#).unwrap();
+        writeln!(file, r#"    "noir-llama": {{ "models": {{ "noir-model": {{ "name": "noir-model", "limit": {{ "context": 262144, "output": 32768 }} }} }} }}"#).unwrap();
+    }
+    writeln!(file, "  }}").unwrap();
+    writeln!(file, "}}").unwrap();
+    file
+}
+
 fn create_temp_models_file(models: &[&str]) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();
     for model in models {
@@ -734,6 +751,120 @@ mod tests {
         if let Some((ref old, ref new)) = default_selection {
             assert_eq!(old, new);
         }
+    }
+
+    // Tests for ctx limit functionality
+
+    #[test]
+    fn test_update_line_input_limit_replace() {
+        let line = r#"      "models": { "m": { "limit": { "context": 262144, "output": 262144, "input": 200000 } } }"#;
+        let result = crate::update_line_input_limit(line, Some(180000));
+        assert!(result.contains("\"input\": 180000"), "got: {}", result);
+        assert!(!result.contains("200000"), "old value should be gone: {}", result);
+        assert!(result.contains("\"context\": 262144"));
+        assert!(result.contains("\"output\": 262144"));
+    }
+
+    #[test]
+    fn test_update_line_input_limit_add() {
+        let line = r#"      "models": { "m": { "limit": { "context": 262144, "output": 262144 } } }"#;
+        let result = crate::update_line_input_limit(line, Some(200000));
+        assert!(result.contains("\"input\": 200000"), "got: {}", result);
+        assert!(result.contains("\"context\": 262144"));
+        assert!(result.contains("\"output\": 262144"));
+    }
+
+    #[test]
+    fn test_update_line_input_limit_remove() {
+        let line = r#"      "models": { "m": { "limit": { "context": 262144, "output": 262144, "input": 200000 } } }"#;
+        let result = crate::update_line_input_limit(line, None);
+        assert!(!result.contains("\"input\""), "got: {}", result);
+        assert!(result.contains("\"context\": 262144"));
+        assert!(result.contains("\"output\": 262144"));
+        // closing brace of limit still present
+        assert!(result.contains("} }"));
+    }
+
+    #[test]
+    fn test_update_line_input_limit_no_limit_key() {
+        let line = r#"  "model": "cosmo-proxy/cosmo-proxy","#;
+        let result = crate::update_line_input_limit(line, Some(200000));
+        assert_eq!(result, line);
+    }
+
+    #[test]
+    fn test_update_line_input_limit_off_no_input_is_noop() {
+        let line = r#"      "models": { "m": { "limit": { "context": 262144, "output": 262144 } } }"#;
+        let result = crate::update_line_input_limit(line, None);
+        assert_eq!(result, line);
+    }
+
+    #[test]
+    fn test_update_input_limits_replaces_all() {
+        let file = create_temp_config_with_limits(true);
+        let path = file.path().to_str().unwrap();
+
+        let changes = crate::update_input_limits(path, Some(180000)).unwrap();
+        assert_eq!(changes, 2);
+
+        let content = fs::read_to_string(path).unwrap();
+        assert_eq!(content.matches("\"input\": 180000").count(), 2);
+        assert!(!content.contains("\"input\": 200000"));
+    }
+
+    #[test]
+    fn test_update_input_limits_adds_when_missing() {
+        let file = create_temp_config_with_limits(false);
+        let path = file.path().to_str().unwrap();
+
+        let changes = crate::update_input_limits(path, Some(200000)).unwrap();
+        assert_eq!(changes, 2);
+
+        let content = fs::read_to_string(path).unwrap();
+        assert_eq!(content.matches("\"input\": 200000").count(), 2);
+    }
+
+    #[test]
+    fn test_update_input_limits_off_removes_all() {
+        let file = create_temp_config_with_limits(true);
+        let path = file.path().to_str().unwrap();
+
+        let changes = crate::update_input_limits(path, None).unwrap();
+        assert_eq!(changes, 2);
+
+        let content = fs::read_to_string(path).unwrap();
+        assert!(!content.contains("\"input\""));
+    }
+
+    #[test]
+    fn test_update_input_limits_off_no_input_zero_changes() {
+        let file = create_temp_config_with_limits(false);
+        let path = file.path().to_str().unwrap();
+
+        let changes = crate::update_input_limits(path, None).unwrap();
+        assert_eq!(changes, 0);
+    }
+
+    #[test]
+    fn test_update_input_limits_preserves_newline() {
+        let file = create_temp_config_with_limits(true);
+        let path = file.path().to_str().unwrap();
+        let original = fs::read_to_string(path).unwrap();
+        assert!(original.ends_with('\n'));
+
+        crate::update_input_limits(path, Some(150000)).unwrap();
+
+        let updated = fs::read_to_string(path).unwrap();
+        assert!(updated.ends_with('\n'));
+    }
+
+    #[test]
+    fn test_update_line_input_limit_roundtrip() {
+        let original = r#"      "m": { "limit": { "context": 262144, "output": 32768 } }"#;
+        let added = crate::update_line_input_limit(original, Some(200000));
+        let replaced = crate::update_line_input_limit(&added, Some(180000));
+        let removed = crate::update_line_input_limit(&replaced, None);
+        assert_eq!(removed, original);
     }
 
     #[test]

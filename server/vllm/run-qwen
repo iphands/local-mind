@@ -63,6 +63,7 @@ LLAMA_ARGS=(
 
   # --reasoning-parser qwen3
   --tool-call-parser qwen3_coder
+  --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
 )
 
 echo

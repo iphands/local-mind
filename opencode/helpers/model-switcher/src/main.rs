@@ -57,6 +57,8 @@ fn print_usage() {
     );
     eprintln!("  all                    Change all agents (system default + agents) to same model");
     eprintln!("  restore-omo-defaults  Restore oh-my-opencode.json from backup");
+    eprintln!("  ctx <SIZE> <PRESET>   Set limit.input for all models (safe/balanced/aggressive)");
+    eprintln!("  ctx off               Remove limit.input from all models");
     eprintln!("  help                   Show this help message");
     eprintln!();
     eprintln!("Without command, runs interactive agent model selection.");
@@ -72,6 +74,42 @@ fn main() -> Result<()> {
             "all" => return run_all_mode(),
             "restore-omo-defaults" => return restore_omo_defaults(),
             "lm" | "local-mind" => return run_agent_mode(),
+            "ctx" => {
+                if args.len() >= 3 && args[2] == "off" {
+                    return run_ctx_off_mode();
+                }
+                if args.len() < 4 {
+                    eprintln!("Usage:");
+                    eprintln!("  model-switcher ctx <SIZE> <PRESET>");
+                    eprintln!("  model-switcher ctx off");
+                    eprintln!();
+                    eprintln!("  SIZE   : context window size (e.g. 65536, 262144, 1048576)");
+                    eprintln!("  PRESET : safe (76%) | balanced (85%) | aggressive (92%)");
+                    std::process::exit(1);
+                }
+                let ctx_size: u64 = args[2].parse().with_context(|| {
+                    format!(
+                        "Invalid context size '{}': must be a positive integer",
+                        args[2]
+                    )
+                })?;
+                if ctx_size == 0 {
+                    anyhow::bail!("Context size must be greater than 0");
+                }
+                let preset = match args[3].as_str() {
+                    "safe" => CtxPreset::Safe,
+                    "balanced" => CtxPreset::Balanced,
+                    "aggressive" => CtxPreset::Aggressive,
+                    other => {
+                        eprintln!(
+                            "Unknown preset: '{}'. Valid: safe, balanced, aggressive",
+                            other
+                        );
+                        std::process::exit(1);
+                    }
+                };
+                return run_ctx_mode(ctx_size, preset);
+            }
             "help" | "-h" | "--help" => {
                 print_usage();
                 return Ok(());
@@ -798,6 +836,195 @@ fn draw_all(
 
     stdout.flush()?;
     Ok(())
+}
+
+enum CtxPreset {
+    Safe,
+    Balanced,
+    Aggressive,
+}
+
+impl CtxPreset {
+    fn fraction(&self) -> f64 {
+        match self {
+            CtxPreset::Safe => 0.76,
+            CtxPreset::Balanced => 0.85,
+            CtxPreset::Aggressive => 0.92,
+        }
+    }
+
+    fn name(&self) -> &'static str {
+        match self {
+            CtxPreset::Safe => "safe",
+            CtxPreset::Balanced => "balanced",
+            CtxPreset::Aggressive => "aggressive",
+        }
+    }
+}
+
+fn run_ctx_mode(ctx_size: u64, preset: CtxPreset) -> Result<()> {
+    let input_limit = (ctx_size as f64 * preset.fraction()) as u64;
+
+    println!("  Context size : {}", format_tokens(ctx_size));
+    println!(
+        "  Preset       : {} ({}%)",
+        preset.name(),
+        (preset.fraction() * 100.0) as u64
+    );
+    println!("  limit.input  : {}", format_tokens(input_limit));
+    println!();
+
+    let changes = update_input_limits(OPENCODE_CONFIG_PATH, Some(input_limit))?;
+    println!("  Updated {} model(s) in {}", changes, OPENCODE_CONFIG_PATH);
+
+    Ok(())
+}
+
+fn run_ctx_off_mode() -> Result<()> {
+    let changes = update_input_limits(OPENCODE_CONFIG_PATH, None)?;
+    println!(
+        "  Removed limit.input from {} model(s) in {}",
+        changes, OPENCODE_CONFIG_PATH
+    );
+    Ok(())
+}
+
+fn format_tokens(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
+}
+
+pub fn update_input_limits(path: &str, input_limit: Option<u64>) -> Result<usize> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path))?;
+    let mut changes = 0usize;
+
+    let new_content: String = content
+        .lines()
+        .map(|line| {
+            if !line.contains("\"limit\":") {
+                return line.to_string();
+            }
+            let new_line = update_line_input_limit(line, input_limit);
+            if new_line != line {
+                changes += 1;
+            }
+            new_line
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let new_content = if content.ends_with('\n') {
+        new_content + "\n"
+    } else {
+        new_content
+    };
+
+    fs::write(path, &new_content)
+        .with_context(|| format!("Failed to write {}", path))?;
+    Ok(changes)
+}
+
+pub fn update_line_input_limit(line: &str, input_limit: Option<u64>) -> String {
+    if !line.contains("\"limit\":") {
+        return line.to_string();
+    }
+
+    let has_input = line.contains("\"input\":");
+
+    match input_limit {
+        Some(val) => {
+            if has_input {
+                replace_input_value(line, val)
+            } else {
+                add_input_to_limit(line, val)
+            }
+        }
+        None => {
+            if has_input {
+                remove_input_from_limit(line)
+            } else {
+                line.to_string()
+            }
+        }
+    }
+}
+
+fn replace_input_value(line: &str, val: u64) -> String {
+    let key = "\"input\":";
+    let Some(key_pos) = line.find(key) else {
+        return line.to_string();
+    };
+    let after_key = key_pos + key.len();
+    let ws_count = line[after_key..].bytes().take_while(|&b| b == b' ').count();
+    let digit_start = after_key + ws_count;
+    let digit_len = line[digit_start..]
+        .bytes()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    format!("{}{}{}", &line[..digit_start], val, &line[digit_start + digit_len..])
+}
+
+fn add_input_to_limit(line: &str, val: u64) -> String {
+    let limit_key = "\"limit\":";
+    let Some(limit_pos) = line.find(limit_key) else {
+        return line.to_string();
+    };
+    let after_limit = limit_pos + limit_key.len();
+    let Some(brace_offset) = line[after_limit..].find('{') else {
+        return line.to_string();
+    };
+    let content_start = after_limit + brace_offset + 1;
+    let Some(close_offset) = line[content_start..].find('}') else {
+        return line.to_string();
+    };
+    let close_pos = content_start + close_offset;
+    format!(
+        "{}, \"input\": {}{}",
+        &line[..close_pos],
+        val,
+        &line[close_pos..]
+    )
+}
+
+fn remove_input_from_limit(line: &str) -> String {
+    let key = "\"input\":";
+    let Some(key_pos) = line.find(key) else {
+        return line.to_string();
+    };
+    let after_key = key_pos + key.len();
+    let ws_count = line[after_key..].bytes().take_while(|&b| b == b' ').count();
+    let digit_start = after_key + ws_count;
+    let digit_len = line[digit_start..]
+        .bytes()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    let after_num = digit_start + digit_len;
+
+    // Prefer removing the preceding comma: ..., "input": NNN
+    if let Some(comma_pos) = line[..key_pos].rfind(',') {
+        let between = &line[comma_pos + 1..key_pos];
+        if between.chars().all(|c| c == ' ') {
+            return format!("{}{}", &line[..comma_pos], &line[after_num..]);
+        }
+    }
+
+    // Fall back to removing the following comma: "input": NNN, ...
+    let after = &line[after_num..];
+    let ws_after = after.bytes().take_while(|&b| b == b' ').count();
+    if after[ws_after..].starts_with(',') {
+        let comma_end = after_num + ws_after + 1;
+        return format!("{}{}", &line[..key_pos], &line[comma_end..]);
+    }
+
+    format!("{}{}", &line[..key_pos], &line[after_num..])
 }
 
 pub fn read_models(path: &str) -> Result<Vec<String>> {

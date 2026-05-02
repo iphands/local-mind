@@ -5,34 +5,28 @@
     "layout": "main-vertical"
   },
   "agents": {
-    "big-pickle-agent": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "librarian": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "OpenCode-Builder": {
+    "build": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
     "oracle": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
-    "atlas": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "sisyphus-junior": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "sisyphus": {
+    "prometheus": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
     "multimodal-looker": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
-    "metis": {
+    "sisyphus-junior": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
-    "momus": {
+    "big-pickle-agent": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "sisyphus": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "metis": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
     "plan": {
@@ -41,33 +35,39 @@
     "explore": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
-    "build": {
+    "OpenCode-Builder": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
-    "prometheus": {
+    "momus": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "atlas": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "librarian": {
       "model": "cosmo-proxy/cosmo-proxy"
     }
   },
   "categories": {
+    "writing": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
     "visual-engineering": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
-    "ultrabrain": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
     "artistry": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "unspecified-low": {
-      "model": "cosmo-proxy/cosmo-proxy"
-    },
-    "writing": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
     "quick": {
       "model": "cosmo-proxy/cosmo-proxy"
     },
     "unspecified-high": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "ultrabrain": {
+      "model": "cosmo-proxy/cosmo-proxy"
+    },
+    "unspecified-low": {
       "model": "cosmo-proxy/cosmo-proxy"
     }
   }
