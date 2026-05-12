@@ -59,6 +59,8 @@ fn print_usage() {
     eprintln!("  restore-omo-defaults  Restore oh-my-opencode.json from backup");
     eprintln!("  ctx <SIZE> <PRESET>   Set limit.input for all models (safe/balanced/aggressive)");
     eprintln!("  ctx off               Remove limit.input from all models");
+    eprintln!("  image [on]            Add image input modality to all models in opencode.jsonc (default: on)");
+    eprintln!("  image off             Remove image input modality from all models");
     eprintln!("  help                   Show this help message");
     eprintln!();
     eprintln!("Without command, runs interactive agent model selection.");
@@ -74,6 +76,17 @@ fn main() -> Result<()> {
             "all" => return run_all_mode(),
             "restore-omo-defaults" => return restore_omo_defaults(),
             "lm" | "local-mind" => return run_agent_mode(),
+            "image" => {
+                let sub = args.get(2).map(|s| s.as_str()).unwrap_or("on");
+                match sub {
+                    "on" => return run_image_on_mode(),
+                    "off" => return run_image_off_mode(),
+                    other => {
+                        eprintln!("Unknown image subcommand: '{}'. Valid: on, off", other);
+                        std::process::exit(1);
+                    }
+                }
+            }
             "ctx" => {
                 if args.len() >= 3 && args[2] == "off" {
                     return run_ctx_off_mode();
@@ -860,6 +873,138 @@ impl CtxPreset {
             CtxPreset::Aggressive => "aggressive",
         }
     }
+}
+
+fn run_image_on_mode() -> Result<()> {
+    let changes = update_image_modality(OPENCODE_CONFIG_PATH, true)?;
+    println!("  Added image modality to {} model(s) in {}", changes, OPENCODE_CONFIG_PATH);
+    Ok(())
+}
+
+fn run_image_off_mode() -> Result<()> {
+    let changes = update_image_modality(OPENCODE_CONFIG_PATH, false)?;
+    println!("  Removed image modality from {} model(s) in {}", changes, OPENCODE_CONFIG_PATH);
+    Ok(())
+}
+
+/// Find the byte position just after the closing `}` of the `"limit": { ... }` object on a line.
+fn find_limit_object_end(line: &str) -> Option<usize> {
+    let limit_key = "\"limit\":";
+    let key_pos = line.find(limit_key)?;
+    let after_key = key_pos + limit_key.len();
+    let brace_offset = line[after_key..].find('{')?;
+    let start = after_key + brace_offset;
+
+    let mut depth = 0usize;
+    for (i, c) in line[start..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(start + i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+pub fn add_image_modality_to_line(line: &str) -> String {
+    if !line.contains("\"limit\":") || !line.contains("\"name\":") {
+        return line.to_string();
+    }
+    if line.contains("\"modalities\":") {
+        return line.to_string();
+    }
+    let Some(end) = find_limit_object_end(line) else {
+        return line.to_string();
+    };
+    const MODALITIES: &str = r#", "modalities": { "input": ["text", "image"], "output": ["text"] }"#;
+    format!("{}{}{}", &line[..end], MODALITIES, &line[end..])
+}
+
+pub fn remove_image_modality_from_line(line: &str) -> String {
+    if !line.contains("\"modalities\":") {
+        return line.to_string();
+    }
+
+    let key = "\"modalities\":";
+    let Some(key_pos) = line.find(key) else {
+        return line.to_string();
+    };
+    let after_key = key_pos + key.len();
+    let Some(brace_offset) = line[after_key..].find('{') else {
+        return line.to_string();
+    };
+    let brace_start = after_key + brace_offset;
+
+    // Find closing brace of the modalities object
+    let mut depth = 0usize;
+    let mut obj_end = brace_start;
+    for (i, c) in line[brace_start..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    obj_end = brace_start + i + 1;
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Prefer removing the preceding ", " before "modalities"
+    let before = &line[..key_pos];
+    if let Some(comma_pos) = before.rfind(',') {
+        if before[comma_pos + 1..].chars().all(|c| c == ' ') {
+            return format!("{}{}", &line[..comma_pos], &line[obj_end..]);
+        }
+    }
+
+    // Fall back: remove trailing comma after the object
+    let after = &line[obj_end..];
+    let ws = after.bytes().take_while(|&b| b == b' ').count();
+    if after[ws..].starts_with(',') {
+        return format!("{}{}", &line[..key_pos], &line[obj_end + ws + 1..]);
+    }
+
+    format!("{}{}", &line[..key_pos], &line[obj_end..])
+}
+
+pub fn update_image_modality(path: &str, enable: bool) -> Result<usize> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path))?;
+    let mut changes = 0usize;
+
+    let new_content: String = content
+        .lines()
+        .map(|line| {
+            let new_line = if enable {
+                add_image_modality_to_line(line)
+            } else {
+                remove_image_modality_from_line(line)
+            };
+            if new_line != line {
+                changes += 1;
+            }
+            new_line
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let new_content = if content.ends_with('\n') {
+        new_content + "\n"
+    } else {
+        new_content
+    };
+
+    fs::write(path, &new_content)
+        .with_context(|| format!("Failed to write {}", path))?;
+    Ok(changes)
 }
 
 fn run_ctx_mode(ctx_size: u64, preset: CtxPreset) -> Result<()> {

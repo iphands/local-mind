@@ -4,6 +4,23 @@ use std::fs;
 use std::io::Write;
 use tempfile::NamedTempFile;
 
+fn create_temp_config_with_modalities(with_modalities: bool) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+    writeln!(file, "{{").unwrap();
+    writeln!(file, "  \"model\": \"cosmo-proxy/cosmo-proxy\",").unwrap();
+    writeln!(file, "  \"provider\": {{").unwrap();
+    if with_modalities {
+        writeln!(file, r#"    "cosmo-00": {{ "models": {{ "cosmo-6000": {{ "name": "cosmo-6000", "limit": {{ "context": 262144, "output": 262144 }}, "modalities": {{ "input": ["text", "image"], "output": ["text"] }} }} }} }},"#).unwrap();
+        writeln!(file, r#"    "noir-llama": {{ "models": {{ "noir-model": {{ "name": "noir-model", "limit": {{ "context": 262144, "output": 32768 }}, "modalities": {{ "input": ["text", "image"], "output": ["text"] }} }} }} }}"#).unwrap();
+    } else {
+        writeln!(file, r#"    "cosmo-00": {{ "models": {{ "cosmo-6000": {{ "name": "cosmo-6000", "limit": {{ "context": 262144, "output": 262144 }} }} }} }},"#).unwrap();
+        writeln!(file, r#"    "noir-llama": {{ "models": {{ "noir-model": {{ "name": "noir-model", "limit": {{ "context": 262144, "output": 32768 }} }} }} }}"#).unwrap();
+    }
+    writeln!(file, "  }}").unwrap();
+    writeln!(file, "}}").unwrap();
+    file
+}
+
 fn create_temp_config_with_limits(with_input: bool) -> NamedTempFile {
     let mut file = NamedTempFile::new().unwrap();
     writeln!(file, "{{").unwrap();
@@ -897,5 +914,92 @@ mod tests {
             let updated = crate::get_default_model(path).unwrap();
             assert_eq!(updated, new_model);
         }
+    }
+
+    // ── image modality tests ────────────────────────────────────────────────
+
+    #[test]
+    fn test_add_image_modality_to_line_basic() {
+        let line = r#"    "cosmo-6000": { "name": "cosmo-6000", "limit": { "context": 262144, "output": 262144 } }"#;
+        let result = crate::add_image_modality_to_line(line);
+        assert!(result.contains("\"modalities\":"), "modalities not added");
+        assert!(result.contains(r#""input": ["text", "image"]"#), "image input missing");
+        assert!(result.contains(r#""output": ["text"]"#), "text output missing");
+    }
+
+    #[test]
+    fn test_add_image_modality_idempotent() {
+        let line = r#"    "cosmo-6000": { "name": "cosmo-6000", "limit": { "context": 262144 }, "modalities": { "input": ["text", "image"], "output": ["text"] } }"#;
+        let result = crate::add_image_modality_to_line(line);
+        assert_eq!(result, line, "should not modify a line already having modalities");
+    }
+
+    #[test]
+    fn test_add_image_modality_skips_non_model_lines() {
+        let line = r#"  "model": "cosmo-proxy/cosmo-proxy","#;
+        let result = crate::add_image_modality_to_line(line);
+        assert_eq!(result, line, "non-model line should not be modified");
+    }
+
+    #[test]
+    fn test_remove_image_modality_from_line_basic() {
+        let line = r#"    "cosmo-6000": { "name": "cosmo-6000", "limit": { "context": 262144, "output": 262144 }, "modalities": { "input": ["text", "image"], "output": ["text"] } }"#;
+        let result = crate::remove_image_modality_from_line(line);
+        assert!(!result.contains("\"modalities\":"), "modalities not removed");
+        assert!(result.contains("\"limit\":"), "limit should still be present");
+        assert!(result.contains("\"name\":"), "name should still be present");
+    }
+
+    #[test]
+    fn test_remove_image_modality_idempotent() {
+        let line = r#"    "cosmo-6000": { "name": "cosmo-6000", "limit": { "context": 262144 } }"#;
+        let result = crate::remove_image_modality_from_line(line);
+        assert_eq!(result, line, "line without modalities should not be modified");
+    }
+
+    #[test]
+    fn test_update_image_modality_on() {
+        let file = create_temp_config_with_modalities(false);
+        let path = file.path().to_str().unwrap();
+
+        let changes = crate::update_image_modality(path, true).unwrap();
+        assert_eq!(changes, 2, "expected 2 model lines updated");
+
+        let content = fs::read_to_string(path).unwrap();
+        assert_eq!(content.matches("\"modalities\":").count(), 2);
+    }
+
+    #[test]
+    fn test_update_image_modality_off() {
+        let file = create_temp_config_with_modalities(true);
+        let path = file.path().to_str().unwrap();
+
+        let changes = crate::update_image_modality(path, false).unwrap();
+        assert_eq!(changes, 2, "expected 2 model lines updated");
+
+        let content = fs::read_to_string(path).unwrap();
+        assert!(!content.contains("\"modalities\":"), "modalities should be removed");
+    }
+
+    #[test]
+    fn test_update_image_modality_on_idempotent() {
+        let file = create_temp_config_with_modalities(true);
+        let path = file.path().to_str().unwrap();
+
+        let changes = crate::update_image_modality(path, true).unwrap();
+        assert_eq!(changes, 0, "no changes expected when modalities already present");
+    }
+
+    #[test]
+    fn test_roundtrip_add_then_remove() {
+        let file = create_temp_config_with_modalities(false);
+        let path = file.path().to_str().unwrap();
+        let original = fs::read_to_string(path).unwrap();
+
+        crate::update_image_modality(path, true).unwrap();
+        crate::update_image_modality(path, false).unwrap();
+
+        let result = fs::read_to_string(path).unwrap();
+        assert_eq!(result, original, "roundtrip add+remove should restore original");
     }
 }
