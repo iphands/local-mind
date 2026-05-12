@@ -46,6 +46,11 @@ fn format_pretty(m: &RequestMetrics) -> String {
         .map(|r| format!("│   Reasoning Tokens: {:46}│\n", r))
         .unwrap_or_default();
 
+    let concurrent_line = m
+        .concurrent_requests
+        .map(|c| format!("│ Concurrent: {:52}│\n", c))
+        .unwrap_or_default();
+
     format!(
         r#"┌──────────────────────────────────────────────────────────────────┐
 │ LLM Request Metrics                                              │
@@ -63,7 +68,7 @@ fn format_pretty(m: &RequestMetrics) -> String {
 │ Context: {:54}│
 │ Finish: {:56}│
 │ Duration: {:54.1}ms│
-└──────────────────────────────────────────────────────────────────┘
+{}└──────────────────────────────────────────────────────────────────┘
 "#,
         truncate(&m.model, 56),
         m.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
@@ -79,6 +84,7 @@ fn format_pretty(m: &RequestMetrics) -> String {
         context_str,
         m.finish_reason,
         m.duration_ms,
+        concurrent_line,
     )
 }
 
@@ -99,8 +105,12 @@ fn format_compact(m: &RequestMetrics) -> String {
         .map(|g| format!(" group={}", g))
         .unwrap_or_default();
 
+    let concurrent_str = m.concurrent_requests
+        .map(|c| format!(" concurrent={}", c))
+        .unwrap_or_default();
+
     format!(
-        "model={}{} tokens={}/{} tps={:.2}s/{:.2}s {} {} finish={} dur={:.1}ms",
+        "model={}{} tokens={}/{} tps={:.2}s/{:.2}s {} {} finish={} dur={:.1}ms{}",
         m.model,
         group_str,
         m.prompt_tokens,
@@ -110,7 +120,8 @@ fn format_compact(m: &RequestMetrics) -> String {
         context_str,
         if m.streaming { "stream" } else { "sync" },
         m.finish_reason,
-        m.duration_ms
+        m.duration_ms,
+        concurrent_str
     )
 }
 

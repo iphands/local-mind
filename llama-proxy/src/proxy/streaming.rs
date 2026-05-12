@@ -120,6 +120,7 @@ pub async fn handle_streaming_response(
     request_method: Option<String>,
     request_uri: Option<String>,
     request_body: Option<Vec<u8>>,
+    concurrent_requests: usize,
 ) -> Response {
     let status = backend_response.status();
     let headers = backend_response.headers().clone();
@@ -281,6 +282,7 @@ pub async fn handle_streaming_response(
         let group_name = group_name; // Already owned, move into closure
         let strip_path_prefix = strip_path_prefix.clone();
         let dump_path = dump_path.clone();
+        let concurrent_requests = concurrent_requests;
         let request_method = request_method.clone();
         let request_uri = request_uri.clone();
         let _request_body = request_body.clone();
@@ -416,6 +418,7 @@ pub async fn handle_streaming_response(
                             );
                             // Set group name if we're in multi-backend mode
                             m.group_name = group_name;
+                            m.concurrent_requests = Some(concurrent_requests);
                             m
                         } else {
                             tracing::trace!(

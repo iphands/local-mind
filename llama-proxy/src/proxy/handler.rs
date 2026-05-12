@@ -7,6 +7,7 @@ use axum::{
     Json,
 };
 use std::io::Read;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -190,6 +191,13 @@ fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<
     }
 }
 
+struct ConcurrentGuard(Arc<std::sync::atomic::AtomicUsize>);
+impl Drop for ConcurrentGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 /// Proxy request handler
 pub struct ProxyHandler {
     state: ProxyState,
@@ -254,6 +262,8 @@ impl ProxyHandler {
     /// Handle an incoming request
     pub async fn handle(&self, req: Request<Body>) -> Response {
         let start = Instant::now();
+        self.state.concurrent_requests.fetch_add(1, Ordering::Relaxed);
+        let _guard = ConcurrentGuard(Arc::clone(&self.state.concurrent_requests));
 
         let method = req.method().clone();
         let uri = req.uri().clone();
@@ -509,6 +519,7 @@ impl ProxyHandler {
             // Unexpected! We forced stream:false but got streaming response
             tracing::warn!("Backend returned streaming response despite stream:false request");
             // Fall back to old streaming handler
+            let concurrent_snapshot = self.state.concurrent_requests.load(Ordering::Relaxed);
             handle_streaming_response(
                 backend_response,
                 self.state.fix_registry.clone(),
@@ -525,6 +536,7 @@ impl ProxyHandler {
                 Some(method.to_string()),
                 Some(uri.to_string()),
                 Some(body_bytes.clone().to_vec()),
+                concurrent_snapshot,
             )
             .await
         } else {
@@ -636,7 +648,7 @@ impl ProxyHandler {
         let is_json_response = Self::is_json_content_type(content_type);
 
         // Try to parse as JSON and apply fixes (only if Content-Type is JSON)
-        let (json_value, metrics) = if is_json_response {
+        let (json_value, mut metrics) = if is_json_response {
             if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                 tracing::debug!("Response parsed as JSON successfully");
                 // Apply fixes with request context if available
@@ -699,7 +711,8 @@ impl ProxyHandler {
         };
 
         // Log stats
-        if let Some(ref m) = metrics {
+        if let Some(ref mut m) = metrics {
+            m.concurrent_requests = Some(self.state.concurrent_requests.load(Ordering::Relaxed));
             let formatted = format_metrics(m, self.state.config.stats.format);
             if self.state.config.stats.format == StatsFormat::Compact {
                 tracing::info!("{}", formatted);
@@ -1029,6 +1042,7 @@ mod tests {
             hide_requests: false,
             log_augmented_request_text: false,
             dump_path: None,
+            concurrent_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 

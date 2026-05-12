@@ -61,6 +61,10 @@ pub struct RequestMetrics {
     pub accepted_prediction_tokens: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rejected_prediction_tokens: Option<u64>,
+
+    /// Number of in-flight requests at the time this request completed
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub concurrent_requests: Option<usize>,
 }
 
 impl RequestMetrics {
@@ -92,6 +96,7 @@ impl RequestMetrics {
             reasoning_tokens: None,
             accepted_prediction_tokens: None,
             rejected_prediction_tokens: None,
+            concurrent_requests: None,
         }
     }
 

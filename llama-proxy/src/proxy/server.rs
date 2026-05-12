@@ -6,6 +6,7 @@ use axum::{
     Router,
 };
 use std::net::SocketAddr;
+use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
 
 use tower_http::cors::{Any, CorsLayer};
@@ -29,6 +30,7 @@ pub struct ProxyState {
     pub hide_requests: bool,
     pub log_augmented_request_text: bool,
     pub dump_path: Option<Arc<std::path::PathBuf>>,
+    pub concurrent_requests: Arc<AtomicUsize>,
 }
 
 /// Run the proxy server
@@ -126,6 +128,7 @@ pub async fn run_server(
         } else {
             None
         },
+        concurrent_requests: Arc::new(AtomicUsize::new(0)),
     };
 
     // Build the router
