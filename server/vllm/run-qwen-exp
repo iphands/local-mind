@@ -46,28 +46,31 @@ LLAMA_ARGS=(
   # --moe-backend flashinfer_trtllm
 
   --data-parallel-size 1
-  --disable-log-stats
+  # --disable-log-stats
   --dtype auto
+  --kv-cache-dtype fp8
+
   --enable-auto-tool-choice
-  --enable-chunked-prefill
   # --enable-expert-parallel
   --gpu-memory-utilization 0.85
-  --kv-cache-dtype fp8
+
   # --kv-cache-dtype auto
-  --language-model-only
+  # --language-model-only
   --max-model-len 262144
   # --max-num-batched-tokens 32768
-  --max-num-seqs 96
+  # --max-num-seqs 96
   --pipeline-parallel-size 1
   --tensor-parallel-size 1
   --trust-remote-code
 
-  --disable-log-stats
-
-  # --reasoning-parser qwen3
+  --reasoning-parser qwen3
   --tool-call-parser qwen3_coder
-  # --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
-
+  --enable-prefix-caching
+  --enable-chunked-prefill
+  --max-num-seqs 4
+  --max-num-batched-tokens 8192
+  --calculate-kv-scales
+  --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
   --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
 )
 

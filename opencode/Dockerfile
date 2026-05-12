@@ -1,5 +1,6 @@
 FROM fedora AS builder
-RUN echo "bump_004"
+RUN echo "bump_005"
+
 RUN dnf group install -y development-tools
 
 COPY .dnf-deps /dnf-deps
@@ -38,8 +39,17 @@ RUN git config --global user.name "Ian Page Hands" && git config --global user.e
 RUN echo bump_004
 RUN touch /home/iphands/IM_A_CONTAINER
 
+RUN sudo dnf remove -y rust
+RUN yes 1 | rustup-init
+RUN .cargo/bin/cargo install just
+RUN sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
+RUN sudo flatpak install -y org.ghidra_sre.Ghidra
+
 RUN curl -fsSL https://opencode.ai/install | bash
 RUN curl -fsSL https://bun.com/install | bash
+
+RUN echo bump_004
+RUN /home/iphands/.opencode/bin/opencode upgrade
 
 RUN npm config set prefix '~/.local/'
 RUN npm install -g oh-my-opencode-linux-x64

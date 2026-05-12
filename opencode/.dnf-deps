@@ -5,14 +5,17 @@ bzip2-devel
 cairo-devel
 cairo-gobject-devel
 cargo
+clang
 clang-tools-extra
 docker
+flatpak
 gcc
 gcc-g++
 gdb
 gdk-pixbuf2-devel
 git
 glib2-devel
+glslc
 gtk3-devel
 gtk4-devel
 java-21-openjdk
@@ -20,6 +23,8 @@ java-21-openjdk-devel
 jq
 less
 libffi-devel
+llvm
+llvm-devel
 lm_sensors-devel
 make
 maven-openjdk21
@@ -29,6 +34,7 @@ openssl
 openssl-devel
 pango-devel
 php
+procps-ng psmisc
 python3-devel
 python3-flake8.noarch
 python3-lsp-server
@@ -37,10 +43,13 @@ readline-devel
 ripgrep
 rust-analyzer
 rustfmt
+rustup
 sqlite-devel
 strace
 tree
+vulkan-tools
 which
+xxd file
 xz-devel
 zip
 zlib-devel

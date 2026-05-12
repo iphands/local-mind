@@ -23,6 +23,13 @@ CONTAINER_ARGS=(
   -v ${ROOT}/opencode/container_data/.bash_history:/home/iphands/.bash_history:rw
   -v ${HOME}/prog:/home/iphands/prog:rw
   -v /run/docker.sock:/var/run/docker.sock:rw
+
+  --gpus all
+  --device /dev/dri
+  -e DISPLAY=$DISPLAY
+  -e XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR
+  -e WAYLAND_DISPLAY=$WAYLAND_DISPLAY
+  -v $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY
 )
 
 docker run --rm -it "${CONTAINER_ARGS[@]}" ocli
