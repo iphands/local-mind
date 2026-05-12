@@ -592,9 +592,10 @@ fn merge_anthropic_events(events: Vec<SseEvent>) -> serde_json::Value {
             "content_block_start" => {
                 // Create content block at specified index
                 let idx = event.data.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                if let Some(block) = event.data.get("content_block") {
+                if idx > 100 {
+                    tracing::warn!(idx, "content_block_start index too large, skipping");
+                } else if let Some(block) = event.data.get("content_block") {
                     if let Some(content) = message.get_mut("content").and_then(|c| c.as_array_mut()) {
-                        // Ensure array is large enough
                         while content.len() <= idx {
                             content.push(json!(null));
                         }
@@ -605,7 +606,9 @@ fn merge_anthropic_events(events: Vec<SseEvent>) -> serde_json::Value {
             "content_block_delta" => {
                 // Append delta text/thinking to content block
                 let idx = event.data.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                if let Some(delta) = event.data.get("delta") {
+                if idx > 100 {
+                    tracing::warn!(idx, "content_block_delta index too large, skipping");
+                } else if let Some(delta) = event.data.get("delta") {
                     if let Some(content) = message.get_mut("content").and_then(|c| c.as_array_mut()) {
                         // Ensure array is large enough and block exists with proper type
                         while content.len() <= idx {
@@ -749,16 +752,21 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                                         {
                                             for new_call in new_arr {
                                                 if let Some(idx) = new_call.get("index").and_then(|i| i.as_u64()) {
+                                                    let idx = idx as usize;
+                                                    if idx > 100 {
+                                                        tracing::warn!(idx, "tool call index too large, skipping");
+                                                        continue;
+                                                    }
                                                     // Find or create slot for this index
-                                                    while acc_arr.len() <= idx as usize {
+                                                    while acc_arr.len() <= idx {
                                                         acc_arr.push(serde_json::Value::Null);
                                                     }
-                                                    if acc_arr[idx as usize].is_null() {
-                                                        acc_arr[idx as usize] = new_call.clone();
+                                                    if acc_arr[idx].is_null() {
+                                                        acc_arr[idx] = new_call.clone();
                                                     } else {
                                                         // Merge function arguments
                                                         if let (Some(acc_func), Some(new_func)) = (
-                                                            acc_arr[idx as usize].get_mut("function"),
+                                                            acc_arr[idx].get_mut("function"),
                                                             new_call.get("function"),
                                                         ) {
                                                             if let (Some(acc_args), Some(new_args)) = (

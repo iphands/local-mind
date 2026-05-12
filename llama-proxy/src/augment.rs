@@ -268,6 +268,7 @@ mod tests {
             reasoning_effort: None,
             verbosity: None,
             thinking_budget: None,
+            extra: Default::default(),
         }
     }
 

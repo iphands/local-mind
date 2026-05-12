@@ -115,33 +115,35 @@ impl ToolcallBadFilepathFix {
         "{}".to_string()
     }
 
-    /// Find the end of a JSON string value starting from position after colon
-    /// Correctly handles escaped quotes like \"
+    /// Find the end of a JSON string value starting from position after colon.
+    /// Returns a **byte offset** (not a char count) so callers can safely slice `&str`.
     fn find_string_end(&self, s: &str) -> Option<usize> {
-        let chars: Vec<char> = s.chars().collect();
+        let mut iter = s.char_indices().peekable();
 
         // Skip whitespace and colon
-        let mut i = 0;
-        while i < chars.len() && (chars[i].is_whitespace() || chars[i] == ':') {
-            i += 1;
+        while let Some(&(_, c)) = iter.peek() {
+            if c.is_whitespace() || c == ':' {
+                iter.next();
+            } else {
+                break;
+            }
         }
 
         // Expect opening quote
-        if i >= chars.len() || chars[i] != '"' {
-            return None;
+        match iter.next() {
+            Some((_, '"')) => {}
+            _ => return None,
         }
-        i += 1;
 
-        // Find closing quote (handle escapes)
-        while i < chars.len() {
-            if chars[i] == '\\' && i + 1 < chars.len() {
-                i += 2; // Skip escaped char
+        // Find closing quote (handle escapes), return byte position after it
+        while let Some((pos, c)) = iter.next() {
+            if c == '\\' {
+                iter.next(); // skip the escaped character
                 continue;
             }
-            if chars[i] == '"' {
-                return Some(i + 1);
+            if c == '"' {
+                return Some(pos + '"'.len_utf8());
             }
-            i += 1;
         }
 
         None
@@ -541,6 +543,21 @@ mod tests {
         let empty = "{}";
         let fixed = fix.fix_arguments(empty);
         assert_eq!(fixed, "{}");
+    }
+
+    #[test]
+    fn test_fix_arguments_non_ascii_filepath() {
+        let fix = ToolcallBadFilepathFix::new();
+
+        // Non-ASCII path — previously would panic due to char/byte index mismatch
+        let malformed = r#"{"filePath":"/日本語/file.txt","extra":"dropped","filePath":"/日本語/file.txt"}"#;
+        let fixed = fix.fix_arguments(malformed);
+        assert!(fix.is_valid_json(&fixed), "fix_arguments panicked or produced invalid JSON for non-ASCII path: {fixed}");
+
+        // German umlaut path
+        let malformed2 = r#"{"filePath":"/über/lösung.rs","x":1,"filePath":"/über/lösung.rs"}"#;
+        let fixed2 = fix.fix_arguments(malformed2);
+        assert!(fix.is_valid_json(&fixed2), "fix_arguments panicked or produced invalid JSON for umlaut path: {fixed2}");
     }
 
     #[test]

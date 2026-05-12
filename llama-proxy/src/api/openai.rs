@@ -49,6 +49,10 @@ pub struct ChatCompletionRequest {
     pub verbosity: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub thinking_budget: Option<u64>,
+
+    // Catch-all for unlisted params (top_k, min_p, seed, repetition_penalty, mirostat, etc.)
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Chat message
@@ -216,8 +220,11 @@ pub struct Delta {
 /// Token usage
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Usage {
+    #[serde(default)]
     pub prompt_tokens: u64,
+    #[serde(default)]
     pub completion_tokens: u64,
+    #[serde(default)]
     pub total_tokens: u64,
 
     // Extended usage details (Opencode/Copilot)
@@ -304,6 +311,9 @@ pub struct AnthropicMessageRequest {
     pub tools: Option<Vec<AnthropicTool>>,
     #[serde(default)]
     pub tool_choice: Option<serde_json::Value>,
+
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Anthropic message content (user/assistant/system messages)
@@ -579,6 +589,7 @@ mod tests {
             reasoning_effort: None,
             verbosity: None,
             thinking_budget: None,
+            extra: Default::default(),
         };
 
         let json = serde_json::to_string(&request).unwrap();
