@@ -121,7 +121,21 @@ fn main() -> Result<()> {
                         std::process::exit(1);
                     }
                 };
-                return run_ctx_mode(ctx_size, preset);
+                run_ctx_mode(ctx_size, preset)?;
+                if let Some(img_cmd) = args.get(4) {
+                    if img_cmd == "image" {
+                        let sub = args.get(5).map(|s| s.as_str()).unwrap_or("on");
+                        match sub {
+                            "on" => run_image_on_mode()?,
+                            "off" => run_image_off_mode()?,
+                            other => {
+                                eprintln!("Unknown image subcommand: '{}'. Valid: on, off", other);
+                                std::process::exit(1);
+                            }
+                        }
+                    }
+                }
+                return Ok(());
             }
             "help" | "-h" | "--help" => {
                 print_usage();
