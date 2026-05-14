@@ -1003,3 +1003,142 @@ mod tests {
         assert_eq!(result, original, "roundtrip add+remove should restore original");
     }
 }
+
+// ── vision model tests ────────────────────────────────────────────────────────
+
+fn make_oma_config(model: &str, disabled: bool) -> NamedTempFile {
+    let mut file = NamedTempFile::new().unwrap();
+    let disabled_line = if disabled {
+        r#"  "disabled_agents": ["multimodal-looker"],"#
+    } else {
+        r#"  "disabled_agents": [],"#
+    };
+    writeln!(
+        file,
+        r#"{{
+  "$schema": "https://example.com/schema.json",
+  "git_master": {{ "include_co_authored_by": false }},
+  "tmux": {{ "enabled": true }},
+{disabled_line}
+  "agents": {{
+    "multimodal-looker": {{ "model": "{model}" }},
+    "oracle": {{ "model": "cosmo-proxy/cosmo-proxy" }}
+  }},
+  "categories": {{
+    "quick": {{ "model": "cosmo-proxy/cosmo-proxy" }}
+  }}
+}}"#
+    )
+    .unwrap();
+    file
+}
+
+#[test]
+fn test_set_vision_model_updates_model_and_enables() {
+    let file = make_oma_config("cosmo-proxy/cosmo-proxy", true);
+    let path = file.path().to_str().unwrap();
+
+    crate::set_vision_model(path, "cosmo-00/cosmo-6000").unwrap();
+
+    let content = fs::read_to_string(path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert_eq!(
+        value["agents"]["multimodal-looker"]["model"].as_str().unwrap(),
+        "cosmo-00/cosmo-6000",
+        "model should be updated"
+    );
+
+    let disabled: Vec<&str> = value["disabled_agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(!disabled.contains(&"multimodal-looker"), "should be removed from disabled_agents");
+}
+
+#[test]
+fn test_set_vision_model_preserves_other_fields() {
+    let file = make_oma_config("cosmo-proxy/cosmo-proxy", false);
+    let path = file.path().to_str().unwrap();
+
+    crate::set_vision_model(path, "cosmo-01/cosmo-4060").unwrap();
+
+    let content = fs::read_to_string(path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert!(value.get("git_master").is_some(), "git_master should be preserved");
+    assert!(value.get("tmux").is_some(), "tmux should be preserved");
+    assert_eq!(
+        value["agents"]["oracle"]["model"].as_str().unwrap(),
+        "cosmo-proxy/cosmo-proxy",
+        "other agents should be untouched"
+    );
+}
+
+#[test]
+fn test_disable_vision_adds_to_disabled_agents() {
+    let file = make_oma_config("cosmo-00/cosmo-6000", false);
+    let path = file.path().to_str().unwrap();
+
+    crate::disable_vision(path).unwrap();
+
+    let content = fs::read_to_string(path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    let disabled: Vec<&str> = value["disabled_agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(disabled.contains(&"multimodal-looker"), "should be in disabled_agents");
+}
+
+#[test]
+fn test_disable_vision_idempotent() {
+    let file = make_oma_config("cosmo-proxy/cosmo-proxy", true);
+    let path = file.path().to_str().unwrap();
+
+    crate::disable_vision(path).unwrap();
+    crate::disable_vision(path).unwrap();
+
+    let content = fs::read_to_string(path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    let disabled: Vec<&str> = value["disabled_agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert_eq!(
+        disabled.iter().filter(|&&s| s == "multimodal-looker").count(),
+        1,
+        "multimodal-looker should appear exactly once"
+    );
+}
+
+#[test]
+fn test_set_vision_model_already_enabled() {
+    let file = make_oma_config("cosmo-proxy/cosmo-proxy", false);
+    let path = file.path().to_str().unwrap();
+
+    crate::set_vision_model(path, "cosmo-00/cosmo-6000").unwrap();
+
+    let content = fs::read_to_string(path).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&content).unwrap();
+
+    assert_eq!(
+        value["agents"]["multimodal-looker"]["model"].as_str().unwrap(),
+        "cosmo-00/cosmo-6000"
+    );
+    let disabled: Vec<&str> = value["disabled_agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str())
+        .collect();
+    assert!(!disabled.contains(&"multimodal-looker"));
+}

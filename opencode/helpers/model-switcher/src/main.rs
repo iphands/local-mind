@@ -6,34 +6,14 @@ use crossterm::{
     style::{Attribute, Color, Print, ResetColor, SetAttribute, SetForegroundColor},
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use std::env;
 use std::fs;
 use std::io::{self, Write};
 
-const OMO_CONFIG_PATH: &str = "container_data/config/opencode/oh-my-opencode.json";
-const OMO_BACKUP_PATH: &str = "container_data/config/opencode/oh-my-opencode.json.original";
+const OMO_CONFIG_PATH: &str = "container_data/config/opencode/oh-my-openagent.json";
+const OMO_BACKUP_PATH: &str = "container_data/config/opencode/oh-my-openagent.json.original";
 const OPENCODE_CONFIG_PATH: &str = "container_data/config/opencode/opencode.jsonc";
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OmoConfig {
-    #[serde(rename = "$schema", skip_serializing_if = "Option::is_none")]
-    schema: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tmux: Option<serde_json::Value>,
-    #[serde(default)]
-    agents: HashMap<String, ModelConfig>,
-    #[serde(default)]
-    categories: HashMap<String, ModelConfig>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct ModelConfig {
-    model: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    variant: Option<String>,
-}
+const OMA_CONFIG_PATH: &str = "container_data/config/opencode/oh-my-openagent.json";
 
 const AGENTS: &[(&str, &str)] = &[
     (
@@ -61,6 +41,8 @@ fn print_usage() {
     eprintln!("  ctx off               Remove limit.input from all models");
     eprintln!("  image [on]            Add image input modality to all models in opencode.jsonc (default: on)");
     eprintln!("  image off             Remove image input modality from all models");
+    eprintln!("  vision                Interactive: set vision model for multimodal-looker (enables it)");
+    eprintln!("  vision off            Disable multimodal-looker agent");
     eprintln!("  help                   Show this help message");
     eprintln!();
     eprintln!("Without command, runs interactive agent model selection.");
@@ -85,6 +67,13 @@ fn main() -> Result<()> {
                         eprintln!("Unknown image subcommand: '{}'. Valid: on, off", other);
                         std::process::exit(1);
                     }
+                }
+            }
+            "vision" => {
+                let sub = args.get(2).map(|s| s.as_str()).unwrap_or("on");
+                match sub {
+                    "off" => return run_vision_off_mode(),
+                    _ => return run_vision_on_mode(),
                 }
             }
             "ctx" => {
@@ -251,13 +240,13 @@ fn run_all_mode() -> Result<()> {
 
     // Get current OMO model
     let current_omo = if std::path::Path::new(OMO_CONFIG_PATH).exists() {
-        let config = read_omo_config(OMO_CONFIG_PATH)?;
-        config
-            .agents
-            .values()
-            .next()
-            .map(|m| m.model.clone())
-            .unwrap_or_else(|| "unknown".to_string())
+        let omo_value = read_oma_value(OMO_CONFIG_PATH)?;
+        omo_value["agents"]
+            .as_object()
+            .and_then(|m| m.values().next())
+            .and_then(|v| v["model"].as_str())
+            .unwrap_or("unknown")
+            .to_string()
     } else {
         "not configured".to_string()
     };
@@ -289,35 +278,37 @@ fn run_all_mode() -> Result<()> {
 
             // Update OMO config if it exists
             if std::path::Path::new(OMO_CONFIG_PATH).exists() {
-                let config = read_omo_config(OMO_CONFIG_PATH)?;
-                let agent_count = config.agents.len();
-                let category_count = config.categories.len();
+                let mut omo_value = read_oma_value(OMO_CONFIG_PATH)?;
+                let agent_count = omo_value["agents"].as_object().map(|m| m.len()).unwrap_or(0);
+                let category_count = omo_value["categories"].as_object().map(|m| m.len()).unwrap_or(0);
 
                 if agent_count > 0 || category_count > 0 {
-                    let mut new_config = config.clone();
-                    for agent in new_config.agents.values_mut() {
-                        if agent.model != selected {
-                            agent.model = selected.clone();
-                            changes += 1;
+                    if let Some(agents) = omo_value["agents"].as_object_mut() {
+                        for agent in agents.values_mut() {
+                            if agent["model"].as_str() != Some(&selected) {
+                                agent["model"] = serde_json::Value::String(selected.clone());
+                                changes += 1;
+                            }
                         }
                     }
-                    for category in new_config.categories.values_mut() {
-                        if category.model != selected {
-                            category.model = selected.clone();
-                            changes += 1;
+                    if let Some(categories) = omo_value["categories"].as_object_mut() {
+                        for category in categories.values_mut() {
+                            if category["model"].as_str() != Some(&selected) {
+                                category["model"] = serde_json::Value::String(selected.clone());
+                                changes += 1;
+                            }
                         }
                     }
-
-                    write_omo_config(OMO_CONFIG_PATH, &new_config)?;
+                    write_oma_value(OMO_CONFIG_PATH, &omo_value)?;
                     println!(
-                        "Updated oh-my-opencode.json: {} agents, {} categories -> {}",
+                        "Updated oh-my-openagent.json: {} agents, {} categories -> {}",
                         agent_count, category_count, selected
                     );
                 } else {
-                    println!("oh-my-opencode.json: no agents or categories to update");
+                    println!("oh-my-openagent.json: no agents or categories to update");
                 }
             } else {
-                println!("oh-my-opencode.json: not found, skipping");
+                println!("oh-my-openagent.json: not found, skipping");
             }
 
             if changes == 0 {
@@ -341,35 +332,31 @@ fn run_omo_mode() -> Result<()> {
         return Ok(());
     }
 
-    // Read current omo config
-    let config = read_omo_config(OMO_CONFIG_PATH)?;
+    let mut value = read_oma_value(OMO_CONFIG_PATH)?;
 
-    // Count current models
-    let agent_count = config.agents.len();
-    let category_count = config.categories.len();
+    let agent_count = value["agents"].as_object().map(|m| m.len()).unwrap_or(0);
+    let category_count = value["categories"].as_object().map(|m| m.len()).unwrap_or(0);
 
-    // Get a sample of current models for display
-    let current_model = config
-        .agents
-        .values()
-        .next()
-        .map(|m| m.model.clone())
-        .unwrap_or_else(|| "unknown".to_string());
+    let current_model = value["agents"]
+        .as_object()
+        .and_then(|m| m.values().next())
+        .and_then(|v| v["model"].as_str())
+        .unwrap_or("unknown")
+        .to_string();
 
-    // Select a model using the TUI
     match select_omo_model(&models, &current_model, agent_count, category_count)? {
         Some(selected) => {
-            // Update all models in config
-            let mut new_config = config.clone();
-            for agent in new_config.agents.values_mut() {
-                agent.model = selected.clone();
+            if let Some(agents) = value["agents"].as_object_mut() {
+                for agent in agents.values_mut() {
+                    agent["model"] = serde_json::Value::String(selected.clone());
+                }
             }
-            for category in new_config.categories.values_mut() {
-                category.model = selected.clone();
+            if let Some(categories) = value["categories"].as_object_mut() {
+                for category in categories.values_mut() {
+                    category["model"] = serde_json::Value::String(selected.clone());
+                }
             }
-
-            // Write back
-            write_omo_config(OMO_CONFIG_PATH, &new_config)?;
+            write_oma_value(OMO_CONFIG_PATH, &value)?;
             println!(
                 "Updated {} agents and {} categories to: {}",
                 agent_count, category_count, selected
@@ -400,21 +387,6 @@ fn restore_omo_defaults() -> Result<()> {
         .with_context(|| format!("Failed to write config: {}", OMO_CONFIG_PATH))?;
 
     println!("Restored oh-my-opencode.json from backup.");
-    Ok(())
-}
-
-fn read_omo_config(path: &str) -> Result<OmoConfig> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read config: {}", path))?;
-    let config: OmoConfig = serde_json::from_str(&content)
-        .with_context(|| format!("Failed to parse JSON: {}", path))?;
-    Ok(config)
-}
-
-fn write_omo_config(path: &str, config: &OmoConfig) -> Result<()> {
-    let content = serde_json::to_string_pretty(config)
-        .with_context(|| "Failed to serialize config to JSON")?;
-    fs::write(path, content + "\n").with_context(|| format!("Failed to write config: {}", path))?;
     Ok(())
 }
 
@@ -887,6 +859,306 @@ impl CtxPreset {
             CtxPreset::Aggressive => "aggressive",
         }
     }
+}
+
+fn read_oma_value(path: &str) -> Result<serde_json::Value> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path))?;
+    serde_json::from_str(&content).with_context(|| format!("Failed to parse JSON: {}", path))
+}
+
+fn write_oma_value(path: &str, value: &serde_json::Value) -> Result<()> {
+    let content = serde_json::to_string_pretty(value)
+        .with_context(|| "Failed to serialize config to JSON")?;
+    fs::write(path, content + "\n").with_context(|| format!("Failed to write {}", path))?;
+    Ok(())
+}
+
+pub fn set_vision_model(path: &str, model: &str) -> Result<()> {
+    let mut value = read_oma_value(path)?;
+
+    // Set the model for multimodal-looker
+    value["agents"]["multimodal-looker"]["model"] = serde_json::Value::String(model.to_string());
+
+    // Remove "multimodal-looker" from disabled_agents if present
+    if let Some(arr) = value.get_mut("disabled_agents").and_then(|v| v.as_array_mut()) {
+        arr.retain(|v| v.as_str() != Some("multimodal-looker"));
+    }
+
+    write_oma_value(path, &value)
+}
+
+pub fn disable_vision(path: &str) -> Result<()> {
+    let mut value = read_oma_value(path)?;
+
+    let already_disabled = value
+        .get("disabled_agents")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().any(|v| v.as_str() == Some("multimodal-looker")))
+        .unwrap_or(false);
+
+    if already_disabled {
+        return Ok(());
+    }
+
+    match value.get_mut("disabled_agents").and_then(|v| v.as_array_mut()) {
+        Some(arr) => {
+            arr.push(serde_json::Value::String("multimodal-looker".to_string()));
+        }
+        None => {
+            value["disabled_agents"] =
+                serde_json::json!(["multimodal-looker"]);
+        }
+    }
+
+    write_oma_value(path, &value)
+}
+
+fn run_vision_on_mode() -> Result<()> {
+    let models = read_models("data/models")?;
+    if models.is_empty() {
+        eprintln!("No models found in data/models");
+        return Ok(());
+    }
+
+    let value = read_oma_value(OMA_CONFIG_PATH)?;
+    let current_model = value
+        .get("agents")
+        .and_then(|a| a.get("multimodal-looker"))
+        .and_then(|m| m.get("model"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    let is_disabled = value
+        .get("disabled_agents")
+        .and_then(|v| v.as_array())
+        .map(|arr| arr.iter().any(|v| v.as_str() == Some("multimodal-looker")))
+        .unwrap_or(false);
+
+    match select_vision_model(&models, &current_model, is_disabled)? {
+        Some(selected) => {
+            set_vision_model(OMA_CONFIG_PATH, &selected)?;
+            println!("Vision model set to: {} (multimodal-looker enabled)", selected);
+        }
+        None => {
+            println!("Aborted. No changes made.");
+        }
+    }
+
+    Ok(())
+}
+
+fn run_vision_off_mode() -> Result<()> {
+    disable_vision(OMA_CONFIG_PATH)?;
+    println!("multimodal-looker disabled.");
+    Ok(())
+}
+
+fn select_vision_model(
+    models: &[String],
+    current: &str,
+    is_disabled: bool,
+) -> Result<Option<String>> {
+    let mut stdout = io::stdout();
+
+    terminal::enable_raw_mode()?;
+    execute!(stdout, EnterAlternateScreen, Hide)?;
+
+    let result = run_vision_selector(&mut stdout, models, current, is_disabled);
+
+    execute!(stdout, Show, LeaveAlternateScreen)?;
+    terminal::disable_raw_mode()?;
+
+    result
+}
+
+fn run_vision_selector(
+    stdout: &mut io::Stdout,
+    models: &[String],
+    current: &str,
+    is_disabled: bool,
+) -> Result<Option<String>> {
+    let mut filter = String::new();
+    let mut selected: usize = 0;
+    let mut initialized = false;
+
+    loop {
+        let filtered: Vec<&String> = models
+            .iter()
+            .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter.to_lowercase()))
+            .collect();
+
+        if selected >= filtered.len() {
+            selected = filtered.len().saturating_sub(1);
+        }
+
+        if !initialized && filter.is_empty() {
+            if let Some(idx) = filtered.iter().position(|m| *m == current) {
+                selected = idx;
+            }
+            initialized = true;
+        }
+
+        draw_vision(stdout, &filtered, selected, &filter, current, is_disabled)?;
+
+        if let Event::Key(key) = event::read()? {
+            match key.code {
+                KeyCode::Up => {
+                    selected = selected.saturating_sub(1);
+                }
+                KeyCode::Down => {
+                    if selected + 1 < filtered.len() {
+                        selected += 1;
+                    }
+                }
+                KeyCode::Enter => {
+                    if let Some(m) = filtered.get(selected) {
+                        return Ok(Some((*m).clone()));
+                    }
+                }
+                KeyCode::Esc => {
+                    return Ok(None);
+                }
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(None);
+                }
+                KeyCode::Char(c) => {
+                    filter.push(c);
+                    selected = 0;
+                    initialized = true;
+                }
+                KeyCode::Backspace => {
+                    filter.pop();
+                    selected = 0;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+fn draw_vision(
+    stdout: &mut io::Stdout,
+    items: &[&String],
+    selected: usize,
+    filter: &str,
+    current: &str,
+    is_disabled: bool,
+) -> Result<()> {
+    let (_, term_height) = terminal::size()?;
+    let max_visible = (term_height as usize).saturating_sub(14);
+
+    execute!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
+
+    let banner = ">>> VISION MODEL (multimodal-looker) <<<";
+    let padding = "=".repeat(banner.len());
+
+    execute!(
+        stdout,
+        SetForegroundColor(Color::DarkGrey),
+        SetAttribute(Attribute::Bold),
+        Print(format!("  {}\r\n", padding)),
+        SetForegroundColor(Color::Cyan),
+        Print(format!("  {}\r\n", banner)),
+        SetForegroundColor(Color::DarkGrey),
+        Print(format!("  {}\r\n", padding)),
+        ResetColor,
+        SetAttribute(Attribute::Reset),
+    )?;
+
+    let status = if is_disabled { "DISABLED" } else { "enabled" };
+    let status_color = if is_disabled { Color::Red } else { Color::Green };
+
+    execute!(
+        stdout,
+        Print("\r\n  Sets the model used by multimodal-looker for image/vision analysis.\r\n"),
+        Print("  Selecting a model will also ENABLE multimodal-looker if disabled.\r\n"),
+        Print(format!("\r\n  Current model : ")),
+        SetForegroundColor(Color::Cyan),
+        Print(format!("{}", current)),
+        ResetColor,
+        Print("  ("),
+        SetForegroundColor(status_color),
+        Print(status),
+        ResetColor,
+        Print(")\r\n"),
+    )?;
+
+    if filter.is_empty() {
+        execute!(
+            stdout,
+            Print("  Type to filter | ↑↓ navigate | Enter select | Esc cancel\r\n\r\n")
+        )?;
+    } else {
+        execute!(
+            stdout,
+            Print(format!(
+                "  Filter: {} | Backspace to clear | Esc cancel\r\n\r\n",
+                filter
+            ))
+        )?;
+    }
+
+    if items.is_empty() {
+        execute!(
+            stdout,
+            SetForegroundColor(Color::Red),
+            Print("    No matches\r\n"),
+            ResetColor,
+        )?;
+    } else {
+        let start = if selected >= max_visible {
+            selected - max_visible + 1
+        } else {
+            0
+        };
+        let end = (start + max_visible).min(items.len());
+
+        for (i, item) in items.iter().enumerate().skip(start).take(end - start) {
+            let is_selected = i == selected;
+            let is_current = *item == current;
+
+            let prefix = match (is_selected, is_current) {
+                (true, true) => "  > * ",
+                (true, false) => "  >   ",
+                (false, true) => "    * ",
+                (false, false) => "      ",
+            };
+
+            if is_selected {
+                execute!(
+                    stdout,
+                    SetForegroundColor(Color::Green),
+                    SetAttribute(Attribute::Bold),
+                    Print(format!("{}{}\r\n", prefix, item)),
+                    SetAttribute(Attribute::Reset),
+                    ResetColor,
+                )?;
+            } else if is_current {
+                execute!(
+                    stdout,
+                    SetForegroundColor(Color::Yellow),
+                    Print(format!("{}{}\r\n", prefix, item)),
+                    ResetColor,
+                )?;
+            } else {
+                execute!(stdout, Print(format!("{}{}\r\n", prefix, item)))?;
+            }
+        }
+
+        if items.len() > max_visible {
+            execute!(
+                stdout,
+                SetForegroundColor(Color::DarkGrey),
+                Print(format!("\r\n    [{}/{}]\r\n", selected + 1, items.len())),
+                ResetColor,
+            )?;
+        }
+    }
+
+    stdout.flush()?;
+    Ok(())
 }
 
 fn run_image_on_mode() -> Result<()> {
