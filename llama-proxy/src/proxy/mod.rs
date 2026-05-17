@@ -3,6 +3,7 @@
 mod context;
 mod handler;
 pub mod server;
+pub mod reprompt;
 mod streaming;
 mod synthesis;
 

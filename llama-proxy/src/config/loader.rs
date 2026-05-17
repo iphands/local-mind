@@ -19,6 +19,15 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
     // Validate streaming configuration
     validate_streaming_config(&config.streaming)?;
 
+    // Validate reprompt config if present
+    if let Some(ref r) = config.reprompt {
+        if r.enabled && r.prompt_file.is_none() && r.prompt.is_none() {
+            return Err(ConfigError::Validation(
+                "reprompt: enabled but neither 'prompt_file' nor 'prompt' is set".to_string(),
+            ));
+        }
+    }
+
     // Validate backend configuration (single or multi-backend)
     if let Some(ref backends) = config.backends {
         // Multi-backend mode: validate all groups and their nodes

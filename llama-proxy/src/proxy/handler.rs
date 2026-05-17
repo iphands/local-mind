@@ -710,6 +710,19 @@ impl ProxyHandler {
             (None, None)
         };
 
+        // Apply reprompt engine if enabled (OpenAI API path only)
+        let json_value = if !is_anthropic_api {
+            match (&self.state.reprompt_engine, &request_json, json_value) {
+                (Some(engine), Some(req_json), Some(current_json)) => {
+                    let result = engine.maybe_reprompt(current_json, req_json, backend).await;
+                    Some(result)
+                }
+                (_, _, jv) => jv,
+            }
+        } else {
+            json_value
+        };
+
         // Log stats
         if let Some(ref mut m) = metrics {
             m.concurrent_requests = Some(self.state.concurrent_requests.load(Ordering::Relaxed));
@@ -1016,6 +1029,7 @@ mod tests {
             detection: crate::config::DetectionConfig::default(),
             streaming: streaming_config,
             augment_backend: None,
+            reprompt: None,
             dump: crate::config::DumpConfig::default(),
         };
 
@@ -1039,6 +1053,7 @@ mod tests {
             fix_registry: std::sync::Arc::new(fix_registry),
             exporter_manager: std::sync::Arc::new(exporter_manager),
             augment_backend: None,
+            reprompt_engine: None,
             hide_requests: false,
             log_augmented_request_text: false,
             dump_path: None,

@@ -79,6 +79,21 @@ backend:
 #   prompt_file: "./augmenter/backend_prompt.md"
 #   request_prompt_file: "./augmenter/request_prompt.md"
 
+# Reprompt engine (optional) — silently re-prompts when backend stops prematurely mid-task.
+# When finish_reason="stop" with no tool_calls, injects a follow-up user message and retries.
+# If the model replies with done_sentinel, passes through the original clean stop to the client.
+# If the model resumes with tool_calls or content, returns that response instead (hiding the stop).
+# reprompt:
+#   enabled: false
+#   # Path to a markdown file containing the continue-prompt text
+#   prompt_file: "./prompts/reprompt.md"
+#   # OR inline prompt text (used if prompt_file is not set)
+#   # prompt: "If you have remaining tasks, continue working on them. If everything is done, reply with only: DONE"
+#   # Maximum reprompt attempts before giving up (default: 3)
+#   max_retries: 3
+#   # If the follow-up response contains this string, treat as a clean finish (default: "DONE")
+#   done_sentinel: "DONE"
+
 # Response fix modules (default: enabled with all fixes active)
 # fixes:
 #   enabled: true

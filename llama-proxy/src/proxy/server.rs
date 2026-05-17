@@ -13,6 +13,7 @@ use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use super::handler::ProxyHandler;
+use super::reprompt::RepromptEngine;
 use crate::augment::AugmentBackend;
 use crate::backends::{build_balancer_from_groups, build_balancer_from_single, preflight, LoadBalancer};
 use crate::config::AppConfig;
@@ -27,6 +28,7 @@ pub struct ProxyState {
     pub fix_registry: Arc<FixRegistry>,
     pub exporter_manager: Arc<ExporterManager>,
     pub augment_backend: Option<Arc<AugmentBackend>>,
+    pub reprompt_engine: Option<Arc<RepromptEngine>>,
     pub hide_requests: bool,
     pub log_augmented_request_text: bool,
     pub dump_path: Option<Arc<std::path::PathBuf>>,
@@ -115,12 +117,38 @@ pub async fn run_server(
         None
     };
 
+    // Initialize reprompt engine if configured
+    let reprompt_engine = if let Some(ref cfg) = config.reprompt {
+        if cfg.enabled {
+            match RepromptEngine::from_config(cfg) {
+                Ok(engine) => {
+                    tracing::info!(
+                        max_retries = cfg.max_retries,
+                        done_sentinel = %cfg.done_sentinel,
+                        has_prompt_file = cfg.prompt_file.is_some(),
+                        "Reprompt engine enabled"
+                    );
+                    Some(Arc::new(engine))
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to initialize reprompt engine — disabled");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     let state = ProxyState {
         config: Arc::new(config.clone()),
         load_balancer,
         fix_registry: Arc::new(fix_registry),
         exporter_manager: Arc::new(exporter_manager),
         augment_backend,
+        reprompt_engine,
         hide_requests,
         log_augmented_request_text,
         dump_path: if config.dump.enabled && !config.dump.path.is_empty() {

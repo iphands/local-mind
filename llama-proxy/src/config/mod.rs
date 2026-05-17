@@ -26,6 +26,8 @@ pub struct AppConfig {
     #[serde(default, rename = "augment-backend")]
     pub augment_backend: Option<AugmentBackendConfig>,
     #[serde(default)]
+    pub reprompt: Option<RepromptConfig>,
+    #[serde(default)]
     pub dump: DumpConfig,
 }
 
@@ -369,6 +371,45 @@ impl std::fmt::Display for AugmentBackendError {
 }
 
 impl std::error::Error for AugmentBackendError {}
+
+/// Reprompt engine configuration — silently re-prompts on premature stop
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct RepromptConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    /// Path to a markdown file containing the continue-prompt text
+    #[serde(default)]
+    pub prompt_file: Option<String>,
+    /// Inline continue-prompt text (used when prompt_file is not set)
+    #[serde(default)]
+    pub prompt: Option<String>,
+    /// Maximum reprompt retries before giving up (default: 3)
+    #[serde(default = "default_reprompt_max_retries")]
+    pub max_retries: u32,
+    /// If the follow-up response text contains this string, treat as clean finish (default: "DONE")
+    #[serde(default = "default_reprompt_done_sentinel")]
+    pub done_sentinel: String,
+}
+
+fn default_reprompt_max_retries() -> u32 {
+    3
+}
+
+fn default_reprompt_done_sentinel() -> String {
+    "DONE".to_string()
+}
+
+impl Default for RepromptConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            prompt_file: None,
+            prompt: None,
+            max_retries: default_reprompt_max_retries(),
+            done_sentinel: default_reprompt_done_sentinel(),
+        }
+    }
+}
 
 /// Exporters configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
