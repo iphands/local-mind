@@ -1,0 +1,13 @@
+default: run
+
+build:
+	cargo build --workspace
+
+test:
+	cargo test --workspace --lib
+
+test-all:
+	cargo test --workspace
+
+run:
+  cargo run --features influxdb --release run --hide-requests
