@@ -28,6 +28,7 @@ pub struct RepromptEngine {
     dynamic_prompt: bool,
     pub max_retries: u32,
     pub done_sentinel: String,
+    log_stop_responses: bool,
 }
 
 impl RepromptEngine {
@@ -54,6 +55,7 @@ impl RepromptEngine {
             dynamic_prompt: config.dynamic_prompt,
             max_retries: config.max_retries,
             done_sentinel: config.done_sentinel.clone(),
+            log_stop_responses: config.log_stop_responses,
         })
     }
 
@@ -238,6 +240,13 @@ impl RepromptEngine {
             "Reprompt triggered: finish_reason=stop with no tool_calls"
         );
 
+        if self.log_stop_responses {
+            tracing::info!(
+                response = %serde_json::to_string_pretty(&original_response).unwrap_or_default(),
+                "REPROMPT: triggering stop response"
+            );
+        }
+
         // Resolve prompt once per trigger (may reload from disk if changed)
         let prompt = self.resolve_prompt().await;
 
@@ -253,6 +262,12 @@ impl RepromptEngine {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(attempt, error = %e, "Reprompt request failed, returning last response");
+                    if self.log_stop_responses {
+                        tracing::info!(
+                            response = %serde_json::to_string_pretty(&current).unwrap_or_default(),
+                            "REPROMPT: client response (request failed)"
+                        );
+                    }
                     return current;
                 }
             };
@@ -261,11 +276,23 @@ impl RepromptEngine {
 
             if new_text.contains(&self.done_sentinel) {
                 tracing::info!(attempt, sentinel = %self.done_sentinel, "Reprompt: done sentinel found, returning original stop");
+                if self.log_stop_responses {
+                    tracing::info!(
+                        response = %serde_json::to_string_pretty(&clean_stop).unwrap_or_default(),
+                        "REPROMPT: client response (done sentinel)"
+                    );
+                }
                 return clean_stop;
             }
 
             if Self::has_continuation(&new_resp) {
                 tracing::info!(attempt, "Reprompt: continuation found, returning new response");
+                if self.log_stop_responses {
+                    tracing::info!(
+                        response = %serde_json::to_string_pretty(&new_resp).unwrap_or_default(),
+                        "REPROMPT: client response (continuation)"
+                    );
+                }
                 return new_resp;
             }
 
@@ -280,6 +307,12 @@ impl RepromptEngine {
             max_retries = self.max_retries,
             "Reprompt: exhausted retries, returning last response"
         );
+        if self.log_stop_responses {
+            tracing::info!(
+                response = %serde_json::to_string_pretty(&current).unwrap_or_default(),
+                "REPROMPT: client response (exhausted retries)"
+            );
+        }
         current
     }
 }
@@ -297,6 +330,7 @@ mod tests {
             dynamic_prompt: false,
             max_retries: 3,
             done_sentinel: "DONE".into(),
+            log_stop_responses: false,
         }
     }
 
@@ -434,6 +468,7 @@ mod tests {
             max_retries: 2,
             done_sentinel: "DONE".into(),
             dynamic_prompt: false,
+            log_stop_responses: false,
         };
         let e = RepromptEngine::from_config(&cfg).unwrap();
         assert_eq!(e.max_retries, 2);
@@ -448,6 +483,7 @@ mod tests {
             max_retries: 3,
             done_sentinel: "DONE".into(),
             dynamic_prompt: false,
+            log_stop_responses: false,
         };
         assert!(RepromptEngine::from_config(&cfg).is_err());
     }
@@ -461,6 +497,7 @@ mod tests {
             max_retries: 3,
             done_sentinel: "DONE".into(),
             dynamic_prompt: false,
+            log_stop_responses: false,
         };
         assert!(RepromptEngine::from_config(&cfg).is_err());
     }
@@ -493,6 +530,7 @@ mod tests {
             dynamic_prompt: true,
             max_retries: 3,
             done_sentinel: "DONE".into(),
+            log_stop_responses: false,
         };
         assert_eq!(e.resolve_prompt().await, "Static text.");
     }
@@ -512,6 +550,7 @@ mod tests {
             dynamic_prompt: true,
             max_retries: 3,
             done_sentinel: "DONE".into(),
+            log_stop_responses: false,
         };
         // mtime hasn't changed, should return cached prompt without re-reading
         assert_eq!(e.resolve_prompt().await, "File prompt.");
@@ -539,6 +578,7 @@ mod tests {
             dynamic_prompt: true,
             max_retries: 3,
             done_sentinel: "DONE".into(),
+            log_stop_responses: false,
         };
         let result = e.resolve_prompt().await;
         assert_eq!(result, "New prompt.");

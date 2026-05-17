@@ -93,6 +93,9 @@ backend:
 #   max_retries: 3
 #   # If the follow-up response contains this string, treat as a clean finish (default: "DONE")
 #   done_sentinel: "DONE"
+#   # Log the full response body on every reprompt trigger — both the stop that fired it
+#   # and the final response returned to the client. Flip on to debug client-side state issues.
+#   log_stop_responses: false
 
 # Response fix modules (default: enabled with all fixes active)
 # fixes:

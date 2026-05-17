@@ -393,6 +393,10 @@ pub struct RepromptConfig {
     /// Set to false to load the prompt once at startup and never re-read.
     #[serde(default = "default_reprompt_dynamic_prompt")]
     pub dynamic_prompt: bool,
+    /// Log the full stop response body when a reprompt is triggered (default: false).
+    /// Useful for debugging why the client-side state isn't updating correctly.
+    #[serde(default)]
+    pub log_stop_responses: bool,
 }
 
 fn default_reprompt_max_retries() -> u32 {
@@ -416,6 +420,7 @@ impl Default for RepromptConfig {
             max_retries: default_reprompt_max_retries(),
             done_sentinel: default_reprompt_done_sentinel(),
             dynamic_prompt: default_reprompt_dynamic_prompt(),
+            log_stop_responses: false,
         }
     }
 }
