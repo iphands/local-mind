@@ -1,5 +1,6 @@
 {
   "model": "cosmo-proxy/cosmo-proxy",
+  "maxSteps": 800,
   "plugin": [
     "oh-my-openagent@latest"
   ],
