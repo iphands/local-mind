@@ -389,6 +389,10 @@ pub struct RepromptConfig {
     /// If the follow-up response text contains this string, treat as clean finish (default: "DONE")
     #[serde(default = "default_reprompt_done_sentinel")]
     pub done_sentinel: String,
+    /// Re-read prompt_file from disk on each trigger if the file has changed (default: true).
+    /// Set to false to load the prompt once at startup and never re-read.
+    #[serde(default = "default_reprompt_dynamic_prompt")]
+    pub dynamic_prompt: bool,
 }
 
 fn default_reprompt_max_retries() -> u32 {
@@ -399,6 +403,10 @@ fn default_reprompt_done_sentinel() -> String {
     "DONE".to_string()
 }
 
+fn default_reprompt_dynamic_prompt() -> bool {
+    true
+}
+
 impl Default for RepromptConfig {
     fn default() -> Self {
         Self {
@@ -407,6 +415,7 @@ impl Default for RepromptConfig {
             prompt: None,
             max_retries: default_reprompt_max_retries(),
             done_sentinel: default_reprompt_done_sentinel(),
+            dynamic_prompt: default_reprompt_dynamic_prompt(),
         }
     }
 }

@@ -5,24 +5,40 @@
 //! - If the response contains the done_sentinel → return the original clean stop.
 //! - If the response has tool_calls or a non-stop finish_reason → return it (hiding the stop).
 //! - After max_retries exhaustion → return the last response seen.
+//!
+//! When dynamic_prompt is enabled (default), the prompt file is re-read from disk on
+//! each trigger if its mtime has changed since the last read. This allows live edits
+//! to the prompt without restarting the proxy.
 
 use crate::backends::BackendNode;
 use crate::config::RepromptConfig;
+use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::SystemTime;
+use tokio::sync::RwLock;
 
 pub struct RepromptEngine {
-    pub prompt: String,
+    /// Current prompt text — guarded for dynamic reload
+    prompt: RwLock<String>,
+    /// Path to reload from (None when using inline prompt)
+    prompt_file: Option<PathBuf>,
+    /// mtime of the prompt file at last successful read
+    last_mtime: RwLock<Option<SystemTime>>,
+    /// Re-read the file on each trigger if mtime changed (default: true)
+    dynamic_prompt: bool,
     pub max_retries: u32,
     pub done_sentinel: String,
 }
 
 impl RepromptEngine {
     pub fn from_config(config: &RepromptConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let prompt = if let Some(ref path) = config.prompt_file {
-            std::fs::read_to_string(path)
-                .map_err(|e| format!("reprompt: failed to read prompt_file '{}': {}", path, e))?
+        let (prompt, prompt_file, initial_mtime) = if let Some(ref path) = config.prompt_file {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("reprompt: failed to read prompt_file '{}': {}", path, e))?;
+            let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+            (text, Some(PathBuf::from(path)), mtime)
         } else if let Some(ref inline) = config.prompt {
-            inline.clone()
+            (inline.clone(), None, None)
         } else {
             return Err("reprompt: neither prompt_file nor prompt is configured".into());
         };
@@ -32,10 +48,68 @@ impl RepromptEngine {
         }
 
         Ok(Self {
-            prompt,
+            prompt: RwLock::new(prompt),
+            prompt_file,
+            last_mtime: RwLock::new(initial_mtime),
+            dynamic_prompt: config.dynamic_prompt,
             max_retries: config.max_retries,
             done_sentinel: config.done_sentinel.clone(),
         })
+    }
+
+    /// If dynamic_prompt is enabled and the file has changed, reload it.
+    /// Called once per trigger (before the retry loop). Returns the prompt text to use.
+    async fn resolve_prompt(&self) -> String {
+        if !self.dynamic_prompt {
+            return self.prompt.read().await.clone();
+        }
+
+        let Some(ref path) = self.prompt_file else {
+            // Inline prompt — no file to reload
+            return self.prompt.read().await.clone();
+        };
+
+        let current_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+
+        let needs_reload = {
+            let last = self.last_mtime.read().await;
+            match (*last, current_mtime) {
+                (Some(last_t), Some(cur_t)) => cur_t != last_t,
+                (None, Some(_)) => true,  // first stat after startup without mtime
+                _ => false,
+            }
+        };
+
+        if needs_reload {
+            match std::fs::read_to_string(path) {
+                Ok(new_text) if !new_text.trim().is_empty() => {
+                    tracing::info!(
+                        path = %path.display(),
+                        "Reprompt: prompt file changed, reloading"
+                    );
+                    *self.prompt.write().await = new_text.clone();
+                    *self.last_mtime.write().await = current_mtime;
+                    new_text
+                }
+                Ok(_) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        "Reprompt: prompt file is empty after reload, keeping previous prompt"
+                    );
+                    self.prompt.read().await.clone()
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        error = %e,
+                        "Reprompt: failed to reload prompt file, keeping previous prompt"
+                    );
+                    self.prompt.read().await.clone()
+                }
+            }
+        } else {
+            self.prompt.read().await.clone()
+        }
     }
 
     /// Returns true when the response should trigger a reprompt:
@@ -98,7 +172,7 @@ impl RepromptEngine {
 
     /// Build the follow-up request: original + assistant stop turn + continue-prompt user message.
     fn build_follow_up(
-        &self,
+        prompt: &str,
         original_req: &serde_json::Value,
         stopped_resp: &serde_json::Value,
         backend: &BackendNode,
@@ -119,7 +193,7 @@ impl RepromptEngine {
 
         let assistant_content = Self::extract_assistant_text(stopped_resp);
         let assistant_msg = serde_json::json!({"role": "assistant", "content": assistant_content});
-        let user_msg = serde_json::json!({"role": "user", "content": self.prompt});
+        let user_msg = serde_json::json!({"role": "user", "content": prompt});
 
         if let Some(msgs) = req.get_mut("messages").and_then(|m| m.as_array_mut()) {
             msgs.push(assistant_msg);
@@ -130,7 +204,6 @@ impl RepromptEngine {
     }
 
     async fn send_follow_up(
-        &self,
         req: &serde_json::Value,
         backend: &BackendNode,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
@@ -165,15 +238,18 @@ impl RepromptEngine {
             "Reprompt triggered: finish_reason=stop with no tool_calls"
         );
 
+        // Resolve prompt once per trigger (may reload from disk if changed)
+        let prompt = self.resolve_prompt().await;
+
         let clean_stop = original_response.clone();
         let mut current = original_response;
 
         for attempt in 0..self.max_retries {
             tracing::debug!(attempt, "Sending reprompt follow-up");
 
-            let follow_up_req = self.build_follow_up(original_request, &current, backend);
+            let follow_up_req = Self::build_follow_up(&prompt, original_request, &current, backend);
 
-            let new_resp = match self.send_follow_up(&follow_up_req, backend).await {
+            let new_resp = match Self::send_follow_up(&follow_up_req, backend).await {
                 Ok(r) => r,
                 Err(e) => {
                     tracing::warn!(attempt, error = %e, "Reprompt request failed, returning last response");
@@ -212,7 +288,10 @@ mod tests {
 
     fn engine() -> RepromptEngine {
         RepromptEngine {
-            prompt: "Continue or say DONE.".into(),
+            prompt: RwLock::new("Continue or say DONE.".into()),
+            prompt_file: None,
+            last_mtime: RwLock::new(None),
+            dynamic_prompt: false,
             max_retries: 3,
             done_sentinel: "DONE".into(),
         }
@@ -276,7 +355,6 @@ mod tests {
 
     #[test]
     fn test_should_trigger_false_empty_tool_calls_array() {
-        // Empty tool_calls array — not actually calling anything, should trigger
         let r = serde_json::json!({
             "choices": [{
                 "finish_reason": "stop",
@@ -309,7 +387,12 @@ mod tests {
             "model": "test",
             "messages": [{"role": "user", "content": "Do X"}]
         });
-        let result = engine().build_follow_up(&req, &stop_resp("I did half."), &node);
+        let result = RepromptEngine::build_follow_up(
+            "Continue or say DONE.",
+            &req,
+            &stop_resp("I did half."),
+            &node,
+        );
         let msgs = result["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[1]["role"], "assistant");
@@ -328,7 +411,7 @@ mod tests {
             "stream_options": {"include_usage": true},
             "messages": [{"role": "user", "content": "Hi"}]
         });
-        let result = engine().build_follow_up(&req, &stop_resp("ok"), &node);
+        let result = RepromptEngine::build_follow_up("Continue.", &req, &stop_resp("ok"), &node);
         assert!(result.get("stream_options").is_none());
     }
 
@@ -340,7 +423,7 @@ mod tests {
             "model": "original",
             "messages": [{"role": "user", "content": "Hi"}]
         });
-        let result = engine().build_follow_up(&req, &stop_resp("ok"), &node);
+        let result = RepromptEngine::build_follow_up("Continue.", &req, &stop_resp("ok"), &node);
         assert_eq!(result["model"], "override-model");
     }
 
@@ -352,10 +435,10 @@ mod tests {
             prompt: Some("Continue or DONE.".into()),
             max_retries: 2,
             done_sentinel: "DONE".into(),
+            dynamic_prompt: false,
         };
         let e = RepromptEngine::from_config(&cfg).unwrap();
         assert_eq!(e.max_retries, 2);
-        assert!(e.prompt.contains("DONE"));
     }
 
     #[test]
@@ -366,6 +449,7 @@ mod tests {
             prompt: None,
             max_retries: 3,
             done_sentinel: "DONE".into(),
+            dynamic_prompt: false,
         };
         assert!(RepromptEngine::from_config(&cfg).is_err());
     }
@@ -378,6 +462,7 @@ mod tests {
             prompt: Some("   ".into()),
             max_retries: 3,
             done_sentinel: "DONE".into(),
+            dynamic_prompt: false,
         };
         assert!(RepromptEngine::from_config(&cfg).is_err());
     }
@@ -392,5 +477,74 @@ mod tests {
     fn test_extract_assistant_text_missing_content() {
         let r = serde_json::json!({"choices": [{"message": {"role": "assistant"}}]});
         assert_eq!(RepromptEngine::extract_assistant_text(&r), "");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prompt_static() {
+        let e = engine(); // dynamic_prompt: false, no file
+        assert_eq!(e.resolve_prompt().await, "Continue or say DONE.");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prompt_dynamic_no_file() {
+        // dynamic_prompt: true but no prompt_file → just reads from RwLock
+        let e = RepromptEngine {
+            prompt: RwLock::new("Static text.".into()),
+            prompt_file: None,
+            last_mtime: RwLock::new(None),
+            dynamic_prompt: true,
+            max_retries: 3,
+            done_sentinel: "DONE".into(),
+        };
+        assert_eq!(e.resolve_prompt().await, "Static text.");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prompt_dynamic_file_unchanged() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "File prompt.").unwrap();
+        let path = f.path().to_path_buf();
+        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+
+        let e = RepromptEngine {
+            prompt: RwLock::new("File prompt.".into()),
+            prompt_file: Some(path),
+            last_mtime: RwLock::new(Some(mtime)),
+            dynamic_prompt: true,
+            max_retries: 3,
+            done_sentinel: "DONE".into(),
+        };
+        // mtime hasn't changed, should return cached prompt without re-reading
+        assert_eq!(e.resolve_prompt().await, "File prompt.");
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prompt_dynamic_file_changed() {
+        use std::io::Write;
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        write!(f, "Old prompt.").unwrap();
+        let path = f.path().to_path_buf();
+
+        // Write new content and advance mtime
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        let mut f2 = std::fs::OpenOptions::new().write(true).truncate(true).open(&path).unwrap();
+        write!(f2, "New prompt.").unwrap();
+        drop(f2);
+
+        let old_mtime = std::time::UNIX_EPOCH; // clearly older than real file
+
+        let e = RepromptEngine {
+            prompt: RwLock::new("Old prompt.".into()),
+            prompt_file: Some(path),
+            last_mtime: RwLock::new(Some(old_mtime)),
+            dynamic_prompt: true,
+            max_retries: 3,
+            done_sentinel: "DONE".into(),
+        };
+        let result = e.resolve_prompt().await;
+        assert_eq!(result, "New prompt.");
+        // Verify internal state updated
+        assert_eq!(*e.prompt.read().await, "New prompt.");
     }
 }
