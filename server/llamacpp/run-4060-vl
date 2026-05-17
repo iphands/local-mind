@@ -1,0 +1,10 @@
+#!/bin/bash
+export MODEL="$1"
+export PORT=8701
+export NAME=llama-server-4060
+export ALIAS=cosmo-4060
+export SINGLE=1
+source ./run-common
+
+CONTAINER_ARGS+=(--gpus '"device=1"')
+run_model_vision

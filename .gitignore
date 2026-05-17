@@ -3,6 +3,8 @@
 /llama-proxy/e2e/target
 /llama-proxy/target
 /llama-proxy/trash
+/opencode/container_data/.bash_history
+/opencode/container_data/config/opencode/oh-my-opencode.json.bak
 /scratch
 /server/llamacpp/vendor
 /server/vllm/scratch/
