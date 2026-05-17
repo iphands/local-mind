@@ -22,7 +22,6 @@ impl PriorityFreeBalancer {
         }
         Ok(Self { nodes })
     }
-
 }
 
 impl LoadBalancer for PriorityFreeBalancer {
@@ -36,7 +35,8 @@ impl LoadBalancer for PriorityFreeBalancer {
         }
 
         // All busy: pick the node with the fewest active requests (lowest index wins ties)
-        let node = self.nodes
+        let node = self
+            .nodes
             .iter()
             .min_by_key(|n| n.active_requests.load(Ordering::Acquire))
             .unwrap(); // safe: nodes is non-empty
@@ -204,8 +204,14 @@ mod tests {
         let balancer = PriorityFreeBalancer::new(nodes).unwrap();
 
         // All selects should use priority_free logic regardless of model
-        assert_eq!(balancer.select(Some("haiku")).unwrap().node.base_url(), "http://localhost:8081");
-        assert_eq!(balancer.select(Some("sonnet")).unwrap().node.base_url(), "http://localhost:8081");
+        assert_eq!(
+            balancer.select(Some("haiku")).unwrap().node.base_url(),
+            "http://localhost:8081"
+        );
+        assert_eq!(
+            balancer.select(Some("sonnet")).unwrap().node.base_url(),
+            "http://localhost:8081"
+        );
         assert_eq!(balancer.select(None).unwrap().node.base_url(), "http://localhost:8081");
     }
 }

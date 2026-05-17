@@ -18,9 +18,7 @@ use std::sync::Arc;
 use crate::config::BackendsConfig;
 
 /// Build a load balancer from backend group configurations
-pub fn build_balancer_from_groups(
-    groups: BackendsConfig,
-) -> Result<Arc<dyn LoadBalancer>, Box<dyn std::error::Error>> {
+pub fn build_balancer_from_groups(groups: BackendsConfig) -> Result<Arc<dyn LoadBalancer>, Box<dyn std::error::Error>> {
     Ok(Arc::new(GroupedLoadBalancer::new(groups)?))
 }
 

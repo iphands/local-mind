@@ -33,8 +33,8 @@ pub struct RepromptEngine {
 impl RepromptEngine {
     pub fn from_config(config: &RepromptConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let (prompt, prompt_file, initial_mtime) = if let Some(ref path) = config.prompt_file {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("reprompt: failed to read prompt_file '{}': {}", path, e))?;
+            let text =
+                std::fs::read_to_string(path).map_err(|e| format!("reprompt: failed to read prompt_file '{}': {}", path, e))?;
             let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
             (text, Some(PathBuf::from(path)), mtime)
         } else if let Some(ref inline) = config.prompt {
@@ -75,7 +75,7 @@ impl RepromptEngine {
             let last = self.last_mtime.read().await;
             match (*last, current_mtime) {
                 (Some(last_t), Some(cur_t)) => cur_t != last_t,
-                (None, Some(_)) => true,  // first stat after startup without mtime
+                (None, Some(_)) => true, // first stat after startup without mtime
                 _ => false,
             }
         };
@@ -269,7 +269,10 @@ impl RepromptEngine {
                 return new_resp;
             }
 
-            tracing::debug!(attempt, "Reprompt: follow-up also stopped without tool_calls, continuing loop");
+            tracing::debug!(
+                attempt,
+                "Reprompt: follow-up also stopped without tool_calls, continuing loop"
+            );
             current = new_resp;
         }
 
@@ -387,12 +390,7 @@ mod tests {
             "model": "test",
             "messages": [{"role": "user", "content": "Do X"}]
         });
-        let result = RepromptEngine::build_follow_up(
-            "Continue or say DONE.",
-            &req,
-            &stop_resp("I did half."),
-            &node,
-        );
+        let result = RepromptEngine::build_follow_up("Continue or say DONE.", &req, &stop_resp("I did half."), &node);
         let msgs = result["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[1]["role"], "assistant");

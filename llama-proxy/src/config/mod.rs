@@ -860,7 +860,9 @@ nodes:
 
     #[test]
     fn test_no_matching_backend_display() {
-        let err = NoMatchingBackend { requested_model: Some("gpt-4".to_string()) };
+        let err = NoMatchingBackend {
+            requested_model: Some("gpt-4".to_string()),
+        };
         assert_eq!(err.to_string(), "No backend configured for model: gpt-4");
 
         let err = NoMatchingBackend { requested_model: None };

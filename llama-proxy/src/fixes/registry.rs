@@ -405,7 +405,10 @@ mod tests {
         let mut modules = HashMap::new();
         modules.insert(
             "toolcall_bad_filepath".to_string(),
-            crate::config::FixModuleConfig { enabled: false, options: HashMap::new() },
+            crate::config::FixModuleConfig {
+                enabled: false,
+                options: HashMap::new(),
+            },
         );
 
         registry.configure(&modules);

@@ -83,10 +83,7 @@ impl ToolcallMalformedArgumentsFix {
 
         // Find which schema parameters are missing from parsed object
         let parsed_keys: Vec<String> = parsed.keys().map(|k| k.to_string()).collect();
-        let missing_params: Vec<&String> = schema_params
-            .iter()
-            .filter(|p| !parsed_keys.contains(p))
-            .collect();
+        let missing_params: Vec<&String> = schema_params.iter().filter(|p| !parsed_keys.contains(p)).collect();
 
         if missing_params.is_empty() {
             return None;

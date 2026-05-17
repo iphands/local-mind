@@ -166,8 +166,14 @@ mod tests {
     #[test]
     fn test_grouped_balancer_model_routing() {
         let mut groups = HashMap::new();
-        groups.insert("opus".to_string(), make_group_config(vec!["opus", "opus4.5"], vec!["http://localhost:8080"]));
-        groups.insert("haiku".to_string(), make_group_config(vec!["haiku"], vec!["http://localhost:8081"]));
+        groups.insert(
+            "opus".to_string(),
+            make_group_config(vec!["opus", "opus4.5"], vec!["http://localhost:8080"]),
+        );
+        groups.insert(
+            "haiku".to_string(),
+            make_group_config(vec!["haiku"], vec!["http://localhost:8081"]),
+        );
 
         let balancer = GroupedLoadBalancer::new(groups).unwrap();
 
@@ -197,8 +203,14 @@ mod tests {
     #[test]
     fn test_grouped_balancer_catch_all() {
         let mut groups = HashMap::new();
-        groups.insert("opus".to_string(), make_group_config(vec!["opus"], vec!["http://localhost:8080"]));
-        groups.insert("catch_all".to_string(), make_group_config(vec![], vec!["http://localhost:8081"]));
+        groups.insert(
+            "opus".to_string(),
+            make_group_config(vec!["opus"], vec!["http://localhost:8080"]),
+        );
+        groups.insert(
+            "catch_all".to_string(),
+            make_group_config(vec![], vec!["http://localhost:8081"]),
+        );
 
         let balancer = GroupedLoadBalancer::new(groups).unwrap();
 
@@ -218,7 +230,10 @@ mod tests {
     #[test]
     fn test_grouped_balancer_only_catch_all() {
         let mut groups = HashMap::new();
-        groups.insert("catch_all".to_string(), make_group_config(vec![], vec!["http://localhost:8080"]));
+        groups.insert(
+            "catch_all".to_string(),
+            make_group_config(vec![], vec!["http://localhost:8080"]),
+        );
 
         let balancer = GroupedLoadBalancer::new(groups).unwrap();
 

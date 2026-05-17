@@ -177,7 +177,7 @@ impl ToolcallBadFilepathFix {
             // fall back to safe_completion to avoid wrong delta calculation.
             if let Some(pos) = accumulated.rfind(current_chunk) {
                 if pos + current_chunk.len() == accumulated.len() {
-                    pos  // Match at end = safe
+                    pos // Match at end = safe
                 } else {
                     // Match found but not at end — ambiguous, could be duplicate
                     // fragment in the accumulated text. Fall through to safe fallback.
@@ -552,12 +552,18 @@ mod tests {
         // Non-ASCII path — previously would panic due to char/byte index mismatch
         let malformed = r#"{"filePath":"/日本語/file.txt","extra":"dropped","filePath":"/日本語/file.txt"}"#;
         let fixed = fix.fix_arguments(malformed);
-        assert!(fix.is_valid_json(&fixed), "fix_arguments panicked or produced invalid JSON for non-ASCII path: {fixed}");
+        assert!(
+            fix.is_valid_json(&fixed),
+            "fix_arguments panicked or produced invalid JSON for non-ASCII path: {fixed}"
+        );
 
         // German umlaut path
         let malformed2 = r#"{"filePath":"/über/lösung.rs","x":1,"filePath":"/über/lösung.rs"}"#;
         let fixed2 = fix.fix_arguments(malformed2);
-        assert!(fix.is_valid_json(&fixed2), "fix_arguments panicked or produced invalid JSON for umlaut path: {fixed2}");
+        assert!(
+            fix.is_valid_json(&fixed2),
+            "fix_arguments panicked or produced invalid JSON for umlaut path: {fixed2}"
+        );
     }
 
     #[test]

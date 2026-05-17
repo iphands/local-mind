@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use crate::config::{BackendsConfig, BackendConfig};
+use crate::config::{BackendConfig, BackendsConfig};
 use crate::proxy::cache_context_from_preflight;
 
 /// Run preflight checks for all backend nodes in multi-backend mode.
@@ -73,7 +73,8 @@ pub async fn run_preflight_multi(backends: &mut BackendsConfig) {
                 node_cfg.strip_path_prefix.as_deref(),
                 models_result.is_llama_cpp,
                 models_result.max_model_len,
-            ).await;
+            )
+            .await;
             if let Some(ctx) = context_total {
                 tracing::info!(
                     group = %group_name,
@@ -173,7 +174,8 @@ pub async fn run_preflight_single(backend: &BackendConfig) {
         backend.strip_path_prefix.as_deref(),
         is_llama_cpp,
         max_model_len,
-    ).await;
+    )
+    .await;
     if let Some(ctx) = context_total {
         tracing::info!(
             url = %base_url,
@@ -208,18 +210,21 @@ async fn fetch_models(req: reqwest::RequestBuilder) -> Result<ModelsResult, Box<
     let body: serde_json::Value = resp.json().await?;
 
     let (model_ids, max_model_len) = if let Some(arr) = body.get("data").and_then(|d| d.as_array()) {
-        let ids = arr.iter()
+        let ids = arr
+            .iter()
             .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(|s| s.to_string()))
             .collect();
-        let max_len = arr.first()
-            .and_then(|m| m.get("max_model_len"))
-            .and_then(|v| v.as_u64());
+        let max_len = arr.first().and_then(|m| m.get("max_model_len")).and_then(|v| v.as_u64());
         (ids, max_len)
     } else {
         (vec![], None)
     };
 
-    Ok(ModelsResult { model_ids, max_model_len, is_llama_cpp })
+    Ok(ModelsResult {
+        model_ids,
+        max_model_len,
+        is_llama_cpp,
+    })
 }
 
 fn build_preflight_client(
@@ -228,8 +233,7 @@ fn build_preflight_client(
 ) -> Result<reqwest::Client, Box<dyn std::error::Error>> {
     // Use short timeout for preflight (max 10s, but respect configured timeout)
     let preflight_timeout = timeout_seconds.min(10);
-    let mut builder = reqwest::Client::builder()
-        .timeout(Duration::from_secs(preflight_timeout));
+    let mut builder = reqwest::Client::builder().timeout(Duration::from_secs(preflight_timeout));
 
     if let Some(tls_cfg) = tls {
         if tls_cfg.accept_invalid_certs {

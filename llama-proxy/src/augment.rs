@@ -41,11 +41,10 @@ impl AugmentBackend {
     /// and returns the extracted text from the response.
     pub async fn get_augmentation(&self, user_content: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
         // Load backend prompt (empty string on failure)
-        let backend_prompt = std::fs::read_to_string(&self.prompt_file)
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, file = %self.prompt_file, "Failed to load backend prompt, using empty string");
-                String::new()
-            });
+        let backend_prompt = std::fs::read_to_string(&self.prompt_file).unwrap_or_else(|e| {
+            tracing::warn!(error = %e, file = %self.prompt_file, "Failed to load backend prompt, using empty string");
+            String::new()
+        });
 
         // Combine backend_prompt + user_content
         let combined = format!("{}\n\n{}", backend_prompt, user_content);
@@ -66,11 +65,7 @@ impl AugmentBackend {
 
         tracing::debug!(url = %url, model = %self.model, "Sending request to augment backend");
 
-        let response = self.http_client
-            .post(&url)
-            .json(&request)
-            .send()
-            .await?;
+        let response = self.http_client.post(&url).json(&request).send().await?;
 
         if !response.status().is_success() {
             let status = response.status();
@@ -90,11 +85,7 @@ fn extract_response_text(body: &serde_json::Value) -> Result<String, Box<dyn std
     // Try OpenAI format: choices[0].message.content
     if let Some(choices) = body.get("choices").and_then(|c| c.as_array()) {
         if let Some(first) = choices.first() {
-            if let Some(content) = first
-                .get("message")
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_str())
-            {
+            if let Some(content) = first.get("message").and_then(|m| m.get("content")).and_then(|c| c.as_str()) {
                 return Ok(content.to_string());
             }
         }
@@ -183,7 +174,11 @@ pub fn extract_user_content(messages: &[Message]) -> Vec<String> {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                if text.is_empty() { None } else { Some(text) }
+                if text.is_empty() {
+                    None
+                } else {
+                    Some(text)
+                }
             }
             None => None,
         })

@@ -379,7 +379,8 @@ pub async fn handle_streaming_response(
                     // Dump request/response if dump mode is enabled (independent of stats)
                     if let Some(ref dump_path) = dump_path {
                         if let (Some(req_method), Some(req_uri), Some(req_json)) =
-                            (request_method, request_uri, request_json_for_dump) {
+                            (request_method, request_uri, request_json_for_dump)
+                        {
                             let dump_path_clone = dump_path.clone();
                             let response_headers = response_headers.clone();
                             let req_json_clone = req_json.clone();
@@ -400,7 +401,9 @@ pub async fn handle_streaming_response(
                                     response_status,
                                     &response_body,
                                     res_content_type,
-                                ).await {
+                                )
+                                .await
+                                {
                                     tracing::warn!(error = %e, "Failed to dump streaming request/response pair");
                                 }
                             });
@@ -429,7 +432,8 @@ pub async fn handle_streaming_response(
                         };
 
                         // Fetch and set context_total
-                        if let Some(ctx_total) = fetch_context_total(&client, &backend_url, strip_path_prefix.as_deref()).await {
+                        if let Some(ctx_total) = fetch_context_total(&client, &backend_url, strip_path_prefix.as_deref()).await
+                        {
                             metrics.context_total = Some(ctx_total);
                             metrics.calculate_context_percent();
                         }
@@ -765,10 +769,9 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                                                         acc_arr[idx] = new_call.clone();
                                                     } else {
                                                         // Merge function arguments
-                                                        if let (Some(acc_func), Some(new_func)) = (
-                                                            acc_arr[idx].get_mut("function"),
-                                                            new_call.get("function"),
-                                                        ) {
+                                                        if let (Some(acc_func), Some(new_func)) =
+                                                            (acc_arr[idx].get_mut("function"), new_call.get("function"))
+                                                        {
                                                             if let (Some(acc_args), Some(new_args)) = (
                                                                 acc_func.get("arguments").and_then(|a| a.as_str()),
                                                                 new_func.get("arguments").and_then(|a| a.as_str()),

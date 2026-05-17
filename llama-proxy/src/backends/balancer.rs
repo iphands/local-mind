@@ -24,7 +24,10 @@ impl BackendGuard {
     /// Create a guard with an associated group name
     pub fn with_group(node: Arc<BackendNode>, group_name: String) -> Self {
         node.active_requests.fetch_add(1, Ordering::Release);
-        Self { node, group_name: Some(group_name) }
+        Self {
+            node,
+            group_name: Some(group_name),
+        }
     }
 }
 

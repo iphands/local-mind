@@ -100,12 +100,10 @@ fn format_compact(m: &RequestMetrics) -> String {
         _ => "ctx=null".to_string(),
     };
 
-    let group_str = m.group_name
-        .as_ref()
-        .map(|g| format!(" group={}", g))
-        .unwrap_or_default();
+    let group_str = m.group_name.as_ref().map(|g| format!(" group={}", g)).unwrap_or_default();
 
-    let concurrent_str = m.concurrent_requests
+    let concurrent_str = m
+        .concurrent_requests
         .map(|c| format!(" concurrent={}", c))
         .unwrap_or_default();
 

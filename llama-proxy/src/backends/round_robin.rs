@@ -144,8 +144,14 @@ mod tests {
         let balancer = RoundRobinBalancer::new(nodes).unwrap();
 
         // All selects should cycle through nodes regardless of model
-        assert_eq!(balancer.select(Some("haiku")).unwrap().node.base_url(), "http://localhost:8080");
-        assert_eq!(balancer.select(Some("sonnet")).unwrap().node.base_url(), "http://localhost:8081");
+        assert_eq!(
+            balancer.select(Some("haiku")).unwrap().node.base_url(),
+            "http://localhost:8080"
+        );
+        assert_eq!(
+            balancer.select(Some("sonnet")).unwrap().node.base_url(),
+            "http://localhost:8081"
+        );
         assert_eq!(balancer.select(None).unwrap().node.base_url(), "http://localhost:8080");
     }
 }

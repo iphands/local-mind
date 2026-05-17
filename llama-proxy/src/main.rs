@@ -129,7 +129,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             log_augmented_request_text,
             dump,
         } => {
-            run_proxy(cli.config, port, backend_url, streaming_mode, hide_requests, log_augmented_request_text, dump).await?;
+            run_proxy(
+                cli.config,
+                port,
+                backend_url,
+                streaming_mode,
+                hide_requests,
+                log_augmented_request_text,
+                dump,
+            )
+            .await?;
         }
         Commands::ListFixes { verbose } => {
             list_fixes(verbose);
@@ -251,7 +260,14 @@ async fn run_proxy(
     }
 
     // Run the server
-    run_server(config, fix_registry, exporter_manager, hide_requests, log_augmented_request_text).await?;
+    run_server(
+        config,
+        fix_registry,
+        exporter_manager,
+        hide_requests,
+        log_augmented_request_text,
+    )
+    .await?;
 
     Ok(())
 }
@@ -445,7 +461,11 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
     // Collect all nodes from all groups (or single backend)
     if let Some(ref backends) = config.backends {
         let total_nodes: usize = backends.values().map(|g| g.nodes.len()).sum();
-        println!("Testing {} backend node(s) across {} group(s)...\n", total_nodes, backends.len());
+        println!(
+            "Testing {} backend node(s) across {} group(s)...\n",
+            total_nodes,
+            backends.len()
+        );
 
         for (group_name, group) in backends {
             for node_cfg in &group.nodes {

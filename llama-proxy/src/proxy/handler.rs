@@ -236,9 +236,9 @@ impl ProxyHandler {
 
         if let Some(idx) = last_user_index {
             // Add augmentation as a new text block at the end
-            request.messages[idx].content.push(crate::api::AnthropicContentBlock::Text {
-                text: suffix,
-            });
+            request.messages[idx]
+                .content
+                .push(crate::api::AnthropicContentBlock::Text { text: suffix });
 
             tracing::debug!(
                 injected_into = idx,
@@ -247,9 +247,9 @@ impl ProxyHandler {
             );
         } else if !request.messages.is_empty() {
             // Fallback: prepend to first message
-            request.messages[0].content.insert(0, crate::api::AnthropicContentBlock::Text {
-                text: suffix,
-            });
+            request.messages[0]
+                .content
+                .insert(0, crate::api::AnthropicContentBlock::Text { text: suffix });
 
             tracing::debug!(
                 injected_into = 0,
@@ -291,10 +291,7 @@ impl ProxyHandler {
         let request_json: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
 
         // Extract model for routing BEFORE selecting backend
-        let requested_model = request_json
-            .as_ref()
-            .and_then(|j| j.get("model"))
-            .and_then(|m| m.as_str());
+        let requested_model = request_json.as_ref().and_then(|j| j.get("model")).and_then(|m| m.as_str());
 
         tracing::debug!(requested_model = ?requested_model, "Routing request");
 
@@ -311,7 +308,8 @@ impl ProxyHandler {
                         "type": "no_backend_configured",
                         "message": format!("No backend for model: {:?}", requested_model)
                     }
-                })).into_response();
+                }))
+                .into_response();
             }
         };
 
@@ -369,11 +367,10 @@ impl ProxyHandler {
                     match augment_backend.get_augmentation(&user_content).await {
                         Ok(aug) if !aug.is_empty() => {
                             tracing::info!(augmentation_length = aug.len(), "Received augmentation");
-                            let request_prompt = augment_backend.load_request_prompt()
-                                .unwrap_or_else(|e| {
-                                    tracing::warn!(error = %e, "Failed to load request_prompt, using empty string");
-                                    String::new()
-                                });
+                            let request_prompt = augment_backend.load_request_prompt().unwrap_or_else(|e| {
+                                tracing::warn!(error = %e, "Failed to load request_prompt, using empty string");
+                                String::new()
+                            });
                             Some((aug, request_prompt, user_content))
                         }
                         Ok(_) => None,
@@ -384,7 +381,8 @@ impl ProxyHandler {
                                     "type": "augment_backend_error",
                                     "message": format!("Augment backend error: {}", e)
                                 }
-                            })).into_response();
+                            }))
+                            .into_response();
                         }
                     }
                 } else {
@@ -404,7 +402,9 @@ impl ProxyHandler {
 
                 if is_anthropic_format {
                     // Inject into Anthropic format
-                    if let Ok(mut anthropic_req) = serde_json::from_value::<crate::api::AnthropicMessageRequest>(req_json.clone()) {
+                    if let Ok(mut anthropic_req) =
+                        serde_json::from_value::<crate::api::AnthropicMessageRequest>(req_json.clone())
+                    {
                         Self::inject_into_anthropic(&mut anthropic_req, request_prompt, aug);
                         serde_json::to_vec(&anthropic_req).unwrap_or(body_bytes.to_vec()).into()
                     } else {
@@ -685,7 +685,10 @@ impl ProxyHandler {
 
                 // Fetch and set context_total for stats
                 if let Some(ref mut m) = metrics {
-                    if let Some(ctx_total) = fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref()).await {
+                    if let Some(ctx_total) =
+                        fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref())
+                            .await
+                    {
                         m.context_total = Some(ctx_total);
                         m.calculate_context_percent();
                     }
@@ -761,10 +764,14 @@ impl ProxyHandler {
             let dump_path_clone = dump_path.clone();
             let request_method_str = request_method.to_string();
             let request_uri_str = request_uri.to_string();
-            let request_content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok().map(|s| s.to_string()));
+            let request_content_type = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok().map(|s| s.to_string()));
             let response_status = status.as_u16();
             let response_body_clone = final_body.clone();
-            let response_content_type = headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok().map(|s| s.to_string()));
+            let response_content_type = headers
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok().map(|s| s.to_string()));
 
             tokio::spawn(async move {
                 if let Some(req_json) = request_json_clone {
@@ -778,7 +785,9 @@ impl ProxyHandler {
                         response_status,
                         &response_body_clone,
                         response_content_type.as_deref(),
-                    ).await {
+                    )
+                    .await
+                    {
                         tracing::warn!(error = %e, "Failed to dump request/response pair");
                     }
                 }
