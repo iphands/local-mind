@@ -5,6 +5,7 @@ cosmo-proxy/cosmo-heavy
 cosmo-proxy/cosmo-light
 noir-llama/noir-model
 zai-coding-plan/glm-5
+zai-coding-plan/glm-5.1
 inception/mercury-2
 inception/mercury-code
 opencode/big-pickle

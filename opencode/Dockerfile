@@ -48,20 +48,22 @@ RUN sudo flatpak install -y org.ghidra_sre.Ghidra
 RUN curl -fsSL https://opencode.ai/install | bash
 RUN curl -fsSL https://bun.com/install | bash
 
-RUN echo bump_004
-RUN /home/iphands/.opencode/bin/opencode upgrade
-
 RUN npm config set prefix '~/.local/'
-RUN npm install -g oh-my-opencode-linux-x64
 RUN npm install -g @ast-grep/cli
 RUN npm install -g pyright typescript typescript-language-server
-RUN source /home/iphands/.bash_profile ; bunx oh-my-opencode install --no-tui --claude=no --gemini=no --copilot=no --opencode-zen=no --zai-coding-plan=no
 
 RUN git clone https://github.com/iphands/dotfiles.git && cd dotfiles && ./init
 RUN git clone https://github.com/Shlomob/ocmonitor-share.git && cd ocmonitor-share && ./install.sh
 
+RUN ln -s /home/iphands/prog/android           /home/iphands/
+
+## FAST UPGRADE PATH
+RUN echo bump_006
+RUN /home/iphands/.opencode/bin/opencode upgrade
+RUN npm install -g oh-my-opencode-linux-x64
+RUN source /home/iphands/.bash_profile ; ./.bun/bin/bunx oh-my-opencode install --no-tui --claude=no --gemini=no --copilot=no --opencode-zen=no --zai-coding-plan=no
+
 RUN ln -s /home/iphands/ocmonitor-share/ocmonitor-wrapper.sh /home/iphands/bin/ocm && \
     ln -s /home/iphands/.opencode/bin/opencode /home/iphands/bin/opencode || true
-RUN ln -s /home/iphands/prog/android           /home/iphands/
 
 CMD [ "/bin/bash", "-l" ]
