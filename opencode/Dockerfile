@@ -58,7 +58,7 @@ RUN git clone https://github.com/Shlomob/ocmonitor-share.git && cd ocmonitor-sha
 RUN ln -s /home/iphands/prog/android           /home/iphands/
 
 ## FAST UPGRADE PATH
-RUN echo bump_006
+RUN echo bump_007
 RUN /home/iphands/.opencode/bin/opencode upgrade
 RUN npm install -g oh-my-opencode-linux-x64
 RUN source /home/iphands/.bash_profile ; ./.bun/bin/bunx oh-my-opencode install --no-tui --claude=no --gemini=no --copilot=no --opencode-zen=no --zai-coding-plan=no

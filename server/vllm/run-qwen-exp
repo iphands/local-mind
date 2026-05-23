@@ -53,10 +53,10 @@ LLAMA_ARGS=(
 
   --enable-auto-tool-choice
   # --enable-expert-parallel
-  --gpu-memory-utilization 0.85
+  --gpu-memory-utilization 0.90
 
   # --kv-cache-dtype auto
-  # --language-model-only
+  --language-model-only
   --max-model-len 262144
   # --max-num-batched-tokens 32768
   # --max-num-seqs 96
@@ -71,7 +71,8 @@ LLAMA_ARGS=(
   --max-num-seqs 4
   --max-num-batched-tokens 8192
   --calculate-kv-scales
-  --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":3}'
+  # vllm serve Qwen/Qwen3.5-122B-A10B --port 8000 --tensor-parallel-size 8 --max-model-len 262144 --reasoning-parser qwen3 --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
+  --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
   --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
 )
 
