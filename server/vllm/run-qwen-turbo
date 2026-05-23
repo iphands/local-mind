@@ -1,0 +1,74 @@
+#!/bin/bash
+set -e
+NAME=vllm
+RUNNER=docker
+# [[ -f /usr/bin/podman ]] && RUNNER=podman
+
+MODEL_PATH=$1
+# MODEL_PATH=$(realpath "$MODEL")
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL=${MODEL_PATH##*/}
+
+CONTAINER=docker.io/vllm/vllm-openai:latest
+CONTAINER=docker.io/vllm/vllm-openai:cu130-nightly
+CONTAINER=vllm-turbo:latest
+
+# $RUNNER pull "$CONTAINER"
+PORT=8700
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name $NAME
+  -e UID=1000
+  -e GID=1000
+  -e APP_UID=1000
+  -e APP_GID=1000
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  -p 0.0.0.0:${PORT}:8799
+  -v "$MODEL_FOLDER":/models:ro
+  -v /mnt/noir/scratch/ai/vllm/cache:/root/.cache:rw
+  --ipc=host
+  # --entrypoint /bin/bash
+)
+
+# Using cache directory: /root/.cache/vllm/torch_compile_cache/27b8d43369/rank_0_0/backbone for vLLM's torch.compile
+
+# /usr/local/lib/python3.12/dist-packages/vllm/model_executor/layers/fused_moe/configs/README
+
+LLAMA_ARGS=(
+  /models/$MODEL
+  --served-model-name cosmo-6000 cosmo-proxy claude-heavy claude-light claude-haiku-4-5-20251001
+  --host 0.0.0.0
+  --port 8799
+
+  --async-scheduling
+  # --attention-backend flashinfer
+  --attention-backend CUSTOM
+  --block-size 32
+  # --moe-backend flashinfer_trtllm
+
+  --data-parallel-size 1
+  --disable-log-stats
+  --dtype auto
+  --enable-auto-tool-choice
+  --enable-chunked-prefill
+  --enable-expert-parallel
+  --gpu-memory-utilization 0.95
+  # --kv-cache-dtype fp8
+  --kv-cache-dtype auto
+  --language-model-only
+  --max-model-len 262144
+  # --max-num-batched-tokens 32768
+  --max-num-seqs 96
+  --pipeline-parallel-size 1
+  --tensor-parallel-size 1
+  --trust-remote-code
+
+  # --reasoning-parser qwen3
+  --tool-call-parser qwen3_coder
+)
+
+echo
+echo "## Running $CONTAINER"
+echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
+"$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"

@@ -1,0 +1,81 @@
+#!/bin/bash
+set -e
+NAME=vllm
+RUNNER=docker
+# [[ -f /usr/bin/podman ]] && RUNNER=podman
+
+MODEL_PATH=$1
+# MODEL_PATH=$(realpath "$MODEL")
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL=${MODEL_PATH##*/}
+
+CONTAINER=docker.io/vllm/vllm-openai:latest
+CONTAINER=docker.io/vllm/vllm-openai:cu130-nightly
+
+$RUNNER pull "$CONTAINER"
+PORT=8700
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name $NAME
+  -e UID=1000
+  -e GID=1000
+  -e APP_UID=1000
+  -e APP_GID=1000
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  -p 0.0.0.0:${PORT}:8799
+  -v /home/iphands/prog/ai/local-mind/server/vllm/scripts:/myscripts:ro
+  -v "$MODEL_FOLDER":/models:ro
+  -v /mnt/noir/scratch/ai/vllm/cache:/root/.cache:rw
+  --ipc=host
+  # --entrypoint /bin/bash
+)
+
+LLAMA_ARGS=(
+  /models/$MODEL
+
+  --served-model-name cosmo-6000 cosmo-proxy claude-heavy claude-light claude-haiku-4-5-20251001
+
+  --host 0.0.0.0
+  --port 8799
+
+  --async-scheduling
+
+  --attention-backend flash_attn
+
+  --data-parallel-size 1
+  --dtype auto
+
+  # IMPORTANT: fp8 kv currently incompatible with DFlash
+  --kv-cache-dtype auto
+
+  --enable-auto-tool-choice
+
+  --gpu-memory-utilization 0.925
+
+  --max-model-len 262144
+
+  --pipeline-parallel-size 1
+  --tensor-parallel-size 1
+
+  --trust-remote-code
+
+  --reasoning-parser qwen3
+  --tool-call-parser qwen3_coder
+
+  --enable-prefix-caching
+  --enable-chunked-prefill
+
+  --max-num-seqs 4
+  --max-num-batched-tokens 8192
+
+  --calculate-kv-scales
+
+  --speculative-config '{ "method":"dflash", "model":"/models/Qwen3.6-27B-DFlash", "num_speculative_tokens":5 }'
+  --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
+)
+
+echo
+echo "## Running $CONTAINER"
+echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
+"$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"

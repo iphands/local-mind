@@ -7,6 +7,7 @@
 /opencode/container_data/config/opencode/oh-my-opencode.json.bak
 /scratch
 /server/llamacpp/vendor
+/server/vllm/*log
 /server/vllm/scratch/
 /server/vllm/server.log
 /server/vllm/vendor/
