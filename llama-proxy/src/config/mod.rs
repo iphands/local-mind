@@ -386,9 +386,14 @@ pub struct RepromptConfig {
     /// Maximum reprompt retries before giving up (default: 3)
     #[serde(default = "default_reprompt_max_retries")]
     pub max_retries: u32,
-    /// If the follow-up response text contains this string, treat as clean finish (default: "DONE")
-    #[serde(default = "default_reprompt_done_sentinel")]
-    pub done_sentinel: String,
+    /// If the follow-up response text contains any of these strings, treat as clean finish.
+    /// Accepts a single string (done_sentinel) or a list (done_sentinels) for backward compat.
+    #[serde(
+        alias = "done_sentinel",
+        default = "default_reprompt_done_sentinels",
+        deserialize_with = "deserialize_string_or_vec"
+    )]
+    pub done_sentinels: Vec<String>,
     /// Re-read prompt_file from disk on each trigger if the file has changed (default: true).
     /// Set to false to load the prompt once at startup and never re-read.
     #[serde(default = "default_reprompt_dynamic_prompt")]
@@ -403,12 +408,37 @@ fn default_reprompt_max_retries() -> u32 {
     3
 }
 
-fn default_reprompt_done_sentinel() -> String {
-    "DONE".to_string()
+fn default_reprompt_done_sentinels() -> Vec<String> {
+    vec!["DONE".to_string()]
 }
 
 fn default_reprompt_dynamic_prompt() -> bool {
     true
+}
+
+fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::{self, SeqAccess, Visitor};
+    struct StringOrVec;
+    impl<'de> Visitor<'de> for StringOrVec {
+        type Value = Vec<String>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            write!(f, "a string or list of strings")
+        }
+        fn visit_str<E: de::Error>(self, v: &str) -> Result<Vec<String>, E> {
+            Ok(vec![v.to_owned()])
+        }
+        fn visit_seq<A: SeqAccess<'de>>(self, mut seq: A) -> Result<Vec<String>, A::Error> {
+            let mut v = Vec::new();
+            while let Some(s) = seq.next_element()? {
+                v.push(s);
+            }
+            Ok(v)
+        }
+    }
+    deserializer.deserialize_any(StringOrVec)
 }
 
 impl Default for RepromptConfig {
@@ -418,7 +448,7 @@ impl Default for RepromptConfig {
             prompt_file: None,
             prompt: None,
             max_retries: default_reprompt_max_retries(),
-            done_sentinel: default_reprompt_done_sentinel(),
+            done_sentinels: default_reprompt_done_sentinels(),
             dynamic_prompt: default_reprompt_dynamic_prompt(),
             log_stop_responses: false,
         }

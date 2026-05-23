@@ -2,7 +2,7 @@
 //!
 //! When finish_reason="stop" with no tool_calls, the engine injects a follow-up
 //! user message (loaded from config) and re-sends the request to the backend.
-//! - If the response contains the done_sentinel → return the original clean stop.
+//! - If the response contains any done_sentinel → return the original clean stop.
 //! - If the response has tool_calls or a non-stop finish_reason → return it (hiding the stop).
 //! - After max_retries exhaustion → return the last response seen.
 //!
@@ -27,7 +27,7 @@ pub struct RepromptEngine {
     /// Re-read the file on each trigger if mtime changed (default: true)
     dynamic_prompt: bool,
     pub max_retries: u32,
-    pub done_sentinel: String,
+    pub done_sentinels: Vec<String>,
     log_stop_responses: bool,
 }
 
@@ -54,7 +54,7 @@ impl RepromptEngine {
             last_mtime: RwLock::new(initial_mtime),
             dynamic_prompt: config.dynamic_prompt,
             max_retries: config.max_retries,
-            done_sentinel: config.done_sentinel.clone(),
+            done_sentinels: config.done_sentinels.clone(),
             log_stop_responses: config.log_stop_responses,
         })
     }
@@ -274,8 +274,8 @@ impl RepromptEngine {
 
             let new_text = Self::extract_assistant_text(&new_resp);
 
-            if new_text.contains(&self.done_sentinel) {
-                tracing::info!(attempt, sentinel = %self.done_sentinel, "Reprompt: done sentinel found, returning original stop");
+            if let Some(matched) = self.done_sentinels.iter().find(|s| new_text.contains(s.as_str())) {
+                tracing::info!(attempt, sentinel = %matched, "Reprompt: done sentinel found, returning original stop");
                 if self.log_stop_responses {
                     tracing::info!(
                         response = %serde_json::to_string_pretty(&clean_stop).unwrap_or_default(),
@@ -329,7 +329,7 @@ mod tests {
             last_mtime: RwLock::new(None),
             dynamic_prompt: false,
             max_retries: 3,
-            done_sentinel: "DONE".into(),
+            done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
         }
     }
@@ -466,7 +466,7 @@ mod tests {
             prompt_file: None,
             prompt: Some("Continue or DONE.".into()),
             max_retries: 2,
-            done_sentinel: "DONE".into(),
+            done_sentinels: vec!["DONE".into()],
             dynamic_prompt: false,
             log_stop_responses: false,
         };
@@ -481,7 +481,7 @@ mod tests {
             prompt_file: None,
             prompt: None,
             max_retries: 3,
-            done_sentinel: "DONE".into(),
+            done_sentinels: vec!["DONE".into()],
             dynamic_prompt: false,
             log_stop_responses: false,
         };
@@ -495,7 +495,7 @@ mod tests {
             prompt_file: None,
             prompt: Some("   ".into()),
             max_retries: 3,
-            done_sentinel: "DONE".into(),
+            done_sentinels: vec!["DONE".into()],
             dynamic_prompt: false,
             log_stop_responses: false,
         };
@@ -529,7 +529,7 @@ mod tests {
             last_mtime: RwLock::new(None),
             dynamic_prompt: true,
             max_retries: 3,
-            done_sentinel: "DONE".into(),
+            done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
         };
         assert_eq!(e.resolve_prompt().await, "Static text.");
@@ -549,7 +549,7 @@ mod tests {
             last_mtime: RwLock::new(Some(mtime)),
             dynamic_prompt: true,
             max_retries: 3,
-            done_sentinel: "DONE".into(),
+            done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
         };
         // mtime hasn't changed, should return cached prompt without re-reading
@@ -577,7 +577,7 @@ mod tests {
             last_mtime: RwLock::new(Some(old_mtime)),
             dynamic_prompt: true,
             max_retries: 3,
-            done_sentinel: "DONE".into(),
+            done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
         };
         let result = e.resolve_prompt().await;

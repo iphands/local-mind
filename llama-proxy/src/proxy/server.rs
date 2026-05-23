@@ -124,7 +124,7 @@ pub async fn run_server(
                 Ok(engine) => {
                     tracing::info!(
                         max_retries = cfg.max_retries,
-                        done_sentinel = %cfg.done_sentinel,
+                        done_sentinels = ?cfg.done_sentinels,
                         has_prompt_file = cfg.prompt_file.is_some(),
                         "Reprompt engine enabled"
                     );
