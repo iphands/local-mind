@@ -1,6 +1,6 @@
 #!/bin/bash
 set -e
-pushd ./opencode/helpers/model-holder >/dev/null
+pushd ./model-holder >/dev/null
 cargo build --release
 popd >/dev/null
 
@@ -22,6 +22,6 @@ for arg in "$@"; do
     fi
 done
 
-pushd ./opencode >/dev/null
-./helpers/model-holder/target/release/model-holder "${resolved_args[@]}"
+pushd ./model-holder >/dev/null
+./target/release/model-holder "${resolved_args[@]}"
 popd >/dev/null

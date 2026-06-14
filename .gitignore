@@ -12,3 +12,4 @@
 /server/vllm/server.log
 /server/vllm/vendor/
 /vendor
+/model-holder/target
