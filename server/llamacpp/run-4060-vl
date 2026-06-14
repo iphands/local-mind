@@ -1,5 +1,9 @@
 #!/bin/bash
-export MODEL="$1"
+CTX=8192
+export CTX=16384
+# export MODEL="$1"
+export MODEL=models/gguf/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf
+
 export PORT=8701
 export NAME=llama-server-4060
 export ALIAS=cosmo-4060

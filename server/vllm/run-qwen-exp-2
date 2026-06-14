@@ -11,9 +11,8 @@ MODEL=${MODEL_PATH##*/}
 
 CONTAINER=docker.io/vllm/vllm-openai:latest
 CONTAINER=docker.io/vllm/vllm-openai:cu130-nightly
-# CONTAINER=docker.io/vllm/vllm-openai:v0.21.0-cu129-ubuntu2404
+CONTAINER=docker.io/vllm/vllm-openai:v0.21.0-cu129-ubuntu2404
 # CONTAINER=docker.io/vllm/vllm-openai:cu129-nightly
-# CONTAINER=docker.io/orthozany/vllm-qwen35-mtp
 
 $RUNNER pull "$CONTAINER"
 PORT=8700
@@ -26,18 +25,11 @@ CONTAINER_ARGS=(
   -e APP_UID=1000
   -e APP_GID=1000
   -e CUDA_DEVICE_ORDER=PCI_BUS_ID
-  -e NCCL_P2P_LEVEL=4
-  -e NCCL_IB_DISABLE=1
-  -e VLLM_WORKER_MULTIPROC_METHOD=spawn
-  -e SAFETENSORS_FAST_GPU=1
   -p 0.0.0.0:${PORT}:8799
   -v /home/iphands/prog/ai/local-mind/server/vllm/scripts:/myscripts:ro
   -v "$MODEL_FOLDER":/models:ro
   -v /mnt/noir/scratch/ai/vllm/cache:/root/.cache:rw
   --ipc=host
-  --shm-size=32g
-  --ulimit memlock=-1
-  --ulimit stack=67108864
   # --entrypoint /bin/bash
 )
 
@@ -51,8 +43,7 @@ LLAMA_ARGS=(
   --host 0.0.0.0
   --port 8799
 
-  --async-scheduling
-  # --attention-backend flashinfer
+  # --async-scheduling
   # --moe-backend flashinfer_trtllm
 
   --data-parallel-size 1
@@ -77,31 +68,21 @@ LLAMA_ARGS=(
   --tool-call-parser qwen3_coder
   --enable-prefix-caching
   --enable-chunked-prefill
-  --max-num-seqs 3
-  --max-num-batched-tokens 8192
   --calculate-kv-scales
   # vllm serve Qwen/Qwen3.5-122B-A10B --port 8000 --tensor-parallel-size 8 --max-model-len 262144 --reasoning-parser qwen3 --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
+  # --speculative-config '{ "method":"qwen3_next_mtp", "num_speculative_tokens": 2 }'
+  --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
 
-
-  ## Good for Qwen 3.5
-  # --speculative-config '{"method":"qwen3_next_mtp","num_speculative_tokens":2}'
-  # # --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
-  # --kv-cache-dtype fp8
-  # --additional-config '{"turboquant": true, "k_quant": "q8_0", "v_quant": "q5_0"}'
+  --max-num-seqs 4
+  --max-num-batched-tokens 8192
 
   --attention-backend flashinfer
   --enable-flashinfer
+  --kv-cache-dtype fp8
   --no-enforce-eager
 
-
-  ## 3.6
-  # --quantization modelopt # NOTE: Only use this on NVFP4
-  # --kv-cache-dtype fp8
-  --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
-  --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":2}'
-  --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true}'
-
-  --additional-config '{"turboquant": true, "k_quant": "q8_0", "v_quant": "q5_0"}'
+  # --kv-cache-dtype nvfp4
+  # --additional-config '{"turboquant": true, "k_quant": "q8_0", "v_quant": "q5_0"}'
 )
 
 echo

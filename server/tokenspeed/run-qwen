@@ -1,0 +1,65 @@
+#!/bin/bash
+set -e
+NAME=tokenspeed
+RUNNER=docker
+
+MODEL_PATH=$(realpath "$1")
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL=${MODEL_PATH##*/}
+
+CONTAINER=tokenspeed
+
+$RUNNER image inspect "$CONTAINER" >/dev/null 2>&1 || { echo "Image $CONTAINER not found. Run ./build first."; exit 1; }
+PORT=8700
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name $NAME
+  --gpus all
+  --shm-size 32g
+  -e UID=1000
+  -e GID=1000
+  -e APP_UID=1000
+  -e APP_GID=1000
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  -p 0.0.0.0:${PORT}:8000
+  -v "$MODEL_FOLDER":/models:ro
+  -v /mnt/noir/scratch/ai/tokenspeed/cache:/root/.cache:rw
+  --ipc=host
+  # --entrypoint /bin/bash
+)
+
+TOKENSPEED_ARGS=(
+  tokenspeed serve
+  /models/$MODEL
+  --served-model-name cosmo-6000
+  --host 0.0.0.0
+  --port 8000
+
+  --tensor-parallel-size 1
+  --dtype auto
+  --gpu-memory-utilization 0.95
+  # --language-model-only
+  --max-model-len 262144
+  --trust-remote-code
+
+  ## For FP8 models
+  --kv-cache-dtype fp8
+  --attention-backend trtllm
+
+  # --quantization compressed-tensors  # nvfp4 models use compressed-tensors format
+
+  --reasoning-parser qwen3
+  --tool-call-parser qwen
+
+  --enable-prefix-caching
+  --chunked-prefill-size 8192
+  --max-num-seqs 4
+
+  --speculative-config '{"method":"MTP","num_speculative_tokens":3}'
+)
+
+echo
+echo "## Running $CONTAINER"
+echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${TOKENSPEED_ARGS[@]}"
+"$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${TOKENSPEED_ARGS[@]}"

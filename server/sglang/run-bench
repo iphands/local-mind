@@ -1,0 +1,74 @@
+#!/bin/bash
+set -eu
+
+PORT=${PORT:-8700}
+HOST=${HOST:-localhost}
+URL="http://${HOST}:${PORT}"
+MODEL=${MODEL:-cosmo-6000}
+PROMPT="Write a pure Bash script to calculate primes up to 10 million"
+MAX_TOKENS=${MAX_TOKENS:-4096}
+
+echo "## SGLang Benchmark"
+echo "   Server: ${URL}"
+echo "   Model:  ${MODEL}"
+echo "   Prompt: ${PROMPT}"
+echo
+
+# 1. Wait for server ready
+echo -n "## Waiting for server..."
+i=0
+until curl -sf "${URL}/health" > /dev/null 2>&1; do
+  sleep 2
+  i=$((i + 1))
+  if [ $i -gt 150 ]; then
+    echo " FAILED (timeout after 300s)"
+    exit 1
+  fi
+  printf "\r## Waiting for server... %ds" $((i * 2))
+done
+echo
+echo "## Server ready"
+echo
+
+# 2. Send prompt and time it
+echo "## Sending benchmark prompt..."
+START=$(date +%s%N)
+
+RESPONSE=$(curl -sf "${URL}/v1/chat/completions" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"${MODEL}\",
+    \"messages\": [{\"role\": \"user\", \"content\": \"${PROMPT}\"}],
+    \"max_tokens\": ${MAX_TOKENS},
+    \"temperature\": 0.6
+  }" 2>&1) || {
+    echo "## Request failed"
+    echo "$RESPONSE"
+    exit 1
+  }
+
+END=$(date +%s%N)
+
+# 3. Parse and report
+ELAPSED_NS=$((END - START))
+ELAPSED_S=$(echo "scale=3; ${ELAPSED_NS} / 1000000000" | bc)
+
+PROMPT_TOKENS=$(echo "$RESPONSE" | jq -r '.usage.prompt_tokens // "N/A"')
+COMPLETION_TOKENS=$(echo "$RESPONSE" | jq -r '.usage.completion_tokens // "N/A"')
+TOTAL_TOKENS=$(echo "$RESPONSE" | jq -r '.usage.total_tokens // "N/A"')
+FINISH_REASON=$(echo "$RESPONSE" | jq -r '.choices[0].finish_reason // "N/A"')
+
+if [ "$COMPLETION_TOKENS" != "N/A" ] && [ "$COMPLETION_TOKENS" -gt 0 ] 2>/dev/null; then
+  TOK_PER_SEC=$(echo "scale=2; ${COMPLETION_TOKENS} / ${ELAPSED_S}" | bc)
+else
+  TOK_PER_SEC="N/A"
+fi
+
+echo
+echo "## Results"
+echo "   Elapsed time:      ${ELAPSED_S}s"
+echo "   Prompt tokens:     ${PROMPT_TOKENS}"
+echo "   Completion tokens: ${COMPLETION_TOKENS}"
+echo "   Total tokens:      ${TOTAL_TOKENS}"
+echo "   Finish reason:     ${FINISH_REASON}"
+echo "   Tokens/sec:        ${TOK_PER_SEC}"

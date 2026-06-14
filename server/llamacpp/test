@@ -1,0 +1,29 @@
+#!/bin/bash
+
+PORT=8700
+export CUDA_VISIBLE_DEVICES=0
+CONTAINER_ARGS=(
+  run -it --rm
+  --name embeddings
+  -e UID=1000
+  -e GID=1000
+  -e APP_UID=1000
+  -e APP_GID=1000
+  -p 0.0.0.0:${PORT}:80
+  -v /mnt/noir/scratch/ai/llm/models:/models:ro
+  --gpus '"device=0"'
+  # ghcr.io/huggingface/text-embeddings-inference:cuda-latest
+  ghcr.io/huggingface/text-embeddings-inference:120-1.9
+)
+
+PROG_ARGS=(
+  --model-id /models/vllm/Qwen3-Embedding-0.6B
+  --dtype float16
+  --tokenization-workers 8
+  --max-client-batch-size 256
+  --max-batch-tokens 40960
+)
+
+echo
+echo docker "${CONTAINER_ARGS[@]}" "${PROG_ARGS[@]}"
+docker "${CONTAINER_ARGS[@]}" "${PROG_ARGS[@]}"

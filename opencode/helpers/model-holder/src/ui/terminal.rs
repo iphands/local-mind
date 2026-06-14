@@ -153,11 +153,65 @@ fn render_title(frame: &mut Frame, area: Rect, app: &AppState) {
     };
 
     let left = " model-holder";
-    let right = format!("{}  ", overall);
-    let gap = (area.width as usize).saturating_sub(left.len() + right.len());
-    let title_text = format!("{}{}{}", left, " ".repeat(gap), right);
+    
+    // Build pattern display for title
+    let pattern_display = if app.files.is_empty() {
+        String::new()
+    } else if app.files.len() > 1 {
+        // Multiple files - try to extract meaningful directory name
+        // First, check if input_patterns has a useful pattern
+        let dir = if app.input_patterns.len() == 1 {
+            let pattern = &app.input_patterns[0];
+            if pattern.contains('*') {
+                // Original glob pattern preserved: extract last component before *
+                let before_star = pattern.split('*').next().unwrap_or(pattern);
+                std::path::Path::new(before_star.trim_end_matches('/'))
+                    .file_name()
+                    .map(|n| n.to_string_lossy().to_string())
+                    .unwrap_or_else(|| before_star.to_string())
+            } else {
+                // Resolved path (from bash realpath): get parent directory
+                let clean_pattern = pattern.trim_end_matches('/');
+                if pattern.ends_with('/') {
+                    std::path::Path::new(clean_pattern)
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| clean_pattern.to_string())
+                } else {
+                    std::path::Path::new(clean_pattern)
+                        .parent()
+                        .and_then(|p| p.file_name())
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| clean_pattern.to_string())
+                }
+            }
+        } else {
+            // Multiple patterns or no patterns: compute common parent from files
+            app.compute_common_parent()
+                .unwrap_or_else(|| format!("{} files", app.files.len()))
+        };
+        
+        format!(" {}/* ({})", dir, app.files.len())
+    } else {
+        // Single file or empty
+        String::new()
+    };
+    
+    let right = format!("  {}", overall);
+    
+    // Truncate if too long for available width
+    let available_width = area.width as usize;
+    let max_pattern_len = available_width.saturating_sub(left.len() + right.len() + 4);
+    let pattern_display = if pattern_display.len() > max_pattern_len && max_pattern_len > 10 {
+        // Truncate with ellipsis
+        format!("…{}", &pattern_display[pattern_display.len().saturating_sub(max_pattern_len - 1)..])
+    } else {
+        pattern_display
+    };
+    
+    let title_text = format!("{}{}{}", left, pattern_display, right);
 
-    let status_color = if app.all_locked {
+    let _status_color = if app.all_locked {
         Color::Green
     } else if app.warmup_complete {
         Color::Cyan
@@ -167,21 +221,13 @@ fn render_title(frame: &mut Frame, area: Rect, app: &AppState) {
 
     let line = Line::from(vec![
         Span::styled(
-            format!(" model-holder{}", " ".repeat(gap)),
+            title_text,
             Style::default()
                 .fg(Color::White)
                 .bg(Color::Blue)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::styled(
-            right,
-            Style::default()
-                .fg(status_color)
-                .bg(Color::Blue)
-                .add_modifier(Modifier::BOLD),
-        ),
     ]);
-    let _ = title_text; // used for length calc only
     frame.render_widget(Paragraph::new(line), area);
 }
 

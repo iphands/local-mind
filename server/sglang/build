@@ -1,2 +1,10 @@
 #!/bin/bash
-docker build -t myvllm .
+set -e
+export DOCKER_BUILDKIT=1
+
+docker build \
+  --tag sglang \
+  --build-arg CUDA_VERSION=13.1.2 \
+  --build-arg USE_LATEST_SGLANG=1 \
+  --build-arg BUILD_TYPE=all \
+  .

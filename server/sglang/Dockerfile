@@ -1,4 +1,5 @@
-ARG CUDA_VERSION=12.9.1
+# syntax=docker/dockerfile:1
+ARG CUDA_VERSION=13.1.2
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS base
 
 ARG TARGETARCH
@@ -40,7 +41,9 @@ RUN if [ -n "$UBUNTU_MIRROR" ]; then \
 fi
 
 # Python setup (combined with apt update to reduce layers)
-RUN --mount=type=cache,target=/var/cache/apt,id=base-apt \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,target=/root/.cache/pip \
     apt update && apt install -y --no-install-recommends wget software-properties-common \
     && add-apt-repository ppa:deadsnakes/ppa -y \
     && apt install -y --no-install-recommends python3.12-full python3.12-dev python3.10-venv \
@@ -57,7 +60,8 @@ RUN --mount=type=cache,target=/var/cache/apt,id=base-apt \
     && ln -s apt_pkg.cpython-310-*-linux-gnu.so apt_pkg.so
 
 # Install system dependencies (organized by category for better caching)
-RUN --mount=type=cache,target=/var/cache/apt,id=base-apt \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     # Core system utilities
     ca-certificates \
@@ -122,24 +126,22 @@ RUN --mount=type=cache,target=/var/cache/apt,id=base-apt \
     check \
     libsubunit0 \
     libsubunit-dev \
-    && ln -sf /usr/bin/python3.12 /usr/bin/python \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && ln -sf /usr/bin/python3.12 /usr/bin/python
 
 # Replace pip global cache if specified
 RUN if [ -n "${PIP_DEFAULT_INDEX}" ]; then \
     python3 -m pip config set global.index-url ${PIP_DEFAULT_INDEX}; \
 fi
 
-# GDRCopy installation
-RUN mkdir -p /tmp/gdrcopy && cd /tmp \
-    && curl --retry 3 --retry-delay 2 -fsSL -o v${GDRCOPY_VERSION}.tar.gz \
-        https://${GITHUB_ARTIFACTORY}/NVIDIA/gdrcopy/archive/refs/tags/v${GDRCOPY_VERSION}.tar.gz \
-    && tar -xzf v${GDRCOPY_VERSION}.tar.gz && rm v${GDRCOPY_VERSION}.tar.gz \
-    && cd gdrcopy-${GDRCOPY_VERSION}/packages \
-    && CUDA=/usr/local/cuda ./build-deb-packages.sh \
-    && dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb \
-    && cd / && rm -rf /tmp/gdrcopy
+# GDRCopy installation (skipped - not needed for single-GPU inference, DKMS fails in container)
+# RUN mkdir -p /tmp/gdrcopy && cd /tmp \
+#     && curl --retry 3 --retry-delay 2 -fsSL -o v${GDRCOPY_VERSION}.tar.gz \
+#         https://${GITHUB_ARTIFACTORY}/NVIDIA/gdrcopy/archive/refs/tags/v${GDRCOPY_VERSION}.tar.gz \
+#     && tar -xzf v${GDRCOPY_VERSION}.tar.gz && rm v${GDRCOPY_VERSION}.tar.gz \
+#     && cd gdrcopy-${GDRCOPY_VERSION}/packages \
+#     && CUDA=/usr/local/cuda ./build-deb-packages.sh \
+#     && dpkg -i gdrdrv-dkms_*.deb libgdrapi_*.deb gdrcopy-tests_*.deb gdrcopy_*.deb \
+#     && cd / && rm -rf /tmp/gdrcopy
 
 # Fix DeepEP IBGDA symlink
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so
@@ -154,28 +156,45 @@ ENV LANG=en_US.UTF-8 \
 ########## Framework Development Image ################
 ########################################################
 
-# Copy local source if building from local
-FROM scratch AS local_src
-COPY . /src
+# Local source stage — only used when BRANCH_TYPE=local
+# We use USE_LATEST_SGLANG=1 (clone from GitHub) so this is empty
+FROM alpine:latest AS local_src
+RUN mkdir -p /src
 
 FROM base AS framework
 
-ARG BRANCH_TYPE
-ARG BUILD_TYPE
-ARG CUDA_VERSION
-ARG BUILD_AND_DOWNLOAD_PARALLEL
-ARG SGL_KERNEL_VERSION
+ARG BRANCH_TYPE=remote
+ARG BUILD_TYPE=all
+ARG CUDA_VERSION=13.1.2
+ARG BUILD_AND_DOWNLOAD_PARALLEL=8
+ARG SGL_KERNEL_VERSION=0.3.21
 ARG SGL_VERSION
-ARG USE_LATEST_SGLANG
-ARG INSTALL_FLASHINFER_JIT_CACHE
-ARG FLASHINFER_VERSION
-ARG GRACE_BLACKWELL
-ARG GRACE_BLACKWELL_DEEPEP_BRANCH
-ARG DEEPEP_COMMIT
+ARG USE_LATEST_SGLANG=0
+ARG INSTALL_FLASHINFER_JIT_CACHE=0
+ARG FLASHINFER_VERSION=0.6.4
+ARG GRACE_BLACKWELL=0
+ARG HOPPER_SBO=0
+ARG GRACE_BLACKWELL_DEEPEP_BRANCH=gb200_blog_part_2
+ARG HOPPER_SBO_DEEPEP_COMMIT=9f2fc4b3182a51044ae7ecb6610f7c9c3258c4d6
+ARG DEEPEP_COMMIT=9af0e0d0e74f3577af1979c9b9e1ac2cad0104ee
 ARG TRITON_LANG_COMMIT
-ARG GITHUB_ARTIFACTORY
+ARG GITHUB_ARTIFACTORY=github.com
+ARG GDRCOPY_VERSION=2.5.1
+ARG PIP_DEFAULT_INDEX
+ARG UBUNTU_MIRROR
+ARG MOONCAKE_VERSION=0.3.9
+ARG MOONCAKE_COMPILE_ARG="-DUSE_HTTP=ON -DUSE_MNNVL=ON -DUSE_CUDA=ON -DWITH_EP=ON"
 
 WORKDIR /sgl-workspace
+
+# Install Rust (needed by SGLang's build_ext)
+RUN --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://sh.rustup.rs | sh -s -- -y \
+    && export PATH="/root/.cargo/bin:${PATH}" \
+    && rustc --version
+
+ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Install SGLang
 COPY --from=local_src /src /tmp/local_src
@@ -198,6 +217,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         12.8.1) CUINDEX=128 ;; \
         12.9.1) CUINDEX=129 ;; \
         13.0.1) CUINDEX=130 ;; \
+        13.1.2) CUINDEX=131 ;; \
         *) echo "Unsupported CUDA version: $CUDA_VERSION" && exit 1 ;; \
     esac \
     && if [ "$CUDA_VERSION" = "12.6.1" ]; then \
@@ -206,7 +226,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     elif [ "$CUDA_VERSION" = "12.8.1" ] || [ "$CUDA_VERSION" = "12.9.1" ]; then \
         python3 -m pip install sgl-kernel==${SGL_KERNEL_VERSION} \
     ; \
-    elif [ "$CUDA_VERSION" = "13.0.1" ]; then \
+    elif [ "$CUDA_VERSION" = "13.0.1" ] || [ "$CUDA_VERSION" = "13.1.2" ]; then \
         python3 -m pip install https://github.com/sgl-project/whl/releases/download/v${SGL_KERNEL_VERSION}/sgl_kernel-${SGL_KERNEL_VERSION}+cu130-cp310-abi3-manylinux2014_$(uname -m).whl --force-reinstall --no-deps \
     ; \
     else \
@@ -259,7 +279,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
             # FIXED: 12.8.1 does NOT support Blackwell 10.3 \
             CHOSEN_TORCH_CUDA_ARCH_LIST='9.0;10.0' \
             ;; \
-        12.9.1|13.0.1) \
+        12.9.1|13.0.1|13.1.2) \
             # 12.9.1+ properly supports Blackwell 10.3 \
             CHOSEN_TORCH_CUDA_ARCH_LIST='9.0;10.0;10.3' \
             ;; \
@@ -306,29 +326,27 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     cubloaty \
     google-cloud-storage
 
-# Build and install sgl-model-gateway (install Rust, build, then remove to save space)
+# Build and install sgl-model-gateway (Rust already installed above)
 RUN --mount=type=cache,target=/root/.cache/pip \
-    curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://sh.rustup.rs | sh -s -- -y \
-    && export PATH="/root/.cargo/bin:${PATH}" \
-    && rustc --version && cargo --version \
-    && python3 -m pip install maturin \
+    --mount=type=cache,target=/root/.cargo/registry \
+    --mount=type=cache,target=/root/.cargo/git \
+    python3 -m pip install maturin \
     && cd /sgl-workspace/sglang/sgl-model-gateway/bindings/python \
     && ulimit -n 65536 && maturin build --release --features vendored-openssl --out dist \
     && python3 -m pip install --force-reinstall dist/*.whl \
     && cd /sgl-workspace/sglang/sgl-model-gateway \
-    && cargo build --release --bin sglang-router --features vendored-openssl \
-    && cp target/release/sglang-router /usr/local/bin/sglang-router \
-    && rm -rf /root/.cargo /root/.rustup target dist ~/.cargo \
-    && sed -i '/\.cargo\/env/d' /root/.profile /root/.bashrc 2>/dev/null || true
+    && cargo build --release --bin sgl-model-gateway --features vendored-openssl \
+    && cp target/release/sgl-model-gateway /usr/local/bin/sgl-model-gateway \
+    && rm -rf target dist
 
-# Pin nvidia-cutlass-dsl to 4.3.5
+# nvidia-cutlass-dsl — let SGLang/FlashInfer pull compatible version
 RUN --mount=type=cache,target=/root/.cache/pip \
-   python3 -m pip uninstall nvidia-cutlass-dsl-libs-base; \
-   python3 -m pip install nvidia-cutlass-dsl==4.3.5 --force-reinstall;
+    python3 -m pip install --upgrade nvidia-cutlass-dsl;
 
 # Patching packages for CUDA 12/13 compatibility
 # TODO: Remove when torch version covers these packages
-RUN --mount=type=cache,target=/root/.cache/pip if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    if [ "${CUDA_VERSION%%.*}" = "12" ]; then \
     python3 -m pip install nvidia-nccl-cu12==2.28.3 --force-reinstall --no-deps ; \
     python3 -m pip install nvidia-cudnn-cu12==9.16.0.29 --force-reinstall --no-deps ; \
 elif [ "${CUDA_VERSION%%.*}" = "13" ]; then \
@@ -340,7 +358,8 @@ elif [ "${CUDA_VERSION%%.*}" = "13" ]; then \
 fi
 
 # Install development tools
-RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
     gdb \
     ninja-build \
@@ -364,19 +383,17 @@ RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
     libibverbs1 \
     libnl-3-200 \
     libnl-route-3-200 \
-    librdmacm1 \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    librdmacm1
 
 # Install NVIDIA development tools
-RUN --mount=type=cache,target=/var/cache/apt,id=framework-apt \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
     apt update -y \
     && apt install -y --no-install-recommends gnupg \
     && echo "deb http://developer.download.nvidia.com/devtools/repos/ubuntu2004/$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "amd64"; fi) /" | tee /etc/apt/sources.list.d/nvidia-devtools.list \
     && apt-key adv --fetch-keys http://developer.download.nvidia.com/compute/cuda/repos/ubuntu1804/$(if [ "$(uname -m)" = "aarch64" ]; then echo "arm64"; else echo "x86_64"; fi)/7fa2af80.pub \
     && apt update -y \
-    && apt install -y --no-install-recommends nsight-systems-cli \
-    && rm -rf /var/lib/apt/lists/*
+    && apt install -y --no-install-recommends nsight-systems-cli
 
 # Install minimal Python dev packages
 RUN --mount=type=cache,target=/root/.cache/pip \
@@ -427,21 +444,21 @@ RUN curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 2 -sSf https://just.
     sed "s|https://github.com|https://${GITHUB_ARTIFACTORY}|g" | \
     bash -s -- --tag 1.42.4 --to /usr/local/bin
 
-# Add yank script
-COPY --chown=root:root --chmod=755 docker/configs/yank /usr/local/bin/yank
+# Add yank script (skipped - not in build context)
+# COPY --chown=root:root --chmod=755 docker/configs/yank /usr/local/bin/yank
 
 # Install oh-my-zsh and plugins
 RUN sh -c "$(curl --retry 3 --retry-delay 2 -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended \
     && git clone --depth 1 https://github.com/zsh-users/zsh-autosuggestions ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-autosuggestions \
     && git clone --depth 1 https://github.com/zsh-users/zsh-syntax-highlighting.git ${ZSH_CUSTOM:-~/.oh-my-zsh/custom}/plugins/zsh-syntax-highlighting
 
-# These configs are optional; users can override them by mounting their own files
-COPY docker/configs/opt/.vimrc /opt/sglang/.vimrc
-COPY docker/configs/opt/.tmux.conf /opt/sglang/.tmux.conf
-COPY docker/configs/opt/.gitconfig /opt/sglang/.gitconfig
+# These configs are optional; users can override them by mounting their own files (skipped - not in build context)
+# COPY docker/configs/opt/.vimrc /opt/sglang/.vimrc
+# COPY docker/configs/opt/.tmux.conf /opt/sglang/.tmux.conf
+# COPY docker/configs/opt/.gitconfig /opt/sglang/.gitconfig
 
-# Configure development environment
-COPY docker/configs/.zshrc /root/.zshrc
+# Configure development environment (skipped - not in build context)
+# COPY docker/configs/.zshrc /root/.zshrc
 
 # Fix Triton to use system ptxas for Blackwell (sm_103a) support (CUDA 13+ only)
 RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ -d /usr/local/lib/python3.12/dist-packages/triton/backends/nvidia/bin ]; then \
@@ -449,7 +466,8 @@ RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ -d /usr/local/lib/python3.12/dist-p
         ln -s /usr/local/cuda/bin/ptxas /usr/local/lib/python3.12/dist-packages/triton/backends/nvidia/bin/ptxas; \
     fi
 
-RUN python3 -m pip install --upgrade "urllib3>=2.6.3"
+RUN --mount=type=cache,target=/root/.cache/pip \
+    python3 -m pip install --upgrade "urllib3>=2.6.3"
 
 # Set workspace directory
 WORKDIR /sgl-workspace/sglang
@@ -474,7 +492,7 @@ WORKDIR /sgl-workspace/sglang
 # Note: Uses devel base for complete NVCC toolchain required by DeepGEMM JIT
 FROM nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04 AS runtime
 
-ARG CUDA_VERSION
+ARG CUDA_VERSION=13.1.2
 ARG TARGETARCH
 ARG GDRCOPY_VERSION=2.5.1
 
@@ -487,7 +505,9 @@ ENV PATH="${PATH}:/usr/local/nvidia/bin:/usr/local/cuda/bin:/usr/local/cuda/nvvm
     LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/nvidia/lib:/usr/local/nvidia/lib64"
 
 # Install runtime dependencies (devel base provides gcc/g++/build tools)
-RUN --mount=type=cache,target=/var/cache/apt,id=runtime-apt \
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    --mount=type=cache,target=/root/.cache/pip \
     apt-get update && apt-get install -y --no-install-recommends \
     # Python runtime
     software-properties-common \
@@ -540,14 +560,13 @@ RUN --mount=type=cache,target=/var/cache/apt,id=runtime-apt \
     && python3 get-pip.py --break-system-packages \
     && rm get-pip.py \
     # Allow pip to install packages globally (PEP 668 workaround for Ubuntu 24.04)
-    && python3 -m pip config set global.break-system-packages true \
-    && rm -rf /var/lib/apt/lists/* \
-    && apt-get clean
+    && python3 -m pip config set global.break-system-packages true
 
 # Set up locale
-RUN apt-get update && apt-get install -y --no-install-recommends locales \
-    && locale-gen en_US.UTF-8 \
-    && rm -rf /var/lib/apt/lists/*
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt/lists,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends locales \
+    && locale-gen en_US.UTF-8
 
 ENV LANG=en_US.UTF-8 \
     LANGUAGE=en_US:en \
@@ -565,10 +584,10 @@ RUN if [ "${CUDA_VERSION%%.*}" = "13" ] && [ -d /usr/local/lib/python3.12/dist-p
         ln -s /usr/local/cuda/bin/ptxas /usr/local/lib/python3.12/dist-packages/triton/backends/nvidia/bin/ptxas; \
     fi
 
-# Copy GDRCopy runtime libraries (but not the build artifacts)
-COPY --from=framework /usr/lib/libgdrapi.so* /usr/lib/
-COPY --from=framework /usr/bin/gdrcopy_* /usr/bin/
-COPY --from=framework /usr/src/gdrdrv-2.5.1 /usr/src/gdrdrv-2.5.1
+# Copy GDRCopy runtime libraries (skipped - not built, not needed for single-GPU)
+# COPY --from=framework /usr/lib/libgdrapi.so* /usr/lib/
+# COPY --from=framework /usr/bin/gdrcopy_* /usr/bin/
+# COPY --from=framework /usr/src/gdrdrv-2.5.1 /usr/src/gdrdrv-2.5.1
 
 # Fix DeepEP IBGDA symlink in runtime
 RUN ln -sf /usr/lib/$(uname -m)-linux-gnu/libmlx5.so.1 /usr/lib/$(uname -m)-linux-gnu/libmlx5.so

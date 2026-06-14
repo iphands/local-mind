@@ -1,0 +1,51 @@
+#!/bin/bash
+set -e
+NAME=lucebox
+RUNNER=docker
+# [[ -f /usr/bin/podman ]] && RUNNER=podman
+
+docker build . -t $NAME
+
+MODEL_PATH=$1
+# MODEL_PATH=$(realpath "$MODEL")
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL=${MODEL_PATH##*/}
+
+CONTAINER=lucebox
+
+PORT=8700
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name $NAME
+  -e UID=1000
+  -e GID=1000
+  -e APP_UID=1000
+  -e APP_GID=1000
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  # -e DFLASH27B_KV_TQ3=1
+  # -e DFLASH27B_PREFILL_UBATCH=16
+  # -e DFLASH_FORCE_QWEN_CHAT=1
+  -p 0.0.0.0:${PORT}:8799
+  -v /mnt/noir/scratch/ai/llm/models/gguf:/models:ro
+  -v /mnt/noir/scratch/ai/vllm/cache:/root/.cache:rw
+  --ipc=host
+  --gpus '"device=0"'
+  # --entrypoint /bin/bash
+)
+
+LLAMA_ARGS=(
+  /lucebox/dflash/.venv/bin/python /lucebox/dflash/scripts/server.py
+  # --target /models/Qwen3.6-27B-UD-Q8_K_XL.gguf
+  --target /models/Qwen3.6-27B-Q4_K_M.gguf
+  --draft  /models/dflash-draft-3.6-q8_0.gguf
+  --budget 80
+  --port 8799
+  # --max-ctx=262144
+  --max-ctx=131072
+)
+
+echo
+echo "## Running $CONTAINER"
+echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
+"$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"

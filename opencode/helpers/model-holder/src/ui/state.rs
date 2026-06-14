@@ -161,6 +161,8 @@ pub struct AppState {
     pub failed_lock_files: Vec<String>,
     /// Whether the lock-failure help overlay is visible
     pub show_help: bool,
+    /// Original input patterns (for display in title bar)
+    pub input_patterns: Vec<String>,
 }
 
 impl AppState {
@@ -176,6 +178,7 @@ impl AppState {
             filter_mode: false,
             failed_lock_files: Vec::new(),
             show_help: false,
+            input_patterns: Vec::new(),
         }
     }
 
@@ -235,6 +238,57 @@ impl AppState {
 
     pub fn all_locked(&mut self) {
         self.all_locked = true;
+    }
+
+    /// Set the input patterns for display
+    pub fn set_input_patterns(&mut self, patterns: Vec<String>) {
+        self.input_patterns = patterns;
+    }
+
+    /// Compute the common parent directory name from all files
+    /// Used when original patterns are lost (e.g., shell expansion)
+    pub fn compute_common_parent(&self) -> Option<String> {
+        if self.files.is_empty() {
+            return None;
+        }
+
+        // Get all parent directories
+        let parents: Vec<_> = self.files
+            .iter()
+            .filter_map(|f| std::path::Path::new(&f.path).parent())
+            .collect();
+
+        if parents.is_empty() {
+            return None;
+        }
+
+        // Find common prefix
+        let first = &parents[0];
+        let mut common = first.to_path_buf();
+
+        for parent in &parents[1..] {
+            // Find common prefix between common and parent
+            let common_components: Vec<_> = common.components().collect();
+            let parent_components: Vec<_> = parent.components().collect();
+            
+            let min_len = common_components.len().min(parent_components.len());
+            let mut prefix_len = 0;
+            
+            for i in 0..min_len {
+                if common_components[i] == parent_components[i] {
+                    prefix_len = i + 1;
+                } else {
+                    break;
+                }
+            }
+            
+            // Rebuild common path up to prefix_len
+            common = parent_components[..prefix_len].iter().collect();
+        }
+
+        // Get the last component (the directory name we want)
+        common.file_name()
+            .map(|n| n.to_string_lossy().to_string())
     }
 
     /// Returns filtered and sorted files based on current state

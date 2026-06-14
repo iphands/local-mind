@@ -1,0 +1,17 @@
+{
+  "last_lgp_path": null,
+  "window_position": null,
+  "window_size": null,
+  "use_vertex_color": true,
+  "background": [
+    0,
+    0,
+    0,
+    0
+  ],
+  "nearest_filtering": false,
+  "culling_enabled": true,
+  "invert_culling": false,
+  "default_zoom": 100,
+  "view_mode": "list"
+}

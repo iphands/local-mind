@@ -1,0 +1,51 @@
+#!/bin/bash
+set -e
+NAME=sglang
+RUNNER=docker
+# [[ -f /usr/bin/podman ]] && RUNNER=podman
+
+MODEL_PATH=$1
+# MODEL_PATH=$(realpath "$MODEL")
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL=${MODEL_PATH##*/}
+
+CONTAINER=sglang
+
+PORT=8700
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name $NAME
+  -e UID=1000
+  -e GID=1000
+  -e APP_UID=1000
+  -e APP_GID=1000
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  -p 0.0.0.0:${PORT}:8799
+  -v "$MODEL_FOLDER":/models:ro
+  -v /mnt/noir/scratch/ai/sglang/cache:/root/.cache:rw
+  --ipc=host
+  # --entrypoint /bin/bash
+)
+
+SGLANG_ARGS=(
+  python3 -m sglang.launch_server
+  --model-path /models/$MODEL
+  --served-model-name cosmo-6000
+  --host 0.0.0.0
+  --port 8799
+
+  --attention-backend flashinfer
+  --mem-fraction-static 0.88
+  --context-length 262144
+  --tp 1
+  --trust-remote-code
+  --tool-call-parser qwen3_coder
+  --reasoning-parser qwen3
+  --log-level info
+)
+
+echo
+echo "## Running $CONTAINER"
+echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${SGLANG_ARGS[@]}"
+"$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${SGLANG_ARGS[@]}"

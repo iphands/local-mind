@@ -1,10 +1,26 @@
 #!/bin/bash
 export MODEL="$1"
 export PORT=8700
-export NAME=llama-server-3070
+export NAME=llama-server-6000
 export ALIAS=cosmo-6000
 export SINGLE=1
 source ./run-common
 
+docker stop llama-server-6000 || true
+docker   rm llama-server-6000 || true
+
 CONTAINER_ARGS+=(--gpus '"device=0"')
+LLAMA_ARGS+=(
+  --embeddings
+  --batch-size 2048
+  --ubatch-size 2048
+  # --ctx-size 8192
+  # --temp 0.7
+  # --top-p 0.8
+  # --top-k 20
+  # --presence-penalty 1.5
+  # --min-p 0.00
+  # --spec-type draft-mtp --spec-draft-n-max 2
+  # --chat-template-kwargs '{"preserve_thinking":true}'
+)
 run_model

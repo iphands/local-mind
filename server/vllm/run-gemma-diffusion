@@ -5,12 +5,17 @@ RUNNER=docker
 # [[ -f /usr/bin/podman ]] && RUNNER=podman
 
 MODEL_PATH=$1
-# MODEL_PATH=$(realpath "$MODEL")
+MODEL_PATH=$(realpath "$1")
 MODEL_FOLDER=${MODEL_PATH%/*}
-MODEL=${MODEL_PATH##*/}
+MODEL=${MODEL_PATH##*vllm/}
+
+echo $MODEL_PATH
+echo $MODEL_FOLDER
+echo $MODEL
+
 
 CONTAINER=docker.io/vllm/vllm-openai:latest
-CONTAINER=docker.io/vllm/vllm-openai:cu130-nightly
+# CONTAINER=docker.io/vllm/vllm-openai:cu130-nightly
 # CONTAINER=docker.io/vllm/vllm-openai:v0.21.0-cu129-ubuntu2404
 # CONTAINER=docker.io/vllm/vllm-openai:cu129-nightly
 # CONTAINER=docker.io/orthozany/vllm-qwen35-mtp
@@ -21,6 +26,7 @@ PORT=8700
 CONTAINER_ARGS=(
   run -it --rm
   --name $NAME
+  -e VLLM_USE_V2_MODEL_RUNNER=1
   -e UID=1000
   -e GID=1000
   -e APP_UID=1000
@@ -32,7 +38,7 @@ CONTAINER_ARGS=(
   -e SAFETENSORS_FAST_GPU=1
   -p 0.0.0.0:${PORT}:8799
   -v /home/iphands/prog/ai/local-mind/server/vllm/scripts:/myscripts:ro
-  -v "$MODEL_FOLDER":/models:ro
+  -v /mnt/noir/scratch/ai/llm/models/vllm:/models:ro
   -v /mnt/noir/scratch/ai/vllm/cache:/root/.cache:rw
   --ipc=host
   --shm-size=32g
@@ -97,14 +103,37 @@ LLAMA_ARGS=(
   ## 3.6
   # --quantization modelopt # NOTE: Only use this on NVFP4
   # --kv-cache-dtype fp8
-  --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
-  --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":2}'
-  --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true}'
+  # --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
+  # --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":2}'
+  # --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true}'
 
-  --additional-config '{"turboquant": true, "k_quant": "q8_0", "v_quant": "q5_0"}'
+  --max-num-seqs 4
+  --hf-overrides '{"diffusion_sampler": "entropy_bound", "diffusion_entropy_bound": 0.1}'
+  --default-chat-template-kwargs '{"enable_thinking": true}'
+
+  # --additional-config '{"turboquant": true, "k_quant": "q8_0", "v_quant": "q5_0"}'
 )
 
 echo
 echo "## Running $CONTAINER"
-echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
-"$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
+
+PRE_CMD='
+pip install -U transformers &&
+echo "Transformers updated"
+'
+
+echo "$RUNNER" "${CONTAINER_ARGS[@]}" \
+  --entrypoint /bin/bash \
+  "$CONTAINER" \
+  -lc "$PRE_CMD; exec $(printf '%q ' "${LLAMA_ARGS[@]}")"
+
+"$RUNNER" "${CONTAINER_ARGS[@]}" \
+    --entrypoint /bin/bash \
+    "$CONTAINER" \
+    -lc '
+        # pip install -U transformers
+        python3 -c "import transformers; print(transformers.__version__)"
+        exec "$@"
+    ' ls # "${LLAMA_ARGS[@]}"
+
+exit 0

@@ -1,9 +1,17 @@
 {
+  "$schema": "https://opencode.ai/config.json",
   "model": "cosmo-proxy/cosmo-proxy",
+  "lsp": true,
+  "mcp": {
+    "docs-rs": {
+      "type": "local",
+      "enabled": true,
+      "command": ["npx", "-y", "@nuskey8/docs-rs-mcp@latest"]
+    }
+  },
   "plugin": [
     "oh-my-openagent@latest"
   ],
-  "$schema": "https://opencode.ai/config.json",
   "default_agent": "local-mind",
   "compaction": {
     "auto": true,
@@ -33,7 +41,7 @@
     "cosmo-00": {
       "name": "cosmo-00",
       "npm": "@ai-sdk/openai-compatible",
-      "models": { "cosmo-6000": { "name": "cosmo-6000", "limit": { "context": 262144, "output": 262144, "input": 222822 }, "modalities": { "input": ["text", "image"], "output": ["text"] } } },
+      "models": { "cosmo-6000": { "name": "cosmo-6000", "limit": { "context": 262144, "output": 262144, "input": 241172 } } },
       "options": {
         "baseURL": "http://cosmo.lan:8700/v1",
         "apiKey": "deadbeef1234"
@@ -42,7 +50,7 @@
     "cosmo-01": {
       "name": "cosmo-01",
       "npm": "@ai-sdk/openai-compatible",
-      "models": { "cosmo-4060": { "name": "cosmo-4060", "limit": { "context": 262144, "output": 262144, "input": 222822 }, "modalities": { "input": ["text", "image"], "output": ["text"] } } },
+      "models": { "cosmo-4060": { "name": "cosmo-4060", "limit": { "context": 262144, "output": 262144, "input": 241172 } } },
       "options": {
         "baseURL": "http://cosmo.lan:8701/v1",
         "apiKey": "deadbeef1234"
@@ -52,9 +60,9 @@
       "name": "cosmo-proxy",
       "npm": "@ai-sdk/openai-compatible",
       "models": {
-        "cosmo-proxy": { "name": "cosmo-proxy", "limit": { "context": 262144, "output": 262144, "input": 222822 }, "modalities": { "input": ["text", "image"], "output": ["text"] } },
-        "cosmo-heavy": { "name": "cosmo-heavy", "limit": { "context": 262144, "output": 262144, "input": 222822 }, "modalities": { "input": ["text", "image"], "output": ["text"] } },
-        "cosmo-light": { "name": "cosmo-light", "limit": { "context": 262144, "output": 262144, "input": 222822 }, "modalities": { "input": ["text", "image"], "output": ["text"] } }
+        "cosmo-proxy": { "name": "cosmo-proxy", "limit": { "context": 262144, "output": 262144, "input": 241172 } },
+        "cosmo-heavy": { "name": "cosmo-heavy", "limit": { "context": 262144, "output": 262144, "input": 241172 } },
+        "cosmo-light": { "name": "cosmo-light", "limit": { "context": 262144, "output": 262144, "input": 241172 } }
       },
       "options": {
         "baseURL": "http://cosmo.lan:8799/v1",
@@ -64,7 +72,7 @@
     "noir-llama": {
       "name": "noir-llama",
       "npm": "@ai-sdk/openai-compatible",
-      "models": { "noir-model": { "name": "noir-model", "limit": { "context": 262144, "output": 32768, "input": 222822 }, "modalities": { "input": ["text", "image"], "output": ["text"] } }, },
+      "models": { "noir-model": { "name": "noir-model", "limit": { "context": 262144, "output": 32768, "input": 241172 } }, },
       "options": {
         "baseURL": "http://noir.lan:8799/v1",
         "apiKey": "deadbeef1234"
@@ -73,7 +81,7 @@
     "station-llama": {
       "name": "station-llama",
       "npm": "@ai-sdk/openai-compatible",
-      "models": { "station-model": { "name": "station-model", "limit": { "context": 262144, "output": 32768, "input": 222822 }, "modalities": { "input": ["text", "image"], "output": ["text"] } }, },
+      "models": { "station-model": { "name": "station-model", "limit": { "context": 262144, "output": 32768, "input": 241172 } }, },
       "options": {
         "baseURL": "http://station.lan:8799/v1",
         "apiKey": "deadbeef1234"
