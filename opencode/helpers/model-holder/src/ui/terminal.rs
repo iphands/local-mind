@@ -193,8 +193,9 @@ fn render_title(frame: &mut Frame, area: Rect, app: &AppState) {
         
         format!(" {}/* ({})", dir, app.files.len())
     } else {
-        // Single file or empty
-        String::new()
+        // Single file - MUST show filename
+        let filename = &app.files[0].filename;
+        format!(" {}", filename)
     };
     
     let right = format!("  {}", overall);
