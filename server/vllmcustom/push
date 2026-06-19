@@ -8,9 +8,13 @@ set -euo pipefail
 IMAGE=${IMAGE:-iphands/vllm-blackwell}
 CUDA_VERSION=${CUDA_VERSION:-13.0.2}
 CUDA_TAG=${CUDA_VERSION//./}
+REF=$(git rev-parse --short HEAD)
 TAG=${TAG:-cu${CUDA_TAG}-sm120}
+TAGTWO="${TAG}-${REF}"
 
-for t in "$TAG" latest; do
+docker tag $IMAGE:latest $IMAGE:$TAGTWO
+
+for t in "$TAG" "$TAGTWO" latest; do
   docker image inspect "$IMAGE:$t" >/dev/null 2>&1 || {
     echo "Image $IMAGE:$t not found locally. Run ./build first."; exit 1; }
   echo "## pushing docker.io/$IMAGE:$t"
