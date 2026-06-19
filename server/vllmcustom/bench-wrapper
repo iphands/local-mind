@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+# Sweep sm120 perf configs end-to-end: for each config it (re)starts vLLM via
+# ./run, waits until ready, warms up, measures, stops, then prints a table.
+#
+#   ./bench-wrapper                                  # default model below
+#   ./bench-wrapper /path/to/model                   # explicit model
+#   RUNS=3 ./bench-wrapper                            # 3 measured runs/config (median TG)
+#   CONFIGS=$'cutlass-mtp2 cutlass 2\ncudnn-mtp2 flashinfer-cudnn 2' ./bench-wrapper
+#
+# Each config is a full 122B (re)load — expect several minutes EACH. The whole
+# default sweep is long; trim CONFIGS to iterate faster.
+#
+# Metrics (client-side, engine-agnostic):
+#   TTFT      time to first token (ms)            -- lower better
+#   prefill   prompt_tokens / TTFT  (tok/s)       -- approx prompt-processing speed
+#   TG        completion_tokens / (total-TTFT)    -- token generation; the number you care about
+#   CAP(W)    GPU0 power cap, read (not set) from nvidia-smi in Python
+#
+# Outputs: a printed table (also appended to bench-wrapper-results.md) AND a
+# long-term, machine-readable bench-results.jsonl (one record per run, written by
+# the Python measurement, including the GPU0 wattage cap).
+set -uo pipefail   # NOT -e: we want to survive a failing config and keep going
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+MODEL=${1:-/mnt/noir/scratch/ai/llm/models/vllm/Qwen3.5-122B-A10B-NVFP4}
+MODELBASE=$(basename "$MODEL")
+NAME=vllm                                   # must match ./run's container --name
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+APIMODEL=${APIMODEL:-cosmo-6000}            # one of ./run's --served-model-name aliases
+READY_TIMEOUT=${READY_TIMEOUT:-1200}        # s to wait for weight load + JIT before giving up
+RUNS=${RUNS:-1}                             # measured runs per config (median TG reported)
+GEN_TOKENS=${GEN_TOKENS:-1024}
+WARMUP_TOKENS=${WARMUP_TOKENS:-512}
+WARMUP_PROMPT="Write a pure bash script to draw ascii art mandlebrot set"
+BENCH_PROMPT="Write a Pure Bash script that calculates primes up to 10 million"
+LOGDIR=${LOGDIR:-$HERE/bench-logs}
+RESULTS=${RESULTS:-$HERE/bench-wrapper-results.md}
+JSONL=${JSONL:-$HERE/bench-results.jsonl}   # long-term machine-readable log (one record/run)
+mkdir -p "$LOGDIR"
+
+# Config matrix: "<name> <NVFP4_BACKEND|-> <SPEC_TOKENS>".  '-' = vLLM auto. SPEC 0 = MTP off.
+DEFAULT_CONFIGS="\
+auto-mtp2      -                2
+cutlass-mtp2   cutlass          2
+cudnn-mtp2     flashinfer-cudnn 2
+marlin-mtp2    marlin           2
+cutlass-mtp3   cutlass          3
+cutlass-mtp0   cutlass          0"
+CONFIGS=${CONFIGS:-$DEFAULT_CONFIGS}
+
+# --- per-request measurement (SSE streaming + usage) --------------------------
+MEASURE="$LOGDIR/_measure.py"
+cat > "$MEASURE" <<'PY'
+import sys, json, time, argparse, subprocess, urllib.request
+from datetime import datetime, timezone
+
+def read_watts():
+    """GPU 0 current power cap (W, int) via nvidia-smi. Read-only; None on failure."""
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=power.limit",
+             "--format=csv,noheader,nounits", "-i", "0"],
+            capture_output=True, text=True, timeout=10)
+        return int(round(float(out.stdout.strip().splitlines()[0])))
+    except Exception:
+        return None
+
+ap = argparse.ArgumentParser()
+ap.add_argument("host", nargs="?"); ap.add_argument("api_model", nargs="?")
+ap.add_argument("prompt", nargs="?"); ap.add_argument("max_tokens", nargs="?", type=int)
+ap.add_argument("--print-watts", action="store_true")  # just print GPU0 cap and exit
+ap.add_argument("--jsonl")                 # if set, append one record here
+ap.add_argument("--config", default="")
+ap.add_argument("--nvfp4", default="")
+ap.add_argument("--mtp", default="")
+ap.add_argument("--model-name", default="")
+ap.add_argument("--run", default="")
+a = ap.parse_args()
+
+if a.print_watts:
+    w = read_watts()
+    print(w if w is not None else "-"); sys.exit(0)
+
+if not (a.host and a.api_model and a.prompt and a.max_tokens):
+    print("ERROR missing-args"); sys.exit(2)
+
+WATTS = read_watts()   # GPU0 cap captured here, in Python, for the jsonl
+
+def append_jsonl(rec):
+    if not a.jsonl:
+        return
+    rec = {
+        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "config": a.config, "nvfp4_backend": a.nvfp4 or "auto", "mtp": a.mtp,
+        "watts_cap": WATTS, "model": a.model_name, "run": a.run, **rec,
+    }
+    with open(a.jsonl, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+body = json.dumps({
+    "model": a.api_model,
+    "messages": [{"role": "user", "content": a.prompt}],
+    "max_tokens": a.max_tokens,
+    "temperature": 0.6,
+    "stream": True,
+    "stream_options": {"include_usage": True},
+}).encode()
+req = urllib.request.Request(f"http://{a.host}/v1/chat/completions",
+                             data=body, headers={"Content-Type": "application/json"})
+start = time.perf_counter(); ttft = None; ptok = None; ctok = None
+try:
+    with urllib.request.urlopen(req, timeout=900) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            ch = json.loads(data)
+            choices = ch.get("choices")
+            if ttft is None and choices and choices[0].get("delta", {}).get("content"):
+                ttft = time.perf_counter() - start
+            if ch.get("usage"):
+                ptok = ch["usage"].get("prompt_tokens")
+                ctok = ch["usage"].get("completion_tokens")
+except Exception as e:
+    append_jsonl({"status": "error", "error": str(e)})
+    print(f"ERROR {e}"); sys.exit(1)
+total = time.perf_counter() - start
+if not ctok:
+    append_jsonl({"status": "error", "error": "no-usage-reported"})
+    print("ERROR no-usage-reported"); sys.exit(1)
+ttft = ttft or 0.0
+gen_time = max(total - ttft, 1e-6)
+prefill = (ptok / ttft) if (ttft > 0 and ptok) else 0.0
+tg = ctok / gen_time
+append_jsonl({"status": "ok", "ttft_ms": round(ttft * 1000, 1),
+              "prefill_tps": round(prefill, 1), "tg_tps": round(tg, 2),
+              "prompt_tokens": ptok, "completion_tokens": ctok})
+print(f"{ttft*1000:.1f} {prefill:.1f} {tg:.2f} {ptok} {ctok}")
+PY
+
+stop_server() {
+  docker rm -f "$NAME" >/dev/null 2>&1 || true
+  # wait for the API port to actually go away before the next launch
+  for _ in $(seq 1 30); do
+    curl -sf "http://${HOST}/health" >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+}
+
+wait_ready() {  # returns 0 when /health is up; 1 on timeout or container exit
+  local waited=0
+  while (( waited < READY_TIMEOUT )); do
+    if curl -sf "http://${HOST}/health" >/dev/null 2>&1; then return 0; fi
+    if ! docker ps -q -f "name=^${NAME}$" | grep -q .; then
+      echo "    container exited during load"; return 1
+    fi
+    sleep 5; waited=$((waited+5))
+  done
+  echo "    timed out after ${READY_TIMEOUT}s"; return 1
+}
+
+median() { printf '%s\n' "$@" | sort -n | awk '{a[NR]=$1} END{print (NR%2)?a[(NR+1)/2]:(a[NR/2]+a[NR/2+1])/2}'; }
+
+# rows for the final table
+declare -a ROWS
+
+echo "## bench-wrapper  model=$(basename "$MODEL")  runs/config=$RUNS  gen_tokens=$GEN_TOKENS"
+echo "## logs -> $LOGDIR"
+
+while read -r cfg_name nvfp4 spec; do
+  [[ -z "${cfg_name:-}" ]] && continue
+  watts=$(python3 "$MEASURE" --print-watts 2>/dev/null); [[ -z "$watts" ]] && watts="-"
+  echo
+  echo "=== $cfg_name  (NVFP4=$nvfp4  MTP=$spec  GPU0 cap=${watts}W) ==="
+  stop_server
+  start_log="$LOGDIR/start-$cfg_name.log"
+  nvfp4_env=""; [[ "$nvfp4" != "-" ]] && nvfp4_env="$nvfp4"
+
+  echo "    launching vLLM ..."
+  DETACH=1 PORT="$PORT" NVFP4_BACKEND="$nvfp4_env" SPEC_TOKENS="$spec" \
+    "$HERE/run" "$MODEL" > "$start_log" 2>&1
+
+  if ! wait_ready; then
+    echo "    NOT READY -> see $start_log"; docker logs "$NAME" > "$LOGDIR/crash-$cfg_name.log" 2>&1 || true
+    ROWS+=("$cfg_name|$nvfp4|$spec|$watts|-|-|-|FAILED(load)")
+    stop_server; continue
+  fi
+  echo "    ready. warmup ..."
+  python3 "$MEASURE" "$HOST" "$APIMODEL" "$WARMUP_PROMPT" "$WARMUP_TOKENS" >/dev/null 2>&1 || true
+
+  echo "    measuring ($RUNS run/s) ..."
+  ttft_ms="-"; prefill="-"; tgs=(); status="OK"
+  for r in $(seq 1 "$RUNS"); do
+    out=$(python3 "$MEASURE" "$HOST" "$APIMODEL" "$BENCH_PROMPT" "$GEN_TOKENS" \
+            --jsonl "$JSONL" --config "$cfg_name" --nvfp4 "$nvfp4_env" --mtp "$spec" \
+            --model-name "$MODELBASE" --run "$r" 2>&1)
+    if [[ "$out" == ERROR* || -z "$out" ]]; then
+      echo "    run $r FAILED: $out"; status="FAILED(infer)"; break
+    fi
+    read -r m_ttft m_prefill m_tg m_ptok m_ctok <<<"$out"
+    echo "    run $r: ttft=${m_ttft}ms prefill=${m_prefill}tok/s TG=${m_tg}tok/s (p=${m_ptok} c=${m_ctok})"
+    # cold prefill/TTFT from run 1 (run 2+ would hit the prefix cache)
+    [[ "$r" == 1 ]] && { ttft_ms="$m_ttft"; prefill="$m_prefill"; }
+    tgs+=("$m_tg")
+  done
+
+  tg="-"; [[ ${#tgs[@]} -gt 0 ]] && tg=$(median "${tgs[@]}")
+  ROWS+=("$cfg_name|$nvfp4|$spec|$watts|$ttft_ms|$prefill|$tg|$status")
+  stop_server
+done <<< "$CONFIGS"
+
+# --- results table ------------------------------------------------------------
+ts=$(date -u +"%Y-%m-%d %H:%M UTC")
+fmt='%-14s %-17s %-4s %7s %12s %14s %12s %-14s\n'
+{
+  echo
+  # shellcheck disable=SC2059
+  printf "$fmt" CONFIG NVFP4 MTP "CAP(W)" "TTFT(ms)" "prefill(tok/s)" "TG(tok/s)" STATUS
+  # shellcheck disable=SC2059
+  printf "$fmt" -------------- ----------------- ---- ------- ------------ -------------- ------------ --------------
+  for row in "${ROWS[@]}"; do
+    IFS='|' read -r n nv sp w tt pf tg st <<<"$row"
+    # shellcheck disable=SC2059
+    printf "$fmt" "$n" "$nv" "$sp" "$w" "$tt" "$pf" "$tg" "$st"
+  done
+} | tee -a "$RESULTS"
+echo "" >> "$RESULTS"; echo "_${ts}  model=${MODELBASE}_" >> "$RESULTS"
+echo
+echo "## table -> $RESULTS    per-run jsonl -> $JSONL"

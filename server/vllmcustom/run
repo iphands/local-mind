@@ -4,11 +4,19 @@
 #   ./run ./models/vllm/Qwen3.6-27B
 #   ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4
 #
-# A/B backends without editing this file:
+# A/B backends/knobs without editing this file:
 #   ATTN_BACKEND=flashinfer ./run <model>
 #   ATTN_BACKEND=triton MOE_BACKEND=flashinfer_trtllm ./run <model>
+#   NVFP4_BACKEND=cutlass ./run <model>       # NVFP4 GEMM kernel: cutlass | flashinfer-cudnn |
+#                                             #   flashinfer-cutlass | marlin | flashinfer-trtllm
+#                                             #   (empty = vLLM auto). cutlass=fastest on sm120f,
+#                                             #   flashinfer-cudnn=safest (dodges FP4 race-cond NaN),
+#                                             #   marlin=W4A16 fallback if FP4 GEMM misbehaves.
+#   SPEC_TOKENS=3 ./run <model>               # MTP speculative tokens (default 2; 0 = MTP off)
 #   IMAGE_TAG=cu1312-sm120 ./run <model>      # run a specific build variant
 #   EXTRA_ARGS="--max-num-seqs 8" ./run <model>
+#
+# Benchmark a variant against the running server: ./bench <label>
 set -euo pipefail
 
 NAME=vllm
@@ -24,6 +32,8 @@ MODEL_FOLDER=$(cd "$MODEL_FOLDER" && pwd)        # absolute, for the bind mount
 PORT=${PORT:-8700}
 ATTN_BACKEND=${ATTN_BACKEND:-flashinfer}
 MOE_BACKEND=${MOE_BACKEND:-}                     # empty = vLLM default
+NVFP4_BACKEND=${NVFP4_BACKEND:-}                 # empty = vLLM auto-select NVFP4 GEMM kernel
+SPEC_TOKENS=${SPEC_TOKENS:-2}                    # MTP speculative tokens (2 = community sweet spot)
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}
 CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
@@ -31,8 +41,12 @@ CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
 docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
   echo "Image $CONTAINER not found. Run ./build first."; exit 1; }
 
+# DETACH=1 -> run backgrounded (-d) for scripted benchmarking (bench-wrapper);
+# interactive (-it) otherwise.
+if [[ -n "${DETACH:-}" ]]; then _RUNMODE=(-d); else _RUNMODE=(-it); fi
+
 CONTAINER_ARGS=(
-  run -it --rm
+  run "${_RUNMODE[@]}" --rm
   --name "$NAME"
   # Force the `vllm serve` entrypoint (we pass `serve` as the first arg below).
   # Required for speculative decoding: only `vllm serve` copies the positional
@@ -47,6 +61,8 @@ CONTAINER_ARGS=(
   -e NCCL_IB_DISABLE=1
   -e VLLM_WORKER_MULTIPROC_METHOD=spawn
   -e SAFETENSORS_FAST_GPU=1
+  -e VLLM_LOG_STATS_INTERVAL=1                   # log tok/s + MTP acceptance every 1s (tuning)
+  -e VLLM_SLEEP_WHEN_IDLE=1                       # release SMs when no requests pending (idle power)
   -p "0.0.0.0:${PORT}:8799"
   -v "$MODEL_FOLDER":/models:ro
   -v "$CACHE_DIR":/root/.cache:rw
@@ -83,12 +99,14 @@ VLLM_ARGS=(
   --no-enforce-eager
 
   --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
-  --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
   --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true}'
   --kv-cache-dtype fp8
 )
 
+# SPEC_TOKENS=0 disables MTP entirely (clean no-speculation baseline); else add it.
+[[ "$SPEC_TOKENS" != "0" ]] && VLLM_ARGS+=( --speculative-config '{"method":"mtp","num_speculative_tokens":'"$SPEC_TOKENS"'}' )
 [[ -n "$MOE_BACKEND" ]] && VLLM_ARGS+=( --moe-backend "$MOE_BACKEND" )
+[[ -n "$NVFP4_BACKEND" ]] && CONTAINER_ARGS+=( -e VLLM_NVFP4_GEMM_BACKEND="$NVFP4_BACKEND" )
 # shellcheck disable=SC2206
 [[ -n "${EXTRA_ARGS:-}" ]] && VLLM_ARGS+=( ${EXTRA_ARGS} )
 
