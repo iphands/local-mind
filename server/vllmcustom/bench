@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+"""Client-side token-generation benchmark for any OpenAI-compatible server.
+
+Engine/build-agnostic: it only talks to the HTTP endpoint, so the same run
+compares any vLLM build / backend / CUDA version currently serving on :8700.
+
+    ./bench <label>                        # e.g. ./bench cu1302-flashinfer
+    ./bench cu1302-triton --host host:8700 --model cosmo-6000
+
+Measures, per prompt, TTFT (time to first token) and decode tok/s
+(completion_tokens / generation-time), then prints medians and appends a row
+to bench-results.md so variants line up for comparison.
+"""
+import argparse, json, statistics, sys, time, urllib.request
+from datetime import datetime, timezone
+
+PROMPTS = [
+    ("short", "Reply with a single short sentence: why is the sky blue?", 256),
+    ("code", "Write a program to calculate primes up to 1,000,000 in ANSI C.", 1024),
+    ("long", "Summarize the history of computing.\n\n" + ("context line. " * 4000), 1024),
+]
+
+
+def run_one(host, model, prompt, max_tokens):
+    body = json.dumps({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+        "temperature": 0.6,
+        "stream": True,
+        "stream_options": {"include_usage": True},
+    }).encode()
+    req = urllib.request.Request(
+        f"http://{host}/v1/chat/completions",
+        data=body, headers={"Content-Type": "application/json"})
+
+    start = time.perf_counter()
+    ttft = None
+    completion_tokens = None
+    with urllib.request.urlopen(req, timeout=600) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            chunk = json.loads(data)
+            if ttft is None and chunk.get("choices"):
+                delta = chunk["choices"][0].get("delta", {})
+                if delta.get("content"):
+                    ttft = time.perf_counter() - start
+            if chunk.get("usage"):
+                completion_tokens = chunk["usage"].get("completion_tokens")
+    total = time.perf_counter() - start
+    if not completion_tokens:
+        raise RuntimeError("server did not report completion_tokens (need stream usage support)")
+    gen_time = max(total - (ttft or 0.0), 1e-6)
+    return ttft or 0.0, completion_tokens / gen_time, completion_tokens
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("label", help="variant label, e.g. cu1302-flashinfer")
+    ap.add_argument("--host", default="localhost:8700")
+    ap.add_argument("--model", default="cosmo-6000")
+    ap.add_argument("--out", default=None, help="results markdown (default: alongside this script)")
+    args = ap.parse_args()
+
+    out = args.out or f"{sys.path[0]}/bench-results.md"
+    tps_all, ttft_all = [], []
+    print(f"# benchmarking {args.label} against {args.host} ({args.model})\n")
+    for name, prompt, max_tokens in PROMPTS:
+        try:
+            ttft, tps, n = run_one(args.host, args.model, prompt, max_tokens)
+        except Exception as e:
+            print(f"  {name:<6} FAILED: {e}")
+            continue
+        tps_all.append(tps); ttft_all.append(ttft)
+        print(f"  {name:<6} ttft={ttft*1000:7.1f}ms  decode={tps:7.2f} tok/s  ({n} tok)")
+
+    if not tps_all:
+        sys.exit("all prompts failed")
+    med_tps = statistics.median(tps_all)
+    med_ttft = statistics.median(ttft_all) * 1000
+    print(f"\n  median decode = {med_tps:.2f} tok/s   median ttft = {med_ttft:.1f} ms")
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    header = "| date (UTC) | label | median tok/s | median TTFT (ms) |\n|---|---|---|---|\n"
+    import os
+    new = not os.path.exists(out)
+    with open(out, "a") as f:
+        if new:
+            f.write("# vLLM sm120 benchmark results\n\n" + header)
+        f.write(f"| {ts} | {args.label} | {med_tps:.2f} | {med_ttft:.1f} |\n")
+    print(f"  -> appended to {out}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,85 @@
+#!/bin/bash
+# Build the sm120-optimized vLLM image from source.
+#
+#   ./build                       # defaults: CUDA 13.0.2, vLLM v0.23.0 + torch v2.11.0 + flashinfer v0.6.12
+#   CUDA_VERSION=13.1.2 ./build   # try a newer CUDA toolkit (produces a different tag)
+#   VLLM_REF=v0.22.1 ./build      # try a different vLLM (pin matching TORCH_REF/FLASHINFER_REF too)
+#
+# Source trees are cloned/pulled into $BUILD_DIR/src once and reused (no re-clone).
+# Patch or `git checkout` them in place; this script only fetches + checks out the pinned ref.
+set -euo pipefail
+
+# --- knobs (override via env) ------------------------------------------------
+CUDA_VERSION=${CUDA_VERSION:-13.0.2}
+PYTHON_VERSION=${PYTHON_VERSION:-3.12}
+TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-12.0}      # sm_120 (RTX PRO 6000 Blackwell)
+MAX_JOBS=${MAX_JOBS:-28}
+NVCC_THREADS=${NVCC_THREADS:-8}
+
+# Mutually-compatible default set (vLLM v0.23.0 pins torch 2.11.0 / flashinfer 0.6.12).
+VLLM_REF=${VLLM_REF:-v0.23.0}
+TORCH_REF=${TORCH_REF:-v2.11.0}
+FLASHINFER_REF=${FLASHINFER_REF:-v0.6.12}
+
+# Clean PEP 440 versions (strip leading 'v') baked into the wheels so vLLM's
+# torch==X pin resolves to our source build instead of pulling from PyPI.
+TORCH_VERSION=${TORCH_VERSION:-${TORCH_REF#v}}
+VLLM_VERSION=${VLLM_VERSION:-${VLLM_REF#v}}
+FLASHINFER_VERSION=${FLASHINFER_VERSION:-${FLASHINFER_REF#v}}   # prebuilt cubin wheel pin
+TORCHVISION_VERSION=${TORCHVISION_VERSION:-0.26.0}
+TORCHAUDIO_VERSION=${TORCHAUDIO_VERSION:-2.11.0}
+
+IMAGE=${IMAGE:-iphands/vllm-blackwell}
+CUDA_TAG=${CUDA_VERSION//./}                            # 13.0.2 -> 1302
+TAG=${TAG:-cu${CUDA_TAG}-sm120}
+
+BUILD_DIR=${BUILD_DIR:-/mnt/noir/scratch/ai/vllm/build}
+SRC_DIR="$BUILD_DIR/src"
+# -----------------------------------------------------------------------------
+
+here=$(cd "$(dirname "$0")" && pwd)
+
+# Clone-once / fetch-and-checkout helper. $1=name $2=url $3=ref
+sync_src() {
+  local name=$1 url=$2 ref=$3
+  local dir="$SRC_DIR/$name"
+  if [[ ! -d "$dir/.git" ]]; then
+    echo "## cloning $name ($ref)"
+    git clone --recursive "$url" "$dir"
+  fi
+  echo "## syncing $name -> $ref"
+  git -C "$dir" fetch --tags --force origin
+  git -C "$dir" checkout --force "$ref"
+  git -C "$dir" submodule update --init --recursive --depth 1
+}
+
+mkdir -p "$SRC_DIR"
+sync_src pytorch    https://github.com/pytorch/pytorch.git        "$TORCH_REF"
+sync_src flashinfer https://github.com/flashinfer-ai/flashinfer.git "$FLASHINFER_REF"
+sync_src vllm       https://github.com/vllm-project/vllm.git        "$VLLM_REF"
+
+echo
+echo "## building $IMAGE:$TAG  (cuda=$CUDA_VERSION torch=$TORCH_REF flashinfer=$FLASHINFER_REF vllm=$VLLM_REF arch=$TORCH_CUDA_ARCH_LIST)"
+
+DOCKER_BUILDKIT=1 docker build \
+  -f "$here/Dockerfile" \
+  --build-context pytorch="$SRC_DIR/pytorch" \
+  --build-context flashinfer="$SRC_DIR/flashinfer" \
+  --build-context vllm="$SRC_DIR/vllm" \
+  --build-arg CUDA_VERSION="$CUDA_VERSION" \
+  --build-arg PYTHON_VERSION="$PYTHON_VERSION" \
+  --build-arg TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
+  --build-arg TORCH_VERSION="$TORCH_VERSION" \
+  --build-arg VLLM_VERSION="$VLLM_VERSION" \
+  --build-arg FLASHINFER_VERSION="$FLASHINFER_VERSION" \
+  --build-arg MAX_JOBS="$MAX_JOBS" \
+  --build-arg NVCC_THREADS="$NVCC_THREADS" \
+  --build-arg TORCHVISION_VERSION="$TORCHVISION_VERSION" \
+  --build-arg TORCHAUDIO_VERSION="$TORCHAUDIO_VERSION" \
+  --target vllm-openai \
+  -t "$IMAGE:$TAG" \
+  -t "$IMAGE:latest" \
+  "$here"
+
+echo
+echo "## built $IMAGE:$TAG (also tagged :latest)"

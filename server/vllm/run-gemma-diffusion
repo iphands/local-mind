@@ -18,7 +18,7 @@ CONTAINER=docker.io/vllm/vllm-openai:latest
 # CONTAINER=docker.io/vllm/vllm-openai:cu130-nightly
 # CONTAINER=docker.io/vllm/vllm-openai:v0.21.0-cu129-ubuntu2404
 # CONTAINER=docker.io/vllm/vllm-openai:cu129-nightly
-# CONTAINER=docker.io/orthozany/vllm-qwen35-mtp
+# CONTAINER=docker.io/iphands/vllm-qwen35-mtp
 
 $RUNNER pull "$CONTAINER"
 PORT=8700

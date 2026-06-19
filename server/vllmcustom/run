@@ -1,0 +1,92 @@
+#!/bin/bash
+# Serve a model with the locally-built sm120 vLLM image (no docker pull).
+#
+#   ./run ./models/vllm/Qwen3.6-27B
+#   ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4
+#
+# A/B backends without editing this file:
+#   ATTN_BACKEND=flashinfer ./run <model>
+#   ATTN_BACKEND=triton MOE_BACKEND=flashinfer_trtllm ./run <model>
+#   IMAGE_TAG=cu1312-sm120 ./run <model>      # run a specific build variant
+#   EXTRA_ARGS="--max-num-seqs 8" ./run <model>
+set -euo pipefail
+
+NAME=vllm
+IMAGE=${IMAGE:-iphands/vllm-blackwell}
+IMAGE_TAG=${IMAGE_TAG:-latest}
+CONTAINER="$IMAGE:$IMAGE_TAG"
+
+MODEL_PATH=$1
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL=${MODEL_PATH##*/}
+MODEL_FOLDER=$(cd "$MODEL_FOLDER" && pwd)        # absolute, for the bind mount
+
+PORT=${PORT:-8700}
+ATTN_BACKEND=${ATTN_BACKEND:-flashinfer}
+MOE_BACKEND=${MOE_BACKEND:-}                     # empty = vLLM default
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}
+CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
+
+docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
+  echo "Image $CONTAINER not found. Run ./build first."; exit 1; }
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name "$NAME"
+  --gpus device=0                                # RTX PRO 6000 only — never the 4060
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  -e NCCL_P2P_LEVEL=4
+  -e NCCL_IB_DISABLE=1
+  -e VLLM_WORKER_MULTIPROC_METHOD=spawn
+  -e SAFETENSORS_FAST_GPU=1
+  -e VLLM_ATTENTION_BACKEND="$ATTN_BACKEND"
+  -p "0.0.0.0:${PORT}:8799"
+  -v "$MODEL_FOLDER":/models:ro
+  -v "$CACHE_DIR":/root/.cache:rw
+  --ipc=host
+  --shm-size=32g
+  --ulimit memlock=-1
+  --ulimit stack=67108864
+)
+
+VLLM_ARGS=(
+  /models/"$MODEL"
+  --served-model-name cosmo-6000 cosmo-proxy claude-heavy claude-light claude-haiku-4-5-20251001
+  --host 0.0.0.0
+  --port 8799
+
+  --async-scheduling
+  --dtype auto
+  --enable-auto-tool-choice
+  --gpu-memory-utilization "$GPU_MEM_UTIL"
+  --language-model-only
+  --max-model-len "$MAX_MODEL_LEN"
+  --pipeline-parallel-size 1
+  --tensor-parallel-size 1
+  --trust-remote-code
+
+  --reasoning-parser qwen3
+  --tool-call-parser qwen3_coder
+  --enable-prefix-caching
+  --enable-chunked-prefill
+  --max-num-seqs 3
+  --max-num-batched-tokens 8192
+
+  --attention-backend "$ATTN_BACKEND"
+  --no-enforce-eager
+
+  --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
+  --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":2}'
+  --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true}'
+  --kv-cache-dtype fp8
+)
+
+[[ -n "$MOE_BACKEND" ]] && VLLM_ARGS+=( --moe-backend "$MOE_BACKEND" )
+# shellcheck disable=SC2206
+[[ -n "${EXTRA_ARGS:-}" ]] && VLLM_ARGS+=( ${EXTRA_ARGS} )
+
+echo
+echo "## Running $CONTAINER  (attn=$ATTN_BACKEND moe=${MOE_BACKEND:-default} gpu0)"
+echo docker "${CONTAINER_ARGS[@]}" "$CONTAINER" "${VLLM_ARGS[@]}"
+docker "${CONTAINER_ARGS[@]}" "$CONTAINER" "${VLLM_ARGS[@]}"

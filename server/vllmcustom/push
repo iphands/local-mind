@@ -1,0 +1,18 @@
+#!/bin/bash
+# Push the built image to Docker Hub. Run `docker login` first.
+#
+#   ./push                  # pushes :latest and the resolved cuda/sm120 tag
+#   TAG=cu1302-sm120 ./push # push a specific variant tag
+set -euo pipefail
+
+IMAGE=${IMAGE:-iphands/vllm-blackwell}
+CUDA_VERSION=${CUDA_VERSION:-13.0.2}
+CUDA_TAG=${CUDA_VERSION//./}
+TAG=${TAG:-cu${CUDA_TAG}-sm120}
+
+for t in "$TAG" latest; do
+  docker image inspect "$IMAGE:$t" >/dev/null 2>&1 || {
+    echo "Image $IMAGE:$t not found locally. Run ./build first."; exit 1; }
+  echo "## pushing docker.io/$IMAGE:$t"
+  docker push "docker.io/$IMAGE:$t"
+done

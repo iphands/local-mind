@@ -1,0 +1,4 @@
+# Source trees come in via named build-contexts (pytorch=, flashinfer=, vllm=),
+# never via the default context. Keep the default context to ~nothing.
+*
+!Dockerfile
