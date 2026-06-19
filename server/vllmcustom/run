@@ -34,13 +34,23 @@ docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
 CONTAINER_ARGS=(
   run -it --rm
   --name "$NAME"
+  # Force the `vllm serve` entrypoint (we pass `serve` as the first arg below).
+  # Required for speculative decoding: only `vllm serve` copies the positional
+  # model path onto the `model` field; the bare api_server module leaves `model`
+  # at vLLM's default (Qwen/Qwen3-0.6B), so the MTP draft loads that default and
+  # fails with "Unsupported speculative method: 'mtp'". --entrypoint REPLACES the
+  # image ENTRYPOINT, so this works whether or not the image has been rebuilt.
+  --entrypoint vllm
   --gpus device=0                                # RTX PRO 6000 only — never the 4060
   -e CUDA_DEVICE_ORDER=PCI_BUS_ID
   -e NCCL_P2P_LEVEL=4
   -e NCCL_IB_DISABLE=1
   -e VLLM_WORKER_MULTIPROC_METHOD=spawn
   -e SAFETENSORS_FAST_GPU=1
-  -e VLLM_ATTENTION_BACKEND="$ATTN_BACKEND"
+  # This model's real context length is in config.json text_config.max_position_embeddings
+  # (262144); vLLM 0.23.x mis-derives 40960 for the Qwen3_5MoeForConditionalGeneration
+  # arch and rejects --max-model-len. Safe to allow — no RoPE extrapolation past trained len.
+  -e VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
   -p "0.0.0.0:${PORT}:8799"
   -v "$MODEL_FOLDER":/models:ro
   -v "$CACHE_DIR":/root/.cache:rw
@@ -77,7 +87,7 @@ VLLM_ARGS=(
   --no-enforce-eager
 
   --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
-  --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":2}'
+  --speculative-config '{"method":"mtp","num_speculative_tokens":2}'
   --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true}'
   --kv-cache-dtype fp8
 )
@@ -88,5 +98,5 @@ VLLM_ARGS=(
 
 echo
 echo "## Running $CONTAINER  (attn=$ATTN_BACKEND moe=${MOE_BACKEND:-default} gpu0)"
-echo docker "${CONTAINER_ARGS[@]}" "$CONTAINER" "${VLLM_ARGS[@]}"
-docker "${CONTAINER_ARGS[@]}" "$CONTAINER" "${VLLM_ARGS[@]}"
+echo docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
+docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
