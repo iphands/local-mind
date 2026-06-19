@@ -147,10 +147,13 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
 COPY --from=vllm . /src/vllm
 WORKDIR /src/vllm
 # Don't let vLLM's pinned torch wheel clobber our source build.
+# v0.23.0 replaced requirements/build.txt with a requirements/build/<platform>.txt
+# split; use the cuda list. use_existing_torch.py globs requirements/**/*.txt, so it
+# still strips the torch==2.11.0 pin from it, leaving our source torch in place.
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
     python use_existing_torch.py 2>/dev/null || true && \
-    uv pip install -r requirements/build.txt && \
+    uv pip install -r requirements/build/cuda.txt && \
     python setup.py bdist_wheel && \
     mkdir -p /wheels && cp dist/*.whl /wheels/ && \
     ccache -s
