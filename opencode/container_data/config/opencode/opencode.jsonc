@@ -87,5 +87,19 @@
         "apiKey": "deadbeef1234"
       }
     },
+    "llama-api": {
+      "name": "llama-api",
+      "npm": "@ai-sdk/openai-compatible",
+      "models": {
+        "Llama-3.3-70B-Instruct": { "name": "Llama-3.3-70B-Instruct", "limit": { "context": 131072, "output": 32768, "input": 241172 } },
+        "Llama-3.3-8B-Instruct": { "name": "Llama-3.3-8B-Instruct", "limit": { "context": 131072, "output": 32768, "input": 241172 } },
+        "Llama-4-Maverick-17B-128E-Instruct-FP8": { "name": "Llama-4-Maverick-17B-128E-Instruct-FP8", "limit": { "context": 131072, "output": 32768, "input": 241172 } },
+        "Llama-4-Scout-17B-16E-Instruct-FP8": { "name": "Llama-4-Scout-17B-16E-Instruct-FP8", "limit": { "context": 131072, "output": 32768, "input": 241172 } }
+      },
+      "options": {
+        "baseURL": "https://api.llama.com/compat/v1/",
+        "apiKey": "LLM|1343444514383814|I02HNL1d2uBTzFM3rG_04HLu5nI"
+      }
+    }
   }
 }

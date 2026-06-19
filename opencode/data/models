@@ -31,3 +31,7 @@ zai-coding-plan/glm-4.6
 zai-coding-plan/glm-4.6v
 zai-coding-plan/glm-4.7
 zai-coding-plan/glm-4.7-flash
+llama-api/Llama-3.3-70B-Instruct
+llama-api/Llama-3.3-8B-Instruct
+llama-api/Llama-4-Maverick-17B-128E-Instruct-FP8
+llama-api/Llama-4-Scout-17B-16E-Instruct-FP8

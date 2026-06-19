@@ -13,7 +13,7 @@ CONTAINER=docker.io/vllm/vllm-openai:latest
 CONTAINER=docker.io/vllm/vllm-openai:cu130-nightly
 # CONTAINER=docker.io/vllm/vllm-openai:v0.21.0-cu129-ubuntu2404
 # CONTAINER=docker.io/vllm/vllm-openai:cu129-nightly
-# CONTAINER=docker.io/orthozany/vllm-qwen35-mtp
+# CONTAINER=docker.io/iphands/vllm-qwen35-mtp
 
 $RUNNER pull "$CONTAINER"
 PORT=8700
@@ -96,12 +96,13 @@ LLAMA_ARGS=(
 
   ## 3.6
   # --quantization modelopt # NOTE: Only use this on NVFP4
-  # --kv-cache-dtype fp8
+
   --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
   --speculative-config '{"method":"qwen3_5_mtp","num_speculative_tokens":2}'
   --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true}'
 
-  --additional-config '{"turboquant": true, "k_quant": "q8_0", "v_quant": "q5_0"}'
+  --kv-cache-dtype fp8
+  # --additional-config '{"turboquant": true, "k_quant": "q8_0", "v_quant": "q5_0"}'
 )
 
 echo
