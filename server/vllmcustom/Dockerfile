@@ -181,4 +181,10 @@ ENV VLLM_HOST_IP=0.0.0.0 \
     DO_NOT_TRACK=1
 
 EXPOSE 8799
-ENTRYPOINT ["python", "-m", "vllm.entrypoints.openai.api_server"]
+# Use `vllm serve`, NOT `python -m vllm.entrypoints.openai.api_server`. Only the
+# `vllm serve` CLI copies the positional model_tag onto the `model` field
+# (entrypoints/cli/serve.py); the bare api_server module does not. With the module
+# entrypoint, `model` stays at vLLM's default (Qwen/Qwen3-0.6B), so speculative
+# decoding builds its draft from that default instead of the served checkpoint —
+# breaking MTP with "Unsupported speculative method: 'mtp'".
+ENTRYPOINT ["vllm", "serve"]
