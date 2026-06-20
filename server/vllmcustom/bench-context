@@ -220,8 +220,8 @@ PY
 while read -r cfg_name nvfp4 spec; do
   [[ -z "${cfg_name:-}" ]] && continue
   watts=$(watts_now); [[ -z "$watts" ]] && watts="-"
-  nvfp4_env=""; [[ "$nvfp4" != "-" ]] && nvfp4_env="$nvfp4"
-  hdr="=== $cfg_name  (NVFP4=$nvfp4  MTP=$spec  GPU0 cap=${watts}W) ==="
+  nvfp4_env=""; nvfp4_disp="auto"; [[ "$nvfp4" != "-" ]] && nvfp4_env="$nvfp4" && nvfp4_disp="$nvfp4"
+  hdr="=== $cfg_name  (NVFP4=$nvfp4_disp  MTP=$spec  GPU0 cap=${watts}W) ==="
   echo; echo "$hdr" | tee -a "$RESULTS"
 
   stop_server
