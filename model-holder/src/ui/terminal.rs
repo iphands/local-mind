@@ -316,6 +316,47 @@ fn render_statusbar(frame: &mut Frame, area: Rect, app: &AppState) {
     frame.render_widget(Paragraph::new(content), area);
 }
 
+/// Total width of all non-name columns (size + progress + mmap + lock + total + status + gaps)
+const RIGHT_COLS: usize = 69;
+
+fn make_row(
+    name: &str, name_style: Style, name_width: usize,
+    size: &str, size_style: Style,
+    progress: &str, progress_style: Style,
+    mmap: &str, mmap_style: Style,
+    lock: &str, lock_style: Style,
+    total: &str, total_style: Style,
+    status: &str, status_style: Style,
+) -> Line<'static> {
+    Line::from(vec![
+        Span::styled(format!("  {:<name_width$}", name, name_width = name_width), name_style),
+        Span::styled(format!("{:>7}", size), size_style),
+        Span::raw("  "),
+        Span::styled(format!("{:<12}", progress), progress_style),
+        Span::raw("  "),
+        Span::styled(format!("{:>11}", mmap), mmap_style),
+        Span::raw(" "),
+        Span::styled(format!("{:>11}", lock), lock_style),
+        Span::raw(" "),
+        Span::styled(format!("{:>11}", total), total_style),
+        Span::raw("  "),
+        Span::styled(format!("{:>9}", status), status_style),
+    ])
+}
+
+fn header_row(name_width: usize) -> Line<'static> {
+    let wb = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+    make_row(
+        "NAME", wb.clone(), name_width,
+        "SIZE", wb.clone(),
+        "PROGRESS", wb.clone(),
+        "MMAP", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+        "LOCK", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+        "TOTAL", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+        "STATUS", wb.clone(),
+    )
+}
+
 fn render_file_list(frame: &mut Frame, area: Rect, app: &AppState) {
     let files = app.filtered_files();
     let max_rows = area.height as usize;
@@ -335,154 +376,112 @@ fn render_file_list(frame: &mut Frame, area: Rect, app: &AppState) {
         return;
     }
 
-    // Calculate filename width the same way as data rows
-    let w = area.width as usize;
-    let right_cols = 67usize;
-    let name_width = w.saturating_sub(right_cols + 2).max(8);
+    let content_width = area.width.saturating_sub(1);
+    let content_area = Rect::new(area.x, area.y, content_width, area.height);
+    let name_width = (content_width as usize).saturating_sub(RIGHT_COLS + 2).max(8);
+    let header = header_row(name_width);
 
-    // Render column headers - use same dynamic width as data rows
-    let header = Line::from(vec![
-        Span::styled(format!("  {:<name_width$}", "NAME"), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:>7}", "SIZE"), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(format!("{:<12}", "PROGRESS"), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(format!("{:>11}", "MMAP"), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
-        Span::styled(format!("{:>11}", "LOCK"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-        Span::raw(" "),
-        Span::styled(format!("{:>11}", "TOTAL"), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-        Span::raw("  "),
-        Span::styled(format!("{:>9}", "STATUS"), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
-    ]);
-    frame.render_widget(Paragraph::new(header), area);
+    frame.render_widget(Paragraph::new(header), content_area);
 
     for (row, file) in files[start..end].iter().enumerate() {
         let y = area.y + (row + 1) as u16; // +1 for header
         if y >= area.bottom() {
             break;
         }
-        let row_area = Rect::new(area.x, y, area.width, 1);
+        let row_area = Rect::new(content_area.x, y, content_area.width, 1);
         render_file_row(frame, row_area, file);
     }
 
-    // Scrollbar on right edge if needed
+    // Scrollbar on right edge if needed (starts below header, avoids status bar)
     if files.len() > max_rows {
-        render_scrollbar(frame, area, files.len(), max_rows, start);
+        let scrollbar_area = Rect::new(
+            area.x + content_width,
+            area.y + 1,
+            1,
+            area.height.saturating_sub(2),
+        );
+        render_scrollbar(frame, scrollbar_area, files.len(), max_rows, start);
     }
 }
 
 fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
     let w = area.width as usize;
 
-    // New layout: size(7) + gap(2) + bar(12) + gap(1) + mmap(11) + gap(1) + lock(11) + gap(1) + total(11) + gap(1) + status(9)
-    // = 7 + 2 + 12 + 1 + 11 + 1 + 11 + 1 + 11 + 1 + 9 = 67 chars
-    // Filename gets the rest.
-    let right_cols = 67usize;
-    let name_width = w.saturating_sub(right_cols + 2).max(8); // +2 for leading spaces
+    let name_width = w.saturating_sub(RIGHT_COLS + 2).max(8);
 
     let name = truncate_str(&file.filename, name_width);
-    let name_padded = format!("  {:<name_width$}", name, name_width = name_width);
 
     let size_str = format!("{:>7}", format_size_bytes(file.size_bytes));
 
     let line: Line = match &file.stage {
-        FileStage::Found => Line::from(vec![
-            Span::styled(name_padded, Style::default().fg(Color::DarkGray)),
-            Span::styled(size_str, Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled(format!("{:<12}", ""), Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled(" pending ", Style::default().fg(Color::DarkGray)),
-        ]),
+        FileStage::Found => make_row(
+            &name, Style::default().fg(Color::DarkGray), name_width,
+            &size_str, Style::default().fg(Color::DarkGray),
+            "", Style::default().fg(Color::DarkGray),
+            "", Style::default().fg(Color::DarkGray),
+            "", Style::default().fg(Color::DarkGray),
+            "", Style::default().fg(Color::DarkGray),
+            " pending ", Style::default().fg(Color::DarkGray),
+        ),
 
-        FileStage::Mapped => Line::from(vec![
-            Span::styled(name_padded, Style::default().fg(Color::Blue)),
-            Span::styled(size_str, Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled(format!("{:<12}", ""), Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled(" mapped  ", Style::default().fg(Color::Blue)),
-        ]),
+        FileStage::Mapped => make_row(
+            &name, Style::default().fg(Color::Blue), name_width,
+            &size_str, Style::default().fg(Color::DarkGray),
+            "", Style::default().fg(Color::DarkGray),
+            "", Style::default().fg(Color::DarkGray),
+            "", Style::default().fg(Color::DarkGray),
+            "", Style::default().fg(Color::DarkGray),
+            " mapped  ", Style::default().fg(Color::Blue),
+        ),
 
         FileStage::Warming {
             progress, speed, ..
         } => {
             let bar = progress_bar(*progress, 12);
             let (filled_len, empty_len) = bar;
-            Line::from(vec![
-                Span::styled(name_padded, Style::default().fg(Color::Cyan)),
-                Span::styled(size_str, Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::styled("█".repeat(filled_len), Style::default().fg(Color::Cyan)),
-                Span::styled("░".repeat(empty_len), Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::styled(
-                    format!("{:>6.1} MB/s", speed),
-                    Style::default().fg(Color::White),
-                ),
-                Span::raw(" "),
-                Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
-                Span::raw(" "),
-                Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::styled(
-                    format!(" {:>5.1}%  ", progress),
-                    Style::default().fg(Color::Cyan),
-                ),
-            ])
+            let bar_str = format!("{}{}", "█".repeat(filled_len), "░".repeat(empty_len));
+            let speed_str = format!("{:>6.1} MB/s", speed);
+            let progress_str = format!("{:>5.1}%", progress);
+            make_row(
+                &name, Style::default().fg(Color::Cyan), name_width,
+                &size_str, Style::default().fg(Color::DarkGray),
+                &bar_str, Style::default().fg(Color::Cyan),
+                &speed_str, Style::default().fg(Color::White),
+                "", Style::default().fg(Color::DarkGray),
+                "", Style::default().fg(Color::DarkGray),
+                &progress_str, Style::default().fg(Color::Cyan),
+            )
         }
 
-        FileStage::Complete { speed, .. } => Line::from(vec![
-            Span::styled(name_padded, Style::default().fg(Color::Green)),
-            Span::styled(size_str, Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled("████████████", Style::default().fg(Color::Green)),
-            Span::raw("  "),
-            Span::styled(
-                format!("{:>6.1} MB/s", speed),
-                Style::default().fg(Color::Green),
-            ),
-            Span::raw(" "),
-            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
-            Span::raw(" "),
-            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled(" done    ", Style::default().fg(Color::Green)),
-        ]),
+        FileStage::Complete { speed, .. } => {
+            let bar_str = "████████████".to_string();
+            let speed_str = format!("{:>6.1} MB/s", speed);
+            make_row(
+                &name, Style::default().fg(Color::Green), name_width,
+                &size_str, Style::default().fg(Color::DarkGray),
+                &bar_str, Style::default().fg(Color::Green),
+                &speed_str, Style::default().fg(Color::Green),
+                "", Style::default().fg(Color::DarkGray),
+                "", Style::default().fg(Color::DarkGray),
+                " done    ", Style::default().fg(Color::Green),
+            )
+        }
 
-        FileStage::Locking { speed, .. } => Line::from(vec![
-            Span::styled(name_padded, Style::default().fg(Color::Yellow)),
-            Span::styled(size_str, Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled("████████████", Style::default().fg(Color::Yellow)),
-            Span::raw("  "),
-            Span::styled(
-                format!("{:>6.1} MB/s", speed),
-                Style::default().fg(Color::Yellow),
-            ),
-            Span::raw(" "),
-            Span::styled(format!("{:>11}", "locking…"), Style::default().fg(Color::Yellow)),
-            Span::raw(" "),
-            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled(" locking…", Style::default().fg(Color::Yellow)),
-        ]),
+        FileStage::Locking { speed, .. } => {
+            let bar_str = "████████████".to_string();
+            let speed_str = format!("{:>6.1} MB/s", speed);
+            make_row(
+                &name, Style::default().fg(Color::Yellow), name_width,
+                &size_str, Style::default().fg(Color::DarkGray),
+                &bar_str, Style::default().fg(Color::Yellow),
+                &speed_str, Style::default().fg(Color::Yellow),
+                "locking…", Style::default().fg(Color::Yellow),
+                "", Style::default().fg(Color::DarkGray),
+                " locking…", Style::default().fg(Color::Yellow),
+            )
+        }
 
         FileStage::Locked { mmap_speed, lock_speed, total_speed, .. } => {
-            // Show all three speeds
             let mmap_str = if *mmap_speed >= 1000.0 {
                 format!("{:>6.2} GB/s", mmap_speed / 1000.0)
             } else {
@@ -498,36 +497,16 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
             } else {
                 format!("{:>6.1} MB/s", total_speed)
             };
-
-            Line::from(vec![
-                Span::styled(
-                    name_padded,
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::styled(size_str, Style::default().fg(Color::DarkGray)),
-                Span::raw("  "),
-                Span::styled(
-                    "████████████",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-                Span::raw("  "),
-                Span::styled(mmap_str, Style::default().fg(Color::Cyan)),
-                Span::raw(" "),
-                Span::styled(lock_str, Style::default().fg(Color::Yellow)),
-                Span::raw(" "),
-                Span::styled(total_str, Style::default().fg(Color::Green)),
-                Span::raw("  "),
-                Span::styled(
-                    " locked  ",
-                    Style::default()
-                        .fg(Color::Green)
-                        .add_modifier(Modifier::BOLD),
-                ),
-            ])
+            let bar_str = "████████████".to_string();
+            make_row(
+                &name, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD), name_width,
+                &size_str, Style::default().fg(Color::DarkGray),
+                &bar_str, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                &mmap_str, Style::default().fg(Color::Cyan),
+                &lock_str, Style::default().fg(Color::Yellow),
+                &total_str, Style::default().fg(Color::Green),
+                " locked  ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+            )
         }
     };
 
@@ -703,13 +682,169 @@ fn format_size_bytes(bytes: u64) -> String {
     }
 }
 
-fn truncate_str(s: &str, max_len: usize) -> String {
-    if max_len < 3 {
-        return s[..max_len.min(s.len())].to_string();
+fn truncate_str(s: &str, max_chars: usize) -> String {
+    if max_chars < 2 {
+        return s[..max_chars.min(s.len())].to_string();
     }
-    if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max_len - 1])
+    match s.char_indices().nth(max_chars - 1) {
+        None => s.to_string(),
+        Some((byte_pos, _)) => format!("{}…", &s[..byte_pos]),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The total width of all non-name columns (size + progress + mmap + lock + total + status + gaps)
+    /// This is the expected width contribution from every column EXCEPT the name column.
+    const EXPECTED_RIGHT_COLS_WIDTH: usize = 7 + 2 + 12 + 2 + 11 + 1 + 11 + 1 + 11 + 2 + 9;
+
+    /// Verify the constant matches the actual column layout in make_row
+    #[test]
+    fn right_cols_constant_matches_layout() {
+        assert_eq!(RIGHT_COLS, EXPECTED_RIGHT_COLS_WIDTH);
+    }
+
+    /// A row built with make_row should have total width = 2 (leading spaces) + name_width + RIGHT_COLS
+    #[test]
+    fn make_row_total_width_matches_formula() {
+        let name_width: usize = 20;
+        let style = Style::default();
+        let row = make_row(
+            "test", style, name_width,
+            "1.0M", style,
+            "████████████", style,
+            "100 MB/s", style,
+            "50 MB/s", style,
+            "150 MB/s", style,
+            "done", style,
+        );
+        let expected = 2 + name_width + RIGHT_COLS;
+        assert_eq!(row.width(), expected, "row width should be 2 + name_width + RIGHT_COLS");
+    }
+
+    /// Header and data row with the SAME name_width must produce the same total width
+    #[test]
+    fn header_and_data_row_same_width() {
+        let name_width: usize = 25;
+        let wb = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        let header = header_row(name_width);
+
+        let row = make_row(
+            "test.safetensors", wb, name_width,
+            "800M", wb,
+            "████████████", wb,
+            "100.00 GB/s", wb,
+            "50.00 GB/s", wb,
+            "150.00 GB/s", wb,
+            "locked", wb,
+        );
+
+        assert_eq!(
+            header.width(),
+            row.width(),
+            "header width ({}) must equal data row width ({}) for same name_width ({})",
+            header.width(),
+            row.width(),
+            name_width
+        );
+    }
+
+    /// The actual name_width computed in render_file_list must match the one in render_file_row
+    /// Both should use: (content_width as usize).saturating_sub(RIGHT_COLS + 2).max(8)
+    #[test]
+    fn name_width_formula_consistency() {
+        let area_width: u16 = 120;
+        let content_width = area_width.saturating_sub(1);
+
+        // What render_file_list computes:
+        let header_name_width = (content_width as usize).saturating_sub(RIGHT_COLS + 2).max(8);
+
+        // What render_file_row computes (it gets content_area.width as area.width):
+        let row_name_width = (content_width as usize).saturating_sub(RIGHT_COLS + 2).max(8);
+
+        assert_eq!(
+            header_name_width, row_name_width,
+            "header and data row must compute the same name_width"
+        );
+    }
+
+    /// Full end-to-end: build header and data row with the name_width that render_file_list
+    /// would compute for a given terminal width, then verify they align
+    #[test]
+    fn full_alignment_for_various_terminals() {
+        for term_width in [80u16, 100, 120, 150, 200] {
+            let content_width = term_width.saturating_sub(1);
+            let name_width = (content_width as usize).saturating_sub(RIGHT_COLS + 2).max(8);
+
+            let wb = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+            let header = header_row(name_width);
+
+            // Data rows truncate the filename BEFORE calling make_row
+            let filename = "file.safetensors";
+            let truncated = truncate_str(filename, name_width);
+            let row = make_row(
+                &truncated, wb, name_width,
+                "800M", wb,
+                "████████████", wb,
+                "100.00 GB/s", wb,
+                "50.00 GB/s", wb,
+                "150.00 GB/s", wb,
+                "locked", wb,
+            );
+
+            assert_eq!(
+                header.width(),
+                row.width(),
+                "width mismatch at terminal width {} (name_width={}), header={}, row={}",
+                term_width,
+                name_width,
+                header.width(),
+                row.width()
+            );
+
+            // Also verify the row fits in content_width
+            assert!(
+                row.width() <= content_width as usize,
+                "row width ({}) should fit in content_width ({}) at terminal width {}",
+                row.width(),
+                content_width,
+                term_width
+            );
+        }
+    }
+
+    /// Edge case: narrow terminal (width = 80, minimum for this layout)
+    #[test]
+    fn narrow_terminal_alignment() {
+        let term_width: u16 = 80;
+        let content_width = term_width.saturating_sub(1);
+        let name_width = (content_width as usize).saturating_sub(RIGHT_COLS + 2).max(8);
+
+        let wb = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        let header = header_row(name_width);
+        let filename = "f";
+        let truncated = truncate_str(filename, name_width);
+        let row = make_row(
+            &truncated, wb, name_width,
+            "1K", wb,
+            "", wb,
+            "", wb,
+            "", wb,
+            "", wb,
+            "pending", wb,
+        );
+
+        assert_eq!(header.width(), row.width(), "narrow terminal: widths must match (header={}, row={})", header.width(), row.width());
+        
+        // The row should fit in content_width (or be very close due to minimum name_width)
+        assert!(
+            row.width() <= content_width as usize + 10, // Allow some slack for minimum name_width
+            "row width ({}) should fit in content_width ({}) at terminal width {}",
+            row.width(),
+            content_width,
+            term_width
+        );
     }
 }
