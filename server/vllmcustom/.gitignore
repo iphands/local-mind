@@ -3,3 +3,4 @@ bench-logs/
 bench-results.md
 bench-results.jsonl
 bench-wrapper-results.md
+bench-context-results.md

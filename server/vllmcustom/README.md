@@ -10,6 +10,7 @@ images: PyTorch, FlashInfer, and vLLM are all compiled from source for
 | `./run`  | serve a model with the local image (GPU 0 only), OpenAI API on `:8700` |
 | `./bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench-results.md` |
 | `./bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
+| `./bench-context`| large-context decode test: per backend, multi-turn convo + padded probes (8k–128k), TG-vs-depth |
 | `./push` | `docker push` to `docker.io/iphands/vllm-blackwell` |
 
 ## Quick start
@@ -118,6 +119,33 @@ long; trim via the `CONFIGS` env. Example:
 ./bench-wrapper /mnt/noir/scratch/ai/llm/models/vllm/Qwen3.5-122B-A10B-NVFP4
 RUNS=3 ./bench-wrapper            # 3 measured runs/config, median TG
 ```
+
+**Large-context decode (`./bench-context`):** `bench-wrapper` only exercises ~1k
+context, so it shows best-case decode. `bench-context` characterizes **TG vs. context
+depth** — the number that actually drops as the KV cache fills — two ways, per backend:
+- **convo**: a multi-turn port-chain (prime sieve in Bash → Python → JS → Rust → …)
+  that resends history each turn so context grows naturally (and exercises prefix
+  caching). Runs until `CONVO_TARGET` tokens or `CONVO_MAXTURNS`.
+- **pad**: prompts padded to exact `PAD_SIZES` (default `8192 32768 65536 131072`),
+  short generation — a clean, repeatable decode-vs-context curve to compare backends at
+  the same depth.
+
+```bash
+./bench-context                                   # default matrix; convo target + pad top = 131072 (128k)
+CONVO_MAXTURNS=120 ./bench-context                # let the convo actually approach 128k (slow)
+PAD_SIZES="8192 32768" CONFIGS=$'cutlass cutlass 2' ./bench-context   # quick single-backend
+```
+
+Defaults: `CONVO_TARGET=131072`, `PAD_SIZES="8192 32768 65536 131072"`. Note the convo
+stops at `CONVO_TARGET` **or** `CONVO_MAXTURNS` (default 24) — whichever first — so by
+default the convo reaches ~25–30k (24 turns) and the **pad** mode is what hits the true
+128k decode point. Raise `CONVO_MAXTURNS` to push the conversation deeper (much slower).
+
+Rows land in `bench-context-results.md` (tables) and `bench-results.jsonl` (with
+`mode=convo|pad`, `context_tokens`, and the watt cap). Caveats: **MTP can crash at long
+context** (a failed turn is recorded and the run continues — use a `mtp0` row for a
+clean curve); reaching 128k via `pad` needs the KV cache to fit in VRAM (an OOM probe
+is recorded, not fatal); and in `convo` mode read **TG**, not TTFT (prefix caching).
 
 ### Host tuning (outside the container)
 - `sudo nvidia-smi -pm 1` then set max power limit (`sudo nvidia-smi -pl <max>`).

@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# Large-context decode benchmark: how TG (token-gen tok/s) degrades as the KV cache
+# fills, measured two ways, across the NVFP4 backend matrix.
+#
+#   ./bench-context                                   # default model below, full matrix
+#   ./bench-context /path/to/model
+#   CONVO_TARGET=16384 ./bench-context                # shorter conversation (faster)
+#   CONVO_MAXTURNS=120 ./bench-context                # let convo actually approach 128k (slow!)
+#   PAD_SIZES="8192 32768" CONFIGS=$'cutlass cutlass 2' ./bench-context   # quick
+#
+# Two modes per backend (one vLLM launch each):
+#   convo : multi-turn port-chain (Bash -> Python -> JS -> ...), history resent each
+#           turn so context grows; realistic, exercises prefix caching. Runs until
+#           CONVO_TARGET tokens or CONVO_MAXTURNS.
+#   pad   : prompt padded to exact PAD_SIZES (8k/32k/64k/128k), short generation,
+#           clean decode-vs-context curve comparable across backends.
+#
+# Primary metric is TG at depth. TTFT/prefill are secondary (prefix caching keeps
+# convo TTFT low). Each measurement records the ACTUAL context depth (prompt_tokens)
+# and the GPU0 watt cap. Outputs: printed tables (+ bench-context-results.md) and
+# rows appended to the shared bench-results.jsonl.
+set -uo pipefail   # NOT -e: survive a failing config/turn and keep going
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+MODEL=${1:-/mnt/noir/scratch/ai/llm/models/vllm/Qwen3.5-122B-A10B-NVFP4}
+MODELBASE=$(basename "$MODEL")
+NAME=vllm                                    # must match ./run's container --name
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+APIMODEL=${APIMODEL:-cosmo-6000}
+READY_TIMEOUT=${READY_TIMEOUT:-1200}
+
+PAD_SIZES=${PAD_SIZES:-"8192 32768 65536 131072"}
+CONVO_TARGET=${CONVO_TARGET:-131072}         # stop convo once context >= this (capped by CONVO_MAXTURNS)
+CONVO_MAXTURNS=${CONVO_MAXTURNS:-24}         # safety cap on convo turns
+GEN_CONVO=${GEN_CONVO:-1024}                 # tokens generated per convo turn
+GEN_PAD=${GEN_PAD:-256}                       # tokens generated per pad probe
+
+LOGDIR=${LOGDIR:-$HERE/bench-logs}
+RESULTS=${RESULTS:-$HERE/bench-context-results.md}
+JSONL=${JSONL:-$HERE/bench-results.jsonl}
+mkdir -p "$LOGDIR"
+
+# Backend matrix: "<name> <NVFP4_BACKEND|-> <SPEC_TOKENS>". '-'=auto, SPEC 0=MTP off.
+# NOTE: MTP can crash at long context (illegal mem access) — add an mtp0 row for a
+# clean decode curve if a backend dies mid-convo.
+DEFAULT_CONFIGS="\
+cutlass-mtp2  cutlass          2
+cudnn-mtp2    flashinfer-cudnn 2
+marlin-mtp2   marlin           2"
+CONFIGS=${CONFIGS:-$DEFAULT_CONFIGS}
+
+source "$HERE/_bench-lib.sh"   # stop_server, wait_ready (uses NAME/HOST/READY_TIMEOUT)
+
+# --- context benchmark (one process drives the whole conversation + pads) ------
+CTX="$LOGDIR/_ctxbench.py"
+cat > "$CTX" <<'PY'
+import sys, json, time, argparse, subprocess, urllib.request
+from datetime import datetime, timezone
+
+def read_watts():
+    try:
+        out = subprocess.run(["nvidia-smi", "--query-gpu=power.limit",
+                              "--format=csv,noheader,nounits", "-i", "0"],
+                             capture_output=True, text=True, timeout=10)
+        return int(round(float(out.stdout.strip().splitlines()[0])))
+    except Exception:
+        return None
+
+ap = argparse.ArgumentParser()
+ap.add_argument("host"); ap.add_argument("api_model")
+ap.add_argument("--jsonl"); ap.add_argument("--config", default="")
+ap.add_argument("--nvfp4", default=""); ap.add_argument("--mtp", default="")
+ap.add_argument("--model-name", default="")
+ap.add_argument("--pad-sizes", default="8192 32768 65536 131072")
+ap.add_argument("--convo-target", type=int, default=32768)
+ap.add_argument("--convo-maxturns", type=int, default=24)
+ap.add_argument("--gen-convo", type=int, default=1024)
+ap.add_argument("--gen-pad", type=int, default=256)
+a = ap.parse_args()
+WATTS = read_watts()
+
+def append_jsonl(rec):
+    if not a.jsonl:
+        return
+    rec = {"ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+           "config": a.config, "nvfp4_backend": a.nvfp4 or "auto", "mtp": a.mtp,
+           "watts_cap": WATTS, "model": a.model_name, **rec}
+    with open(a.jsonl, "a") as f:
+        f.write(json.dumps(rec) + "\n")
+
+def stream_chat(messages, max_tokens):
+    """Return (ttft_s, total_s, prompt_tokens, completion_tokens, content)."""
+    body = json.dumps({"model": a.api_model, "messages": messages,
+                       "max_tokens": max_tokens, "temperature": 0.6, "stream": True,
+                       "stream_options": {"include_usage": True}}).encode()
+    req = urllib.request.Request(f"http://{a.host}/v1/chat/completions",
+                                 data=body, headers={"Content-Type": "application/json"})
+    start = time.perf_counter(); ttft = None; ptok = ctok = None; parts = []
+    with urllib.request.urlopen(req, timeout=1800) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            d = line[5:].strip()
+            if d == "[DONE]":
+                break
+            ch = json.loads(d)
+            ch_choices = ch.get("choices")
+            if ch_choices:
+                delta = ch_choices[0].get("delta", {}).get("content")
+                if delta:
+                    if ttft is None:
+                        ttft = time.perf_counter() - start
+                    parts.append(delta)
+            if ch.get("usage"):
+                ptok = ch["usage"].get("prompt_tokens")
+                ctok = ch["usage"].get("completion_tokens")
+    total = time.perf_counter() - start
+    if not ctok:
+        raise RuntimeError("no-usage-reported")
+    return (ttft or 0.0), total, ptok, ctok, "".join(parts)
+
+def metrics(ttft, total, ptok, ctok):
+    gen_time = max(total - ttft, 1e-6)
+    prefill = (ptok / ttft) if (ttft > 0 and ptok) else 0.0
+    return round(ttft*1000, 1), round(prefill, 1), round(ctok/gen_time, 2)
+
+SEED = ("Write a Sieve of Eratosthenes that finds all primes up to 10,000,000 in Bash. "
+        "Include comments explaining each step.")
+TRANSFORMS = [
+    "Port that program to Python.", "Now port it to JavaScript (Node.js).",
+    "Now port it to Rust.", "Now port it to Go.", "Now port it to C.",
+    "Now port it to C++ with extensive comments.", "Now port it to Java.",
+    "Now port it to Haskell.",
+    "Add detailed inline comments, a complexity analysis, and unit tests to the previous version.",
+]
+
+# ---- convo mode ----
+print(f"  [convo] target>={a.convo_target} tok, max {a.convo_maxturns} turns, gen {a.gen_convo}/turn")
+print(f"    {'TURN':<5}{'CTX(tok)':>10}{'GEN(tok)':>10}{'TTFT(ms)':>10}{'prefill':>10}{'TG(t/s)':>10}")
+messages = []
+for turn in range(a.convo_maxturns):
+    prompt = SEED if turn == 0 else TRANSFORMS[(turn - 1) % len(TRANSFORMS)]
+    messages.append({"role": "user", "content": prompt})
+    try:
+        ttft, total, ptok, ctok, content = stream_chat(messages, a.gen_convo)
+    except Exception as e:
+        print(f"    turn {turn} FAILED: {e}")
+        append_jsonl({"mode": "convo", "turn": turn, "status": "error", "error": str(e)})
+        break
+    messages.append({"role": "assistant", "content": content})
+    ttft_ms, prefill, tg = metrics(ttft, total, ptok, ctok)
+    print(f"    {turn:<5}{ptok:>10}{ctok:>10}{ttft_ms:>10}{prefill:>10}{tg:>10}")
+    append_jsonl({"mode": "convo", "turn": turn, "context_tokens": ptok,
+                  "status": "ok", "ttft_ms": ttft_ms, "prefill_tps": prefill,
+                  "tg_tps": tg, "prompt_tokens": ptok, "completion_tokens": ctok})
+    if ptok >= a.convo_target:
+        print(f"    reached target ({ptok} >= {a.convo_target}); stopping convo")
+        break
+
+# ---- pad mode ----
+print(f"  [pad] sizes={a.pad_sizes} gen {a.gen_pad}/probe")
+print(f"    {'TARGET':>8}{'CTX(tok)':>10}{'GEN(tok)':>10}{'TTFT(ms)':>10}{'prefill':>10}{'TG(t/s)':>10}")
+PHRASE = "the quick brown fox jumps over the lazy dog. "   # ~10 tokens/phrase
+for size in [int(s) for s in a.pad_sizes.split()]:
+    reps = max(1, size // 10)
+    # size-unique leading marker so prefix caching can't serve one size from another
+    filler = f"[pad-{size}] " + (PHRASE * reps)
+    msgs = [{"role": "user", "content": filler +
+             "\n\nIgnore the text above. In exactly one word, what is two plus two?"}]
+    try:
+        ttft, total, ptok, ctok, _ = stream_chat(msgs, a.gen_pad)
+    except Exception as e:
+        print(f"    {size:>8}  FAILED: {e}")
+        append_jsonl({"mode": "pad", "target_tokens": size, "status": "error", "error": str(e)})
+        continue
+    ttft_ms, prefill, tg = metrics(ttft, total, ptok, ctok)
+    print(f"    {size:>8}{ptok:>10}{ctok:>10}{ttft_ms:>10}{prefill:>10}{tg:>10}")
+    append_jsonl({"mode": "pad", "target_tokens": size, "context_tokens": ptok,
+                  "status": "ok", "ttft_ms": ttft_ms, "prefill_tps": prefill,
+                  "tg_tps": tg, "prompt_tokens": ptok, "completion_tokens": ctok})
+PY
+
+watts_now() { python3 - <<'PY'
+import subprocess
+try:
+    o=subprocess.run(["nvidia-smi","--query-gpu=power.limit","--format=csv,noheader,nounits","-i","0"],
+                     capture_output=True,text=True,timeout=10)
+    print(int(round(float(o.stdout.strip().splitlines()[0]))))
+except Exception:
+    print("-")
+PY
+}
+
+{
+  echo "## bench-context  model=$MODELBASE  pad=[$PAD_SIZES]  convo_target=$CONVO_TARGET"
+  echo "## $(date -u +'%Y-%m-%d %H:%M UTC')"
+} | tee -a "$RESULTS"
+
+while read -r cfg_name nvfp4 spec; do
+  [[ -z "${cfg_name:-}" ]] && continue
+  watts=$(watts_now); [[ -z "$watts" ]] && watts="-"
+  nvfp4_env=""; [[ "$nvfp4" != "-" ]] && nvfp4_env="$nvfp4"
+  hdr="=== $cfg_name  (NVFP4=$nvfp4  MTP=$spec  GPU0 cap=${watts}W) ==="
+  echo; echo "$hdr" | tee -a "$RESULTS"
+
+  stop_server
+  start_log="$LOGDIR/start-ctx-$cfg_name.log"
+  echo "    launching vLLM ..."
+  DETACH=1 PORT="$PORT" NVFP4_BACKEND="$nvfp4_env" SPEC_TOKENS="$spec" \
+    "$HERE/run" "$MODEL" > "$start_log" 2>&1
+
+  if ! wait_ready; then
+    echo "    NOT READY -> see $start_log" | tee -a "$RESULTS"
+    docker logs "$NAME" > "$LOGDIR/crash-ctx-$cfg_name.log" 2>&1 || true
+    stop_server; continue
+  fi
+  echo "    ready. running convo + pad ..."
+  python3 "$CTX" "$HOST" "$APIMODEL" \
+    --jsonl "$JSONL" --config "$cfg_name" --nvfp4 "$nvfp4_env" --mtp "$spec" \
+    --model-name "$MODELBASE" --pad-sizes "$PAD_SIZES" --convo-target "$CONVO_TARGET" \
+    --convo-maxturns "$CONVO_MAXTURNS" --gen-convo "$GEN_CONVO" --gen-pad "$GEN_PAD" \
+    2>&1 | tee -a "$RESULTS"
+  stop_server
+done <<< "$CONFIGS"
+
+echo
+echo "## tables -> $RESULTS    per-measurement jsonl -> $JSONL"
