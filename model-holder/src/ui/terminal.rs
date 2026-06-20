@@ -413,6 +413,15 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
 
     let size_str = format!("{:>7}", format_size_bytes(file.size_bytes));
 
+    /// Format speed for display: use GB/s if >= 1000 MB/s, otherwise MB/s
+    fn format_speed(speed: f64) -> String {
+        if speed >= 1000.0 {
+            format!("{:>6.2} GB/s", speed / 1000.0)
+        } else {
+            format!("{:>6.1} MB/s", speed)
+        }
+    }
+
     let line: Line = match &file.stage {
         FileStage::Found => make_row(
             &name, Style::default().fg(Color::DarkGray), name_width,
@@ -440,11 +449,7 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
             let bar = progress_bar(*progress, 12);
             let (filled_len, empty_len) = bar;
             let bar_str = format!("{}{}", "█".repeat(filled_len), "░".repeat(empty_len));
-            let speed_str = if *speed >= 1000.0 {
-                format!("{:>6.2} GB/s", speed / 1000.0)
-            } else {
-                format!("{:>6.1} MB/s", speed)
-            };
+            let speed_str = format_speed(*speed);
             let progress_str = format!("{:>5.1}%", progress);
             make_row(
                 &name, Style::default().fg(Color::Cyan), name_width,
@@ -459,11 +464,7 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
 
         FileStage::Complete { speed, .. } => {
             let bar_str = "████████████".to_string();
-            let speed_str = if *speed >= 1000.0 {
-                format!("{:>6.2} GB/s", speed / 1000.0)
-            } else {
-                format!("{:>6.1} MB/s", speed)
-            };
+            let speed_str = format_speed(*speed);
             make_row(
                 &name, Style::default().fg(Color::Green), name_width,
                 &size_str, Style::default().fg(Color::DarkGray),
@@ -477,11 +478,7 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
 
         FileStage::Locking { speed, .. } => {
             let bar_str = "████████████".to_string();
-            let speed_str = if *speed >= 1000.0 {
-                format!("{:>6.2} GB/s", speed / 1000.0)
-            } else {
-                format!("{:>6.1} MB/s", speed)
-            };
+            let speed_str = format_speed(*speed);
             make_row(
                 &name, Style::default().fg(Color::Yellow), name_width,
                 &size_str, Style::default().fg(Color::DarkGray),
@@ -494,21 +491,9 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
         }
 
         FileStage::Locked { mmap_speed, lock_speed, total_speed, .. } => {
-            let mmap_str = if *mmap_speed >= 1000.0 {
-                format!("{:>6.2} GB/s", mmap_speed / 1000.0)
-            } else {
-                format!("{:>6.1} MB/s", mmap_speed)
-            };
-            let lock_str = if *lock_speed >= 1000.0 {
-                format!("{:>6.2} GB/s", lock_speed / 1000.0)
-            } else {
-                format!("{:>6.1} MB/s", lock_speed)
-            };
-            let total_str = if *total_speed >= 1000.0 {
-                format!("{:>6.2} GB/s", total_speed / 1000.0)
-            } else {
-                format!("{:>6.1} MB/s", total_speed)
-            };
+            let mmap_str = format_speed(*mmap_speed);
+            let lock_str = format_speed(*lock_speed);
+            let total_str = format_speed(*total_speed);
             let bar_str = "████████████".to_string();
             make_row(
                 &name, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD), name_width,
