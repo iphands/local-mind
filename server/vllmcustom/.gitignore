@@ -1,4 +1,6 @@
 vendor
+data/
+__pycache__/
 bench-logs/
 bench-results.md
 bench-results.jsonl

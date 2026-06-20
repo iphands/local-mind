@@ -2,16 +2,16 @@
 # Large-context decode benchmark: how TG (token-gen tok/s) degrades as the KV cache
 # fills, measured two ways, across the NVFP4 backend matrix.
 #
-#   ./bench-context                                   # default model below, full matrix
+#   ./bench-context                                   # ALL permutations (see DEFAULT_CONFIGS): long!
 #   ./bench-context /path/to/model
-#   CONVO_TARGET=16384 ./bench-context                # shorter conversation (faster)
-#   CONVO_MAXTURNS=120 ./bench-context                # let convo actually approach 128k (slow!)
-#   PAD_SIZES="8192 32768" CONFIGS=$'cutlass cutlass 2' ./bench-context   # quick
+#   PAD_SIZES="8192 32768" CONFIGS=$'cutlass cutlass 2' ./bench-context   # quick subset
 #
 # Two modes per backend (one vLLM launch each):
-#   convo : multi-turn port-chain (Bash -> Python -> JS -> ...), history resent each
-#           turn so context grows; realistic, exercises prefix caching. Runs until
-#           CONVO_TARGET tokens or CONVO_MAXTURNS.
+#   convo : 3-turn conversation -- (1) Bash primes (dynamic), (2) port to Python
+#           (dynamic), (3) static "summarize this Quake II source" turn loaded from
+#           data/test-convo.json (run ./make-test-convo first). Turn 3 injects ~120k
+#           tokens of real C source, so it measures decode at ~128k inside a realistic
+#           chat (history resent each turn -> exercises prefix caching).
 #   pad   : prompt padded to exact PAD_SIZES (8k/32k/64k/128k), short generation,
 #           clean decode-vs-context curve comparable across backends.
 #
@@ -31,9 +31,9 @@ APIMODEL=${APIMODEL:-cosmo-6000}
 READY_TIMEOUT=${READY_TIMEOUT:-1200}
 
 PAD_SIZES=${PAD_SIZES:-"8192 32768 65536 131072"}
-CONVO_TARGET=${CONVO_TARGET:-131072}         # stop convo once context >= this (capped by CONVO_MAXTURNS)
-CONVO_MAXTURNS=${CONVO_MAXTURNS:-24}         # safety cap on convo turns
-GEN_CONVO=${GEN_CONVO:-1024}                 # tokens generated per convo turn
+TESTCONVO=${TESTCONVO:-$HERE/data/test-convo.json}   # static quake2 turn (./make-test-convo)
+GEN_CONVO=${GEN_CONVO:-1024}                 # tokens generated for the dynamic convo turns
+GEN_SUMMARY=${GEN_SUMMARY:-512}              # tokens generated for the big quake2 summarize turn
 GEN_PAD=${GEN_PAD:-256}                       # tokens generated per pad probe
 
 LOGDIR=${LOGDIR:-$HERE/bench-logs}
@@ -42,11 +42,22 @@ JSONL=${JSONL:-$HERE/bench-results.jsonl}
 mkdir -p "$LOGDIR"
 
 # Backend matrix: "<name> <NVFP4_BACKEND|-> <SPEC_TOKENS>". '-'=auto, SPEC 0=MTP off.
-# NOTE: MTP can crash at long context (illegal mem access) — add an mtp0 row for a
-# clean decode curve if a backend dies mid-convo.
+# DEFAULT = ALL permutations: {auto, cutlass, flashinfer-cudnn, marlin} x MTP {0,1,2}
+# = 12 configs. This is LONG (each = full 122B reload + ~128k convo + pad to 128k);
+# trim with CONFIGS=... for a faster pass. MTP can crash at long context (illegal mem
+# access) — the mtp0 rows give a clean number if an mtpN config dies mid-convo.
 DEFAULT_CONFIGS="\
+auto-mtp0     -                0
+auto-mtp1     -                1
+auto-mtp2     -                2
+cutlass-mtp0  cutlass          0
+cutlass-mtp1  cutlass          1
 cutlass-mtp2  cutlass          2
+cudnn-mtp0    flashinfer-cudnn 0
+cudnn-mtp1    flashinfer-cudnn 1
 cudnn-mtp2    flashinfer-cudnn 2
+marlin-mtp0   marlin           0
+marlin-mtp1   marlin           1
 marlin-mtp2   marlin           2"
 CONFIGS=${CONFIGS:-$DEFAULT_CONFIGS}
 
@@ -73,9 +84,9 @@ ap.add_argument("--jsonl"); ap.add_argument("--config", default="")
 ap.add_argument("--nvfp4", default=""); ap.add_argument("--mtp", default="")
 ap.add_argument("--model-name", default="")
 ap.add_argument("--pad-sizes", default="8192 32768 65536 131072")
-ap.add_argument("--convo-target", type=int, default=32768)
-ap.add_argument("--convo-maxturns", type=int, default=24)
+ap.add_argument("--testconvo", default="")     # data/test-convo.json (static quake2 turn)
 ap.add_argument("--gen-convo", type=int, default=1024)
+ap.add_argument("--gen-summary", type=int, default=512)
 ap.add_argument("--gen-pad", type=int, default=256)
 a = ap.parse_args()
 WATTS = read_watts()
@@ -128,36 +139,44 @@ def metrics(ttft, total, ptok, ctok):
 
 SEED = ("Write a Sieve of Eratosthenes that finds all primes up to 10,000,000 in Bash. "
         "Include comments explaining each step.")
-TRANSFORMS = [
-    "Port that program to Python.", "Now port it to JavaScript (Node.js).",
-    "Now port it to Rust.", "Now port it to Go.", "Now port it to C.",
-    "Now port it to C++ with extensive comments.", "Now port it to Java.",
-    "Now port it to Haskell.",
-    "Add detailed inline comments, a complexity analysis, and unit tests to the previous version.",
-]
+PORT = "Port that program to Python."
+
+# Fixed 3-turn flow: primes (dynamic) -> python (dynamic) -> quake2 (static big turn).
+# turn = (label, [user messages to append], gen_tokens). quake2 messages come from the
+# generated test-convo.json; if absent, that turn is skipped (non-fatal).
+turns = [("primes", [{"role": "user", "content": SEED}], a.gen_convo),
+         ("python", [{"role": "user", "content": PORT}], a.gen_convo)]
+if a.testconvo:
+    try:
+        with open(a.testconvo) as f:
+            tc = json.load(f)
+        turns.append(("quake2", tc["messages"], a.gen_summary))
+    except FileNotFoundError:
+        print(f"  [convo] {a.testconvo} not found -- run ./make-test-convo first; "
+              f"skipping the quake2 turn")
+    except Exception as e:
+        print(f"  [convo] failed to load {a.testconvo}: {e}; skipping quake2 turn")
 
 # ---- convo mode ----
-print(f"  [convo] target>={a.convo_target} tok, max {a.convo_maxturns} turns, gen {a.gen_convo}/turn")
-print(f"    {'TURN':<5}{'CTX(tok)':>10}{'GEN(tok)':>10}{'TTFT(ms)':>10}{'prefill':>10}{'TG(t/s)':>10}")
+print(f"  [convo] primes/python (gen {a.gen_convo}) -> quake2 (gen {a.gen_summary})")
+print(f"    {'TURN':<8}{'CTX(tok)':>10}{'GEN(tok)':>10}{'TTFT(ms)':>10}{'prefill':>10}{'TG(t/s)':>10}")
 messages = []
-for turn in range(a.convo_maxturns):
-    prompt = SEED if turn == 0 else TRANSFORMS[(turn - 1) % len(TRANSFORMS)]
-    messages.append({"role": "user", "content": prompt})
+for idx, (label, user_msgs, gen) in enumerate(turns):
+    messages.extend(user_msgs)
     try:
-        ttft, total, ptok, ctok, content = stream_chat(messages, a.gen_convo)
+        ttft, total, ptok, ctok, content = stream_chat(messages, gen)
     except Exception as e:
-        print(f"    turn {turn} FAILED: {e}")
-        append_jsonl({"mode": "convo", "turn": turn, "status": "error", "error": str(e)})
+        print(f"    {label:<8} FAILED: {e}")
+        append_jsonl({"mode": "convo", "turn": idx, "turn_label": label,
+                      "status": "error", "error": str(e)})
         break
     messages.append({"role": "assistant", "content": content})
     ttft_ms, prefill, tg = metrics(ttft, total, ptok, ctok)
-    print(f"    {turn:<5}{ptok:>10}{ctok:>10}{ttft_ms:>10}{prefill:>10}{tg:>10}")
-    append_jsonl({"mode": "convo", "turn": turn, "context_tokens": ptok,
-                  "status": "ok", "ttft_ms": ttft_ms, "prefill_tps": prefill,
-                  "tg_tps": tg, "prompt_tokens": ptok, "completion_tokens": ctok})
-    if ptok >= a.convo_target:
-        print(f"    reached target ({ptok} >= {a.convo_target}); stopping convo")
-        break
+    print(f"    {label:<8}{ptok:>10}{ctok:>10}{ttft_ms:>10}{prefill:>10}{tg:>10}")
+    append_jsonl({"mode": "convo", "turn": idx, "turn_label": label,
+                  "context_tokens": ptok, "status": "ok", "ttft_ms": ttft_ms,
+                  "prefill_tps": prefill, "tg_tps": tg,
+                  "prompt_tokens": ptok, "completion_tokens": ctok})
 
 # ---- pad mode ----
 print(f"  [pad] sizes={a.pad_sizes} gen {a.gen_pad}/probe")
@@ -194,7 +213,7 @@ PY
 }
 
 {
-  echo "## bench-context  model=$MODELBASE  pad=[$PAD_SIZES]  convo_target=$CONVO_TARGET"
+  echo "## bench-context  model=$MODELBASE  pad=[$PAD_SIZES]  testconvo=$(basename "$TESTCONVO")"
   echo "## $(date -u +'%Y-%m-%d %H:%M UTC')"
 } | tee -a "$RESULTS"
 
@@ -219,8 +238,8 @@ while read -r cfg_name nvfp4 spec; do
   echo "    ready. running convo + pad ..."
   python3 "$CTX" "$HOST" "$APIMODEL" \
     --jsonl "$JSONL" --config "$cfg_name" --nvfp4 "$nvfp4_env" --mtp "$spec" \
-    --model-name "$MODELBASE" --pad-sizes "$PAD_SIZES" --convo-target "$CONVO_TARGET" \
-    --convo-maxturns "$CONVO_MAXTURNS" --gen-convo "$GEN_CONVO" --gen-pad "$GEN_PAD" \
+    --model-name "$MODELBASE" --pad-sizes "$PAD_SIZES" --testconvo "$TESTCONVO" \
+    --gen-convo "$GEN_CONVO" --gen-summary "$GEN_SUMMARY" --gen-pad "$GEN_PAD" \
     2>&1 | tee -a "$RESULTS"
   stop_server
 done <<< "$CONFIGS"

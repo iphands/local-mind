@@ -1,0 +1,98 @@
+#!/usr/bin/env python3
+"""Build a static large-context conversation turn from Yamagi Quake II C source.
+
+Walks curated yquake2 subsystems in deterministic order, concatenating *.c/*.h until
+a token budget is reached, wraps them in a single "summarize this engine" user
+message, and saves it to data/test-convo.json. bench-context tacks this on as the
+static 3rd turn (primes -> python -> quake2) to reach ~128k context in one turn.
+
+    ./make-test-convo                          # ~120k-token default
+    QUAKE_TOKEN_BUDGET=64000 ./make-test-convo
+    SUBSYS="src/server src/common" ./make-test-convo
+
+Regenerable from vendor/yquake2 (gitignored); the output is gitignored too.
+"""
+import json
+import os
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+YQUAKE_DIR = Path(os.environ.get("YQUAKE_DIR", HERE / "vendor" / "yquake2"))
+SUBSYS = os.environ.get("SUBSYS", "src/common src/server src/game").split()
+BUDGET_TOKENS = int(os.environ.get("QUAKE_TOKEN_BUDGET", "120000"))
+CHARS_PER_TOKEN = float(os.environ.get("CHARS_PER_TOKEN", "3.6"))  # rough, for C code
+OUT = Path(os.environ.get("OUT", HERE / "data" / "test-convo.json"))
+
+INTRO = (
+    "I'm studying the Yamagi Quake II engine (a modern fork of id Software's "
+    "Quake II). Below is the C source for several subsystems. Please summarize what "
+    "each file does and how the subsystems fit together, then call out the most "
+    "important data structures and entry points.\n\n"
+)
+
+
+def collect():
+    budget_chars = int(BUDGET_TOKENS * CHARS_PER_TOKEN)
+    if not YQUAKE_DIR.is_dir():
+        sys.exit(f"yquake2 source not found at {YQUAKE_DIR} (set YQUAKE_DIR=)")
+    chunks, files, total = [], [], 0
+    for sub in SUBSYS:
+        root = YQUAKE_DIR / sub
+        if not root.is_dir():
+            print(f"  WARN: subsystem not found, skipping: {sub}", file=sys.stderr)
+            continue
+        # deterministic order: sorted relative paths
+        for p in sorted(root.rglob("*")):
+            if p.suffix not in (".c", ".h") or not p.is_file():
+                continue
+            if total >= budget_chars:
+                break
+            try:
+                text = p.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                print(f"  WARN: skip {p}: {e}", file=sys.stderr)
+                continue
+            rel = p.relative_to(YQUAKE_DIR).as_posix()
+            chunk = f"\n// ===== FILE: {rel} =====\n{text}"
+            chunks.append(chunk)
+            files.append(rel)
+            total += len(chunk)
+        if total >= budget_chars:
+            break
+    return chunks, files, total
+
+
+def main():
+    chunks, files, total_chars = collect()
+    if not files:
+        sys.exit("no source files collected")
+    content = INTRO + "```c\n" + "".join(chunks) + "\n```\n"
+    approx_tokens = round(len(content) / CHARS_PER_TOKEN)
+    doc = {
+        "meta": {
+            "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "source": str(YQUAKE_DIR),
+            "subsystems": SUBSYS,
+            "budget_tokens": BUDGET_TOKENS,
+            "chars_per_token_est": CHARS_PER_TOKEN,
+            "total_bytes": len(content),
+            "approx_tokens": approx_tokens,
+            "num_files": len(files),
+            "files": files,
+        },
+        "messages": [{"role": "user", "content": content}],
+    }
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    OUT.write_text(json.dumps(doc), encoding="utf-8")
+    print(f"wrote {OUT}")
+    print(f"  files       : {len(files)} (.c/.h from {' '.join(SUBSYS)})")
+    print(f"  total bytes : {len(content):,}")
+    print(f"  approx tokens: ~{approx_tokens:,} (budget {BUDGET_TOKENS:,}, "
+          f"est {CHARS_PER_TOKEN} chars/tok -- real depth shown by bench-context)")
+    print(f"  first/last  : {files[0]} ... {files[-1]}")
+
+
+if __name__ == "__main__":
+    main()
