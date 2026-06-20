@@ -9,9 +9,9 @@
 #   ATTN_BACKEND=triton MOE_BACKEND=flashinfer_trtllm ./run <model>
 #   NVFP4_BACKEND=cutlass ./run <model>       # NVFP4 GEMM kernel: cutlass | flashinfer-cudnn |
 #                                             #   flashinfer-cutlass | marlin | flashinfer-trtllm
-#                                             #   (empty = vLLM auto). cutlass=fastest on sm120f,
-#                                             #   flashinfer-cudnn=safest (dodges FP4 race-cond NaN),
-#                                             #   marlin=W4A16 fallback if FP4 GEMM misbehaves.
+#                                             #   (default cutlass = bench-fastest on sm120f).
+#                                             #   flashinfer-cudnn=safe fallback if FP4 GEMM hits the
+#                                             #   race-cond NaN; marlin=W4A16 fallback if FP4 misbehaves.
 #   SPEC_TOKENS=3 ./run <model>               # MTP speculative tokens (default 2; 0 = MTP off)
 #   IMAGE_TAG=cu1312-sm120 ./run <model>      # run a specific build variant
 #   EXTRA_ARGS="--max-num-seqs 8" ./run <model>
@@ -32,7 +32,7 @@ MODEL_FOLDER=$(cd "$MODEL_FOLDER" && pwd)        # absolute, for the bind mount
 PORT=${PORT:-8700}
 ATTN_BACKEND=${ATTN_BACKEND:-flashinfer}
 MOE_BACKEND=${MOE_BACKEND:-}                     # empty = vLLM default
-NVFP4_BACKEND=${NVFP4_BACKEND:-}                 # empty = vLLM auto-select NVFP4 GEMM kernel
+NVFP4_BACKEND=${NVFP4_BACKEND:-cutlass}          # default cutlass = bench-fastest NVFP4 GEMM on sm120f
 SPEC_TOKENS=${SPEC_TOKENS:-2}                    # MTP speculative tokens (2 = community sweet spot)
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}
