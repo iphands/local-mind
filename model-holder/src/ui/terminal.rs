@@ -254,9 +254,22 @@ fn render_summary(frame: &mut Frame, area: Rect, app: &AppState) {
         String::new()
     };
 
+    // Calculate aggregate speeds for summary
+    let speed_summary = if app.warmup_complete && app.all_locked && !app.files.is_empty() {
+        let avg_mmap: f64 = app.files.iter()
+            .filter_map(|f| f.mmap_speed)
+            .sum::<f64>() / app.files.len() as f64;
+        let avg_lock: f64 = app.files.iter()
+            .filter_map(|f| f.lock_speed)
+            .sum::<f64>() / app.files.len() as f64;
+        format!("  avg mmap:{:.1} lock:{:.1} MB/s", avg_mmap, avg_lock)
+    } else {
+        String::new()
+    };
+
     let text = format!(
-        "  {} files  {}  {}/{} complete  {} locked{}{}",
-        total, total_size, complete, total, locked, sort_label, filter_label
+        "  {} files  {}  {}/{} complete  {} locked{}{}{}",
+        total, total_size, complete, total, locked, speed_summary, sort_label, filter_label
     );
 
     frame.render_widget(
@@ -322,8 +335,30 @@ fn render_file_list(frame: &mut Frame, area: Rect, app: &AppState) {
         return;
     }
 
+    // Calculate filename width the same way as data rows
+    let w = area.width as usize;
+    let right_cols = 67usize;
+    let name_width = w.saturating_sub(right_cols + 2).max(8);
+
+    // Render column headers - use same dynamic width as data rows
+    let header = Line::from(vec![
+        Span::styled(format!("  {:<name_width$}", "NAME"), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::styled(format!("{:>7}", "SIZE"), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(format!("{:<12}", "PROGRESS"), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(format!("{:>11}", "MMAP"), Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
+        Span::raw(" "),
+        Span::styled(format!("{:>11}", "LOCK"), Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+        Span::raw(" "),
+        Span::styled(format!("{:>11}", "TOTAL"), Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+        Span::raw("  "),
+        Span::styled(format!("{:>9}", "STATUS"), Style::default().fg(Color::White).add_modifier(Modifier::BOLD)),
+    ]);
+    frame.render_widget(Paragraph::new(header), area);
+
     for (row, file) in files[start..end].iter().enumerate() {
-        let y = area.y + row as u16;
+        let y = area.y + (row + 1) as u16; // +1 for header
         if y >= area.bottom() {
             break;
         }
@@ -340,10 +375,10 @@ fn render_file_list(frame: &mut Frame, area: Rect, app: &AppState) {
 fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
     let w = area.width as usize;
 
-    // Right-side column widths: size(7) + gap(2) + bar(20) + gap(2) + speed(13) + gap(2) + status(9)
-    // speed = "{:>8.1} MB/s" = 13 chars; status has a leading space for padding
-    // = 55 chars. Filename gets the rest.
-    let right_cols = 55usize;
+    // New layout: size(7) + gap(2) + bar(12) + gap(1) + mmap(11) + gap(1) + lock(11) + gap(1) + total(11) + gap(1) + status(9)
+    // = 7 + 2 + 12 + 1 + 11 + 1 + 11 + 1 + 11 + 1 + 9 = 67 chars
+    // Filename gets the rest.
+    let right_cols = 67usize;
     let name_width = w.saturating_sub(right_cols + 2).max(8); // +2 for leading spaces
 
     let name = truncate_str(&file.filename, name_width);
@@ -356,9 +391,13 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
             Span::styled(name_padded, Style::default().fg(Color::DarkGray)),
             Span::styled(size_str, Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled(format!("{:<20}", ""), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:<12}", ""), Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled(format!("{:>13}", ""), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(" pending ", Style::default().fg(Color::DarkGray)),
         ]),
@@ -367,9 +406,13 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
             Span::styled(name_padded, Style::default().fg(Color::Blue)),
             Span::styled(size_str, Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled(format!("{:<20}", ""), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:<12}", ""), Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled(format!("{:>13}", ""), Style::default().fg(Color::DarkGray)),
+            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(" mapped  ", Style::default().fg(Color::Blue)),
         ]),
@@ -377,7 +420,7 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
         FileStage::Warming {
             progress, speed, ..
         } => {
-            let bar = progress_bar(*progress, 20);
+            let bar = progress_bar(*progress, 12);
             let (filled_len, empty_len) = bar;
             Line::from(vec![
                 Span::styled(name_padded, Style::default().fg(Color::Cyan)),
@@ -387,9 +430,13 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
                 Span::styled("░".repeat(empty_len), Style::default().fg(Color::DarkGray)),
                 Span::raw("  "),
                 Span::styled(
-                    format!("{:>8.1} MB/s", speed),
+                    format!("{:>6.1} MB/s", speed),
                     Style::default().fg(Color::White),
                 ),
+                Span::raw(" "),
+                Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
+                Span::raw(" "),
+                Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
                 Span::raw("  "),
                 Span::styled(
                     format!(" {:>5.1}%  ", progress),
@@ -402,12 +449,16 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
             Span::styled(name_padded, Style::default().fg(Color::Green)),
             Span::styled(size_str, Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled("████████████████████", Style::default().fg(Color::Green)),
+            Span::styled("████████████", Style::default().fg(Color::Green)),
             Span::raw("  "),
             Span::styled(
-                format!("{:>8.1} MB/s", speed),
-                Style::default().fg(Color::DarkGray),
+                format!("{:>6.1} MB/s", speed),
+                Style::default().fg(Color::Green),
             ),
+            Span::raw(" "),
+            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
+            Span::raw(" "),
+            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(" done    ", Style::default().fg(Color::Green)),
         ]),
@@ -416,44 +467,68 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
             Span::styled(name_padded, Style::default().fg(Color::Yellow)),
             Span::styled(size_str, Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
-            Span::styled("████████████████████", Style::default().fg(Color::Yellow)),
+            Span::styled("████████████", Style::default().fg(Color::Yellow)),
             Span::raw("  "),
             Span::styled(
-                format!("{:>8.1} MB/s", speed),
-                Style::default().fg(Color::DarkGray),
+                format!("{:>6.1} MB/s", speed),
+                Style::default().fg(Color::Yellow),
             ),
+            Span::raw(" "),
+            Span::styled(format!("{:>11}", "locking…"), Style::default().fg(Color::Yellow)),
+            Span::raw(" "),
+            Span::styled(format!("{:>11}", ""), Style::default().fg(Color::DarkGray)),
             Span::raw("  "),
             Span::styled(" locking…", Style::default().fg(Color::Yellow)),
         ]),
 
-        FileStage::Locked { speed, .. } => Line::from(vec![
-            Span::styled(
-                name_padded,
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(size_str, Style::default().fg(Color::DarkGray)),
-            Span::raw("  "),
-            Span::styled(
-                "████████████████████",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                format!("{:>8.1} MB/s", speed),
-                Style::default().fg(Color::DarkGray),
-            ),
-            Span::raw("  "),
-            Span::styled(
-                " locked  ",
-                Style::default()
-                    .fg(Color::Green)
-                    .add_modifier(Modifier::BOLD),
-            ),
-        ]),
+        FileStage::Locked { mmap_speed, lock_speed, total_speed, .. } => {
+            // Show all three speeds
+            let mmap_str = if *mmap_speed >= 1000.0 {
+                format!("{:>6.2} GB/s", mmap_speed / 1000.0)
+            } else {
+                format!("{:>6.1} MB/s", mmap_speed)
+            };
+            let lock_str = if *lock_speed >= 1000.0 {
+                format!("{:>6.2} GB/s", lock_speed / 1000.0)
+            } else {
+                format!("{:>6.1} MB/s", lock_speed)
+            };
+            let total_str = if *total_speed >= 1000.0 {
+                format!("{:>6.2} GB/s", total_speed / 1000.0)
+            } else {
+                format!("{:>6.1} MB/s", total_speed)
+            };
+
+            Line::from(vec![
+                Span::styled(
+                    name_padded,
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(size_str, Style::default().fg(Color::DarkGray)),
+                Span::raw("  "),
+                Span::styled(
+                    "████████████",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("  "),
+                Span::styled(mmap_str, Style::default().fg(Color::Cyan)),
+                Span::raw(" "),
+                Span::styled(lock_str, Style::default().fg(Color::Yellow)),
+                Span::raw(" "),
+                Span::styled(total_str, Style::default().fg(Color::Green)),
+                Span::raw("  "),
+                Span::styled(
+                    " locked  ",
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+        }
     };
 
     frame.render_widget(Paragraph::new(line), area);
@@ -567,6 +642,23 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
     lines.push(Line::from(Span::styled(
         "      (add to ~/.bashrc or /etc/security/limits.conf)",
         Style::default().fg(Color::DarkGray),
+    )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Speed columns (locked files):",
+        Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  mmap  = memory-mapped load (cyan)",
+        Style::default().fg(Color::Cyan),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  lock  = page-locking speed (yellow)",
+        Style::default().fg(Color::Yellow),
+    )));
+    lines.push(Line::from(Span::styled(
+        "  total = combined speed (green)",
+        Style::default().fg(Color::Green),
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(

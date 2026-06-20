@@ -29,7 +29,9 @@ pub enum FileStage {
     /// File is locked in RAM
     Locked {
         size_mb: f64,
-        speed: f64,
+        mmap_speed: f64,
+        lock_speed: f64,
+        total_speed: f64,
         elapsed: Duration,
     },
 }
@@ -66,6 +68,10 @@ pub struct FileStatus {
     pub stage: FileStage,
     pub warmup_complete: bool,
     pub process_index: usize,
+    pub mmap_duration: Option<Duration>,
+    pub lock_duration: Option<Duration>,
+    pub mmap_speed: Option<f64>,
+    pub lock_speed: Option<f64>,
 }
 
 impl FileStatus {
@@ -84,6 +90,10 @@ impl FileStatus {
             stage: FileStage::Found,
             warmup_complete: false,
             process_index,
+            mmap_duration: None,
+            lock_duration: None,
+            mmap_speed: None,
+            lock_speed: None,
         }
     }
 
@@ -118,12 +128,21 @@ impl FileStatus {
         self.stage = FileStage::Locking { speed, elapsed };
     }
 
-    pub fn mark_locked(&mut self, speed: f64, elapsed: Duration) {
+    pub fn mark_locked(&mut self, mmap_speed: f64, lock_speed: f64, elapsed: Duration) {
+        let total_speed = if elapsed.as_secs_f64() > 0.0 {
+            self.size_bytes as f64 / elapsed.as_secs_f64() / BYTES_PER_MB
+        } else {
+            0.0
+        };
         self.stage = FileStage::Locked {
             size_mb: self.size_mb,
-            speed,
+            mmap_speed,
+            lock_speed,
+            total_speed,
             elapsed,
         };
+        self.mmap_speed = Some(mmap_speed);
+        self.lock_speed = Some(lock_speed);
     }
 
     pub fn is_complete(&self) -> bool {
@@ -138,7 +157,7 @@ impl FileStatus {
             FileStage::Warming { speed, .. } => *speed,
             FileStage::Complete { speed, .. } => *speed,
             FileStage::Locking { speed, .. } => *speed,
-            FileStage::Locked { speed, .. } => *speed,
+            FileStage::Locked { total_speed, .. } => *total_speed,
             _ => 0.0,
         }
     }

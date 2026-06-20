@@ -196,6 +196,7 @@ struct MappedFile {
     path: PathBuf,
     mmap: Mmap,
     size: u64,
+    mmap_duration: Option<Duration>,
 }
 
 /// File identity based on device and inode (for cross-mount comparison)
@@ -342,6 +343,7 @@ fn warmup_file_with_tui(
 
     if let Ok(mut app) = state.lock() {
         if let Some(file) = app.find_file_mut(file_path) {
+            file.mmap_speed = Some(mb_per_sec); // Set BEFORE mark_complete
             file.mark_complete(mb_per_sec, elapsed);
         }
     }
@@ -421,6 +423,7 @@ fn hold_models_with_tui(
         }
 
         // Safety: Mmap::map is safe here because we're mapping a regular file that we just opened
+        let mmap_start = Instant::now();
         let mmap = match unsafe { Mmap::map(&file) } {
             Ok(m) => m,
             Err(e) => {
@@ -428,6 +431,7 @@ fn hold_models_with_tui(
                 continue;
             }
         };
+        let mmap_duration = mmap_start.elapsed();
 
         {
             let mut app = state.lock().unwrap();
@@ -439,7 +443,15 @@ fn hold_models_with_tui(
             path: path.clone(),
             mmap,
             size,
+            mmap_duration: Some(mmap_duration),
         });
+
+        // Store mmap duration for later use
+        if let Ok(mut app) = state.lock() {
+            if let Some(f) = app.find_file_mut(&path.display().to_string()) {
+                f.mmap_duration = Some(mmap_duration);
+            }
+        }
     }
 
     if !no_warmup {
@@ -477,6 +489,7 @@ fn hold_models_with_tui(
                     let state = &state;
                     let failed_files = &failed_files;
                     let _locked_bytes = &_locked_bytes;
+                    let mmap_duration = mf.mmap_duration; // Capture mmap_duration
                     s.spawn(move || {
                         let file_path = mf.path.display().to_string();
                         let start = Instant::now();
@@ -485,10 +498,19 @@ fn hold_models_with_tui(
                         };
                         if result == 0 {
                             _locked_bytes.fetch_add(mf.size, Ordering::Relaxed);
+                            let lock_duration = start.elapsed();
+                            let lock_speed = if lock_duration.as_secs_f64() > 0.0 {
+                                mf.size as f64 / lock_duration.as_secs_f64() / BYTES_PER_MB
+                            } else {
+                                0.0
+                            };
+                            
                             if let Ok(mut app) = state.lock() {
                                 if let Some(f) = app.find_file_mut(&file_path) {
-                                    let speed = f.current_speed();
-                                    f.mark_locked(speed, start.elapsed());
+                                    let mmap_speed = f.mmap_speed.unwrap_or(0.0);
+                                    f.mmap_duration = f.mmap_duration.or(mmap_duration);
+                                    f.lock_duration = Some(lock_duration);
+                                    f.mark_locked(mmap_speed, lock_speed, lock_duration);
                                 }
                             }
                         } else {
@@ -579,6 +601,7 @@ fn hold_models(
             path: path.clone(),
             mmap,
             size,
+            mmap_duration: None, // Legacy function doesn't track mmap duration
         });
     }
 
