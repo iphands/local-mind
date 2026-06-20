@@ -460,10 +460,10 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
                 &name, Style::default().fg(Color::Green), name_width,
                 &size_str, Style::default().fg(Color::DarkGray),
                 &bar_str, Style::default().fg(Color::Green),
+                "", Style::default().fg(Color::DarkGray),
+                "", Style::default().fg(Color::DarkGray),
                 &speed_str, Style::default().fg(Color::Green),
-                "", Style::default().fg(Color::DarkGray),
-                "", Style::default().fg(Color::DarkGray),
-                " done    ", Style::default().fg(Color::Green),
+                "done    ", Style::default().fg(Color::Green),
             )
         }
 
@@ -477,7 +477,7 @@ fn render_file_row(frame: &mut Frame, area: Rect, file: &FileStatus) {
                 &speed_str, Style::default().fg(Color::Yellow),
                 "locking…", Style::default().fg(Color::Yellow),
                 "", Style::default().fg(Color::DarkGray),
-                " locking…", Style::default().fg(Color::Yellow),
+                "", Style::default().fg(Color::DarkGray),
             )
         }
 
@@ -846,5 +846,67 @@ mod tests {
             content_width,
             term_width
         );
+    }
+
+    /// Test Warming stage alignment (progress bar + speed in progress column)
+    #[test]
+    fn warming_stage_alignment() {
+        let term_width: u16 = 120;
+        let content_width = term_width.saturating_sub(1);
+        let name_width = (content_width as usize).saturating_sub(RIGHT_COLS + 2).max(8);
+
+        let wb = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        let header = header_row(name_width);
+
+        // Warming stage: progress bar (12 chars) + speed (8 chars) in progress column
+        let filename = "test.safetensors";
+        let truncated = truncate_str(filename, name_width);
+        let bar_str = "████████████".to_string(); // 12 chars
+        let speed_str = format!("{:>6.1} MB/s", 50.0); // "  50.0 MB/s" = 10 chars
+        let progress_str = format!("{:>5.1}%", 50.0); // " 50.0%" = 6 chars
+
+        let row = make_row(
+            &truncated, wb, name_width,
+            "800M", wb,
+            &bar_str, wb,
+            &speed_str, wb,
+            "", wb,
+            "", wb,
+            &progress_str, wb,
+        );
+
+        assert_eq!(header.width(), row.width(), "warming: header width ({}) must equal row width ({})", header.width(), row.width());
+        assert!(row.width() <= content_width as usize, "warming row must fit in content area");
+    }
+
+    /// Test Locking stage alignment (bar in progress, speed in mmap, "locking…" in lock column)
+    #[test]
+    fn locking_stage_alignment() {
+        let term_width: u16 = 120;
+        let content_width = term_width.saturating_sub(1);
+        let name_width = (content_width as usize).saturating_sub(RIGHT_COLS + 2).max(8);
+
+        let wb = Style::default().fg(Color::White).add_modifier(Modifier::BOLD);
+        let header = header_row(name_width);
+
+        // Locking stage: bar in progress, speed in mmap, "locking…" in lock column
+        let filename = "test.safetensors";
+        let truncated = truncate_str(filename, name_width);
+        let bar_str = "████████████".to_string();
+        let speed_str = format!("{:>6.1} MB/s", 50.0);
+        let lock_str = "locking…"; // 8 chars, fits in 11-char lock column
+
+        let row = make_row(
+            &truncated, wb, name_width,
+            "800M", wb,
+            &bar_str, wb,
+            &speed_str, wb,
+            lock_str, wb,
+            "", wb,
+            "", wb,
+        );
+
+        assert_eq!(header.width(), row.width(), "locking: header width ({}) must equal row width ({})", header.width(), row.width());
+        assert!(row.width() <= content_width as usize, "locking row must fit in content area");
     }
 }
