@@ -12,11 +12,20 @@ REF=$(git rev-parse --short HEAD)
 TAG=${TAG:-cu${CUDA_TAG}-sm120}
 TAGTWO="${TAG}-${REF}"
 
-docker tag $IMAGE:latest $IMAGE:$TAGTWO
-
-for t in "$TAG" "$TAGTWO" latest; do
+for t in "$TAG" latest; do
   docker image inspect "$IMAGE:$t" >/dev/null 2>&1 || {
     echo "Image $IMAGE:$t not found locally. Run ./build first."; exit 1; }
+done
+
+# The git-SHA tag pins the variant tag, NOT :latest — :latest may be a different
+# (more recently built) variant. Warn when they diverge so a stale push is obvious.
+if [[ "$(docker image inspect -f '{{.Id}}' "$IMAGE:$TAG")" != \
+      "$(docker image inspect -f '{{.Id}}' "$IMAGE:latest")" ]]; then
+  echo "WARN: $IMAGE:latest is a different image than $IMAGE:$TAG (last build was another variant?)"
+fi
+docker tag "$IMAGE:$TAG" "$IMAGE:$TAGTWO"
+
+for t in "$TAG" "$TAGTWO" latest; do
   echo "## pushing docker.io/$IMAGE:$t"
   docker push "docker.io/$IMAGE:$t"
 done

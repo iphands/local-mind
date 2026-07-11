@@ -8,11 +8,16 @@
 #   ATTN_BACKEND=flashinfer ./run <model>
 #   ATTN_BACKEND=triton MOE_BACKEND=flashinfer_trtllm ./run <model>
 #   NVFP4_BACKEND=cutlass ./run <model>       # NVFP4 GEMM kernel: cutlass | flashinfer-cudnn |
-#                                             #   flashinfer-cutlass | marlin | flashinfer-trtllm
+#                                             #   flashinfer-cutlass | marlin | flashinfer-trtllm |
+#                                             #   flashinfer-b12x (SM12x CuTe DSL kernel)
 #                                             #   (default cutlass = bench-fastest on sm120f).
 #                                             #   flashinfer-cudnn=safe fallback if FP4 GEMM hits the
 #                                             #   race-cond NaN; marlin=W4A16 fallback if FP4 misbehaves.
+#   MOE_BACKEND=flashinfer_b12x ./run <model> # SM12x fused MoE (excluded from vLLM auto-select; opt-in)
 #   SPEC_TOKENS=3 ./run <model>               # MTP speculative tokens (default 2; 0 = MTP off)
+#   CUDAGRAPH_MODE=FULL_AND_PIECEWISE ./run <model>   # full CUDA graphs (small-batch decode A/B)
+#   FLASHINFER_AUTOTUNE=1 ./run <model>       # FlashInfer autotuning during warmup
+#   MAX_BATCHED_TOKENS=32768 ./run <model>    # faster long-context prefill (default 8192)
 #   IMAGE_TAG=cu1312-sm120 ./run <model>      # run a specific build variant
 #   EXTRA_ARGS="--max-num-seqs 8" ./run <model>
 #
@@ -24,10 +29,10 @@ IMAGE=${IMAGE:-iphands/vllm-blackwell}
 IMAGE_TAG=${IMAGE_TAG:-latest}
 CONTAINER="$IMAGE:$IMAGE_TAG"
 
-MODEL_PATH=$1
-MODEL_FOLDER=${MODEL_PATH%/*}
-MODEL=${MODEL_PATH##*/}
-MODEL_FOLDER=$(cd "$MODEL_FOLDER" && pwd)        # absolute, for the bind mount
+MODEL_PATH=${1:?usage: ./run <path-to-model-dir>   (e.g. ./run ./models/vllm/Qwen3.6-27B)}
+# basename/dirname (vs ${x%/*}) tolerate trailing slashes and slash-less paths
+MODEL=$(basename "$MODEL_PATH")
+MODEL_FOLDER=$(cd "$(dirname "$MODEL_PATH")" && pwd)   # absolute, for the bind mount
 
 PORT=${PORT:-8700}
 ATTN_BACKEND=${ATTN_BACKEND:-flashinfer}
@@ -36,6 +41,9 @@ NVFP4_BACKEND=${NVFP4_BACKEND:-cutlass}          # default cutlass = bench-faste
 SPEC_TOKENS=${SPEC_TOKENS:-2}                    # MTP speculative tokens (2 = community sweet spot)
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}
+MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-8192}   # bigger (16384/32768) speeds long-context prefill/TTFT
+CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-}               # e.g. FULL_AND_PIECEWISE (A/B: full graphs help small-batch decode)
+FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-}     # 1 = run FlashInfer autotuning during warmup (A/B)
 CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
 
 docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
@@ -57,6 +65,7 @@ CONTAINER_ARGS=(
   --entrypoint vllm
   --gpus device=0                                # RTX PRO 6000 only — never the 4060
   -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  # NCCL vars are inert on this single-GPU deployment; kept in case TP/PP ever >1
   -e NCCL_P2P_LEVEL=4
   -e NCCL_IB_DISABLE=1
   -e VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -92,8 +101,9 @@ VLLM_ARGS=(
   --tool-call-parser qwen3_coder
   --enable-prefix-caching
   --enable-chunked-prefill
+  --enable-prompt-tokens-details              # usage reports cached_tokens (bench logs prefix-cache hits)
   --max-num-seqs 3
-  --max-num-batched-tokens 8192
+  --max-num-batched-tokens "$MAX_BATCHED_TOKENS"
 
   --attention-backend "$ATTN_BACKEND"
   --no-enforce-eager
@@ -106,7 +116,18 @@ VLLM_ARGS=(
 # SPEC_TOKENS=0 disables MTP entirely (clean no-speculation baseline); else add it.
 [[ "$SPEC_TOKENS" != "0" ]] && VLLM_ARGS+=( --speculative-config '{"method":"mtp","num_speculative_tokens":'"$SPEC_TOKENS"'}' )
 [[ -n "$MOE_BACKEND" ]] && VLLM_ARGS+=( --moe-backend "$MOE_BACKEND" )
-[[ -n "$NVFP4_BACKEND" ]] && CONTAINER_ARGS+=( -e VLLM_NVFP4_GEMM_BACKEND="$NVFP4_BACKEND" )
+# NVFP4 GEMM backend: the VLLM_NVFP4_GEMM_BACKEND env is deprecated in v0.23
+# ("Use --linear-backend"), so pass the flag. Exception: flashinfer-b12x isn't in
+# the --linear-backend choices yet — only the env still routes to it.
+if [[ -n "$NVFP4_BACKEND" ]]; then
+  if [[ "$NVFP4_BACKEND" == "flashinfer-b12x" ]]; then
+    CONTAINER_ARGS+=( -e VLLM_NVFP4_GEMM_BACKEND="$NVFP4_BACKEND" )
+  else
+    VLLM_ARGS+=( --linear-backend "$NVFP4_BACKEND" )   # vLLM lowercases and maps - to _
+  fi
+fi
+[[ -n "$CUDAGRAPH_MODE" ]] && VLLM_ARGS+=( --compilation-config '{"cudagraph_mode":"'"$CUDAGRAPH_MODE"'"}' )
+[[ -n "$FLASHINFER_AUTOTUNE" ]] && VLLM_ARGS+=( --enable-flashinfer-autotune )
 # shellcheck disable=SC2206
 [[ -n "${EXTRA_ARGS:-}" ]] && VLLM_ARGS+=( ${EXTRA_ARGS} )
 

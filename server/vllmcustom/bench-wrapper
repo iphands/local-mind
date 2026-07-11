@@ -16,9 +16,11 @@
 #   TG        completion_tokens / (total-TTFT)    -- token generation; the number you care about
 #   CAP(W)    GPU0 power cap, read (not set) from nvidia-smi in Python
 #
+# Measured requests set ignore_eos, so TG always covers exactly GEN_TOKENS tokens.
+#
 # Outputs: a printed table (also appended to bench-wrapper-results.md) AND a
 # long-term, machine-readable bench-results.jsonl (one record per run, written by
-# the Python measurement, including the GPU0 wattage cap).
+# lib/measure.py, including the GPU0 wattage cap + image/vLLM-version provenance).
 set -uo pipefail   # NOT -e: we want to survive a failing config and keep going
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -37,111 +39,24 @@ BENCH_PROMPT="Write a Pure Bash script that calculates primes up to 10 million"
 LOGDIR=${LOGDIR:-$HERE/bench-logs}
 RESULTS=${RESULTS:-$HERE/bench-wrapper-results.md}
 JSONL=${JSONL:-$HERE/bench-results.jsonl}   # long-term machine-readable log (one record/run)
+MEASURE="$HERE/lib/measure.py"              # per-request measurement (SSE streaming + usage)
 mkdir -p "$LOGDIR"
 
-# Config matrix: "<name> <NVFP4_BACKEND|-> <SPEC_TOKENS>".  '-' = vLLM auto. SPEC 0 = MTP off.
+# Config matrix: "<name> <NVFP4_BACKEND|-> <SPEC_TOKENS> [MOE_BACKEND|-]".
+# '-' = vLLM auto. SPEC 0 = MTP off. The MoE column is optional (default '-').
+# b12x rows: FlashInfer's CuTe DSL SM12x kernels (built for the RTX PRO 6000 /
+# DGX Spark) — the MoE one is deliberately excluded from vLLM's auto-selection,
+# so it only ever runs if opted into here.
 DEFAULT_CONFIGS="\
 auto-mtp2      -                2
 cutlass-mtp2   cutlass          2
 cudnn-mtp2     flashinfer-cudnn 2
 marlin-mtp2    marlin           2
+b12x-mtp2      flashinfer-b12x  2
+b12xmoe-mtp2   cutlass          2  flashinfer_b12x
 cutlass-mtp3   cutlass          3
 cutlass-mtp0   cutlass          0"
 CONFIGS=${CONFIGS:-$DEFAULT_CONFIGS}
-
-# --- per-request measurement (SSE streaming + usage) --------------------------
-MEASURE="$LOGDIR/_measure.py"
-cat > "$MEASURE" <<'PY'
-import sys, json, time, argparse, subprocess, urllib.request
-from datetime import datetime, timezone
-
-def read_watts():
-    """GPU 0 current power cap (W, int) via nvidia-smi. Read-only; None on failure."""
-    try:
-        out = subprocess.run(
-            ["nvidia-smi", "--query-gpu=power.limit",
-             "--format=csv,noheader,nounits", "-i", "0"],
-            capture_output=True, text=True, timeout=10)
-        return int(round(float(out.stdout.strip().splitlines()[0])))
-    except Exception:
-        return None
-
-ap = argparse.ArgumentParser()
-ap.add_argument("host", nargs="?"); ap.add_argument("api_model", nargs="?")
-ap.add_argument("prompt", nargs="?"); ap.add_argument("max_tokens", nargs="?", type=int)
-ap.add_argument("--print-watts", action="store_true")  # just print GPU0 cap and exit
-ap.add_argument("--jsonl")                 # if set, append one record here
-ap.add_argument("--config", default="")
-ap.add_argument("--nvfp4", default="")
-ap.add_argument("--mtp", default="")
-ap.add_argument("--model-name", default="")
-ap.add_argument("--run", default="")
-ap.add_argument("--mode", default="single")   # tag in jsonl (single|convo|pad)
-a = ap.parse_args()
-
-if a.print_watts:
-    w = read_watts()
-    print(w if w is not None else "-"); sys.exit(0)
-
-if not (a.host and a.api_model and a.prompt and a.max_tokens):
-    print("ERROR missing-args"); sys.exit(2)
-
-WATTS = read_watts()   # GPU0 cap captured here, in Python, for the jsonl
-
-def append_jsonl(rec):
-    if not a.jsonl:
-        return
-    rec = {
-        "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "mode": a.mode, "config": a.config, "nvfp4_backend": a.nvfp4 or "auto",
-        "mtp": a.mtp, "watts_cap": WATTS, "model": a.model_name, "run": a.run, **rec,
-    }
-    with open(a.jsonl, "a") as f:
-        f.write(json.dumps(rec) + "\n")
-
-body = json.dumps({
-    "model": a.api_model,
-    "messages": [{"role": "user", "content": a.prompt}],
-    "max_tokens": a.max_tokens,
-    "temperature": 0.6,
-    "stream": True,
-    "stream_options": {"include_usage": True},
-}).encode()
-req = urllib.request.Request(f"http://{a.host}/v1/chat/completions",
-                             data=body, headers={"Content-Type": "application/json"})
-start = time.perf_counter(); ttft = None; ptok = None; ctok = None
-try:
-    with urllib.request.urlopen(req, timeout=900) as resp:
-        for raw in resp:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            ch = json.loads(data)
-            choices = ch.get("choices")
-            if ttft is None and choices and choices[0].get("delta", {}).get("content"):
-                ttft = time.perf_counter() - start
-            if ch.get("usage"):
-                ptok = ch["usage"].get("prompt_tokens")
-                ctok = ch["usage"].get("completion_tokens")
-except Exception as e:
-    append_jsonl({"status": "error", "error": str(e)})
-    print(f"ERROR {e}"); sys.exit(1)
-total = time.perf_counter() - start
-if not ctok:
-    append_jsonl({"status": "error", "error": "no-usage-reported"})
-    print("ERROR no-usage-reported"); sys.exit(1)
-ttft = ttft or 0.0
-gen_time = max(total - ttft, 1e-6)
-prefill = (ptok / ttft) if (ttft > 0 and ptok) else 0.0
-tg = ctok / gen_time
-append_jsonl({"status": "ok", "ttft_ms": round(ttft * 1000, 1),
-              "prefill_tps": round(prefill, 1), "tg_tps": round(tg, 2),
-              "prompt_tokens": ptok, "completion_tokens": ctok})
-print(f"{ttft*1000:.1f} {prefill:.1f} {tg:.2f} {ptok} {ctok}")
-PY
 
 source "$HERE/_bench-lib.sh"   # stop_server, wait_ready, median (uses NAME/HOST/READY_TIMEOUT)
 
@@ -151,24 +66,27 @@ declare -a ROWS
 echo "## bench-wrapper  model=$(basename "$MODEL")  runs/config=$RUNS  gen_tokens=$GEN_TOKENS"
 echo "## logs -> $LOGDIR"
 
-while read -r cfg_name nvfp4 spec; do
+while read -r cfg_name nvfp4 spec moe; do
   [[ -z "${cfg_name:-}" ]] && continue
+  moe=${moe:--}
   watts=$(python3 "$MEASURE" --print-watts 2>/dev/null); [[ -z "$watts" ]] && watts="-"
   echo
-  echo "=== $cfg_name  (NVFP4=$nvfp4  MTP=$spec  GPU0 cap=${watts}W) ==="
+  echo "=== $cfg_name  (NVFP4=$nvfp4  MTP=$spec  MOE=$moe  GPU0 cap=${watts}W) ==="
   stop_server
   start_log="$LOGDIR/start-$cfg_name.log"
   nvfp4_env=""; [[ "$nvfp4" != "-" ]] && nvfp4_env="$nvfp4"
+  moe_env="";   [[ "$moe" != "-" ]] && moe_env="$moe"
 
   echo "    launching vLLM ..."
-  DETACH=1 PORT="$PORT" NVFP4_BACKEND="$nvfp4_env" SPEC_TOKENS="$spec" \
+  DETACH=1 PORT="$PORT" NVFP4_BACKEND="$nvfp4_env" SPEC_TOKENS="$spec" MOE_BACKEND="$moe_env" \
     "$HERE/run" "$MODEL" > "$start_log" 2>&1
 
   if ! wait_ready; then
     echo "    NOT READY -> see $start_log"; docker logs "$NAME" > "$LOGDIR/crash-$cfg_name.log" 2>&1 || true
-    ROWS+=("$cfg_name|$nvfp4|$spec|$watts|-|-|-|FAILED(load)")
+    ROWS+=("$cfg_name|$nvfp4|$spec|$moe|$watts|-|-|-|FAILED(load)")
     stop_server; continue
   fi
+  image=$(docker inspect "$NAME" --format '{{.Config.Image}}' 2>/dev/null || true)
   echo "    ready. warmup ..."
   python3 "$MEASURE" "$HOST" "$APIMODEL" "$WARMUP_PROMPT" "$WARMUP_TOKENS" >/dev/null 2>&1 || true
 
@@ -176,8 +94,9 @@ while read -r cfg_name nvfp4 spec; do
   ttft_ms="-"; prefill="-"; tgs=(); status="OK"
   for r in $(seq 1 "$RUNS"); do
     out=$(python3 "$MEASURE" "$HOST" "$APIMODEL" "$BENCH_PROMPT" "$GEN_TOKENS" \
-            --jsonl "$JSONL" --config "$cfg_name" --nvfp4 "$nvfp4_env" --mtp "$spec" \
-            --model-name "$MODELBASE" --run "$r" 2>&1)
+            --ignore-eos --jsonl "$JSONL" --config "$cfg_name" --nvfp4 "$nvfp4_env" \
+            --moe "$moe_env" --mtp "$spec" --model-name "$MODELBASE" --run "$r" \
+            --image "$image" 2>&1)
     if [[ "$out" == ERROR* || -z "$out" ]]; then
       echo "    run $r FAILED: $out"; status="FAILED(infer)"; break
     fi
@@ -189,23 +108,23 @@ while read -r cfg_name nvfp4 spec; do
   done
 
   tg="-"; [[ ${#tgs[@]} -gt 0 ]] && tg=$(median "${tgs[@]}")
-  ROWS+=("$cfg_name|$nvfp4|$spec|$watts|$ttft_ms|$prefill|$tg|$status")
+  ROWS+=("$cfg_name|$nvfp4|$spec|$moe|$watts|$ttft_ms|$prefill|$tg|$status")
   stop_server
 done <<< "$CONFIGS"
 
 # --- results table ------------------------------------------------------------
 ts=$(date -u +"%Y-%m-%d %H:%M UTC")
-fmt='%-14s %-17s %-4s %7s %12s %14s %12s %-14s\n'
+fmt='%-14s %-17s %-4s %-16s %7s %12s %14s %12s %-14s\n'
 {
   echo
   # shellcheck disable=SC2059
-  printf "$fmt" CONFIG NVFP4 MTP "CAP(W)" "TTFT(ms)" "prefill(tok/s)" "TG(tok/s)" STATUS
+  printf "$fmt" CONFIG NVFP4 MTP MOE "CAP(W)" "TTFT(ms)" "prefill(tok/s)" "TG(tok/s)" STATUS
   # shellcheck disable=SC2059
-  printf "$fmt" -------------- ----------------- ---- ------- ------------ -------------- ------------ --------------
+  printf "$fmt" -------------- ----------------- ---- ---------------- ------- ------------ -------------- ------------ --------------
   for row in "${ROWS[@]}"; do
-    IFS='|' read -r n nv sp w tt pf tg st <<<"$row"
+    IFS='|' read -r n nv sp mo w tt pf tg st <<<"$row"
     # shellcheck disable=SC2059
-    printf "$fmt" "$n" "$nv" "$sp" "$w" "$tt" "$pf" "$tg" "$st"
+    printf "$fmt" "$n" "$nv" "$sp" "$mo" "$w" "$tt" "$pf" "$tg" "$st"
   done
 } | tee -a "$RESULTS"
 echo "" >> "$RESULTS"; echo "_${ts}  model=${MODELBASE}_" >> "$RESULTS"

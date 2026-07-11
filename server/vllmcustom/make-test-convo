@@ -22,7 +22,12 @@ HERE = Path(__file__).resolve().parent
 YQUAKE_DIR = Path(os.environ.get("YQUAKE_DIR", HERE / "vendor" / "yquake2"))
 SUBSYS = os.environ.get("SUBSYS", "src/common src/server src/game").split()
 BUDGET_TOKENS = int(os.environ.get("QUAKE_TOKEN_BUDGET", "120000"))
-CHARS_PER_TOKEN = float(os.environ.get("CHARS_PER_TOKEN", "3.6"))  # rough, for C code
+# Measured: C code tokenizes at ~2.3-2.7 chars/token depending on which files land
+# in the budget (the old 3.6 default made a 120k budget tokenize to ~190k). With 2.3
+# the default 120k budget yields ~104k real tokens (slightly conservative -- never
+# overshoots MAX_MODEL_LEN). Check real depth via bench-context's context_tokens or
+# the server's /tokenize endpoint, and tune QUAKE_TOKEN_BUDGET from that.
+CHARS_PER_TOKEN = float(os.environ.get("CHARS_PER_TOKEN", "2.3"))
 OUT = Path(os.environ.get("OUT", HERE / "data" / "test-convo.json"))
 
 INTRO = (

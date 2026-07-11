@@ -11,8 +11,9 @@ images: PyTorch, FlashInfer, and vLLM are all compiled from source for
 | `./bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench-results.md` |
 | `./bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
 | `./bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |
-| `./make-test-convo`| build the static ~120k-token "summarize Quake II source" turn from `vendor/yquake2` into `data/test-convo.json` |
+| `./make-test-convo`| build the static ~100k-token "summarize Quake II source" turn from `vendor/yquake2` into `data/test-convo.json` |
 | `./push` | `docker push` to `docker.io/iphands/vllm-blackwell` |
+| `lib/`   | the shared measurement client (`benchclient.py`) + the Python drivers the bench scripts invoke (`measure.py`, `ctxbench.py`) |
 
 ## Quick start
 
@@ -65,9 +66,12 @@ Backends and the main perf knobs are runtime env on `./run`:
 ```bash
 ATTN_BACKEND=flashinfer ./run ./models/vllm/Qwen3.6-27B   # default (correct for Qwen3.5)
 ATTN_BACKEND=triton     ./run ./models/vllm/Qwen3.6-27B
-MOE_BACKEND=flashinfer_trtllm ./run ./models/vllm/Qwen3.6-27B
+MOE_BACKEND=flashinfer_b12x ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4  # SM12x fused MoE (opt-in)
 NVFP4_BACKEND=cutlass   ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # NVFP4 GEMM kernel
 SPEC_TOKENS=3           ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # MTP tokens (default 2)
+CUDAGRAPH_MODE=FULL_AND_PIECEWISE ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4  # full CUDA graphs
+FLASHINFER_AUTOTUNE=1   ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # autotune during warmup
+MAX_BATCHED_TOKENS=32768 ./run ./models/vllm/Qwen3.6-27B  # faster long-context prefill (default 8192)
 EXTRA_ARGS="--max-num-seqs 8" ./run ./models/vllm/Qwen3.6-27B
 ```
 
@@ -96,13 +100,25 @@ have one card).
   is only for MLA models (Kimi/GLM), not this one.
 
 **Worth A/B testing (decode levers):**
+- `MOE_BACKEND=flashinfer_b12x` — FlashInfer's CuTe DSL fused MoE built specifically
+  for SM12x (RTX PRO 6000 / DGX Spark). vLLM *deliberately excludes it from
+  auto-selection* (pending an upstream CUTLASS SM121 guard fix), so it never runs
+  unless opted into — potentially the biggest untested decode lever for a 122B MoE.
 - `NVFP4_BACKEND` — vLLM's NVFP4 GEMM kernel. `cutlass` (internal sm120f) is the
   fastest per the wiki; `flashinfer-cudnn` is the *safest* (sidesteps a FlashInfer
   CUTLASS FP4 race condition that silently NaNs); `marlin` is a W4A16 fallback if FP4
-  GEMM ever produces garbage. Empty = vLLM auto.
+  GEMM ever produces garbage; `flashinfer-b12x` is the same SM12x CuTe DSL kernel for
+  dense GEMM. Empty = vLLM auto. (Passed as `--linear-backend`; the old
+  `VLLM_NVFP4_GEMM_BACKEND` env is deprecated in v0.23 — only `flashinfer-b12x`
+  still goes through the env, since it's missing from the flag's choices.)
 - `SPEC_TOKENS` — MTP=2 is the safe sweet spot; MTP=3 *may* add a bit for single
   streams (its instability is a long-context/high-concurrency problem). Watch the logs
   for `probability tensor contains inf/nan` → back off to `flashinfer-cudnn` or MTP=2.
+- `CUDAGRAPH_MODE=FULL_AND_PIECEWISE` — full CUDA graphs for small-batch decode
+  (exactly this workload) instead of piecewise-only.
+- `FLASHINFER_AUTOTUNE=1` — FlashInfer kernel autotuning during warmup.
+- `MAX_BATCHED_TOKENS` — 16384/32768 speeds long-context prefill/TTFT (decode
+  unaffected; default 8192).
 
 `VLLM_LOG_STATS_INTERVAL=1` is on by default so each run prints live tok/s + MTP
 acceptance for comparison.
@@ -111,9 +127,12 @@ acceptance for comparison.
 vLLM per config, warms up (mandelbrot prompt), measures (primes prompt), and prints a
 table of **CAP(W)** / TTFT / prefill / **TG (token-gen) tok/s**, appending to
 `bench-wrapper-results.md`. It also writes a long-term `bench-results.jsonl` (one
-record per run, written by the Python measurement) that includes the **GPU0 power cap**
-(read — never set — via `nvidia-smi`), so you can correlate tok/s with the wattage you
-had set. Each config is a full 122B reload (minutes), so the default 6-config sweep is
+record per run, written by `lib/measure.py`) that includes the **GPU0 power cap**
+(read — never set — via `nvidia-smi`) plus the image tag and vLLM version, so old rows
+stay comparable across rebuilds. Config lines are
+`<name> <NVFP4_BACKEND|-> <SPEC_TOKENS> [MOE_BACKEND|-]` (the MoE column is optional).
+Measured requests set `ignore_eos`, so TG always covers exactly `GEN_TOKENS` tokens.
+Each config is a full 122B reload (minutes), so the default 8-config sweep is
 long; trim via the `CONFIGS` env. Example:
 
 ```bash
@@ -125,36 +144,48 @@ RUNS=3 ./bench-wrapper            # 3 measured runs/config, median TG
 context, so it shows best-case decode. `bench-context` characterizes **TG vs. context
 depth** — the number that actually drops as the KV cache fills — two ways, per backend:
 - **convo**: a realistic 3-turn chat — (1) Bash prime sieve, (2) port to Python, (3) a
-  static "summarize this Quake II source" turn that injects ~120k tokens of real C code
+  static "summarize this Quake II source" turn that injects ~100k tokens of real C code
   (history is resent each turn, exercising prefix caching). Turn 3 is the big-context
-  measurement, hitting ~128k in a single turn. **Generate that turn first** with
-  `./make-test-convo` (reads `vendor/yquake2` → `data/test-convo.json`); if it's
-  missing, bench-context warns and skips turn 3.
+  measurement. **Generate that turn first** with `./make-test-convo` (reads
+  `vendor/yquake2` → `data/test-convo.json`); if it's missing, bench-context warns and
+  skips turn 3.
 - **pad**: prompts padded to exact `PAD_SIZES` (default `8192 32768 65536 131072`),
   short generation — a clean, repeatable decode-vs-context curve to compare backends at
   the same depth.
 
 ```bash
-./make-test-convo                                 # build the ~120k-token quake2 turn (once)
-QUAKE_TOKEN_BUDGET=95000 ./make-test-convo        # smaller turn if 120k overshoots 128k
-./bench-context                                   # ALL permutations (default): {auto,cutlass,cudnn,marlin} × MTP{0,1,2}
+./make-test-convo                                 # build the ~100k-token quake2 turn (once)
+QUAKE_TOKEN_BUDGET=150000 ./make-test-convo       # bigger turn (default 120k budget ≈ 104k real)
+./bench-context                                   # ALL permutations (default): {auto,cutlass,cudnn,marlin} × MTP{0,1,2} + b12x
 PAD_SIZES="8192 32768" CONFIGS=$'cutlass cutlass 2' ./bench-context   # quick single-backend subset
 ```
 
-By default `./bench-context` (no args) runs the **full 12-config matrix** — every NVFP4
-backend × MTP {0,1,2}, each a full reload + 3-turn convo + pad-to-128k. Budget **hours**;
-trim with `CONFIGS=…` / `PAD_SIZES=…` for a faster pass.
+By default `./bench-context` (no args) runs the **full 14-config matrix** — every NVFP4
+backend × MTP {0,1,2} plus the SM12x b12x GEMM/MoE opt-ins, each a full reload +
+3-turn convo + pad-to-128k. Budget **hours**; trim with `CONFIGS=…` / `PAD_SIZES=…`
+for a faster pass. Config lines take the same optional 4th MoE-backend column as
+bench-wrapper.
 
 The generator is deterministic (sorted files) so turn 3 is byte-identical across
 backends — a fair A/B at the same large context. Its `approx_tokens` is a chars/token
-estimate; the **real** depth is the `context_tokens` bench-context reports for the
-`quake2` turn — tune `QUAKE_TOKEN_BUDGET` from that.
+estimate (default 2.3 chars/token, measured on this C corpus — the old 3.6 default
+made a 120k budget tokenize to ~190k, so regenerate `data/test-convo.json` if yours
+predates that); the **real** depth is the `context_tokens` bench-context reports for
+the `quake2` turn — tune `QUAKE_TOKEN_BUDGET` from that.
 
 Rows land in `bench-context-results.md` (tables) and `bench-results.jsonl` (with
-`mode=convo|pad`, `turn_label`, `context_tokens`, and the watt cap). Caveats: **MTP can
-crash at long context** (a failed turn is recorded and the run continues — use a `mtp0`
-row for a clean number); the 128k `pad` probe needs the KV cache to fit in VRAM (an OOM
-probe is recorded, not fatal); and in `convo` mode read **TG**, not TTFT (prefix caching).
+`mode=convo|pad`, `turn_label`, `context_tokens`, `cached_tokens`, `answer_ttft_ms`,
+the watt cap, and image/vLLM-version provenance). Caveats: **MTP can crash at long
+context** (a failed turn is recorded and the run continues — use a `mtp0` row for a
+clean number); the 128k `pad` probe needs the KV cache to fit in VRAM (an OOM probe is
+recorded, not fatal); and in `convo` mode read **TG**, not TTFT (prefix caching).
+
+> **Historic-data caveat:** jsonl rows written before 2026-07 with `ttft_ms: 0.0` are
+> invalid — the old clients only detected `content` deltas, but the qwen3 reasoning
+> parser streams `reasoning_content` first, so TTFT never fired and the whole prefill
+> was counted as generation time. All pad rows and any all-thinking convo turns
+> understate TG badly (e.g. at 131k the recorded 7.47 tok/s is mostly prefill).
+> Re-run the sweeps for trustworthy TG-vs-depth curves.
 
 ### Host tuning (outside the container)
 - `sudo nvidia-smi -pm 1` then set max power limit (`sudo nvidia-smi -pl <max>`).

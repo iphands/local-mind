@@ -9,6 +9,8 @@ stop_server() {
     curl -sf "http://${HOST}/health" >/dev/null 2>&1 || return 0
     sleep 1
   done
+  echo "    WARN: ${HOST}/health still answering 30s after removing ${NAME}; next launch may fail" >&2
+  return 1
 }
 
 wait_ready() {  # returns 0 when /health is up; 1 on timeout or container exit

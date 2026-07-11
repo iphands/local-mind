@@ -10,53 +10,25 @@ compares any vLLM build / backend / CUDA version currently serving on :8700.
 Measures, per prompt, TTFT (time to first token) and decode tok/s
 (completion_tokens / generation-time), then prints medians and appends a row
 to bench-results.md so variants line up for comparison.
+
+Requests set ignore_eos so every run generates exactly max_tokens (comparable
+TG regardless of where the model would naturally stop).
 """
-import argparse, json, statistics, sys, time, urllib.request
+import argparse
+import os
+import statistics
+import sys
 from datetime import datetime, timezone
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent / "lib"))
+from benchclient import metrics, stream_chat  # noqa: E402
 
 PROMPTS = [
     ("short", "Reply with a single short sentence: why is the sky blue?", 256),
     ("code", "Write a program to calculate primes up to 1,000,000 in ANSI C.", 1024),
     ("long", "Summarize the history of computing.\n\n" + ("context line. " * 4000), 1024),
 ]
-
-
-def run_one(host, model, prompt, max_tokens):
-    body = json.dumps({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-        "temperature": 0.6,
-        "stream": True,
-        "stream_options": {"include_usage": True},
-    }).encode()
-    req = urllib.request.Request(
-        f"http://{host}/v1/chat/completions",
-        data=body, headers={"Content-Type": "application/json"})
-
-    start = time.perf_counter()
-    ttft = None
-    completion_tokens = None
-    with urllib.request.urlopen(req, timeout=600) as resp:
-        for raw in resp:
-            line = raw.decode("utf-8", "replace").strip()
-            if not line.startswith("data:"):
-                continue
-            data = line[5:].strip()
-            if data == "[DONE]":
-                break
-            chunk = json.loads(data)
-            if ttft is None and chunk.get("choices"):
-                delta = chunk["choices"][0].get("delta", {})
-                if delta.get("content"):
-                    ttft = time.perf_counter() - start
-            if chunk.get("usage"):
-                completion_tokens = chunk["usage"].get("completion_tokens")
-    total = time.perf_counter() - start
-    if not completion_tokens:
-        raise RuntimeError("server did not report completion_tokens (need stream usage support)")
-    gen_time = max(total - (ttft or 0.0), 1e-6)
-    return ttft or 0.0, completion_tokens / gen_time, completion_tokens
 
 
 def main():
@@ -67,27 +39,30 @@ def main():
     ap.add_argument("--out", default=None, help="results markdown (default: alongside this script)")
     args = ap.parse_args()
 
-    out = args.out or f"{sys.path[0]}/bench-results.md"
+    out = args.out or str(Path(__file__).resolve().parent / "bench-results.md")
     tps_all, ttft_all = [], []
     print(f"# benchmarking {args.label} against {args.host} ({args.model})\n")
     for name, prompt, max_tokens in PROMPTS:
         try:
-            ttft, tps, n = run_one(args.host, args.model, prompt, max_tokens)
+            r = stream_chat(args.host, args.model,
+                            [{"role": "user", "content": prompt}], max_tokens,
+                            ignore_eos=True, timeout=600)
         except Exception as e:
             print(f"  {name:<6} FAILED: {e}")
             continue
-        tps_all.append(tps); ttft_all.append(ttft)
-        print(f"  {name:<6} ttft={ttft*1000:7.1f}ms  decode={tps:7.2f} tok/s  ({n} tok)")
+        ttft_ms, _prefill, tps = metrics(r)
+        tps_all.append(tps); ttft_all.append(ttft_ms)
+        print(f"  {name:<6} ttft={ttft_ms:7.1f}ms  decode={tps:7.2f} tok/s  "
+              f"({r['completion_tokens']} tok)")
 
     if not tps_all:
         sys.exit("all prompts failed")
     med_tps = statistics.median(tps_all)
-    med_ttft = statistics.median(ttft_all) * 1000
+    med_ttft = statistics.median(ttft_all)
     print(f"\n  median decode = {med_tps:.2f} tok/s   median ttft = {med_ttft:.1f} ms")
 
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
     header = "| date (UTC) | label | median tok/s | median TTFT (ms) |\n|---|---|---|---|\n"
-    import os
     new = not os.path.exists(out)
     with open(out, "a") as f:
         if new:

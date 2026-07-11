@@ -20,7 +20,6 @@ ARG BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04
 ###############################################################################
 FROM ${BASE_IMAGE} AS base
 
-ARG PYTHON_VERSION=3.12
 ENV DEBIAN_FRONTEND=noninteractive \
     PIP_BREAK_SYSTEM_PACKAGES=1 \
     PATH=/usr/local/cuda/bin:/usr/lib/ccache:${PATH} \
