@@ -95,7 +95,7 @@ ARG NVCC_THREADS=8
 ARG TORCH_CUDA_ARCH_LIST=12.0
 # Must match FLASHINFER_REF in ./build (e.g. v0.6.12 -> 0.6.12); used to pull the
 # matching prebuilt flashinfer-cubin wheel instead of rebuilding it from source.
-ARG FLASHINFER_VERSION=0.6.12
+ARG FLASHINFER_VERSION=0.6.13
 # 12.0f = sm120 family-conditional kernels (RTX PRO 6000 Blackwell). FlashInfer
 # 0.6.x has no setup.py; it builds via a PEP 517 backend (python -m build).
 ENV FLASHINFER_CUDA_ARCH_LIST="12.0f" \
@@ -135,7 +135,7 @@ FROM flashinfer-build AS vllm-build
 ARG MAX_JOBS=28
 ARG NVCC_THREADS=8
 ARG TORCH_CUDA_ARCH_LIST=12.0
-ARG VLLM_VERSION=0.23.0
+ARG VLLM_VERSION=0.25.1
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     MAX_JOBS=${MAX_JOBS} \
     NVCC_THREADS=${NVCC_THREADS} \
