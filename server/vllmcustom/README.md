@@ -32,15 +32,19 @@ old `server/vllm` scripts:
 
 ## Default version set (mutually compatible)
 
-vLLM `v0.23.0` pins these, so they are the defaults:
+vLLM `v0.27.0` pins these (see its `requirements/cuda.txt`), so they are the defaults:
 
 | component  | ref/version | arch flags |
 |------------|-------------|------------|
-| CUDA       | 13.0.2 (`cudnn-devel-ubuntu24.04`) | — |
-| PyTorch    | v2.11.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0` |
-| FlashInfer | v0.6.12 (**from source**) | `FLASHINFER_CUDA_ARCH_LIST=12.0f` |
-| vLLM       | v0.23.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0`, `VLLM_USE_PRECOMPILED=0` |
-| torchvision/torchaudio | 0.26.0 / 2.11.0 (cu130 wheels, `--no-deps`) | not perf-critical |
+| CUDA       | 13.0.3 (`cudnn-devel-ubuntu24.04`) | — |
+| PyTorch    | v2.13.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0` |
+| FlashInfer | v0.6.16.post3 (**from source**) | `FLASHINFER_CUDA_ARCH_LIST=12.0f` |
+| vLLM       | v0.27.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0`, `VLLM_USE_PRECOMPILED=0` |
+| torchvision/torchaudio | 0.28.0 / 2.11.0 (cu130 wheels, `--no-deps`) | not perf-critical |
+
+torchaudio 2.11.0 alongside torch 2.13.0 is not a typo — that is upstream's own pairing.
+`flashinfer-cubin` stopped publishing to PyPI after 0.6.13, so the build pulls it from
+`--extra-index-url https://flashinfer.ai/whl/` (matching vLLM's `requirements/cuda.txt`).
 
 ## Trying other CUDA / versions
 
@@ -49,7 +53,7 @@ coexist:
 
 ```bash
 CUDA_VERSION=13.1.2 ./build               # -> iphands/vllm-blackwell:cu1312-sm120
-VLLM_REF=v0.22.1 TORCH_REF=v2.11.0 FLASHINFER_REF=v0.6.11 ./build
+VLLM_REF=v0.25.1 TORCH_REF=v2.11.0 FLASHINFER_REF=v0.6.13 ./build
 ```
 
 Then run a specific variant and benchmark it:
@@ -78,8 +82,8 @@ EXTRA_ARGS="--max-num-seqs 8" ./run ./models/vllm/Qwen3.6-27B
 Benchmark each with a distinct label; rows accumulate in `bench-results.md`:
 
 ```bash
-./bench cu1302-flashinfer
-./bench cu1302-cutlass-mtp2
+./bench cu1303-flashinfer
+./bench cu1303-cutlass-mtp2
 ```
 
 ## Performance tuning (sm120, single GPU)
@@ -108,9 +112,9 @@ have one card).
   fastest per the wiki; `flashinfer-cudnn` is the *safest* (sidesteps a FlashInfer
   CUTLASS FP4 race condition that silently NaNs); `marlin` is a W4A16 fallback if FP4
   GEMM ever produces garbage; `flashinfer-b12x` is the same SM12x CuTe DSL kernel for
-  dense GEMM. Empty = vLLM auto. (Passed as `--linear-backend`; the old
-  `VLLM_NVFP4_GEMM_BACKEND` env is deprecated in v0.23 — only `flashinfer-b12x`
-  still goes through the env, since it's missing from the flag's choices.)
+  dense GEMM. Empty = vLLM auto. (All passed as `--linear-backend`. The old
+  `VLLM_NVFP4_GEMM_BACKEND` env was deprecated in v0.23 and is gone from `vllm/envs.py`
+  as of v0.27.0, which also promoted `flashinfer_b12x` into the flag's own choices.)
 - `SPEC_TOKENS` — MTP=2 is the safe sweet spot; MTP=3 *may* add a bit for single
   streams (its instability is a long-context/high-concurrency problem). Watch the logs
   for `probability tensor contains inf/nan` → back off to `flashinfer-cudnn` or MTP=2.
@@ -197,10 +201,19 @@ recorded, not fatal); and in `convo` mode read **TG**, not TTFT (prefix caching)
   under sustained load.
 
 ### Version notes (Tier 3, investigated)
-Staying on the pinned set is fine for decode: flashinfer 0.6.12 already includes the
-sm120f FP4 module (PR #2650), and vLLM v0.23.0 already includes the Qwen3.5 MTP fix
-(#35581). A vLLM bump would only add fixes merged after 2026-06-14 — not worth the
-full rebuild + torch/flashinfer compat risk unless a benchmark exposes a problem.
+The v0.27.0 bump was taken for architecture support, not decode throughput: it lands
+native `DiffusionGemmaForBlockDiffusion` (unblocking `./run-diffusiongemma`) plus
+`LagunaForCausalLM` / `DFlashLagunaForCausalLM`. Decode-wise the earlier pinned set was
+already fine — flashinfer has carried the sm120f FP4 module since 0.6.12 (PR #2650).
+
+A further bump is not free: it drags torch and flashinfer with it (0.27.0 moved torch
+2.11.0 → 2.13.0), which invalidates the `torch-build` layer and most of ccache, so
+budget a full multi-hour rebuild rather than an incremental one. Read the target tag's
+`requirements/cuda.txt` first and move `TORCH_REF`/`FLASHINFER_REF` in `./build` to match.
+
+`MuseGlimmer` still has no native implementation as of v0.27.0, so the
+`patches/muse-embed-norm/` sitecustomize shim and `run-muse`'s `--hf-overrides` are
+both still required.
 
 ## Caching — why builds aren't from scratch every time
 

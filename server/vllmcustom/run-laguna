@@ -120,16 +120,11 @@ VLLM_ARGS=(
 [[ "$SPEC_TOKENS" != "0" ]] && VLLM_ARGS+=( --speculative-config \
   '{"method":"dflash","model":"/models/Laguna-S-2.1-DFlash-NVFP4","num_speculative_tokens":'"$SPEC_TOKENS"'}' )
 [[ -n "$MOE_BACKEND" ]] && VLLM_ARGS+=( --moe-backend "$MOE_BACKEND" )
-# NVFP4 GEMM backend: the VLLM_NVFP4_GEMM_BACKEND env is deprecated in v0.23
-# ("Use --linear-backend"), so pass the flag. Exception: flashinfer-b12x isn't in
-# the --linear-backend choices yet — only the env still routes to it.
-if [[ -n "$NVFP4_BACKEND" ]]; then
-  if [[ "$NVFP4_BACKEND" == "flashinfer-b12x" ]]; then
-    CONTAINER_ARGS+=( -e VLLM_NVFP4_GEMM_BACKEND="$NVFP4_BACKEND" )
-  else
-    VLLM_ARGS+=( --linear-backend "$NVFP4_BACKEND" )   # vLLM lowercases and maps - to _
-  fi
-fi
+# NVFP4 GEMM backend: deprecated in v0.23 ("Use --linear-backend"), the
+# VLLM_NVFP4_GEMM_BACKEND env is now gone from vllm/envs.py entirely. v0.27.0 also
+# promoted flashinfer_b12x into the LinearBackend choices (vllm/config/kernel.py),
+# so the old env-only special case for it is obsolete — everything takes the flag.
+[[ -n "$NVFP4_BACKEND" ]] && VLLM_ARGS+=( --linear-backend "$NVFP4_BACKEND" )  # vLLM lowercases and maps - to _
 [[ -n "$CUDAGRAPH_MODE" ]] && VLLM_ARGS+=( --compilation-config '{"cudagraph_mode":"'"$CUDAGRAPH_MODE"'"}' )
 [[ -n "$FLASHINFER_AUTOTUNE" ]] && VLLM_ARGS+=( --enable-flashinfer-autotune )
 # shellcheck disable=SC2206

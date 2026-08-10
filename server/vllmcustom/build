@@ -1,35 +1,35 @@
 #!/bin/bash
 # Build the sm120-optimized vLLM image from source.
 #
-#   ./build                       # defaults: CUDA 13.0.2, vLLM v0.25.1 + torch v2.11.0 + flashinfer v0.6.13
+#   ./build                       # defaults: CUDA 13.0.3, vLLM v0.27.0 + torch v2.13.0 + flashinfer v0.6.16.post3
 #   CUDA_VERSION=13.1.2 ./build   # try a newer CUDA toolkit (produces a different tag)
-#   VLLM_REF=v0.22.1 ./build      # try a different vLLM (pin matching TORCH_REF/FLASHINFER_REF too)
+#   VLLM_REF=v0.25.1 ./build      # try a different vLLM (pin matching TORCH_REF/FLASHINFER_REF too)
 #
 # Source trees are cloned/pulled into $BUILD_DIR/src once and reused (no re-clone).
 # Patch or `git checkout` them in place; this script only fetches + checks out the pinned ref.
 set -euo pipefail
 
 # --- knobs (override via env) ------------------------------------------------
-CUDA_VERSION=${CUDA_VERSION:-13.0.2}
+CUDA_VERSION=${CUDA_VERSION:-13.0.3}
 TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-12.0}      # sm_120 (RTX PRO 6000 Blackwell)
 MAX_JOBS=${MAX_JOBS:-28}
 NVCC_THREADS=${NVCC_THREADS:-8}
 
-# Mutually-compatible default set (vLLM v0.25.1 pins torch 2.11.0 / flashinfer 0.6.13).
-VLLM_REF=${VLLM_REF:-v0.25.1}
-TORCH_REF=${TORCH_REF:-v2.11.0}
-FLASHINFER_REF=${FLASHINFER_REF:-v0.6.13}
+# Mutually-compatible default set (vLLM v0.27.0 pins torch 2.13.0 / flashinfer 0.6.16.post3).
+VLLM_REF=${VLLM_REF:-v0.27.0}
+TORCH_REF=${TORCH_REF:-v2.13.0}
+FLASHINFER_REF=${FLASHINFER_REF:-v0.6.16.post3}
 
 # Clean PEP 440 versions (strip leading 'v') baked into the wheels so vLLM's
 # torch==X pin resolves to our source build instead of pulling from PyPI.
 TORCH_VERSION=${TORCH_VERSION:-${TORCH_REF#v}}
 VLLM_VERSION=${VLLM_VERSION:-${VLLM_REF#v}}
 FLASHINFER_VERSION=${FLASHINFER_VERSION:-${FLASHINFER_REF#v}}   # prebuilt cubin wheel pin
-TORCHVISION_VERSION=${TORCHVISION_VERSION:-0.26.0}
-TORCHAUDIO_VERSION=${TORCHAUDIO_VERSION:-2.11.0}
+TORCHVISION_VERSION=${TORCHVISION_VERSION:-0.28.0}
+TORCHAUDIO_VERSION=${TORCHAUDIO_VERSION:-2.11.0}      # upstream pairs 2.11.0 with torch 2.13.0
 
 IMAGE=${IMAGE:-iphands/vllm-blackwell}
-CUDA_TAG=${CUDA_VERSION//./}                            # 13.0.2 -> 1302
+CUDA_TAG=${CUDA_VERSION//./}                            # 13.0.3 -> 1303
 TAG=${TAG:-cu${CUDA_TAG}-sm120}
 
 BUILD_DIR=${BUILD_DIR:-/mnt/noir/scratch/ai/vllm/build}

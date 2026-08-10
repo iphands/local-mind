@@ -4,8 +4,8 @@
 Engine/build-agnostic: it only talks to the HTTP endpoint, so the same run
 compares any vLLM build / backend / CUDA version currently serving on :8700.
 
-    ./bench <label>                        # e.g. ./bench cu1302-flashinfer
-    ./bench cu1302-triton --host host:8700 --model cosmo-6000
+    ./bench <label>                        # e.g. ./bench cu1303-flashinfer
+    ./bench cu1303-triton --host host:8700 --model cosmo-6000
 
 Measures, per prompt, TTFT (time to first token) and decode tok/s
 (completion_tokens / generation-time), then prints medians and appends a row
@@ -33,7 +33,7 @@ PROMPTS = [
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("label", help="variant label, e.g. cu1302-flashinfer")
+    ap.add_argument("label", help="variant label, e.g. cu1303-flashinfer")
     ap.add_argument("--host", default="localhost:8700")
     ap.add_argument("--model", default="cosmo-6000")
     ap.add_argument("--out", default=None, help="results markdown (default: alongside this script)")

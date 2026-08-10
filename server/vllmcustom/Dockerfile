@@ -12,7 +12,7 @@
 # ccache + uv caches use BuildKit cache mounts so an incremental change re-links
 # in minutes instead of recompiling torch from scratch.
 
-ARG CUDA_VERSION=13.0.2
+ARG CUDA_VERSION=13.0.3
 ARG BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04
 
 ###############################################################################
@@ -59,9 +59,9 @@ FROM base AS torch-build
 ARG MAX_JOBS=28
 ARG NVCC_THREADS=8
 ARG TORCH_CUDA_ARCH_LIST=12.0
-ARG TORCH_VERSION=2.11.0
-# Pin a clean wheel version (e.g. 2.11.0, not 2.11.0a0+gitXXXX) so vLLM's
-# `torch==2.11.0` dependency resolves to our wheel instead of pulling from PyPI.
+ARG TORCH_VERSION=2.13.0
+# Pin a clean wheel version (e.g. 2.13.0, not 2.13.0a0+gitXXXX) so vLLM's
+# `torch==2.13.0` dependency resolves to our wheel instead of pulling from PyPI.
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     PYTORCH_BUILD_VERSION=${TORCH_VERSION} \
     PYTORCH_BUILD_NUMBER=1 \
@@ -93,9 +93,9 @@ FROM torch-build AS flashinfer-build
 ARG MAX_JOBS=28
 ARG NVCC_THREADS=8
 ARG TORCH_CUDA_ARCH_LIST=12.0
-# Must match FLASHINFER_REF in ./build (e.g. v0.6.12 -> 0.6.12); used to pull the
-# matching prebuilt flashinfer-cubin wheel instead of rebuilding it from source.
-ARG FLASHINFER_VERSION=0.6.13
+# Must match FLASHINFER_REF in ./build (e.g. v0.6.16.post3 -> 0.6.16.post3); used to
+# pull the matching prebuilt flashinfer-cubin wheel instead of rebuilding it from source.
+ARG FLASHINFER_VERSION=0.6.16.post3
 # 12.0f = sm120 family-conditional kernels (RTX PRO 6000 Blackwell). FlashInfer
 # 0.6.x has no setup.py; it builds via a PEP 517 backend (python -m build).
 ENV FLASHINFER_CUDA_ARCH_LIST="12.0f" \
@@ -118,10 +118,13 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     # prebuilt cubins (vLLM pins flashinfer-cubin); install before jit-cache so the
     # AOT step can reuse them instead of refetching. The cubin package is a
     # py3-none-any blob of kernels NVIDIA already compiled — nothing to build for
-    # sm120 — so we pull the prebuilt PyPI wheel instead of rebuilding it. Building
-    # it from source scrapes ~15.6k files off NVIDIA's flaky edge.urm.nvidia.com
-    # CDN all-or-nothing, and a single failed file aborts the whole image build.
-    uv pip install --no-deps "flashinfer-cubin==${FLASHINFER_VERSION}" && \
+    # sm120 — so we pull the prebuilt wheel instead of rebuilding it. Building it
+    # from source scrapes ~15.6k files off NVIDIA's flaky edge.urm.nvidia.com CDN
+    # all-or-nothing, and a single failed file aborts the whole image build.
+    # flashinfer-cubin stopped publishing to PyPI after 0.6.13, so it comes from
+    # flashinfer.ai/whl — the same --extra-index-url vLLM uses in requirements/cuda.txt.
+    uv pip install --no-deps --extra-index-url https://flashinfer.ai/whl/ \
+        "flashinfer-cubin==${FLASHINFER_VERSION}" && \
     # AOT-precompiled sm120 kernels (the heavy compile; honors FLASHINFER_CUDA_ARCH_LIST)
     python -m build --no-isolation --wheel --outdir /wheels ./flashinfer-jit-cache && \
     uv pip install --no-deps /wheels/flashinfer_jit_cache-*.whl && \
@@ -135,7 +138,7 @@ FROM flashinfer-build AS vllm-build
 ARG MAX_JOBS=28
 ARG NVCC_THREADS=8
 ARG TORCH_CUDA_ARCH_LIST=12.0
-ARG VLLM_VERSION=0.25.1
+ARG VLLM_VERSION=0.27.0
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     MAX_JOBS=${MAX_JOBS} \
     NVCC_THREADS=${NVCC_THREADS} \
@@ -148,7 +151,7 @@ WORKDIR /src/vllm
 # Don't let vLLM's pinned torch wheel clobber our source build.
 # v0.23.0 replaced requirements/build.txt with a requirements/build/<platform>.txt
 # split; use the cuda list. use_existing_torch.py globs requirements/**/*.txt, so it
-# still strips the torch==2.11.0 pin from it, leaving our source torch in place.
+# still strips the torch==2.13.0 pin from it, leaving our source torch in place.
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
     python use_existing_torch.py 2>/dev/null || true && \
@@ -162,7 +165,9 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 ###############################################################################
 FROM base AS vllm-openai
 
-ARG TORCHVISION_VERSION=0.26.0
+ARG TORCHVISION_VERSION=0.28.0
+# Not a stale pin: vLLM's requirements/cuda.txt really does pair torchaudio 2.11.0
+# with torch 2.13.0 / torchvision 0.28.0. Keep it in step with upstream, not with torch.
 ARG TORCHAUDIO_VERSION=2.11.0
 
 # All locally-built wheels (torch, flashinfer, vllm).
