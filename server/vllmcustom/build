@@ -23,8 +23,16 @@ TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-12.0}      # sm_120 (RTX PRO 6000 B
 # to bypass the calculation. ./scripts/slice-setup enforces the same budget as a
 # kernel-level backstop; see "Memory-capped builds" in the README.
 BUILD_MEM_GB=${BUILD_MEM_GB:-90}
-MEM_PER_JOB_GB=${MEM_PER_JOB_GB:-5}                     # peak RSS per nvcc/cicc job -> 18 jobs
-_jobs_by_mem=$(( BUILD_MEM_GB / MEM_PER_JOB_GB ))
+# Measured on the flashinfer AOT stage (the worst offender, 3408 kernels): 17
+# concurrent cicc held 82.3 GB total — 4.9 GB average, 7.3 GB for the fattest.
+MEM_PER_JOB_GB=${MEM_PER_JOB_GB:-5}
+# Jobs are sized against a *fraction* of the budget, not the whole thing. Sizing
+# them to BUILD_MEM_GB directly makes predicted peak equal the cap by
+# construction (18 x 5 GB = 90 GB = the limit), which parks the build on the
+# ceiling permanently. The gap absorbs peak skew — jobs don't all crest at once,
+# but a few hitting 7.3 GB together would blow a zero-headroom budget.
+MEM_HEADROOM_PCT=${MEM_HEADROOM_PCT:-80}
+_jobs_by_mem=$(( BUILD_MEM_GB * MEM_HEADROOM_PCT / 100 / MEM_PER_JOB_GB ))
 _jobs_by_cpu=$(( $(nproc) - 4 ))
 MAX_JOBS=${MAX_JOBS:-$(( _jobs_by_mem < _jobs_by_cpu ? _jobs_by_mem : _jobs_by_cpu ))}
 # nvcc -t parallelises across arch targets; with the single 12.0 target in

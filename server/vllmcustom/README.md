@@ -236,21 +236,52 @@ To inspect/relocate the ccache on disk, export it:
 
 The host has 125 GB and **no swap**, so an OOM during compilation isn't a build
 failure — the kernel OOM-killer fires against the whole machine. Parallel `nvcc`
-is what gets it there: each `cicc` holds 2–6 GB on the heavy sm120 template
-kernels, so an unbounded 28-way build can spike past 110 GB.
+is what gets it there. Measured on the flashinfer AOT stage (3408 kernels, the
+worst offender): 17 concurrent `cicc` held **82.3 GB** — 4.9 GB average, 7.3 GB
+for the fattest — so an unbounded 28-way build wants well over 110 GB.
 
 `./build` is capped at `BUILD_MEM_GB` (default 90G) by two independent layers:
 
-- **Derived `MAX_JOBS`** — `BUILD_MEM_GB / MEM_PER_JOB_GB` (default 5), clamped
-  to `nproc - 4`. On this box that's **18** jobs instead of 28. This is the
-  prevention layer: no privileges, no setup, just keeps the build off the
-  ceiling. Setting `MAX_JOBS` explicitly bypasses the calculation entirely.
+- **Derived `MAX_JOBS`** — `BUILD_MEM_GB × MEM_HEADROOM_PCT / MEM_PER_JOB_GB`
+  (defaults 80% and 5 GB), clamped to `nproc - 4`. On this box that's **14**
+  jobs instead of 28: ~70 GB expected against a 90 GB cap. This is the
+  prevention layer — no privileges, no setup. Setting `MAX_JOBS` explicitly
+  bypasses the calculation entirely.
 - **A cgroup ceiling** — `./build` passes `--cgroup-parent=vllmbuild.slice`, a
-  systemd slice with `MemoryHigh=84G` / `MemoryMax=90G`. `High` throttles under
-  reclaim pressure; `Max` is the wall, where the OOM killer fires **scoped to
-  that cgroup** — it kills an `nvcc`, not your desktop session or a running
-  vLLM server. This is containment, not prevention: hitting it still loses the
-  build, just not the machine.
+  systemd slice with `MemoryMax=90G`. That's the wall, where the OOM killer
+  fires **scoped to that cgroup** — it kills an `nvcc`, not your desktop session
+  or a running vLLM server. Containment, not prevention: hitting it still loses
+  the build, just not the machine.
+
+> **Why the headroom fraction, and why no `MemoryHigh`** — both learned the hard
+> way, and both produce a build that runs overnight without finishing:
+>
+> Sizing jobs against the *whole* budget (`BUILD_MEM_GB / MEM_PER_JOB_GB`) makes
+> predicted peak equal the cap by construction — 18 × 5 GB = 90 GB = the limit —
+> so the build parks on the ceiling permanently. `MEM_HEADROOM_PCT=100`
+> reproduces exactly that.
+>
+> `MemoryHigh` looks like the gentler knob (throttle before you kill) but here it
+> is a **livelock**. `memory.high` throttles by forcing direct reclaim, which only
+> degrades gracefully when something is reclaimable — page cache or swap. This
+> build is 99.97% anonymous (90 GB anon vs 23 MB file cache) with no swap, so
+> nothing can be evicted: the kernel burns itself scanning an anon LRU it can
+> never free, and the only reclaimable memory left is the mapped text of
+> `cicc`/`nvcc` themselves, which major-faults straight back in. Observed with
+> `MemoryHigh=84G`: 397M `memory.high` events, 7.7B file refaults, 37M major
+> faults, **3.3 GB/s of disk reads at ~0% user CPU**, and no forward progress —
+> while `memory.max` and `oom_kill` both stayed at 0. `MemoryMax` alone fails
+> fast instead of hanging forever.
+>
+> If a build ever crawls with high iowait, check this first:
+>
+> ```bash
+> cat /sys/fs/cgroup/vllmbuild.slice/memory.events   # 'high' climbing = throttled
+> grep -E '^(anon|file) ' /sys/fs/cgroup/vllmbuild.slice/memory.stat
+> ```
+>
+> Adding swap would make both failure modes far less sharp — with anything to
+> page out, overshoot degrades instead of livelocking or OOM-killing.
 
 Install the slice once, as root:
 
@@ -292,7 +323,9 @@ BUILD_MEM_GB=64 su -c "$PWD/scripts/slice-setup"   # move the hard ceiling
 BUILD_MEM_GB=64 ./build                            # and the derived MAX_JOBS
 ```
 
-`MEM_PER_JOB_GB=5` is a starting estimate, not a measurement. After a full build
+`MEM_PER_JOB_GB=5` matches the measured 4.9 GB average, but averages hide peak
+skew (the fattest kernel wanted 7.3 GB) — that's what `MEM_HEADROOM_PCT` absorbs.
+After a full build
 read the real high-water mark and adjust:
 
 ```bash

@@ -26,9 +26,18 @@ BUILD_MEM_GB=${BUILD_MEM_GB:-90}
 # value we hand to BuildKit identical to the unit name.)
 SLICE=${SLICE:-vllmbuild.slice}
 
-# MemoryHigh throttles (reclaim pressure, processes stall) before MemoryMax
-# kills. The 6 GB gap is the "slow down" warning band.
-MEM_HIGH_GB=$(( BUILD_MEM_GB - 6 ))
+# DO NOT set MemoryHigh here. It looks like the gentler knob -- throttle before
+# you kill -- but on this box it is a livelock, not a throttle. memory.high works
+# by forcing direct reclaim and injecting stalls, which only degrades gracefully
+# when something is actually reclaimable (page cache or swap). This build is
+# ~99.97% anonymous memory (90 GB anon vs 23 MB file cache) on a machine with no
+# swap, so nothing can be evicted: the kernel burns itself scanning an anon LRU
+# it can never free (211B pages scanned for 7.8B freed), and the only reclaimable
+# memory left is the mapped text of cicc/nvcc themselves -- which immediately
+# major-faults back in. Measured result: 397M memory.high events, 7.7B file
+# refaults, 3.3 GB/s of disk reads, ~0% user CPU, and a build that ran overnight
+# without finishing. MemoryMax alone is the correct backstop: it fails fast
+# (kills one nvcc) instead of hanging forever.
 
 self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
 
@@ -50,14 +59,16 @@ if [[ $SLICE != vllm-build.slice && -f $legacy ]]; then
   rm -f "$legacy"
 fi
 
-echo "## writing $unit (high=${MEM_HIGH_GB}G max=${BUILD_MEM_GB}G)"
+echo "## writing $unit (max=${BUILD_MEM_GB}G, no MemoryHigh — see comment above)"
 cat > "$unit" <<EOF
 # Managed by vllmcustom/scripts/slice-setup — re-run that to change limits.
 [Unit]
 Description=vLLM source build (memory-capped)
 
 [Slice]
-MemoryHigh=${MEM_HIGH_GB}G
+# MemoryHigh is deliberately unset: with a no-swap, all-anonymous workload it
+# livelocks the build in futile direct reclaim rather than throttling it.
+MemoryHigh=infinity
 MemoryMax=${BUILD_MEM_GB}G
 EOF
 
