@@ -56,7 +56,7 @@ RUN uv venv --python python3 ${VIRTUAL_ENV} && \
 ###############################################################################
 FROM base AS torch-build
 
-ARG MAX_JOBS=28
+ARG MAX_JOBS=18
 ARG NVCC_THREADS=8
 ARG TORCH_CUDA_ARCH_LIST=12.0
 ARG TORCH_VERSION=2.13.0
@@ -90,7 +90,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 ###############################################################################
 FROM torch-build AS flashinfer-build
 
-ARG MAX_JOBS=28
+ARG MAX_JOBS=18
 ARG NVCC_THREADS=8
 ARG TORCH_CUDA_ARCH_LIST=12.0
 # Must match FLASHINFER_REF in ./build (e.g. v0.6.16.post3 -> 0.6.16.post3); used to
@@ -135,7 +135,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 ###############################################################################
 FROM flashinfer-build AS vllm-build
 
-ARG MAX_JOBS=28
+ARG MAX_JOBS=18
 ARG NVCC_THREADS=8
 ARG TORCH_CUDA_ARCH_LIST=12.0
 ARG VLLM_VERSION=0.27.0
