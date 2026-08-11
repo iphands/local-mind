@@ -1,0 +1,86 @@
+#!/bin/bash
+# Install the systemd slice that gives ./build a hard memory ceiling.
+#
+#   su -c '/path/to/vllmcustom/scripts/slice-setup'    # install with defaults
+#   BUILD_MEM_GB=64 ./scripts/slice-setup              # re-run to change the budget
+#
+# ./build passes --cgroup-parent=$SLICE to `docker build`, so every RUN step
+# lands in this cgroup. MemoryMax is enforced by the kernel: when the build
+# exceeds it the OOM killer fires *inside this cgroup only* — it kills an nvcc
+# instead of taking down the host (125 GB, no swap, so a host OOM is brutal).
+#
+# This is the backstop, not the primary defence. ./build also derives MAX_JOBS
+# from the same BUILD_MEM_GB so it should never reach the ceiling in the first
+# place; see the "Memory-capped builds" section of the README.
+#
+# Idempotent — re-running overwrites the unit with the current values.
+set -euo pipefail
+
+BUILD_MEM_GB=${BUILD_MEM_GB:-90}
+# NOTE: no dash in the name. systemd treats '-' as the slice hierarchy separator,
+# so a "vllm-build.slice" would silently nest under an implicit vllm.slice and
+# live at /sys/fs/cgroup/vllm.slice/vllm-build.slice. A dash-free name is
+# top-level, so the unit name and the cgroup path component are the same string —
+# which is what --cgroup-parent needs. (The path is resolved from ControlGroup
+# below regardless, so a renamed SLICE still works; the flat name just keeps the
+# value we hand to BuildKit identical to the unit name.)
+SLICE=${SLICE:-vllmbuild.slice}
+
+# MemoryHigh throttles (reclaim pressure, processes stall) before MemoryMax
+# kills. The 6 GB gap is the "slow down" warning band.
+MEM_HIGH_GB=$(( BUILD_MEM_GB - 6 ))
+
+self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+
+if [[ $EUID -ne 0 ]]; then
+  echo "## $0 must run as root (it writes /etc/systemd/system)." >&2
+  echo "##" >&2
+  echo "##   su -c '$self'" >&2
+  exit 1
+fi
+
+unit=/etc/systemd/system/$SLICE
+
+# Migrate off the first cut of this script, which used a dashed name that landed
+# in the wrong place (see the SLICE note above).
+legacy=/etc/systemd/system/vllm-build.slice
+if [[ $SLICE != vllm-build.slice && -f $legacy ]]; then
+  echo "## removing legacy $legacy (nested under vllm.slice, unused)"
+  systemctl stop vllm-build.slice 2>/dev/null || true
+  rm -f "$legacy"
+fi
+
+echo "## writing $unit (high=${MEM_HIGH_GB}G max=${BUILD_MEM_GB}G)"
+cat > "$unit" <<EOF
+# Managed by vllmcustom/scripts/slice-setup — re-run that to change limits.
+[Unit]
+Description=vLLM source build (memory-capped)
+
+[Slice]
+MemoryHigh=${MEM_HIGH_GB}G
+MemoryMax=${BUILD_MEM_GB}G
+EOF
+
+systemctl daemon-reload
+# Start it so the cgroup exists and the limits are observable before any build.
+systemctl start "$SLICE"
+
+echo
+systemctl show "$SLICE" --property=MemoryHigh --property=MemoryMax
+
+# Verify against the live cgroup, not systemctl's view of the unit file. The
+# `systemctl start` above is what actually materialises the cgroup with limits:
+# without it BuildKit would create the directory itself, uncapped, while
+# systemctl still reported a healthy MemoryMax from the unit config.
+#
+# Ask systemd where the cgroup actually is rather than assuming
+# /sys/fs/cgroup/$SLICE — dashes in a slice name introduce parent levels.
+cgroup=$(systemctl show "$SLICE" --property=ControlGroup --value)
+applied=$(cat "/sys/fs/cgroup$cgroup/memory.max" 2>/dev/null || echo missing)
+if [[ ! $applied =~ ^[0-9]+$ ]]; then
+  echo "## ERROR: /sys/fs/cgroup$cgroup/memory.max is '$applied' — the limit did not take." >&2
+  exit 1
+fi
+
+echo "## cgroup: $applied bytes at /sys/fs/cgroup$cgroup"
+echo "## done — ./build will now pick this up automatically."

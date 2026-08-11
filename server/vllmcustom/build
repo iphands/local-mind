@@ -4,6 +4,11 @@
 #   ./build                       # defaults: CUDA 13.0.3, vLLM v0.27.0 + torch v2.13.0 + flashinfer v0.6.16.post3
 #   CUDA_VERSION=13.1.2 ./build   # try a newer CUDA toolkit (produces a different tag)
 #   VLLM_REF=v0.25.1 ./build      # try a different vLLM (pin matching TORCH_REF/FLASHINFER_REF too)
+#   BUILD_MEM_GB=64 ./build       # tighter memory budget (lowers the derived MAX_JOBS)
+#
+# Memory: the build is capped at BUILD_MEM_GB (default 90G) two ways — a derived
+# MAX_JOBS, plus a kernel-enforced cgroup ceiling if ./scripts/slice-setup has
+# been run once as root. See "Memory-capped builds" in the README.
 #
 # Source trees are cloned/pulled into $BUILD_DIR/src once and reused (no re-clone).
 # Patch or `git checkout` them in place; this script only fetches + checks out the pinned ref.
@@ -12,7 +17,18 @@ set -euo pipefail
 # --- knobs (override via env) ------------------------------------------------
 CUDA_VERSION=${CUDA_VERSION:-13.0.3}
 TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-12.0}      # sm_120 (RTX PRO 6000 Blackwell)
-MAX_JOBS=${MAX_JOBS:-28}
+# Memory budget. MAX_JOBS is derived from it because parallel nvcc is what OOMs
+# this box (125 GB, no swap): each cicc holds 2-6 GB on the heavy sm120 template
+# kernels, so an unbounded 28 jobs can spike past 110 GB. Set MAX_JOBS directly
+# to bypass the calculation. ./scripts/slice-setup enforces the same budget as a
+# kernel-level backstop; see "Memory-capped builds" in the README.
+BUILD_MEM_GB=${BUILD_MEM_GB:-90}
+MEM_PER_JOB_GB=${MEM_PER_JOB_GB:-5}                     # peak RSS per nvcc/cicc job -> 18 jobs
+_jobs_by_mem=$(( BUILD_MEM_GB / MEM_PER_JOB_GB ))
+_jobs_by_cpu=$(( $(nproc) - 4 ))
+MAX_JOBS=${MAX_JOBS:-$(( _jobs_by_mem < _jobs_by_cpu ? _jobs_by_mem : _jobs_by_cpu ))}
+# nvcc -t parallelises across arch targets; with the single 12.0 target in
+# TORCH_CUDA_ARCH_LIST it does little here and is not the memory driver.
 NVCC_THREADS=${NVCC_THREADS:-8}
 
 # Mutually-compatible default set (vLLM v0.27.0 pins torch 2.13.0 / flashinfer 0.6.16.post3).
@@ -57,10 +73,40 @@ sync_src pytorch    https://github.com/pytorch/pytorch.git        "$TORCH_REF"
 sync_src flashinfer https://github.com/flashinfer-ai/flashinfer.git "$FLASHINFER_REF"
 sync_src vllm       https://github.com/vllm-project/vllm.git        "$VLLM_REF"
 
+# Hard memory ceiling for the RUN steps. `docker buildx build` has no --memory
+# (classic-builder only); --cgroup-parent is the supported mechanism, and the
+# BuildKit embedded in dockerd does honor it (verified: RUN steps land in
+# /sys/fs/cgroup/$CGROUP_PARENT/buildkit/).
+#
+# Read memory.max out of the live cgroup rather than asking systemctl for the
+# unit's configured value. BuildKit *creates* the cgroup itself — uncapped — if
+# it doesn't exist, so a unit file that was never `systemctl start`ed reports a
+# healthy 90G from systemctl while the actual build runs unlimited. The kernel
+# state is the only honest answer. Missing/uncapped warns but never fails; the
+# derived MAX_JOBS still applies.
+#
+# Resolve the path via ControlGroup instead of assuming /sys/fs/cgroup/$SLICE:
+# systemd reads '-' in a slice name as a hierarchy separator, so vllm-build.slice
+# would actually live at /sys/fs/cgroup/vllm.slice/vllm-build.slice. BuildKit
+# treats --cgroup-parent as a literal path, so it must get the resolved path
+# (leading / stripped) or it would mkdir a fresh uncapped cgroup at the top level.
+CGROUP_PARENT=${CGROUP_PARENT:-vllmbuild.slice}
+cgroup_args=()
+cgroup_path=$(systemctl show "$CGROUP_PARENT" --property=ControlGroup --value 2>/dev/null || true)
+if [[ -n $cgroup_path ]] &&
+   [[ "$(cat "/sys/fs/cgroup$cgroup_path/memory.max" 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+  cgroup_args=(--cgroup-parent="${cgroup_path#/}")
+else
+  echo "## WARN: $CGROUP_PARENT is missing or uncapped — no hard ceiling on this build."
+  echo "##       Install it once:  su -c '$here/scripts/slice-setup'"
+  echo "##       Proceeding with MAX_JOBS=$MAX_JOBS as the only limit."
+fi
+
 echo
-echo "## building $IMAGE:$TAG  (cuda=$CUDA_VERSION torch=$TORCH_REF flashinfer=$FLASHINFER_REF vllm=$VLLM_REF arch=$TORCH_CUDA_ARCH_LIST)"
+echo "## building $IMAGE:$TAG  (cuda=$CUDA_VERSION torch=$TORCH_REF flashinfer=$FLASHINFER_REF vllm=$VLLM_REF arch=$TORCH_CUDA_ARCH_LIST mem=${BUILD_MEM_GB}G jobs=$MAX_JOBS)"
 
 DOCKER_BUILDKIT=1 docker build \
+  ${cgroup_args[@]+"${cgroup_args[@]}"} \
   -f "$here/Dockerfile" \
   --build-context pytorch="$SRC_DIR/pytorch" \
   --build-context flashinfer="$SRC_DIR/flashinfer" \

@@ -232,10 +232,82 @@ both still required.
 To inspect/relocate the ccache on disk, export it:
 `docker buildx build ... --cache-to type=local,dest=$BUILD_DIR/ccache`.
 
+## Memory-capped builds
+
+The host has 125 GB and **no swap**, so an OOM during compilation isn't a build
+failure — the kernel OOM-killer fires against the whole machine. Parallel `nvcc`
+is what gets it there: each `cicc` holds 2–6 GB on the heavy sm120 template
+kernels, so an unbounded 28-way build can spike past 110 GB.
+
+`./build` is capped at `BUILD_MEM_GB` (default 90G) by two independent layers:
+
+- **Derived `MAX_JOBS`** — `BUILD_MEM_GB / MEM_PER_JOB_GB` (default 5), clamped
+  to `nproc - 4`. On this box that's **18** jobs instead of 28. This is the
+  prevention layer: no privileges, no setup, just keeps the build off the
+  ceiling. Setting `MAX_JOBS` explicitly bypasses the calculation entirely.
+- **A cgroup ceiling** — `./build` passes `--cgroup-parent=vllmbuild.slice`, a
+  systemd slice with `MemoryHigh=84G` / `MemoryMax=90G`. `High` throttles under
+  reclaim pressure; `Max` is the wall, where the OOM killer fires **scoped to
+  that cgroup** — it kills an `nvcc`, not your desktop session or a running
+  vLLM server. This is containment, not prevention: hitting it still loses the
+  build, just not the machine.
+
+Install the slice once, as root:
+
+```bash
+su -c "$PWD/scripts/slice-setup"
+```
+
+Until you do, `./build` prints a warning and runs with `MAX_JOBS` as the only
+limit — it never hard-fails on a missing slice. `docker buildx build` has no
+`--memory` flag (that was classic-builder only), so `--cgroup-parent` is the
+supported mechanism here; the BuildKit embedded in dockerd does honor it, and
+`RUN` steps land in `/sys/fs/cgroup/vllmbuild.slice/buildkit/`.
+
+> **Gotcha:** BuildKit *creates* the cgroup itself, uncapped, if the directory
+> doesn't already exist — so pointing `--cgroup-parent` at a unit that was never
+> `systemctl start`ed silently gives you no ceiling at all, while `systemctl show`
+> still reports the configured 90G from the unit file. That's why `slice-setup`
+> starts the slice, and why `./build` verifies live kernel state (`memory.max`)
+> rather than asking systemd for the unit's configured value.
+>
+> **Why the name has no dash:** systemd reads `-` in a slice name as a hierarchy
+> separator, so a `vllm-build.slice` silently nests under an implicit
+> `vllm.slice` and lives at `/sys/fs/cgroup/vllm.slice/vllm-build.slice`. Since
+> BuildKit treats `--cgroup-parent` as a literal path, the dashed name would send
+> it to a *different*, uncapped cgroup. `vllmbuild.slice` is top-level, so the
+> unit name and the path component match. Both scripts resolve the path from
+> `systemctl show -p ControlGroup` anyway, so a rename stays correct.
+>
+> To confirm the cap is genuinely live:
+>
+> ```bash
+> cat /sys/fs/cgroup/vllmbuild.slice/memory.max   # a number, not "max"
+> ```
+
+To retune, re-run both with a new budget — they read the same env var:
+
+```bash
+BUILD_MEM_GB=64 su -c "$PWD/scripts/slice-setup"   # move the hard ceiling
+BUILD_MEM_GB=64 ./build                            # and the derived MAX_JOBS
+```
+
+`MEM_PER_JOB_GB=5` is a starting estimate, not a measurement. After a full build
+read the real high-water mark and adjust:
+
+```bash
+cat /sys/fs/cgroup/vllmbuild.slice/memory.peak
+```
+
+If peak lands well under the budget, lower `MEM_PER_JOB_GB` to buy back
+parallelism; if it brushes the ceiling, raise it.
+
 ## Notes / caveats
 
 - **First build compiles PyTorch from source** — expect hours. ccache makes
-  subsequent builds fast. Tune `MAX_JOBS` / `NVCC_THREADS` for your box.
+  subsequent builds fast. `MAX_JOBS` is derived from `BUILD_MEM_GB` rather than
+  hardcoded — see [Memory-capped builds](#memory-capped-builds) to trade compile
+  parallelism against peak RAM.
 - **Build state is on NFS** (`/mnt/noir/scratch`) by request; compile I/O is
   slower than local NVMe, mitigated by the ccache mount. Override with
   `BUILD_DIR=/some/local/path ./build`.
