@@ -1,0 +1,109 @@
+#!/bin/bash
+# Validate the pinned version set against what vLLM actually requires, BEFORE
+# any compilation happens.
+#
+# Runs entirely on the host — it reads the synced vllm source tree and (unless
+# PREFLIGHT_OFFLINE=1) queries the flashinfer wheel index. It never invokes
+# `docker build`, so it cannot touch the layer cache.
+#
+#   PREFLIGHT_ONLY=1 ./build        # sync sources, check versions, stop
+#   VLLM_REF=v0.28.0 PREFLIGHT_ONLY=1 ./build
+#                                   # "would this vLLM work with my pins?"
+#
+# ./build runs this automatically before building. ALLOW_VERSION_MISMATCH=1
+# downgrades every failure to a warning, for deliberately trying an untested
+# combination.
+#
+# Why this exists: vLLM pins torch/flashinfer as a matched set and bakes
+# `Requires-Dist: flashinfer-python==X` into its wheel. A mismatch is not caught
+# until the very last stage (`uv pip install /wheels/*.whl` in vllm-openai),
+# i.e. AFTER flashinfer's ~35min AOT recompile and vllm's 404 CUDA targets. The
+# resolver failure looks like:
+#     × No solution found ... vllm depends on flashinfer-python==0.6.16.post3
+#       and you require flashinfer-python==0.6.17
+# Everything here is checkable in under a second first.
+set -euo pipefail
+
+: "${SRC_DIR:?run via ./build, or export SRC_DIR VLLM_REF TORCH_VERSION ... first}"
+: "${VLLM_REF:?}" "${TORCH_VERSION:?}" "${FLASHINFER_VERSION:?}"
+: "${TORCHVISION_VERSION:?}" "${TORCHAUDIO_VERSION:?}"
+
+fail=0
+note() { printf '##   %s\n' "$1"; }
+bad()  { fail=1; printf '## MISMATCH  %s\n' "$1"; }
+
+echo "## preflight: checking pins against vLLM $VLLM_REF"
+
+reqs=$(git -C "$SRC_DIR/vllm" show "$VLLM_REF:requirements/cuda.txt" 2>/dev/null) || {
+  echo "## ERROR: cannot read requirements/cuda.txt at $VLLM_REF" >&2
+  echo "##        (is the ref fetched? ./build's sync_src does that)" >&2
+  exit 1
+}
+
+# Strip trailing comments (`torchvision==0.28.0 # Required for phi3v ...`).
+pin() {
+  printf '%s\n' "$reqs" | sed -e 's/[[:space:]]*#.*//' -e 's/[[:space:]]*$//' \
+    | grep -E "^$1==" | head -1 | sed "s/^$1==//"
+}
+
+check() { # $1=dist  $2=our value  $3=consequence if it differs
+  local want; want=$(pin "$1")
+  if [[ -z $want ]]; then
+    note "$1: not pinned by vLLM $VLLM_REF (skipped)"
+  elif [[ $want == "$2" ]]; then
+    note "$1: $2 ✓"
+  else
+    bad "$1: we build $2, vLLM $VLLM_REF wants $want"
+    note "  -> $3"
+  fi
+}
+
+# flashinfer is the one that hard-fails the build: the version is baked into the
+# vLLM wheel's Requires-Dist, so the final resolve cannot satisfy both.
+check flashinfer-python "$FLASHINFER_VERSION" \
+  "vLLM's wheel pins this; the final 'uv pip install /wheels/*.whl' will fail to resolve"
+check flashinfer-cubin  "$FLASHINFER_VERSION" \
+  "FLASHINFER_VERSION drives the cubin wheel pull; a missing cubin aborts flashinfer-build"
+# torch is NOT baked into the wheel — use_existing_torch.py strips the pin so our
+# source build is used. A mismatch is an ABI/compatibility risk, not a resolver
+# error, so it fails louder than it would otherwise deserve: it will not be
+# caught by the build at all.
+check torch "$TORCH_VERSION" \
+  "not a resolver error (use_existing_torch.py strips the pin) — vLLM would be compiled against an untested torch"
+check torchvision "$TORCHVISION_VERSION" \
+  "installed --no-deps from download.pytorch.org; a wrong pin silently disables multimodal"
+check torchaudio  "$TORCHAUDIO_VERSION" \
+  "installed --no-deps from download.pytorch.org"
+
+# The cubin wheel is a prebuilt blob fetched from flashinfer.ai/whl (it left PyPI
+# after 0.6.13). If the pinned version is absent the build dies deep inside
+# flashinfer-build, so confirm it exists up front.
+if [[ ${PREFLIGHT_OFFLINE:-0} != 1 ]]; then
+  idx=https://flashinfer.ai/whl/flashinfer-cubin/
+  if avail=$(curl -sS --max-time 20 "$idx" 2>/dev/null \
+             | grep -oE 'flashinfer_cubin-[0-9][^-]*' | sed 's/flashinfer_cubin-//' | sort -u) \
+     && [[ -n $avail ]]; then
+    if grep -qxF "$FLASHINFER_VERSION" <<<"$avail"; then
+      note "flashinfer-cubin $FLASHINFER_VERSION present at flashinfer.ai/whl ✓"
+    else
+      bad "flashinfer-cubin $FLASHINFER_VERSION is NOT published at flashinfer.ai/whl"
+      note "  -> flashinfer-build would fail at the cubin install step"
+      note "  -> newest published: $(sort -V <<<"$avail" | tail -5 | tr '\n' ' ')"
+    fi
+  else
+    note "flashinfer-cubin: index unreachable, skipped (set PREFLIGHT_OFFLINE=1 to silence)"
+  fi
+fi
+
+if (( fail )); then
+  echo "##"
+  if [[ ${ALLOW_VERSION_MISMATCH:-0} == 1 ]]; then
+    echo "## preflight FAILED but ALLOW_VERSION_MISMATCH=1 — continuing anyway."
+    exit 0
+  fi
+  echo "## preflight FAILED — refusing to start a build that cannot finish."
+  echo "## Move the refs together (see 'Version notes' in the README), or set"
+  echo "## ALLOW_VERSION_MISMATCH=1 to build the untested combination anyway."
+  exit 1
+fi
+echo "## preflight OK"

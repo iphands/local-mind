@@ -1,12 +1,12 @@
 #!/bin/bash
 # Build the sm120-optimized vLLM image from source.
 #
-#   ./build                       # defaults: CUDA 13.0.3, vLLM v0.27.0 + torch v2.13.0 + flashinfer v0.6.16.post3
+#   ./build                       # defaults: CUDA 13.0.3, vLLM v0.27.1 + torch v2.13.0 + flashinfer v0.6.16.post3
 #   CUDA_VERSION=13.1.2 ./build   # try a newer CUDA toolkit (produces a different tag)
 #   VLLM_REF=v0.25.1 ./build      # try a different vLLM (pin matching TORCH_REF/FLASHINFER_REF too)
 #   BUILD_MEM_GB=64 ./build       # tighter memory budget (lowers the derived MAX_JOBS)
 #
-# Memory: the build is capped at BUILD_MEM_GB (default 90G) two ways — a derived
+# Memory: the build is capped at BUILD_MEM_GB (default 110G) two ways — a derived
 # MAX_JOBS, plus a kernel-enforced cgroup ceiling if ./scripts/slice-setup has
 # been run once as root. See "Memory-capped builds" in the README.
 #
@@ -55,8 +55,8 @@ MAX_JOBS=${MAX_JOBS:-$(( _jobs_by_mem < _jobs_by_cpu ? _jobs_by_mem : _jobs_by_c
 # last stage.
 NVCC_THREADS=${NVCC_THREADS:-1}
 
-# Mutually-compatible default set (vLLM v0.27.0 pins torch 2.13.0 / flashinfer 0.6.16.post3).
-VLLM_REF=${VLLM_REF:-v0.27.0}
+# Mutually-compatible default set (vLLM v0.27.1 pins torch 2.13.0 / flashinfer 0.6.16.post3).
+VLLM_REF=${VLLM_REF:-v0.27.1}
 TORCH_REF=${TORCH_REF:-v2.13.0}
 FLASHINFER_REF=${FLASHINFER_REF:-v0.6.16.post3}
 
@@ -97,6 +97,21 @@ sync_src pytorch    https://github.com/pytorch/pytorch.git        "$TORCH_REF"
 sync_src flashinfer https://github.com/flashinfer-ai/flashinfer.git "$FLASHINFER_REF"
 sync_src vllm       https://github.com/vllm-project/vllm.git        "$VLLM_REF"
 
+# Fail fast on an incompatible version set. This is host-side only — it never
+# runs `docker build`, so it cannot invalidate a layer. Worth the second: a
+# flashinfer/vLLM mismatch is otherwise only discovered by the final
+# `uv pip install /wheels/*.whl`, after the ~35min AOT recompile.
+# PREFLIGHT_ONLY=1 stops here; ALLOW_VERSION_MISMATCH=1 downgrades it to a warning.
+echo
+SRC_DIR="$SRC_DIR" VLLM_REF="$VLLM_REF" \
+TORCH_VERSION="$TORCH_VERSION" FLASHINFER_VERSION="$FLASHINFER_VERSION" \
+TORCHVISION_VERSION="$TORCHVISION_VERSION" TORCHAUDIO_VERSION="$TORCHAUDIO_VERSION" \
+  "$here/scripts/preflight"
+if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
+  echo "## PREFLIGHT_ONLY=1 — stopping before docker build."
+  exit 0
+fi
+
 # Hard memory ceiling for the RUN steps. `docker buildx build` has no --memory
 # (classic-builder only); --cgroup-parent is the supported mechanism, and the
 # BuildKit embedded in dockerd does honor it (verified: RUN steps land in
@@ -105,7 +120,7 @@ sync_src vllm       https://github.com/vllm-project/vllm.git        "$VLLM_REF"
 # Read memory.max out of the live cgroup rather than asking systemctl for the
 # unit's configured value. BuildKit *creates* the cgroup itself — uncapped — if
 # it doesn't exist, so a unit file that was never `systemctl start`ed reports a
-# healthy 90G from systemctl while the actual build runs unlimited. The kernel
+# healthy 110G from systemctl while the actual build runs unlimited. The kernel
 # state is the only honest answer. Missing/uncapped warns but never fails; the
 # derived MAX_JOBS still applies.
 #

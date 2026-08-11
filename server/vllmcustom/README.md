@@ -215,6 +215,43 @@ budget a full multi-hour rebuild rather than an incremental one. Read the target
 `patches/muse-embed-norm/` sitecustomize shim and `run-muse`'s `--hf-overrides` are
 both still required.
 
+## Preflight — fail fast on an incompatible version set
+
+vLLM pins torch/flashinfer as a matched set and bakes
+`Requires-Dist: flashinfer-python==X` into its wheel, so bumping
+`FLASHINFER_REF` on its own produces a build that **cannot finish** — and the
+failure only surfaces in the very last stage, at
+`uv pip install /wheels/*.whl`, i.e. after flashinfer's ~35 min AOT recompile
+and vLLM's 404 CUDA targets:
+
+```
+× No solution found when resolving dependencies:
+╰─▶ Because vllm>=0.27.1 depends on flashinfer-python==0.6.16.post3
+    and you require flashinfer-python==0.6.17, ... unsatisfiable.
+```
+
+`./build` now runs `scripts/preflight` first, which compares every pin against
+the target vLLM's `requirements/cuda.txt` and confirms the `flashinfer-cubin`
+wheel is actually published. It runs **entirely on the host** — it never invokes
+`docker build`, so it cannot invalidate a layer.
+
+```bash
+PREFLIGHT_ONLY=1 ./build                      # sync + check, then stop
+VLLM_REF=v0.28.0 PREFLIGHT_ONLY=1 ./build     # "would this vLLM work with my pins?"
+ALLOW_VERSION_MISMATCH=1 ./build              # build the untested combination anyway
+PREFLIGHT_OFFLINE=1 ./build                   # skip the wheel-index lookup
+```
+
+The second form is the useful one when a new release lands: it answers whether a
+vLLM bump needs `TORCH_REF`/`FLASHINFER_REF` moved with it, in about a second and
+without touching the cache.
+
+Note what preflight can and can't tell you. A `flashinfer-python` mismatch is a
+hard resolver failure. A **`torch` mismatch is not** — `use_existing_torch.py`
+strips that pin so the source build is used, so nothing in the build will ever
+complain; it just means vLLM was compiled against a torch upstream never tested.
+Preflight flags it precisely because the build won't.
+
 ## Caching — why builds aren't from scratch every time
 
 - **Source** lives in `$BUILD_DIR/src/{pytorch,flashinfer,vllm}` (default
