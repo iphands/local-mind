@@ -217,6 +217,27 @@ ENV VLLM_HOST_IP=0.0.0.0 \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
     DO_NOT_TRACK=1
 
+# Stamp the version set into the image so ./push can derive its tags by reading
+# the image rather than re-declaring the versions (which is how ./push's
+# CUDA_VERSION drifted from ./build's). Declared here, *after* the expensive RUN,
+# so a version change only rebuilds this metadata layer.
+#
+# ARG re-declaration is required per stage; these inherit the values ./build
+# already passes with --build-arg.
+ARG CUDA_VERSION
+ARG TORCH_VERSION
+ARG VLLM_VERSION
+ARG FLASHINFER_VERSION
+ARG TORCH_CUDA_ARCH_LIST
+LABEL org.opencontainers.image.title="vllm-blackwell" \
+      org.opencontainers.image.description="Source-built sm120-optimized vLLM (RTX PRO 6000 Blackwell)" \
+      org.opencontainers.image.version="${VLLM_VERSION}" \
+      ai.vllmcustom.vllm.version="${VLLM_VERSION}" \
+      ai.vllmcustom.torch.version="${TORCH_VERSION}" \
+      ai.vllmcustom.flashinfer.version="${FLASHINFER_VERSION}" \
+      ai.vllmcustom.cuda.version="${CUDA_VERSION}" \
+      ai.vllmcustom.cuda.arch="${TORCH_CUDA_ARCH_LIST}"
+
 EXPOSE 8799
 # Use `vllm serve`, NOT `python -m vllm.entrypoints.openai.api_server`. Only the
 # `vllm serve` CLI copies the positional model_tag onto the `model` field

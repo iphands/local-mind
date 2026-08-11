@@ -442,4 +442,20 @@ parallelism; if it brushes the ceiling, raise it.
   JIT-compiles kernels for sm_120 at runtime and needs `nvcc`.
 - Only **GPU 0** (the RTX PRO 6000) is exposed to the container; the RTX 4060 is
   never used.
-- `./push` needs `docker login` first (Docker Hub namespace `iphands`).
+- `./push` needs `docker login` first (Docker Hub namespace `iphands`). It pushes
+  four tags — two moving, two pinned:
+
+  | Tag | Meaning |
+  |---|---|
+  | `cu1303-sm120` | newest build of this CUDA variant |
+  | `cu1303-sm120-vllm0.27.1` | pinned to the vLLM version |
+  | `cu1303-sm120-vllm0.27.1-d6d029f` | pinned to vLLM version *and* build commit |
+  | `latest` | newest build of anything |
+
+  The versions come from the image's own OCI labels (`ai.vllmcustom.*`, stamped
+  by the Dockerfile), never re-declared in `./push` — so a tag cannot claim a
+  version the image doesn't contain. `docker image inspect -f
+  '{{json .Config.Labels}}' iphands/vllm-blackwell:latest` shows the full set.
+  `PUSH_DRY_RUN=1 ./push` prints the tags without publishing. Images built before
+  labels existed are rejected with a message rather than pushed under a guessed
+  tag.

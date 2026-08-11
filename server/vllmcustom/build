@@ -71,6 +71,10 @@ TORCHAUDIO_VERSION=${TORCHAUDIO_VERSION:-2.11.0}      # upstream pairs 2.11.0 wi
 IMAGE=${IMAGE:-iphands/vllm-blackwell}
 CUDA_TAG=${CUDA_VERSION//./}                            # 13.0.3 -> 1303
 TAG=${TAG:-cu${CUDA_TAG}-sm120}
+# $TAG is the moving "newest build of this CUDA variant" tag; $VTAG pins the vLLM
+# version so `docker images` says which vLLM an image actually carries. ./push
+# derives its tags from the image's labels, not from these — see ./push.
+VTAG="${TAG}-vllm${VLLM_VERSION}"
 
 BUILD_DIR=${BUILD_DIR:-/mnt/noir/scratch/ai/vllm/build}
 SRC_DIR="$BUILD_DIR/src"
@@ -180,8 +184,9 @@ DOCKER_BUILDKIT=1 docker build \
   --build-arg TORCHAUDIO_VERSION="$TORCHAUDIO_VERSION" \
   --target vllm-openai \
   -t "$IMAGE:$TAG" \
+  -t "$IMAGE:$VTAG" \
   -t "$IMAGE:latest" \
   "$here"
 
 echo
-echo "## built $IMAGE:$TAG (also tagged :latest)"
+echo "## built $IMAGE:$TAG (also tagged :$VTAG and :latest)"

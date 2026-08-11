@@ -1,31 +1,78 @@
 #!/bin/bash
 # Push the built image to Docker Hub. Run `docker login` first.
 #
-#   ./push                  # pushes :latest and the resolved cuda/sm120 tag
+#   ./push                  # pushes the resolved tags for the last build
 #   TAG=cu1303-sm120 ./push # push a specific variant tag
+#
+# Tags pushed, for vLLM 0.27.1 on CUDA 13.0.3 at commit d6d029f:
+#
+#   cu1303-sm120                     moving — newest build of this CUDA variant
+#   cu1303-sm120-vllm0.27.1          pinned to the vLLM version
+#   cu1303-sm120-vllm0.27.1-d6d029f  pinned to vLLM version *and* build commit
+#   latest                           moving — newest build of anything
+#
+# The vLLM/CUDA versions are read from the image's own labels (stamped by the
+# Dockerfile), not re-declared here. An earlier version of this script kept its
+# own CUDA_VERSION with a "keep in sync with ./build" comment; that is exactly
+# how a tag ends up claiming a version the image does not contain.
 set -euo pipefail
 
 IMAGE=${IMAGE:-iphands/vllm-blackwell}
-CUDA_VERSION=${CUDA_VERSION:-13.0.3}                    # keep in sync with ./build
-CUDA_TAG=${CUDA_VERSION//./}
 REF=$(git rev-parse --short HEAD)
-TAG=${TAG:-cu${CUDA_TAG}-sm120}
-TAGTWO="${TAG}-${REF}"
 
-for t in "$TAG" latest; do
-  docker image inspect "$IMAGE:$t" >/dev/null 2>&1 || {
-    echo "Image $IMAGE:$t not found locally. Run ./build first."; exit 1; }
-done
+# TAG still has to be derived without the image, since it is how we *find* the
+# image. Default to the CUDA variant of whatever :latest actually is.
+label() { docker image inspect -f "{{index .Config.Labels \"$1\"}}" "$2" 2>/dev/null; }
 
-# The git-SHA tag pins the variant tag, NOT :latest — :latest may be a different
-# (more recently built) variant. Warn when they diverge so a stale push is obvious.
-if [[ "$(docker image inspect -f '{{.Id}}' "$IMAGE:$TAG")" != \
+if [[ -z ${TAG:-} ]]; then
+  cuda=$(label ai.vllmcustom.cuda.version "$IMAGE:latest")
+  if [[ -z $cuda ]]; then
+    echo "ERROR: $IMAGE:latest has no ai.vllmcustom.cuda.version label." >&2
+    echo "       It predates label support — rebuild, or pass TAG=... explicitly." >&2
+    exit 1
+  fi
+  TAG="cu${cuda//./}-sm120"
+fi
+
+docker image inspect "$IMAGE:$TAG" >/dev/null 2>&1 || {
+  echo "Image $IMAGE:$TAG not found locally. Run ./build first."; exit 1; }
+
+vllm_version=$(label ai.vllmcustom.vllm.version "$IMAGE:$TAG")
+if [[ -z $vllm_version ]]; then
+  echo "ERROR: $IMAGE:$TAG has no ai.vllmcustom.vllm.version label — cannot build a" >&2
+  echo "       version-pinned tag. Rebuild with the current Dockerfile." >&2
+  exit 1
+fi
+
+VTAG="${TAG}-vllm${vllm_version}"
+STAG="${VTAG}-${REF}"
+
+echo "## $IMAGE:$TAG carries vllm=$vllm_version torch=$(label ai.vllmcustom.torch.version "$IMAGE:$TAG") flashinfer=$(label ai.vllmcustom.flashinfer.version "$IMAGE:$TAG")"
+
+# The pinned tags describe $TAG, NOT :latest — :latest may be a different (more
+# recently built) variant. Warn when they diverge so a stale push is obvious.
+if docker image inspect "$IMAGE:latest" >/dev/null 2>&1 &&
+   [[ "$(docker image inspect -f '{{.Id}}' "$IMAGE:$TAG")" != \
       "$(docker image inspect -f '{{.Id}}' "$IMAGE:latest")" ]]; then
   echo "WARN: $IMAGE:latest is a different image than $IMAGE:$TAG (last build was another variant?)"
 fi
-docker tag "$IMAGE:$TAG" "$IMAGE:$TAGTWO"
 
-for t in "$TAG" "$TAGTWO" latest; do
+# The git SHA describes the build recipe, not the vLLM source; a dirty tree means
+# the pushed image may not correspond to any commit.
+if [[ -n "$(git status --porcelain -- . 2>/dev/null)" ]]; then
+  echo "WARN: working tree is dirty — :$STAG names commit $REF but the build used uncommitted changes."
+fi
+
+if [[ ${PUSH_DRY_RUN:-0} == 1 ]]; then
+  echo "## PUSH_DRY_RUN=1 — would tag and push:"
+  for t in "$TAG" "$VTAG" "$STAG" latest; do echo "##   docker.io/$IMAGE:$t"; done
+  exit 0
+fi
+
+docker tag "$IMAGE:$TAG" "$IMAGE:$VTAG"
+docker tag "$IMAGE:$TAG" "$IMAGE:$STAG"
+
+for t in "$TAG" "$VTAG" "$STAG" latest; do
   echo "## pushing docker.io/$IMAGE:$t"
   docker push "docker.io/$IMAGE:$t"
 done
