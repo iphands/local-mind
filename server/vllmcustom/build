@@ -117,9 +117,19 @@ sync_src vllm       https://github.com/vllm-project/vllm.git        "$VLLM_REF"
 CGROUP_PARENT=${CGROUP_PARENT:-vllmbuild.slice}
 cgroup_args=()
 cgroup_path=$(systemctl show "$CGROUP_PARENT" --property=ControlGroup --value 2>/dev/null || true)
-if [[ -n $cgroup_path ]] &&
-   [[ "$(cat "/sys/fs/cgroup$cgroup_path/memory.max" 2>/dev/null)" =~ ^[0-9]+$ ]]; then
+live_max=$(cat "/sys/fs/cgroup$cgroup_path/memory.max" 2>/dev/null || true)
+if [[ -n $cgroup_path && $live_max =~ ^[0-9]+$ ]]; then
   cgroup_args=(--cgroup-parent="${cgroup_path#/}")
+  # The slice does not track BUILD_MEM_GB automatically — slice-setup has to be
+  # re-run. Warn on disagreement: a slice capped lower than the budget MAX_JOBS
+  # was derived from is how you get an OOM kill from a build that looks correctly
+  # sized. Warn only; the cap is real either way and the build is still safe.
+  want_max=$(( BUILD_MEM_GB * 1024 * 1024 * 1024 ))
+  if [[ $live_max -ne $want_max ]]; then
+    echo "## WARN: $CGROUP_PARENT is capped at $(( live_max / 1024 / 1024 / 1024 ))G"
+    echo "##       but MAX_JOBS=$MAX_JOBS was derived from BUILD_MEM_GB=${BUILD_MEM_GB}G."
+    echo "##       Re-sync:  BUILD_MEM_GB=$BUILD_MEM_GB su -c '$here/scripts/slice-setup'"
+  fi
 else
   echo "## WARN: $CGROUP_PARENT is missing or uncapped — no hard ceiling on this build."
   echo "##       Install it once:  su -c '$here/scripts/slice-setup'"

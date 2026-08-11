@@ -16,7 +16,12 @@
 # Idempotent — re-running overwrites the unit with the current values.
 set -euo pipefail
 
-BUILD_MEM_GB=${BUILD_MEM_GB:-90}
+# Keep this default identical to BUILD_MEM_GB in ../build — they are two halves
+# of one budget (that script derives MAX_JOBS from it; this one sets the ceiling
+# the kernel enforces). ./build warns at build time if the live cap disagrees
+# with what it was told, so a drift here surfaces rather than silently shrinking
+# the ceiling.
+BUILD_MEM_GB=${BUILD_MEM_GB:-110}
 # NOTE: no dash in the name. systemd treats '-' as the slice hierarchy separator,
 # so a "vllm-build.slice" would silently nest under an implicit vllm.slice and
 # live at /sys/fs/cgroup/vllm.slice/vllm-build.slice. A dash-free name is
