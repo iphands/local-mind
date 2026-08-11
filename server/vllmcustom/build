@@ -35,9 +35,14 @@ MEM_HEADROOM_PCT=${MEM_HEADROOM_PCT:-80}
 _jobs_by_mem=$(( BUILD_MEM_GB * MEM_HEADROOM_PCT / 100 / MEM_PER_JOB_GB ))
 _jobs_by_cpu=$(( $(nproc) - 4 ))
 MAX_JOBS=${MAX_JOBS:-$(( _jobs_by_mem < _jobs_by_cpu ? _jobs_by_mem : _jobs_by_cpu ))}
-# nvcc -t parallelises across arch targets; with the single 12.0 target in
-# TORCH_CUDA_ARCH_LIST it does little here and is not the memory driver.
-NVCC_THREADS=${NVCC_THREADS:-8}
+# Keep this at 1. `nvcc -t` parallelises across arch targets, so with the single
+# 12.0 target in TORCH_CUDA_ARCH_LIST it buys ~nothing -- but vLLM *divides* by
+# it: setup.py compute_num_jobs() does `num_jobs = max(1, MAX_JOBS //
+# NVCC_THREADS)`. At the old 8 that floored MAX_JOBS=14 to `ninja -j 1`, running
+# vllm-build's 404 CUDA targets one at a time at ~3% CPU. torch and flashinfer
+# use MAX_JOBS directly, so the damage was confined to (and easy to miss in) the
+# last stage.
+NVCC_THREADS=${NVCC_THREADS:-1}
 
 # Mutually-compatible default set (vLLM v0.27.0 pins torch 2.13.0 / flashinfer 0.6.16.post3).
 VLLM_REF=${VLLM_REF:-v0.27.0}

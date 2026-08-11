@@ -323,6 +323,19 @@ BUILD_MEM_GB=64 su -c "$PWD/scripts/slice-setup"   # move the hard ceiling
 BUILD_MEM_GB=64 ./build                            # and the derived MAX_JOBS
 ```
 
+> **Leave `NVCC_THREADS=1` alone.** vLLM's `setup.py` (`compute_num_jobs()`)
+> computes its ninja parallelism as `max(1, MAX_JOBS // NVCC_THREADS)`. At the
+> old `NVCC_THREADS=8`, a `MAX_JOBS` of 14 floored to **`ninja -j 1`** — the
+> vllm-build stage compiled its 404 CUDA targets one at a time at ~3% CPU, while
+> torch and flashinfer (which use `MAX_JOBS` directly) looked perfectly healthy.
+> Since `nvcc -t` only parallelises across arch targets and we build the single
+> `12.0` target, raising it buys nothing and silently divides this stage's
+> throughput. If vllm-build ever looks idle, check first:
+>
+> ```bash
+> ps -eo args | grep -oE 'ninja -j *[0-9]+'   # want -j MAX_JOBS, not -j 1
+> ```
+
 `MEM_PER_JOB_GB=5` matches the measured 4.9 GB average, but averages hide peak
 skew (the fattest kernel wanted 7.3 GB) — that's what `MEM_HEADROOM_PCT` absorbs.
 After a full build

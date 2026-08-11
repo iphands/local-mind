@@ -57,7 +57,7 @@ RUN uv venv --python python3 ${VIRTUAL_ENV} && \
 FROM base AS torch-build
 
 ARG MAX_JOBS=18
-ARG NVCC_THREADS=8
+ARG NVCC_THREADS=1
 ARG TORCH_CUDA_ARCH_LIST=12.0
 ARG TORCH_VERSION=2.13.0
 # Pin a clean wheel version (e.g. 2.13.0, not 2.13.0a0+gitXXXX) so vLLM's
@@ -91,7 +91,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 FROM torch-build AS flashinfer-build
 
 ARG MAX_JOBS=18
-ARG NVCC_THREADS=8
+ARG NVCC_THREADS=1
 ARG TORCH_CUDA_ARCH_LIST=12.0
 # Must match FLASHINFER_REF in ./build (e.g. v0.6.16.post3 -> 0.6.16.post3); used to
 # pull the matching prebuilt flashinfer-cubin wheel instead of rebuilding it from source.
@@ -136,7 +136,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 FROM flashinfer-build AS vllm-build
 
 ARG MAX_JOBS=18
-ARG NVCC_THREADS=8
+ARG NVCC_THREADS=1
 ARG TORCH_CUDA_ARCH_LIST=12.0
 ARG VLLM_VERSION=0.27.0
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
