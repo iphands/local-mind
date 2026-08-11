@@ -115,6 +115,16 @@ else
   echo "##       Proceeding with MAX_JOBS=$MAX_JOBS as the only limit."
 fi
 
+# Build-speed knobs travel as a secret, not --build-arg. BuildKit keeps secret
+# contents out of the cache key, so retuning MAX_JOBS reuses the cached compile
+# layers instead of forcing a full torch+flashinfer+vllm rebuild (which is what
+# ARG/ENV did). Correct as well as convenient: these change build speed, never
+# the artifact. The banner below stays the record of what a build actually ran
+# with, since the values no longer appear anywhere in the image.
+jobs_file=$(mktemp)
+trap 'rm -f "$jobs_file"' EXIT
+printf 'MAX_JOBS=%s\nNVCC_THREADS=%s\n' "$MAX_JOBS" "$NVCC_THREADS" > "$jobs_file"
+
 echo
 echo "## building $IMAGE:$TAG  (cuda=$CUDA_VERSION torch=$TORCH_REF flashinfer=$FLASHINFER_REF vllm=$VLLM_REF arch=$TORCH_CUDA_ARCH_LIST mem=${BUILD_MEM_GB}G jobs=$MAX_JOBS)"
 
@@ -129,8 +139,7 @@ DOCKER_BUILDKIT=1 docker build \
   --build-arg TORCH_VERSION="$TORCH_VERSION" \
   --build-arg VLLM_VERSION="$VLLM_VERSION" \
   --build-arg FLASHINFER_VERSION="$FLASHINFER_VERSION" \
-  --build-arg MAX_JOBS="$MAX_JOBS" \
-  --build-arg NVCC_THREADS="$NVCC_THREADS" \
+  --secret id=buildjobs,src="$jobs_file" \
   --build-arg TORCHVISION_VERSION="$TORCHVISION_VERSION" \
   --build-arg TORCHAUDIO_VERSION="$TORCHAUDIO_VERSION" \
   --target vllm-openai \

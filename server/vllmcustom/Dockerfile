@@ -56,29 +56,44 @@ RUN uv venv --python python3 ${VIRTUAL_ENV} && \
 ###############################################################################
 FROM base AS torch-build
 
-ARG MAX_JOBS=18
-ARG NVCC_THREADS=1
 ARG TORCH_CUDA_ARCH_LIST=12.0
 ARG TORCH_VERSION=2.13.0
 # Pin a clean wheel version (e.g. 2.13.0, not 2.13.0a0+gitXXXX) so vLLM's
 # `torch==2.13.0` dependency resolves to our wheel instead of pulling from PyPI.
+# Everything here is semantic — it changes the artifact, so it *should* bust the
+# cache. Build-speed knobs deliberately live elsewhere; see the RUN below.
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     PYTORCH_BUILD_VERSION=${TORCH_VERSION} \
     PYTORCH_BUILD_NUMBER=1 \
-    MAX_JOBS=${MAX_JOBS} \
-    NVCC_THREADS=${NVCC_THREADS} \
     USE_CUDA=1 USE_CUDNN=1 USE_CUSPARSELT=1 \
     USE_FLASH_ATTENTION=1 USE_MEM_EFF_ATTENTION=1 \
     BUILD_TEST=0 USE_DISTRIBUTED=1 \
-    CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS} \
     _GLIBCXX_USE_CXX11_ABI=1
 
 # pytorch source supplied as a build-context (recursive submodules already
 # checked out on the host by ./build).
-COPY --from=pytorch . /src/pytorch
+#
+# .git is excluded here rather than by a .dockerignore inside the source tree:
+# ./build runs `git checkout --force` against those trees, and pytorch's
+# .dockerignore is a symlink to .gitignore, which does NOT exclude .git. That put
+# 5.8 GB of git objects (72% of the context) into this COPY's cache key, churned
+# by the `git fetch` every ./build does — invalidating torch, and with it
+# flashinfer and vllm downstream. Nothing here needs git metadata:
+# PYTORCH_BUILD_VERSION above is what sets the wheel version.
+COPY --from=pytorch --exclude=.git --exclude=**/.git . /src/pytorch
 WORKDIR /src/pytorch
+# MAX_JOBS/NVCC_THREADS arrive by secret mount, NOT as ARG/ENV. BuildKit excludes
+# secret *contents* from the cache key, which is exactly the semantics wanted:
+# these knobs change how fast the build runs, never what it produces. As ARG/ENV
+# they were part of every layer key, so retuning MAX_JOBS forced a full
+# torch+flashinfer+vllm recompile. Please don't "simplify" this back into ENV.
+# The -f guard and := defaults keep a bare `docker build` (no --secret) working.
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=buildjobs \
+    { [ -f /run/secrets/buildjobs ] && . /run/secrets/buildjobs; } ; \
+    : "${MAX_JOBS:=8}" "${NVCC_THREADS:=1}" ; \
+    export MAX_JOBS NVCC_THREADS CMAKE_BUILD_PARALLEL_LEVEL="$MAX_JOBS" ; \
     uv pip install -r requirements.txt && \
     python setup.py bdist_wheel && \
     mkdir -p /wheels && cp dist/*.whl /wheels/ && \
@@ -90,8 +105,6 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 ###############################################################################
 FROM torch-build AS flashinfer-build
 
-ARG MAX_JOBS=18
-ARG NVCC_THREADS=1
 ARG TORCH_CUDA_ARCH_LIST=12.0
 # Must match FLASHINFER_REF in ./build (e.g. v0.6.16.post3 -> 0.6.16.post3); used to
 # pull the matching prebuilt flashinfer-cubin wheel instead of rebuilding it from source.
@@ -99,15 +112,20 @@ ARG FLASHINFER_VERSION=0.6.16.post3
 # 12.0f = sm120 family-conditional kernels (RTX PRO 6000 Blackwell). FlashInfer
 # 0.6.x has no setup.py; it builds via a PEP 517 backend (python -m build).
 ENV FLASHINFER_CUDA_ARCH_LIST="12.0f" \
-    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
-    MAX_JOBS=${MAX_JOBS} \
-    NVCC_THREADS=${NVCC_THREADS} \
-    CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS}
+    TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 
-COPY --from=flashinfer . /src/flashinfer
+# flashinfer's own .dockerignore already excludes .git, but it is an untracked
+# file in a tree ./build runs `git checkout --force` against — state the
+# exclusion here too so it cannot be clobbered. See torch-build for the rationale.
+COPY --from=flashinfer --exclude=.git --exclude=**/.git . /src/flashinfer
 WORKDIR /src/flashinfer
+# Build-speed knobs by secret mount — see torch-build above.
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=buildjobs \
+    { [ -f /run/secrets/buildjobs ] && . /run/secrets/buildjobs; } ; \
+    : "${MAX_JOBS:=8}" "${NVCC_THREADS:=1}" ; \
+    export MAX_JOBS NVCC_THREADS CMAKE_BUILD_PARALLEL_LEVEL="$MAX_JOBS" ; \
     uv pip install build "setuptools>=77" "packaging>=24" wheel ninja numpy \
         tqdm requests filelock nvidia-ml-py \
         "apache-tvm-ffi>=0.1.6,!=0.1.8,!=0.1.8.post0,<0.2" && \
@@ -135,18 +153,17 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 ###############################################################################
 FROM flashinfer-build AS vllm-build
 
-ARG MAX_JOBS=18
-ARG NVCC_THREADS=1
 ARG TORCH_CUDA_ARCH_LIST=12.0
 ARG VLLM_VERSION=0.27.0
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
-    MAX_JOBS=${MAX_JOBS} \
-    NVCC_THREADS=${NVCC_THREADS} \
     VLLM_USE_PRECOMPILED=0 \
-    CMAKE_BUILD_PARALLEL_LEVEL=${MAX_JOBS} \
     SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM=${VLLM_VERSION}
 
-COPY --from=vllm . /src/vllm
+# .git excluded (see torch-build). vLLM is the one case where that could have
+# broken versioning — setuptools-scm derives the version from git tags — but
+# SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM above already overrides it, which is
+# why this is safe. Verify with `vllm.__version__` after changing either.
+COPY --from=vllm --exclude=.git --exclude=**/.git . /src/vllm
 WORKDIR /src/vllm
 # Don't let vLLM's pinned torch wheel clobber our source build.
 # v0.23.0 replaced requirements/build.txt with a requirements/build/<platform>.txt
@@ -154,6 +171,10 @@ WORKDIR /src/vllm
 # still strips the torch==2.13.0 pin from it, leaving our source torch in place.
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=buildjobs \
+    { [ -f /run/secrets/buildjobs ] && . /run/secrets/buildjobs; } ; \
+    : "${MAX_JOBS:=8}" "${NVCC_THREADS:=1}" ; \
+    export MAX_JOBS NVCC_THREADS CMAKE_BUILD_PARALLEL_LEVEL="$MAX_JOBS" ; \
     python use_existing_torch.py 2>/dev/null || true && \
     uv pip install -r requirements/build/cuda.txt && \
     python setup.py bdist_wheel && \

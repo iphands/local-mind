@@ -232,6 +232,35 @@ both still required.
 To inspect/relocate the ccache on disk, export it:
 `docker buildx build ... --cache-to type=local,dest=$BUILD_DIR/ccache`.
 
+### Two things deliberately kept *out* of the cache key
+
+Both exist because they were causing full `torch → flashinfer → vllm` rebuilds
+(~35 min of flashinfer AOT each) when nothing about the output had changed. The
+stages are a chain, so anything that invalidates torch invalidates everything —
+which is why flashinfer seemed to rebuild constantly when its own inputs were
+untouched.
+
+- **Build-speed knobs travel by secret mount.** `MAX_JOBS` / `NVCC_THREADS` are
+  passed as `--secret id=buildjobs` and sourced inside each compile `RUN`, not as
+  `ARG`/`ENV`. BuildKit excludes secret *contents* from the cache key, so
+  retuning reuses the cached layers. This is correct, not just convenient: these
+  knobs change how fast a build runs, never what it produces. Verified both ways
+  — changing `MAX_JOBS` keeps layers `CACHED`, while a semantic change still
+  invalidates. **Don't move them back into `ENV`.**
+- **`.git` is excluded in the Dockerfile**, via `COPY --exclude=.git
+  --exclude=**/.git` (needs the `dockerfile:1.7-labs` syntax on line 1), rather
+  than by `.dockerignore` files inside the source trees. Two reasons: pytorch's
+  `.dockerignore` is a symlink to `.gitignore`, which does *not* exclude `.git`,
+  so 5.8 GB of git objects (72% of that context) sat in the `COPY` cache key and
+  churned on every `git fetch`; and those trees get `git checkout --force`d, so
+  any `.dockerignore` living in them is unversioned and clobberable. No stage
+  needs git metadata — `PYTORCH_BUILD_VERSION` and
+  `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM` set the versions explicitly.
+
+Note `docker build --check` reports `unknown flag: exclude` here. That is a false
+alarm: the checker lints with a non-labs frontend (`dockerfile:1.8.1`) instead of
+the `1.7-labs` the file declares. Real builds are unaffected.
+
 ## Memory-capped builds
 
 The host has 125 GB and **no swap**, so an OOM during compilation isn't a build
