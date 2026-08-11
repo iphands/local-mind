@@ -1,0 +1,333 @@
+#!/bin/bash
+# Serve meta-models/Muse-Glimmer-30B with the locally-built sm120 vLLM image.
+#
+#   ./run-muse                                   # serves the default path below
+#   ./run-muse ./models/vllm/meta-models/Muse-Glimmer-30B
+#   ./run-muse --selftest                        # offline check of the ATEM parsers
+#
+# ---------------------------------------------------------------------------
+# WHY THIS SCRIPT EXISTS (and why ./run produces loops/garbage on "Hi")
+# ---------------------------------------------------------------------------
+# vLLM has NO native MuseGlimmerForConditionalGeneration implementation
+# (checked on 0.25.2 and again on 0.27.1.dev0: ModelRegistry.get_supported_archs()
+# has no Muse* arch, and no muse/glimmer/atem parser in either registry).
+# transformers 5.15 DOES, so vLLM silently falls back to its generic Transformers
+# backend (TransformersMultiModalForCausalLM), which logs only a mild "no vLLM
+# implementation" warning and then computes the model WRONG in two ways -- and
+# leaves the wire format unparsed, which is the third.
+#
+# BUG 1 -- the dropped embedding norm. THIS is what wrecks the output.
+#   Muse Glimmer's input embedding is not a plain nn.Embedding; it carries a
+#   weight-less RMSNorm applied to every looked-up row --
+#   transformers/models/muse_glimmer/modeling_muse_glimmer.py:436
+#       class MuseGlimmerTextNormedEmbedding(nn.Embedding):
+#           def forward(self, input_ids):
+#               return self.embed_norm(super().forward(input_ids))
+#   The fallback unconditionally swaps the input embedding for a plain
+#   VocabParallelEmbedding (vllm/.../transformers/base.py:170-189). It knows
+#   about a scalar `embed_scale`, but nothing about an `embed_norm` MODULE, so
+#   the norm is silently dropped and layer 0 gets unnormalized embeddings.
+#   Measured against stock HF on the same 57-token prompt, hidden states diverge
+#   immediately: cosine 0.456 at layer 0, ~0.31 by layer 51. Output is garbage
+#   (a burst of <|eom|> and stray CJK) or degenerate repetition.
+#   FIXED HERE by patches/muse-embed-norm/sitecustomize.py, mounted on
+#   PYTHONPATH. With it, all 52 layers match HF at cosine >= 0.9992 (the
+#   remainder is ordinary bf16 kernel drift) and generation matches HF's.
+#
+# BUG 2 -- the dropped output multiplier. Real, but subtler.
+#   vllm/model_executor/models/transformers/causal.py:58
+#       logit_scale = getattr(self.text_config, "logit_scale", 1.0)
+#   Muse Glimmer has no `logit_scale`. It calls the field `output_multiplier`
+#   and applies it, plus a Gemma-style tanh softcap, in
+#   MuseGlimmerForConditionalGeneration.forward -- i.e. AFTER the LM head, which
+#   the fallback never calls -- modeling_muse_glimmer.py:1255
+#       logits = logits * output_multiplier          # 0.19611613513818404
+#       logits = logits / final_logit_softcapping    # / 20.0
+#       logits = torch.tanh(logits) * final_logit_softcapping
+#   So stock vLLM emits logits 1/0.196 = 5.1x TOO LARGE and uncapped, and the
+#   recommended temperature=1.0 behaves like temperature ~0.2. Measured: with
+#   BUG 1 fixed but this left alone, two runs of the same prompt at temp 1.0
+#   came back byte-identical -- sampling had collapsed to greedy, which is the
+#   standard precondition for repetition loops on longer agentic runs.
+#   FIXED HERE by handing vLLM the multiplier under the name its fallback reads,
+#   via --hf-overrides (see LOGIT_SCALE below). Runs then vary as they should.
+#
+#   Residual vs native HF: the tanh softcap is still not applied. It is
+#   monotonic so it never reorders tokens, and after the 0.196 multiply the
+#   logits sit well inside the +/-20 cap, so it only slightly compresses the
+#   tail. Sampling stays a hair sharper than reference.
+#
+# Both workarounds exist only because there is no native implementation. When
+# vLLM ships one, drop --hf-overrides AND the sitecustomize patch together. To
+# re-verify after any vLLM bump: PATCH=0 ./run-muse and prompt "Hi" -- if the
+# reply is coherent, the fallback no longer drops embed_norm.
+#
+# ---------------------------------------------------------------------------
+# BUG 3 -- no ATEM parser, so no reasoning split and no tool calls.
+#   Muse Glimmer does NOT use <think>. Its chat template is a Harmony-style
+#   ATEM format: `<|start|>assistant to=self<|message|>...<|eom|>` for reasoning,
+#   `<|start|>assistant to=user<|message|>...` for the answer, and
+#   `<atem:function_calls><atem:invoke name=...>` for tools. vLLM ships no
+#   parser for it (no muse/glimmer/atem in the --tool-call-parser choices, none
+#   in vllm/reasoning/__init__.py) and does not read the tokenizer's
+#   `response_template` either, so /v1/chat/completions handed back the whole
+#   transcript as `content` -- chain of thought, routing tokens and all -- and
+#   any request carrying tools was rejected outright:
+#       "auto" tool choice requires --enable-auto-tool-choice and
+#       --tool-call-parser to be set
+#   FIXED HERE by patches/atem-parsers/atem_parsers.py, a --tool-parser-plugin
+#   + --reasoning-parser-plugin registered under the name `atem`. Reasoning
+#   lands in `reasoning`, the answer in `content`, `<atem:invoke>` blocks come
+#   back as OpenAI tool_calls, streaming included. `./run-muse --selftest`
+#   checks it against vLLM's real parser plumbing without a GPU or a server.
+#   PARSERS=0 ./run-muse goes back to raw transcripts (and 400s on tools).
+#   Pointing the qwen3 parsers at this model makes things worse, not better.
+#
+# Other things ./run gets wrong for this model, all deliberately dropped here:
+#
+#   * NO NVFP4 --linear-backend
+#       This checkpoint is bf16 ("dtype": "bfloat16", ~59.5 GB over 2 shards),
+#       not NVFP4-quantized. The NVFP4 GEMM knobs are meaningless here.
+#   * NO speculative decoding
+#       Muse Glimmer uses a DFlash block-diffusion drafter, not MTP. The drafter
+#       is a separate artifact and is not in this model dir.
+#   * NO --kv-cache-dtype fp8 by default
+#       This is a 32Q/2KV GQA model. With only 2 KV heads there is very little
+#       redundancy to absorb fp8 KV quantization error. Opt in with KV_FP8=1.
+#   * NO VLLM_ALLOW_LONG_MAX_MODEL_LEN / 262144 context
+#       max_position_embeddings is 131072 and rope_type is "default" (no scaling),
+#       so 262144 is pure out-of-distribution extrapolation.
+#
+# A/B knobs without editing this file:
+#   PATCH=0 ./run-muse                 # drop the embed_norm patch -> garbage (BUG 1)
+#   LOGIT_SCALE=1.0 ./run-muse         # stock vLLM logits -> greedy collapse (BUG 2)
+#   PARSERS=0 ./run-muse               # drop the ATEM parsers -> raw transcript (BUG 3)
+#   EAGER=1 ./run-muse                 # no torch.compile / CUDA graphs
+#   SWA=0 ./run-muse                   # don't hoist layer_types (see below)
+#   KV_FP8=1 ./run-muse                # fp8 KV cache (quality risk, 2 KV heads)
+#   REASONING=xhigh ./run-muse         # low | medium | high | xhigh
+#   VISION=0 ./run-muse                # drop the perception encoder (text only)
+#   ATTN_BACKEND=FLASHINFER ./run-muse
+#   MAX_MODEL_LEN=32768 ./run-muse
+#   IMAGE_TAG=cu1312-sm120 ./run-muse
+#   EXTRA_ARGS="--max-num-seqs 8" ./run-muse
+#
+# Benchmark a variant against the running server: ./bench <label>
+set -euo pipefail
+
+NAME=vllm-muse
+IMAGE=${IMAGE:-iphands/vllm-blackwell}
+IMAGE_TAG=${IMAGE_TAG:-latest}
+CONTAINER="$IMAGE:$IMAGE_TAG"
+
+SELFTEST=0
+[[ "${1:-}" == "--selftest" ]] && { SELFTEST=1; shift; }
+
+MODEL_PATH=${1:-./models/vllm/meta-models/Muse-Glimmer-30B}
+MODEL=$(basename "$MODEL_PATH")
+MODEL_FOLDER=$(cd "$(dirname "$MODEL_PATH")" && pwd)   # absolute, for the bind mount
+
+PORT=${PORT:-8700}                               # 8702: coexists with ./run (8700) and dgemma (8701)
+ATTN_BACKEND=${ATTN_BACKEND:-FLASH_ATTN}
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-131072}           # == max_position_embeddings; do NOT exceed
+MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-8192}
+CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
+REASONING=${REASONING:-high}                     # model card: high/xhigh for coding + agentic
+VISION=${VISION:-1}                              # 1 = keep the ~1.8B ViT-G/14 perception encoder
+KV_FP8=${KV_FP8:-}                               # 1 = --kv-cache-dtype fp8 (off by default)
+SWA=${SWA:-1}                                    # 1 = hoist layer_types so interleaved SWA applies
+EAGER=${EAGER:-0}                                # 1 = --enforce-eager (no torch.compile / CUDA graphs)
+
+# THE FIX. text_config.output_multiplier, surfaced under the name vLLM's
+# Transformers fallback actually reads. LOGIT_SCALE=1.0 reproduces the loop.
+LOGIT_SCALE=${LOGIT_SCALE:-0.19611613513818404}
+
+# THE OTHER FIX: restores the embedding RMSNorm the fallback drops. See the
+# header comment in that file. PATCH=0 disables it (reproduces the garbage).
+PATCH=${PATCH:-1}
+# THE THIRD FIX: the ATEM reasoning + tool-call parsers. PARSERS=0 disables them
+# (raw transcripts back in `content`, and 400 on any request carrying tools).
+PARSERS=${PARSERS:-1}
+
+# patches/ is mounted whole at /vllm-patches; each subdirectory is one patch.
+PATCH_ROOT=$(cd "$(dirname "$0")/patches" && pwd)
+EMBED_PATCH=muse-embed-norm/sitecustomize.py
+ATEM_PLUGIN=atem-parsers/atem_parsers.py
+for f in "$EMBED_PATCH" "$ATEM_PLUGIN" atem-parsers/selftest.py; do
+  [[ -f "$PATCH_ROOT/$f" ]] || { echo "missing $PATCH_ROOT/$f"; exit 1; }
+done
+
+docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
+  echo "Image $CONTAINER not found. Run ./build first."; exit 1; }
+
+# ./run-muse --selftest -- exercise the ATEM parsers against vLLM's real parser
+# plumbing (ParserManager + DelegatingParser). No GPU, no server, no weights
+# beyond the tokenizer. Run it after every vLLM bump: that plumbing is internal
+# API and it does move.
+if [[ "$SELFTEST" == "1" ]]; then
+  exec docker run --rm --entrypoint python \
+    -v "$PATCH_ROOT":/vllm-patches:ro \
+    -v "$MODEL_FOLDER":/models:ro \
+    "$CONTAINER" /vllm-patches/atem-parsers/selftest.py "/models/$MODEL"
+fi
+
+if [[ -n "${DETACH:-}" ]]; then _RUNMODE=(-d); else _RUNMODE=(-it); fi
+
+# sitecustomize.py on PYTHONPATH is auto-imported by CPython at startup, so the
+# patch lands in the API server and in every spawned engine/worker process.
+PATCH_ARGS=( -v "$PATCH_ROOT":/vllm-patches:ro )
+if [[ "$PATCH" == "1" ]]; then
+  PATCH_ARGS+=( -e PYTHONPATH=/vllm-patches/muse-embed-norm )
+fi
+
+# --- build the --hf-overrides payload ------------------------------------
+# 1) text_config.logit_scale -> restores output_multiplier (the loop fix).
+# 2) layer_types + sliding_window hoisted to the TOP-LEVEL config.
+#    vllm/model_executor/models/transformers/base.py:551 checks
+#        hasattr(self.config, "layer_types") and self.config.layer_types[i] == ...
+#        per_layer_sliding_window = self.config.sliding_window
+#    against the top-level config, but on this model both live under
+#    text_config. So without the hoist every one of the 52 layers is built as
+#    FULL attention and the 2048-token sliding window is silently never applied.
+#    Harmless below 2048 tokens (the two are identical there) but wrong beyond
+#    it, and it makes the KV cache far larger than it needs to be.
+#    Set SWA=0 to skip the hoist if a vLLM bump ever makes it redundant.
+HF_OVERRIDES="{\"text_config\": {\"logit_scale\": ${LOGIT_SCALE}}"
+if [[ "$SWA" == "1" ]]; then
+  # 52 layers = 13 x [sliding, sliding, sliding, full] -- matches config.json.
+  _lt=""
+  for ((i = 0; i < 52; i++)); do
+    if (( (i + 1) % 4 == 0 )); then _t='"full_attention"'; else _t='"sliding_attention"'; fi
+    _lt+="${_lt:+, }$_t"
+  done
+  HF_OVERRIDES+=", \"layer_types\": [${_lt}], \"sliding_window\": 2048"
+fi
+HF_OVERRIDES+="}"
+
+CONTAINER_ARGS=(
+  run "${_RUNMODE[@]}" --rm
+  --name "$NAME"
+  "${PATCH_ARGS[@]}"
+  --entrypoint vllm
+  --gpus device=0                                # RTX PRO 6000 only — never the 4060
+  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  -e VLLM_WORKER_MULTIPROC_METHOD=spawn
+  -e SAFETENSORS_FAST_GPU=1
+  -e VLLM_LOG_STATS_INTERVAL=1
+  -e VLLM_SLEEP_WHEN_IDLE=1
+  # NOTE: no VLLM_ALLOW_LONG_MAX_MODEL_LEN — 131072 is the real limit here.
+  -p "0.0.0.0:${PORT}:8799"
+  -v "$MODEL_FOLDER":/models:ro
+  -v "$CACHE_DIR":/root/.cache:rw
+  --ipc=host
+  --shm-size=32g
+  --ulimit memlock=-1
+  --ulimit stack=67108864
+)
+
+VLLM_ARGS=(
+  /models/"$MODEL"
+  --served-model-name cosmo-6000 cosmo-proxy claude-heavy claude-light claude-haiku-4-5-20251001
+  --host 0.0.0.0
+  --port 8799
+
+  --async-scheduling
+  --dtype auto                                   # bf16 per config.json
+  --gpu-memory-utilization "$GPU_MEM_UTIL"
+  --max-model-len "$MAX_MODEL_LEN"
+  --pipeline-parallel-size 1
+  --tensor-parallel-size 1
+  --trust-remote-code                            # required: muse_glimmer is a transformers-backend model
+
+  --hf-overrides "$HF_OVERRIDES"
+
+  --enable-prefix-caching
+  --enable-chunked-prefill
+  --enable-prompt-tokens-details
+  --max-num-seqs 3
+  --max-num-batched-tokens "$MAX_BATCHED_TOKENS"
+
+  --attention-backend "$ATTN_BACKEND"
+
+  # Model card "Best Practices": temperature 1.0 / top_p 0.95 / top_k 64.
+  # These are only meaningful once LOGIT_SCALE is correct — on raw 5.1x logits
+  # they are effectively temperature ~0.2.
+  --override-generation-config '{"temperature": 1.0, "top_p": 0.95, "top_k": 64}'
+  # The chat template reads `reasoning_strength` (low/medium/high/xhigh) and
+  # renders "Reasoning strength: <v>." into the system message. It does NOT
+  # understand enable_thinking/preserve_thinking — those are Qwen-isms.
+  --default-chat-template-kwargs "{\"reasoning_strength\": \"${REASONING}\"}"
+)
+
+# The ATEM parsers (BUG 3). One plugin file registers both under the name
+# `atem`; the reasoning parser also forces skip_special_tokens off, because the
+# channel boundaries ARE special tokens. Without --enable-auto-tool-choice any
+# request carrying tools is rejected with
+#   "auto" tool choice requires --enable-auto-tool-choice and --tool-call-parser
+if [[ "$PARSERS" == "1" ]]; then
+  VLLM_ARGS+=(
+    --reasoning-parser atem
+    --reasoning-parser-plugin "/vllm-patches/$ATEM_PLUGIN"
+    --tool-call-parser atem
+    --tool-parser-plugin "/vllm-patches/$ATEM_PLUGIN"
+    --enable-auto-tool-choice
+  )
+fi
+
+[[ "$EAGER" == "1" ]] && VLLM_ARGS+=( --enforce-eager ) || VLLM_ARGS+=( --no-enforce-eager )
+[[ "$VISION" == "1" ]] || VLLM_ARGS+=( --language-model-only )
+[[ -n "$KV_FP8" ]] && VLLM_ARGS+=( --kv-cache-dtype fp8 )
+# shellcheck disable=SC2206
+[[ -n "${EXTRA_ARGS:-}" ]] && VLLM_ARGS+=( ${EXTRA_ARGS} )
+
+echo
+echo "## Running $CONTAINER"
+echo "##   attn=$ATTN_BACKEND  logit_scale=$LOGIT_SCALE  swa=$SWA  vision=$VISION  reasoning=$REASONING"
+echo "##   ctx=$MAX_MODEL_LEN  kv=${KV_FP8:+fp8}${KV_FP8:-auto}  port=$PORT"
+echo "##   parsers=$([[ "$PARSERS" == "1" ]] && echo atem || echo none)  embed_norm_patch=$PATCH"
+echo
+echo docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
+docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
+
+# ---------------------------------------------------------------------------
+# NOTES ON THE ATEM PARSERS (BUG 3 above)
+# ---------------------------------------------------------------------------
+# Because the generation prompt ends at a bare `<|start|>assistant`, the model
+# itself emits the routing tokens, so the raw text of a turn is:
+#
+#   to=self<|message|>...chain of thought...<|eom|>
+#   <|start|>assistant to=user<|message|>...the actual answer...<|eot|>
+#
+# patches/atem-parsers/atem_parsers.py splits that into `reasoning` + `content`
+# and turns `<atem:invoke name=...>` blocks into OpenAI tool_calls. Two things
+# worth knowing:
+#
+#   * skip_special_tokens is forced OFF for every chat request. The channel
+#     boundaries ARE special tokens, and with vLLM's default stripping the
+#     response collapses to " to=selfWhat is...assistant to=user391" with no
+#     reliable split point. Hermes, Jamba and Kimi K3 do the same. Nothing
+#     leaks: the parsers strip the markers before the client sees them.
+#   * tool_choice "required" and named-function tool_choice do NOT go through
+#     vLLM's JSON-grammar path (supports_required_and_named = False) — that
+#     would force bare JSON, which this chat format has no channel for. They
+#     fall back to the same ATEM parsing as "auto".
+#     CONSEQUENCE: "required" is advisory here, not a guarantee. Everywhere else
+#     vLLM enforces it by constraining decoding; this model can still answer in
+#     prose (observed: "Tell me about Boston." with tool_choice=required came
+#     back as text). A client that must have a call should retry or prompt for
+#     it, not rely on the flag.
+#
+# Stops are unaffected: generation_config.json marks <|end_of_text|> (200001)
+# and <|eot|> (200008) as EOS and vLLM honours both (verified), while <|eom|>
+# (200007) is intentionally NOT an EOS since it only ends a message.
+#
+# The parsers hook vLLM internals that are not public API (ParserManager,
+# DelegatingParser's streaming contract). After a vLLM bump run
+# `./run-muse --selftest` before trusting a server: it replays recorded
+# transcripts through the real plumbing, one-shot and token-by-token.
+#
+# For the full thing -- selftest, then a server, then seven live checks over
+# both the streaming and non-streaming APIs including a tool-result round trip:
+#
+#   ./scripts/muse-e2e

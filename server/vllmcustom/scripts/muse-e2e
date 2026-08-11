@@ -1,0 +1,400 @@
+#!/usr/bin/env bash
+# End-to-end check of the Muse Glimmer ATEM parsers (see ../run-muse "BUG 3").
+#
+#   ./scripts/muse-e2e                 # selftest, (re)start the server, run 7 live checks
+#   KEEP=1 ./scripts/muse-e2e          # leave the server running afterwards
+#   ./scripts/muse-e2e /path/to/model  # non-default checkpoint
+#
+# Run this after rebuilding the image. The parsers hook vLLM internals that are
+# not public API (ParserManager, DelegatingParser's streaming contract), so a
+# vLLM bump can break them quietly -- the failure mode is a 200 response with
+# the chain of thought glued to the answer, not a crash.
+#
+# Stages:
+#   0. ./run-muse --selftest        offline, replays recorded transcripts through
+#                                   vLLM's real parser plumbing. Catches the
+#                                   internal-API drift before burning a load.
+#   1. server                       reuses a healthy one on $PORT if there is
+#                                   one, otherwise DETACH=1 ./run-muse and waits
+#                                   for /health (several minutes: 60 GB + compile)
+#   2. live checks                  the seven below, against the running server
+#
+# What the live checks are actually for:
+#   1 plain, non-streaming      reasoning lands in `reasoning`, answer in
+#                               `content`, and no <|start|>/to=self/<atem: markers
+#                               leak into either
+#   2 plain, streaming          same split incrementally, reasoning deltas first
+#   3 tools, non-streaming      the 400 that started all this is gone; the call
+#                               comes back as a real tool_call with JSON arguments
+#   4 tools, streaming          name + argument fragments reassemble into the
+#                               same call (this is the fiddly path)
+#   5 tool result round trip    feeding the tool_call and its result back in
+#                               renders (chat_template.jinja's render_atem raises
+#                               unless vLLM converted `arguments` to a dict) and
+#                               the model answers from the tool output
+#   6 typed arguments           an integer parameter comes back as a JSON number,
+#                               not "3" -- i.e. the schema-driven coercion works
+#   7 tool_choice required      does NOT go down vLLM's JSON-grammar path
+#                               (supports_required_and_named = False)
+#
+# Checks 3-7 depend on the model choosing to call the tool. If a check reports
+# NO CALL, that is a model/prompt result, not a parser failure -- rerun before
+# reading anything into it. Everything else is a real assertion.
+set -uo pipefail   # NOT -e: a failing check must not abort the rest of the run
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+MODEL=${1:-$HERE/models/vllm/meta-models/Muse-Glimmer-30B}
+NAME=vllm-muse                              # must match ./run-muse's --name
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+APIMODEL=${APIMODEL:-cosmo-6000}            # one of ./run-muse's --served-model-name aliases
+READY_TIMEOUT=${READY_TIMEOUT:-1200}        # s to wait for weight load + torch.compile
+KEEP=${KEEP:-0}                             # 1 = leave the server up when done
+LOGDIR=${LOGDIR:-$HERE/bench-logs}
+STARTED_SERVER=0
+FAILURES=0
+CHECKS=0
+
+# shellcheck source=../_bench-lib.sh
+source "$HERE/_bench-lib.sh"                # stop_server, wait_ready (use NAME/HOST/READY_TIMEOUT)
+
+mkdir -p "$LOGDIR"
+for tool in curl jq docker; do
+  command -v "$tool" >/dev/null || { echo "## need $tool on PATH"; exit 2; }
+done
+
+# --- assertions ---------------------------------------------------------------
+
+ok()   { echo "     ok   $*"; }
+fail() { echo "     FAIL $*"; FAILURES=$((FAILURES + 1)); }
+skip() { echo "     --   $*"; }
+
+# The whole point of the parsers: none of the transcript scaffolding may reach
+# the client, on any field.
+no_markers() {  # <label> <text>
+  local label=$1 text=$2 marker
+  for marker in '<|' 'to=self' 'to=user' '<atem:' '</atem:'; do
+    if [[ "$text" == *"$marker"* ]]; then
+      fail "$label leaked $marker"
+      echo "          text: ${text:0:200}"
+      return 1
+    fi
+  done
+  ok "$label clean of transcript markers"
+}
+
+nonempty() {  # <label> <text>
+  local label=$1 text=$2
+  [[ -n "$text" && "$text" != "null" ]] && { ok "$label non-empty"; return 0; }
+  fail "$label empty"
+  return 1
+}
+
+contains() {  # <label> <text> <needle>
+  local label=$1 text=$2 needle=$3
+  [[ "${text,,}" == *"${needle,,}"* ]] && { ok "$label contains '$needle'"; return 0; }
+  fail "$label does not contain '$needle'"
+  echo "          text: ${text:0:200}"
+  return 1
+}
+
+equals() {  # <label> <got> <want>
+  local label=$1 got=$2 want=$3
+  [[ "$got" == "$want" ]] && { ok "$label = $want"; return 0; }
+  fail "$label = '$got' (want '$want')"
+  return 1
+}
+
+banner() { CHECKS=$((CHECKS + 1)); echo; echo "  [$CHECKS] $*"; }
+
+# --- request helpers ----------------------------------------------------------
+
+TOOLS=$(jq -n '[
+  {type:"function", function:{
+     name:"get_weather", description:"Current weather for a city.",
+     parameters:{type:"object", properties:{city:{type:"string"}}, required:["city"]}}},
+  {type:"function", function:{
+     name:"get_forecast", description:"Multi-day forecast for a city.",
+     parameters:{type:"object", properties:{
+        city:{type:"string"}, days:{type:"integer"}, tags:{type:"array", items:{type:"string"}}},
+        required:["city","days"]}}}
+]')
+
+post() {  # <json-body>  -> response body on stdout
+  curl -sS --max-time 300 -X POST "http://${HOST}/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d "$1"
+}
+
+post_stream() {  # <json-body> -> raw SSE text
+  curl -sSN --max-time 300 -X POST "http://${HOST}/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d "$1"
+}
+
+# Reassemble an SSE stream into the same shape as a non-streaming response, so
+# both paths can be asserted with the same helpers. Emits nothing at all when
+# the body carried no data: lines (an error response, say), so the caller can
+# tell "no deltas" apart from "empty deltas".
+sse_json() {  # <raw SSE> -> {reasoning, content, name, args, finish, first_*}
+  printf '%s\n' "$1" | sed -n 's/^data: //p' | grep -v '^\[DONE\]$' \
+  | jq -s 'if length == 0 then empty else
+      [.[] | .choices[0].delta // {}] as $d |
+      { reasoning: (([$d[].reasoning // ""] | add) // ""),
+        content:   (([$d[].content   // ""] | add) // ""),
+        name:      (([$d[] | (.tool_calls // [])[] | .function.name      // ""] | add) // ""),
+        args:      (([$d[] | (.tool_calls // [])[] | .function.arguments // ""] | add) // ""),
+        finish:    ([.[] | .choices[0].finish_reason // empty] | last // ""),
+        first_reasoning: ([$d | to_entries[] | select((.value.reasoning // "") != "") | .key] | first),
+        first_content:   ([$d | to_entries[] | select((.value.content   // "") != "") | .key] | first) }
+    end'
+}
+
+body() {  # <messages-json> [extra-json]
+  jq -n --argjson messages "$1" --argjson extra "${2:-{\}}" --arg model "$APIMODEL" \
+    '{model:$model, temperature:0, max_tokens:600, messages:$messages} + $extra'
+}
+
+user_msg() { jq -n --arg c "$1" '[{role:"user", content:$c}]'; }
+
+# Every check funnels errors through here: an API-level failure (the 400 that
+# started this) must be reported as such, not silently parsed as an empty answer.
+api_error() {  # <label> <response>
+  local label=$1 response=$2 message
+  message=$(jq -r 'if type=="object" and has("error") then (.error.message // .error) else empty end' \
+              <<<"$response" 2>/dev/null)
+  if [[ -n "$message" ]]; then
+    fail "$label API error: $message"
+    return 0
+  fi
+  if ! jq -e '.choices[0]' >/dev/null 2>&1 <<<"$response"; then
+    fail "$label unparseable response: ${response:0:200}"
+    return 0
+  fi
+  return 1
+}
+
+# --- stage 0: offline selftest ------------------------------------------------
+
+echo "## muse-e2e  model=$(basename "$MODEL")  host=$HOST  api-model=$APIMODEL"
+echo
+echo "## stage 0: offline parser selftest"
+if ! "$HERE/run-muse" --selftest 2>&1 | grep -v FutureWarning | tail -3; then
+  echo "## selftest FAILED -- the parsers no longer match this vLLM. Stopping."
+  exit 1
+fi
+
+# --- stage 1: server ----------------------------------------------------------
+
+echo
+echo "## stage 1: server"
+if curl -sf "http://${HOST}/health" >/dev/null 2>&1; then
+  echo "##   reusing the server already answering on $HOST"
+  echo "##   (it must have been started WITH the parsers; PARSERS=0 will fail check 3)"
+else
+  start_log="$LOGDIR/muse-e2e-start.log"
+  echo "##   launching ./run-muse (log -> $start_log)"
+  DETACH=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" > "$start_log" 2>&1
+  STARTED_SERVER=1
+  echo "##   waiting up to ${READY_TIMEOUT}s for weight load + compile ..."
+  if ! wait_ready; then
+    echo "##   NOT READY. Last 40 log lines:"
+    docker logs --tail 40 "$NAME" 2>&1 | sed 's/^/       /'
+    stop_server
+    exit 1
+  fi
+  echo "##   ready"
+fi
+
+cleanup() {
+  if [[ "$STARTED_SERVER" == "1" && "$KEEP" != "1" ]]; then
+    echo
+    echo "## stopping $NAME (KEEP=1 to leave it up)"
+    stop_server
+  fi
+}
+trap cleanup EXIT
+
+echo
+echo "## stage 2: live checks"
+
+# --- 1. plain chat, non-streaming --------------------------------------------
+
+banner "plain chat, non-streaming"
+resp=$(post "$(body "$(user_msg 'What is 17*23? Answer with just the number.')")")
+if ! api_error "plain" "$resp"; then
+  content=$(jq -r '.choices[0].message.content // ""' <<<"$resp")
+  reasoning=$(jq -r '.choices[0].message.reasoning // .choices[0].message.reasoning_content // ""' <<<"$resp")
+  nonempty "content" "$content"
+  nonempty "reasoning" "$reasoning"
+  contains "content" "$content" "391"
+  no_markers "content" "$content"
+  no_markers "reasoning" "$reasoning"
+fi
+
+# --- 2. plain chat, streaming -------------------------------------------------
+
+banner "plain chat, streaming"
+raw=$(post_stream "$(body "$(user_msg 'What is 17*23? Answer with just the number.')" '{"stream":true}')")
+agg=$(sse_json "$raw")
+if [[ -z "$agg" ]]; then
+  api_error "plain stream" "$raw" || fail "stream produced no data: lines"
+else
+  content=$(jq -r '.content' <<<"$agg")
+  reasoning=$(jq -r '.reasoning' <<<"$agg")
+  nonempty "streamed content" "$content"
+  nonempty "streamed reasoning" "$reasoning"
+  contains "streamed content" "$content" "391"
+  no_markers "streamed content" "$content"
+  no_markers "streamed reasoning" "$reasoning"
+  # Reasoning is emitted before the answer; if the driver ever hands content
+  # first, the phase transition is broken even though the totals look right.
+  fr=$(jq -r '.first_reasoning // "null"' <<<"$agg")
+  fc=$(jq -r '.first_content // "null"' <<<"$agg")
+  if [[ "$fr" != "null" && "$fc" != "null" && "$fr" -lt "$fc" ]]; then
+    ok "reasoning deltas precede content deltas ($fr < $fc)"
+  else
+    fail "delta ordering: first reasoning=$fr first content=$fc"
+  fi
+fi
+
+# --- 3. tools, non-streaming --------------------------------------------------
+
+banner "tools, non-streaming (the 400 this all started with)"
+TOOL_PROMPT='What is the weather in Boston right now? Use the tool.'
+req=$(body "$(user_msg "$TOOL_PROMPT")" "$(jq -n --argjson t "$TOOLS" '{tools:$t, tool_choice:"auto"}')")
+resp=$(post "$req")
+TOOL_CALLS=""
+if ! api_error "tools" "$resp"; then
+  ncalls=$(jq -r '(.choices[0].message.tool_calls // []) | length' <<<"$resp")
+  if [[ "$ncalls" == "0" ]]; then
+    skip "NO CALL: the model answered in prose instead of calling a tool"
+    echo "          content: $(jq -r '.choices[0].message.content // ""' <<<"$resp" | head -c 200)"
+  else
+    TOOL_CALLS=$(jq -c '.choices[0].message.tool_calls' <<<"$resp")
+    name=$(jq -r '.choices[0].message.tool_calls[0].function.name' <<<"$resp")
+    args=$(jq -r '.choices[0].message.tool_calls[0].function.arguments' <<<"$resp")
+    equals "finish_reason" "$(jq -r '.choices[0].finish_reason' <<<"$resp")" "tool_calls"
+    equals "function name" "$name" "get_weather"
+    if jq -e . >/dev/null 2>&1 <<<"$args"; then
+      ok "arguments parse as JSON: $args"
+      contains "arguments.city" "$(jq -r '.city // ""' <<<"$args")" "boston"
+    else
+      fail "arguments are not valid JSON: $args"
+    fi
+    no_markers "tool-call content" "$(jq -r '.choices[0].message.content // ""' <<<"$resp")"
+  fi
+fi
+
+# --- 4. tools, streaming ------------------------------------------------------
+
+banner "tools, streaming"
+raw=$(post_stream "$(body "$(user_msg "$TOOL_PROMPT")" \
+        "$(jq -n --argjson t "$TOOLS" '{tools:$t, tool_choice:"auto", stream:true}')")")
+agg=$(sse_json "$raw")
+if [[ -z "$agg" ]]; then
+  api_error "tools stream" "$raw" || fail "stream produced no data: lines"
+else
+  name=$(jq -r '.name' <<<"$agg")
+  args=$(jq -r '.args' <<<"$agg")
+  if [[ -z "$name" ]]; then
+    skip "NO CALL: no tool_call deltas in the stream"
+  else
+    equals "streamed function name" "$name" "get_weather"
+    equals "streamed finish_reason" "$(jq -r '.finish' <<<"$agg")" "tool_calls"
+    if jq -e . >/dev/null 2>&1 <<<"$args"; then
+      ok "reassembled arguments parse as JSON: $args"
+      contains "streamed arguments.city" "$(jq -r '.city // ""' <<<"$args")" "boston"
+    else
+      fail "reassembled argument fragments are not valid JSON: $args"
+    fi
+    no_markers "streamed tool-call content" "$(jq -r '.content' <<<"$agg")"
+  fi
+fi
+
+# --- 5. tool result round trip ------------------------------------------------
+
+banner "tool result round trip"
+if [[ -z "$TOOL_CALLS" ]]; then
+  skip "no tool_call from check 3 to feed back"
+else
+  messages=$(jq -n --argjson tc "$TOOL_CALLS" --arg prompt "$TOOL_PROMPT" '[
+    {role:"user", content:$prompt},
+    {role:"assistant", content:"", tool_calls:$tc},
+    {role:"tool", tool_call_id:($tc[0].id // "call_0"), name:$tc[0].function.name,
+     content:"{\"temp_c\": 18, \"summary\": \"light rain\"}"}
+  ]')
+  resp=$(post "$(body "$messages" "$(jq -n --argjson t "$TOOLS" '{tools:$t, tool_choice:"auto"}')")")
+  if ! api_error "round trip" "$resp"; then
+    content=$(jq -r '.choices[0].message.content // ""' <<<"$resp")
+    nonempty "round-trip content" "$content"
+    contains "round-trip content" "$content" "18"
+    no_markers "round-trip content" "$content"
+    no_markers "round-trip reasoning" \
+      "$(jq -r '.choices[0].message.reasoning // ""' <<<"$resp")"
+  fi
+fi
+
+# --- 6. typed arguments -------------------------------------------------------
+
+banner "typed arguments (integer stays a number)"
+req=$(body "$(user_msg 'Get the 3 day forecast for Boston, tagged "rain" and "wind". Use the tool.')" \
+        "$(jq -n --argjson t "$TOOLS" '{tools:$t, tool_choice:"auto"}')")
+resp=$(post "$req")
+if ! api_error "typed args" "$resp"; then
+  args=$(jq -r '(.choices[0].message.tool_calls // [])[0].function.arguments // ""' <<<"$resp")
+  if [[ -z "$args" ]]; then
+    skip "NO CALL: the model did not call get_forecast"
+  elif ! jq -e . >/dev/null 2>&1 <<<"$args"; then
+    fail "arguments are not valid JSON: $args"
+  else
+    ok "arguments: $args"
+    # ATEM writes every value as bare text; these assert the schema-driven
+    # coercion put the types back. Only checked if the model filled them in.
+    days_type=$(jq -r 'if has("days") then (.days|type) else "absent" end' <<<"$args")
+    case "$days_type" in
+      number) ok "days is a JSON number" ;;
+      absent) skip "days not filled in by the model" ;;
+      *)      fail "days came back as $days_type (schema says integer)" ;;
+    esac
+    tags_type=$(jq -r 'if has("tags") then (.tags|type) else "absent" end' <<<"$args")
+    case "$tags_type" in
+      array)  ok "tags is a JSON array" ;;
+      absent) skip "tags not filled in by the model" ;;
+      *)      fail "tags came back as $tags_type (schema says array)" ;;
+    esac
+  fi
+fi
+
+# --- 7. tool_choice: required -------------------------------------------------
+
+banner "tool_choice: required"
+req=$(body "$(user_msg 'Tell me about Boston.')" \
+        "$(jq -n --argjson t "$TOOLS" '{tools:$t, tool_choice:"required"}')")
+resp=$(post "$req")
+if ! api_error "required" "$resp"; then
+  name=$(jq -r '(.choices[0].message.tool_calls // [])[0].function.name // ""' <<<"$resp")
+  if [[ -z "$name" ]]; then
+    # Not a hard failure: "required" is not grammar-enforced for this format, so
+    # it is a request to the model, not a guarantee. A 200 with no JSON garbage
+    # is still the important half.
+    skip "NO CALL: the model did not call a tool (not grammar-enforced here)"
+    no_markers "required content" "$(jq -r '.choices[0].message.content // ""' <<<"$resp")"
+  else
+    ok "tool call returned: $name"
+    args=$(jq -r '.choices[0].message.tool_calls[0].function.arguments' <<<"$resp")
+    jq -e . >/dev/null 2>&1 <<<"$args" \
+      && ok "arguments parse as JSON: $args" \
+      || fail "arguments are not valid JSON: $args"
+  fi
+fi
+
+# --- summary ------------------------------------------------------------------
+
+echo
+if (( FAILURES == 0 )); then
+  echo "## PASS -- $CHECKS checks, no failures"
+  exit 0
+fi
+echo "## FAIL -- $FAILURES failed assertion(s) across $CHECKS checks"
+echo "##   server log: docker logs $NAME"
+echo "##   to isolate: PARSERS=0 ./run-muse  (raw transcripts; check 3 should 400)"
+exit 1
