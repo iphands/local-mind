@@ -266,18 +266,19 @@ the `1.7-labs` the file declares. Real builds are unaffected.
 The host has 125 GB and **no swap**, so an OOM during compilation isn't a build
 failure — the kernel OOM-killer fires against the whole machine. Parallel `nvcc`
 is what gets it there. Measured on the flashinfer AOT stage (3408 kernels, the
-worst offender): 17 concurrent `cicc` held **82.3 GB** — 4.9 GB average, 7.3 GB
-for the fattest — so an unbounded 28-way build wants well over 110 GB.
+worst offender): 17 concurrent `cicc` held **82.3 GB** at one sample. A complete
+build then measured a **89.8 GiB peak at 14 jobs = 6.4 GB/job**, so an unbounded
+28-way build wants ~180 GB.
 
-`./build` is capped at `BUILD_MEM_GB` (default 90G) by two independent layers:
+`./build` is capped at `BUILD_MEM_GB` (default 110G) by two independent layers:
 
 - **Derived `MAX_JOBS`** — `BUILD_MEM_GB × MEM_HEADROOM_PCT / MEM_PER_JOB_GB`
-  (defaults 80% and 5 GB), clamped to `nproc - 4`. On this box that's **14**
-  jobs instead of 28: ~70 GB expected against a 90 GB cap. This is the
-  prevention layer — no privileges, no setup. Setting `MAX_JOBS` explicitly
-  bypasses the calculation entirely.
+  (defaults 80% and 6 GB), clamped to `nproc - 4`. On this box that's **14**
+  jobs instead of 28: ~89 GiB at the measured rate against a 110 GiB cap. This
+  is the prevention layer — no privileges, no setup. Setting `MAX_JOBS`
+  explicitly bypasses the calculation entirely.
 - **A cgroup ceiling** — `./build` passes `--cgroup-parent=vllmbuild.slice`, a
-  systemd slice with `MemoryMax=90G`. That's the wall, where the OOM killer
+  systemd slice with `MemoryMax=110G`. That's the wall, where the OOM killer
   fires **scoped to that cgroup** — it kills an `nvcc`, not your desktop session
   or a running vLLM server. Containment, not prevention: hitting it still loses
   the build, just not the machine.
@@ -365,8 +366,15 @@ BUILD_MEM_GB=64 ./build                            # and the derived MAX_JOBS
 > ps -eo args | grep -oE 'ninja -j *[0-9]+'   # want -j MAX_JOBS, not -j 1
 > ```
 
-`MEM_PER_JOB_GB=5` matches the measured 4.9 GB average, but averages hide peak
-skew (the fattest kernel wanted 7.3 GB) — that's what `MEM_HEADROOM_PCT` absorbs.
+`MEM_PER_JOB_GB=6` comes from a completed build: 89.8 GiB peak ÷ 14 jobs =
+6.4 GB/job. Don't tune it from an average sampled mid-build — an earlier 4.9 GB
+average was taken during a light stretch of flashinfer's AOT stage and
+underestimated by 30%, because per-kernel demand varies enormously.
+
+**`BUILD_MEM_GB` moves two things at once.** It sets the cgroup ceiling *and*
+feeds `MAX_JOBS`, so raising it alone buys no headroom — the extra budget is
+immediately spent on more jobs (110G with the old 5 GB/job gives 17 jobs ≈
+108 GiB, right back at the wall). Move `MEM_PER_JOB_GB` with it.
 After a full build
 read the real high-water mark and adjust:
 

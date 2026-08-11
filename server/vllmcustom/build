@@ -22,15 +22,26 @@ TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-12.0}      # sm_120 (RTX PRO 6000 B
 # kernels, so an unbounded 28 jobs can spike past 110 GB. Set MAX_JOBS directly
 # to bypass the calculation. ./scripts/slice-setup enforces the same budget as a
 # kernel-level backstop; see "Memory-capped builds" in the README.
-BUILD_MEM_GB=${BUILD_MEM_GB:-90}
-# Measured on the flashinfer AOT stage (the worst offender, 3408 kernels): 17
-# concurrent cicc held 82.3 GB total — 4.9 GB average, 7.3 GB for the fattest.
-MEM_PER_JOB_GB=${MEM_PER_JOB_GB:-5}
+#
+# 110 rather than 90: a full build was measured at a 89.8 GiB peak, i.e. 0.2 GiB
+# under a 90 GiB ceiling. Keep this in step with ./scripts/slice-setup — the two
+# read the same variable, but the slice has to be re-run to pick up a change.
+BUILD_MEM_GB=${BUILD_MEM_GB:-110}
+# Measured, not estimated: a complete build peaked at 89.8 GiB with 14 jobs =
+# 6.4 GB/job. (An earlier 4.9 GB average came from sampling a light stretch of
+# the flashinfer AOT stage; per-kernel demand varies enormously, so an average
+# taken at the wrong moment underestimates badly.) 6 is used rather than 7 so the
+# derivation reproduces the 14 jobs that build actually ran at; it under-predicts
+# the peak by ~7%, which MEM_HEADROOM_PCT below absorbs.
+MEM_PER_JOB_GB=${MEM_PER_JOB_GB:-6}
 # Jobs are sized against a *fraction* of the budget, not the whole thing. Sizing
 # them to BUILD_MEM_GB directly makes predicted peak equal the cap by
 # construction (18 x 5 GB = 90 GB = the limit), which parks the build on the
 # ceiling permanently. The gap absorbs peak skew — jobs don't all crest at once,
 # but a few hitting 7.3 GB together would blow a zero-headroom budget.
+# At 110G/6GB/80% this yields 14 jobs: the configuration measured at 89.8 GiB
+# peak with oom_kill=0. Raising BUILD_MEM_GB alone would also raise MAX_JOBS and
+# spend the new headroom on more jobs — move MEM_PER_JOB_GB with it.
 MEM_HEADROOM_PCT=${MEM_HEADROOM_PCT:-80}
 _jobs_by_mem=$(( BUILD_MEM_GB * MEM_HEADROOM_PCT / 100 / MEM_PER_JOB_GB ))
 _jobs_by_cpu=$(( $(nproc) - 4 ))
