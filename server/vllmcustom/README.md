@@ -291,8 +291,15 @@ untouched.
   so 5.8 GB of git objects (72% of that context) sat in the `COPY` cache key and
   churned on every `git fetch`; and those trees get `git checkout --force`d, so
   any `.dockerignore` living in them is unversioned and clobberable. No stage
-  needs git metadata — `PYTORCH_BUILD_VERSION` and
-  `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM` set the versions explicitly.
+  needs git metadata, but **only because the version is forced explicitly** in
+  each: `PYTORCH_BUILD_VERSION` for torch and `VLLM_VERSION_OVERRIDE` for vLLM.
+  That second one is load-bearing — vLLM's version comes from setuptools-scm, so
+  without it, excluding `.git` fails the build outright with *"setuptools-scm was
+  unable to detect version for /src/vllm"*. Note the scoped
+  `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM` does **not** work: `setup.py` calls
+  `get_version()` with no `dist_name`, so the `_FOR_VLLM` suffix has nothing to
+  match. It sat in the Dockerfile doing nothing for as long as `.git` was present
+  to cover for it.
 
 Note `docker build --check` reports `unknown flag: exclude` here. That is a false
 alarm: the checker lints with a non-labs frontend (`dockerfile:1.8.1`) instead of

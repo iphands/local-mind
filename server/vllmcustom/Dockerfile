@@ -155,14 +155,26 @@ FROM flashinfer-build AS vllm-build
 
 ARG TORCH_CUDA_ARCH_LIST=12.0
 ARG VLLM_VERSION=0.27.0
+# VLLM_VERSION_OVERRIDE, *not* SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM. The
+# scoped form does not work here: setup.py calls setuptools-scm's get_version()
+# with no dist_name (setup.py:1026), so there is nothing for the _FOR_VLLM suffix
+# to match and the lookup fails — verified directly against setuptools-scm 10.2.1
+# / vcs-versioning 2.2.4. It silently appeared to work only while .git was in the
+# build context, because setuptools-scm was reading the git tags instead.
+# VLLM_VERSION_OVERRIDE is vLLM's own hook (setup.py:1020) and sets the *unscoped*
+# SETUPTOOLS_SCM_PRETEND_VERSION internally.
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     VLLM_USE_PRECOMPILED=0 \
-    SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM=${VLLM_VERSION}
+    VLLM_VERSION_OVERRIDE=${VLLM_VERSION}
 
-# .git excluded (see torch-build). vLLM is the one case where that could have
-# broken versioning — setuptools-scm derives the version from git tags — but
-# SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM above already overrides it, which is
-# why this is safe. Verify with `vllm.__version__` after changing either.
+# .git excluded (see torch-build). vLLM is the case where that matters most —
+# setuptools-scm derives the version from git tags — so VLLM_VERSION_OVERRIDE
+# above is load-bearing, not belt-and-braces: without it this build fails with
+# "setuptools-scm was unable to detect version for /src/vllm".
+# It also yields a clean 0.27.1 rather than the 0.27.1.dev0+g<sha>.d<date> that
+# git derivation produced (use_existing_torch.py edits pyproject.toml before
+# setup.py runs, so the tree is always dirty by then).
+# Verify with `vllm.__version__` after changing either.
 COPY --from=vllm --exclude=.git --exclude=**/.git . /src/vllm
 WORKDIR /src/vllm
 # Don't let vLLM's pinned torch wheel clobber our source build.
