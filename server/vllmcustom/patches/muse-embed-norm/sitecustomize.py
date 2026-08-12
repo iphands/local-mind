@@ -153,6 +153,7 @@ MODELING = "transformers.models.muse_glimmer.modeling_muse_glimmer"
 SPECULATIVE = "vllm.config.speculative"
 REASONING = "vllm.reasoning.abs_reasoning_parsers"
 TRANSFORMERS_BACKEND = "vllm.model_executor.models.transformers.base"
+TU_CONFIG = "vllm.transformers_utils.config"
 
 
 def _log(msg):
@@ -512,11 +513,43 @@ def _patch_parser_lookup(mod):
 # ---------------------------------------------------------------------------
 # import hook
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# SHIM 7 -- upstream's config classes, when NATIVE=1
+# ---------------------------------------------------------------------------
+def _patch_native_configs(mod):
+    """Mirror the _CONFIG_REGISTRY edits from vllm-project/vllm#51655.
+
+    Everything else the PR adds is vendored and resolved by
+    patches/muse-native/muse_native.py, but this one is an edit to an EXISTING
+    core file (transformers_utils/config.py:104-107), so it has to be replayed
+    rather than copied. Runs right after that module finishes importing, which
+    is well before any model config is parsed.
+    """
+    if os.environ.get("MUSE_NATIVE", "0") != "1":
+        return
+    if getattr(mod, "_muse_native_configs", False):
+        return
+    try:
+        import muse_native
+    except Exception as exc:
+        _log(f"[muse-native] NOT active: cannot import muse_native ({exc!r})")
+        return
+    try:
+        registered = muse_native.register_configs()
+    except Exception as exc:
+        _log(f"[muse-native] NOT active: config registration failed ({exc!r})")
+        return
+    mod._muse_native_configs = True
+    _log(f"[muse-native] upstream {muse_native.upstream_ref()}")
+    _log(f"[muse-native] registered config types: {', '.join(registered)}")
+
+
 _PATCHES = {
     MODELING: _patch_modeling,
     SPECULATIVE: _patch_speculative,
     REASONING: _patch_parser_lookup,
     TRANSFORMERS_BACKEND: _patch_transformers_backend,
+    TU_CONFIG: _patch_native_configs,
 }
 
 

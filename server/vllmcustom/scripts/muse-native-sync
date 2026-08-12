@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+# Vendor the in-flight upstream Muse Glimmer support into patches/muse-native/.
+#
+#   ./scripts/muse-native-sync            # fetch, vendor, report what moved
+#   ./scripts/muse-native-sync --check    # report only; writes nothing
+#   PR=51655 ./scripts/muse-native-sync   # a different PR (or REF=main once merged)
+#
+# vLLM 0.27.1 has no Muse Glimmer, so run-muse serves it through the generic
+# Transformers backend -- which is why patches/ is full of shims. PR #51655 adds
+# a native implementation. Rather than wait for it to merge and then rebuild the
+# image (multi-hour), vendor the files it ADDS and load them out-of-tree with
+# --model-class-overrides. Refreshing against upstream then costs one fetch and
+# a server restart instead of a rebuild.
+#
+# WHAT IS VENDORED: only files upstream ADDS under vllm/ whose path mentions
+# muse or glimmer. Those cannot collide with anything in 0.27.1, so copying them
+# verbatim is safe and they stay byte-identical to upstream -- no local edits,
+# so a refresh is never a merge.
+#
+# WHAT IS NOT VENDORED: upstream's edits to EXISTING core files (registry.py,
+# transformers_utils/config.py, ...). Copying those wholesale would drag in
+# unrelated changes from a newer tree. Those few lines are mirrored by hand in
+# patches/muse-embed-norm/sitecustomize.py, so this script prints them every run
+# -- if they change, that is your signal to update the shim.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+PR=${PR:-51655}
+REF=${REF:-refs/pull/${PR}/head}
+REPO=${REPO:-https://github.com/vllm-project/vllm.git}
+DEST="$HERE/patches/muse-native"
+VENDOR="$DEST/vendor"
+STAMP="$DEST/UPSTREAM"
+CACHE=${CACHE:-/mnt/noir/scratch/ai/vllm/muse-native-src}
+CHECK=0
+[[ "${1:-}" == "--check" ]] && CHECK=1
+
+command -v git >/dev/null || { echo "need git"; exit 2; }
+
+# Deliberately NOT the ./build source tree: a stray PR ref in there could confuse
+# a later build, and this wants to be safe to run at any time.
+if [[ ! -d "$CACHE/.git" ]]; then
+  echo "## cloning a scratch mirror -> $CACHE"
+  mkdir -p "$CACHE"
+  git init -q "$CACHE"
+  git -C "$CACHE" remote add origin "$REPO"
+fi
+
+echo "## fetching $REF from $REPO"
+git -C "$CACHE" fetch -q --depth=1 origin "$REF"
+SHA=$(git -C "$CACHE" rev-parse FETCH_HEAD)
+SUBJECT=$(git -C "$CACHE" log -1 --format='%s' FETCH_HEAD)
+WHEN=$(git -C "$CACHE" log -1 --format='%ad' --date=short FETCH_HEAD)
+
+PREV_SHA=$(sed -n 's/^commit: //p' "$STAMP" 2>/dev/null || true)
+echo "##   upstream $SHA ($WHEN)"
+echo "##   $SUBJECT"
+if [[ -n "$PREV_SHA" ]]; then
+  if [[ "$PREV_SHA" == "$SHA" ]]; then
+    echo "##   unchanged since last sync"
+  else
+    echo "##   MOVED since last sync (was ${PREV_SHA:0:12})"
+  fi
+fi
+
+mapfile -t FILES < <(git -C "$CACHE" ls-tree -r --name-only FETCH_HEAD \
+                     | grep -E '^vllm/.*(muse|glimmer)' | sort)
+if (( ${#FILES[@]} == 0 )); then
+  echo "## no muse/glimmer files under vllm/ at that ref -- wrong PR, or it merged and moved"
+  exit 1
+fi
+
+echo
+echo "## files upstream adds under vllm/ (these get vendored verbatim):"
+CHANGED=0 ADDED=0
+for f in "${FILES[@]}"; do
+  target="$VENDOR/$f"
+  status="new"
+  ADDED=$((ADDED + 1))
+  if [[ -f "$target" ]]; then
+    if git -C "$CACHE" cat-file -p "FETCH_HEAD:$f" | cmp -s - "$target"; then
+      status="same"; ADDED=$((ADDED - 1))
+    else
+      status="CHANGED"; CHANGED=$((CHANGED + 1)); ADDED=$((ADDED - 1))
+    fi
+  fi
+  printf '  %-8s %8s  %s\n' "$status" "$(git -C "$CACHE" cat-file -s "FETCH_HEAD:$f")" "$f"
+  if (( ! CHECK )); then
+    mkdir -p "$(dirname "$target")"
+    git -C "$CACHE" cat-file -p "FETCH_HEAD:$f" > "$target"
+  fi
+done
+
+# Anything we vendored previously that upstream has dropped.
+if [[ -d "$VENDOR" ]]; then
+  while IFS= read -r stale; do
+    rel=${stale#"$VENDOR"/}
+    printf '  %-8s %8s  %s\n' "STALE" "-" "$rel"
+    (( CHECK )) || rm -f "$stale"
+  done < <(find "$VENDOR" -name '*.py' -type f 2>/dev/null | while IFS= read -r p; do
+             rel=${p#"$VENDOR"/}
+             printf '%s\n' "${FILES[@]}" | grep -qxF "$rel" || echo "$p"
+           done)
+fi
+
+# The core-file edits we cannot vendor. Printed every run so drift is visible.
+echo
+echo "## upstream's edits to EXISTING core files -- mirror these by hand in"
+echo "## patches/muse-embed-norm/sitecustomize.py if they change:"
+for core in vllm/model_executor/models/registry.py vllm/transformers_utils/config.py; do
+  echo "  --- $core"
+  git -C "$CACHE" cat-file -p "FETCH_HEAD:$core" 2>/dev/null \
+    | grep -in 'muse' | sed 's/^/      /' || echo "      (none)"
+done
+
+if (( CHECK )); then
+  echo
+  echo "## --check: nothing written"
+  exit $(( CHANGED > 0 || ADDED > 0 ? 1 : 0 ))
+fi
+
+cat > "$STAMP" <<EOF
+# Written by scripts/muse-native-sync. Do not edit by hand.
+pr: $PR
+ref: $REF
+commit: $SHA
+date: $WHEN
+subject: $SUBJECT
+synced: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+EOF
+
+echo
+echo "## vendored $(printf '%s\n' "${FILES[@]}" | wc -l) files -> $VENDOR"
+echo "##   $ADDED added, $CHANGED changed"
+echo "## stamp -> $STAMP"
+echo
+echo "## next: NATIVE=1 ./run-muse    (no rebuild; the vendored tree is mounted read-only)"

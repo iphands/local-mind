@@ -1,0 +1,7 @@
+# Written by scripts/muse-native-sync. Do not edit by hand.
+pr: 51655
+ref: refs/pull/51655/head
+commit: 99a10304dce8945119bd0b1a072297803c52a749
+date: 2026-08-11
+subject: Merge pull request #5 from xianbaoqian/tiezhen/consolidate-muse-glimmer-tests
+synced: 2026-08-12T17:14:10Z

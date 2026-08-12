@@ -237,6 +237,19 @@ DRAFT=${DRAFT:-Muse-Glimmer-30B-assistant}       # sibling of $MODEL under $MODE
 DRAFT_CAUSAL=${DRAFT_CAUSAL:-0}                  # reference sets is_causal = False
 DRAFT_EMBED_NORM=${DRAFT_EMBED_NORM:-0}          # reference embeds WITHOUT the norm
 
+# NATIVE=1 serves the model through upstream's in-flight native implementation
+# (vllm-project/vllm#51655) vendored into patches/muse-native/, instead of the
+# generic Transformers backend. No rebuild -- the vendored tree is mounted and
+# loaded out of tree, so trying a newer revision of that PR costs
+#   ./scripts/muse-native-sync && NATIVE=1 ./run-muse
+# rather than a multi-hour image build.
+#
+# EXPERIMENTAL. The PR is unmerged and still moving. When it is on, the shims
+# that exist only to paper over the fallback are turned off (see below) --
+# native reads output_multiplier, keeps the embedding RMSNorm and hoists
+# layer_types on its own.
+NATIVE=${NATIVE:-0}
+
 # patches/ is mounted whole at /vllm-patches; each subdirectory is one patch.
 PATCH_ROOT=$(cd "$(dirname "$0")/patches" && pwd)
 EMBED_PATCH=muse-embed-norm/sitecustomize.py
@@ -266,6 +279,14 @@ if [[ "$SPEC" == "1" ]]; then
     echo "SPEC=1 but no drafter at $MODEL_FOLDER/$DRAFT -- use SPEC=0 or set DRAFT="; exit 1; }
 fi
 
+# vendor/ is gitignored (regenerable upstream code, pinned by UPSTREAM), so a
+# fresh clone has the loader but not the files it loads.
+if [[ "$NATIVE" == "1" && ! -f "$PATCH_ROOT/muse-native/vendor/vllm/model_executor/models/muse_glimmer.py" ]]; then
+  echo "NATIVE=1 but patches/muse-native/vendor is empty."
+  echo "Fetch upstream's implementation first:  ./scripts/muse-native-sync"
+  exit 1
+fi
+
 # NOTE for future debugging: getting torch.compile and the drafter to coexist
 # hinged on ONE detail. vLLM compiles the DECODER class -- here
 # MuseGlimmerTextModel -- and vllm/compilation/decorators.py:719 installs the
@@ -289,8 +310,12 @@ if [[ -n "${DETACH:-}" ]]; then _RUNMODE=(-d); else _RUNMODE=(-it); fi
 # the embed_norm shim off); each shim reads its own env var instead.
 PATCH_ARGS=(
   -v "$PATCH_ROOT":/vllm-patches:ro
-  -e PYTHONPATH=/vllm-patches/muse-embed-norm:/vllm-patches/muse-dflash
-  -e MUSE_EMBED_NORM="$PATCH"                    # PATCH=0 -> reproduces BUG 1
+  -e PYTHONPATH=/vllm-patches/muse-embed-norm:/vllm-patches/muse-dflash:/vllm-patches/muse-native
+  -e MUSE_NATIVE="$NATIVE"
+  # The embed_norm shim exists only because the Transformers fallback drops the
+  # norm. Upstream's native model keeps it, so with NATIVE=1 the shim would be
+  # re-attaching a norm to a module that already has one.
+  -e MUSE_EMBED_NORM="$([[ "$NATIVE" == "1" ]] && echo 0 || echo "$PATCH")"
   -e MUSE_DFLASH="$SPEC"
   -e MUSE_DRAFT_LOGIT_SCALE="$DRAFT_LOGIT_SCALE" # defaults to LOGIT_SCALE; see above
   -e MUSE_DRAFT_CAUSAL="$DRAFT_CAUSAL"
@@ -386,7 +411,7 @@ VLLM_ARGS=(
   --tensor-parallel-size 1
   --trust-remote-code                            # required: muse_glimmer is a transformers-backend model
 
-  --hf-overrides "$HF_OVERRIDES"
+  # --hf-overrides is only added below when NATIVE=0; see the array append.
 
   --enable-prefix-caching
   --enable-chunked-prefill
@@ -431,9 +456,25 @@ fi
 #   --speculative-config must state the method: auto-detection is a substring
 #     match on the model path (vllm/config/speculative.py:886) and
 #     "Muse-Glimmer-30B-assistant" contains no "dflash".
+# --hf-overrides patches around the Transformers fallback (logit_scale it does
+# not read, layer_types it reads from the wrong level). Upstream's native model
+# handles both itself, and forcing text_config.logit_scale on top of a model
+# that already applies output_multiplier would double-scale the logits.
+[[ "$NATIVE" == "1" ]] || VLLM_ARGS+=( --hf-overrides "$HF_OVERRIDES" )
+
+# One --model-class-overrides, assembled from whichever pieces are enabled.
+# Both entries mirror upstream's registry.py, so the names match what vLLM will
+# look up once the PR merges (registry.py:530 and :631).
+MCO=()
+[[ "$NATIVE" == "1" ]] && MCO+=( '"MuseGlimmerForConditionalGeneration": "muse_native:MuseGlimmerForCausalLM"' )
+[[ "$SPEC"   == "1" ]] && MCO+=( '"DFlashMuseGlimmerAssistantModel": "muse_dflash:MuseGlimmerDFlashForCausalLM"' )
+if (( ${#MCO[@]} )); then
+  _mco=$(IFS=,; printf '%s' "${MCO[*]}")
+  VLLM_ARGS+=( --model-class-overrides "{${_mco}}" )
+fi
+
 if [[ "$SPEC" == "1" ]]; then
   VLLM_ARGS+=(
-    --model-class-overrides '{"DFlashMuseGlimmerAssistantModel": "muse_dflash:MuseGlimmerDFlashForCausalLM"}'
     --speculative-config "{\"method\": \"dflash\", \"model\": \"/models/${DRAFT}\", \"num_speculative_tokens\": ${SPEC_TOKENS}}"
   )
 fi
