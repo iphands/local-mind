@@ -1,0 +1,385 @@
+#!/usr/bin/env bash
+# Does the Muse Glimmer DFlash drafter actually work, and is it actually faster?
+# (see ../run-muse, the "SPEED" section)
+#
+#   ./scripts/muse-spec-check                 # boot both ways, compare
+#   REPEATS=5 ./scripts/muse-spec-check       # more timing samples per side
+#   MAX_TOKENS=800 ./scripts/muse-spec-check  # longer generations
+#   ./scripts/muse-spec-check /path/to/model  # non-default checkpoint
+#
+# Stage 0 boots once with EAGER=1 and a short context (~3 min: no torch.compile)
+# purely to answer "is the drafter wired up at all". Every DFlash wiring bug --
+# aux capture, the encoder rename, the fc width, the shared embedding, the
+# registered architecture -- has already shown itself by the end of the first
+# forward, so there is no point paying for a compiled build to discover it. Only
+# if that passes does it boot SPEC=0 and SPEC=1 properly for timings. Budget
+# ~20 minutes for a full clean run, ~3 for a failing one.
+#
+# All container output is streamed to bench-logs/ from the moment of launch.
+# run-muse uses `docker run --rm`, so a container that dies during load takes
+# its logs with it -- reading them afterwards gets you "No such container" and
+# nothing else. (Which is exactly how the first SPEC=1 crash was lost.)
+#
+# THE SHARP TEST is greedy parity, not speed. DFlash verifies every drafted token
+# against the target and rejects mismatches, so at temperature 0 the drafter
+# cannot change what comes out: SPEC=0 and SPEC=1 must emit the SAME TOKENS. If
+# they do not, the wiring is wrong -- most likely one of
+#
+#   * the encoder rename in patches/muse-dflash/muse_dflash.py landed on the
+#     wrong module, so `fc` or `hidden_norm` holds the other one's weights
+#   * MUSE_DRAFT_LOGIT_SCALE disagrees with the target's LOGIT_SCALE
+#   * target_layer_ids point at the wrong target layers
+#
+# and none of those announce themselves at boot.
+#
+# BUT a differing token is not automatically a fault, and on this model the
+# difference you will actually hit is benign. With the drafter on, the target
+# evaluates a 16-position block instead of one position, which changes the GEMM
+# shape and the reduction order and moves logits by ~1e-5. That is plenty to flip
+# an argmax the model had no opinion about. Measured here at token 115:
+#     SPEC=0  "Make"@-1.5914909839630127  "Probably"@-1.5914909839630127  gap=0
+#     SPEC=1  "Probably"@-1.4664549827575684  "Make"@-1.5914549827575684
+# an EXACT tie in the baseline, and the token speculation took was the other
+# front-runner. Nothing was overridden.
+#
+# So the verdict is tie-aware: it fails only when SPEC=1 takes a token the
+# baseline did NOT rank first by more than TIE_EPS (default 0.01). That is the
+# shape a real fault takes -- e.g. MUSE_DRAFT_LOGIT_SCALE out of step with the
+# target's LOGIT_SCALE, which makes the accept/reject comparison compare
+# differently-scaled logits.
+#
+# Acceptance rate is the second signal. The drafter can be perfectly harmless and
+# still useless: if acceptance is near zero, output stays correct and throughput
+# stays flat. That is the expected symptom of the two undocumented conventions
+# this wiring had to guess -- try DRAFT_EMBED_NORM=0 and DRAFT_CAUSAL=0.
+set -uo pipefail   # NOT -e: a failed stage must still print the report
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+MODEL=${1:-$HERE/models/vllm/meta-models/Muse-Glimmer-30B}
+NAME=vllm-muse                              # must match ./run-muse's --name
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+APIMODEL=${APIMODEL:-cosmo-6000}            # one of ./run-muse's --served-model-name aliases
+READY_TIMEOUT=${READY_TIMEOUT:-1200}        # s to wait for weight load + torch.compile
+REPEATS=${REPEATS:-3}                       # timed generations per side; median is reported
+MAX_TOKENS=${MAX_TOKENS:-400}
+KEEP=${KEEP:-0}                             # 1 = leave the SPEC=1 server up when done
+WIRING_ONLY=${WIRING_ONLY:-0}               # 1 = stop after stage 0 (~3 min, no timings)
+WIRING_EAGER=${WIRING_EAGER:-1}             # 0 = compile the wiring boot too (slow, but it is
+                                            #     the only way to exercise the compiled path)
+SKIP_WIRING=${SKIP_WIRING:-0}               # 1 = go straight to the timed boots (saves ~4 min
+                                            #     when the wiring is already known good)
+LOGDIR=${LOGDIR:-$HERE/bench-logs}
+WORK=$(mktemp -d)
+FAILURES=0
+
+# shellcheck source=../_bench-lib.sh
+source "$HERE/_bench-lib.sh"                # stop_server, wait_ready, median
+
+mkdir -p "$LOGDIR"
+for tool in curl jq docker bc; do
+  command -v "$tool" >/dev/null || { echo "## need $tool on PATH"; exit 2; }
+done
+
+ok()   { echo "     ok   $*"; }
+fail() { echo "     FAIL $*"; FAILURES=$((FAILURES + 1)); }
+
+LOGS_PID=""
+LOG=""
+
+stop_log_stream() {
+  [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null
+  LOGS_PID=""
+}
+
+cleanup() {
+  stop_log_stream
+  rm -rf "$WORK"
+  if [[ "$KEEP" != "1" ]]; then
+    echo
+    echo "## stopping $NAME (KEEP=1 to leave it up)"
+    stop_server
+  fi
+}
+trap cleanup EXIT
+
+# A prompt long enough to generate steadily, and deterministic at temperature 0.
+PROMPT='Write a Python function that merges two sorted lists into one sorted list, then explain how it works step by step.'
+
+boot() {  # <label> <spec> [VAR=VAL ...]  -- (re)start the server
+  local label=$1 spec=$2
+  shift 2
+  LOG="$LOGDIR/muse-spec-check-$label.log"
+  stop_log_stream
+  stop_server
+  : > "$LOG"
+  echo "##   launching SPEC=$spec ${*:-} ./run-muse (log -> $LOG)"
+  env SPEC="$spec" DETACH=1 PORT="$PORT" "$@" "$HERE/run-muse" "$MODEL" >> "$LOG" 2>&1
+
+  # Stream the container's own output into the same file, starting NOW. run-muse
+  # uses `docker run --rm`, so a container that dies during load is removed with
+  # its logs -- calling `docker logs` after the fact returns "No such container"
+  # and the traceback is gone for good. Following from t=0 is what makes a crash
+  # readable.
+  docker logs -f "$NAME" >> "$LOG" 2>&1 &
+  LOGS_PID=$!
+
+  echo "##   waiting up to ${READY_TIMEOUT}s for weight load${*:+ (eager)} ..."
+  if ! wait_ready; then
+    stop_log_stream
+    echo "##   NOT READY. Last 40 lines of $LOG:"
+    tail -40 "$LOG" | sed 's/^/       /'
+    return 1
+  fi
+  # The shims announce themselves on stderr; surfacing them here is how you tell
+  # "the drafter loaded" apart from "the drafter was silently skipped".
+  grep -E '^\[muse-(embed-norm|dflash)\]' "$LOG" | sed 's/^/##   /'
+  echo "##   ready"
+}
+
+generate() {  # <elapsed-file> -> response JSON on stdout, seconds into the file
+  local body t0 t1
+  # top_logprobs is what makes a parity divergence diagnosable rather than just
+  # reportable: it shows how close the runner-up was at the token that split.
+  body=$(jq -n --arg model "$APIMODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
+    '{model:$model, temperature:0, max_tokens:$mt, logprobs:true, top_logprobs:5,
+      messages:[{role:"user", content:$p}]}')
+  t0=$(date +%s.%N)
+  curl -sS --max-time 600 -X POST "http://${HOST}/v1/chat/completions" \
+    -H 'Content-Type: application/json' -d "$body"
+  t1=$(date +%s.%N)
+  echo "$t1 - $t0" | bc > "$1"
+}
+
+# The generated token sequence. logprobs carries the raw decoded tokens, which is
+# what we want to compare -- the ATEM parsers reshape `content`/`reasoning` after
+# the fact, so comparing those would test the parsers, not the decoder.
+# @json, NOT the bare token: newline tokens are everywhere in real output, and a
+# raw "\n\n" writes two extra lines, so line N stops meaning token N. That
+# silently inflates the token count and, worse, makes the divergence index point
+# at the wrong entry in the logprobs array -- which is exactly how the first
+# attempt at this diagnostic reported a gap for a token that was not the one that
+# diverged. One JSON string per line keeps line N == token N.
+tokens_of() { jq -r '.choices[0].logprobs.content[]?.token | @json' <<<"$1"; }
+
+# One side: REPEATS timed generations, tokens from the first, median tok/s.
+# Sets SIDE_RATE / SIDE_CT / SIDE_NTOK. Deliberately NOT run in a subshell -- it
+# calls fail(), and FAILURES has to survive.
+run_side() {  # <label>  -> writes $WORK/<label>.tokens
+  local label=$1 i resp elapsed rates=() ct=0
+  for ((i = 0; i < REPEATS; i++)); do
+    resp=$(generate "$WORK/$label.elapsed")
+    elapsed=$(cat "$WORK/$label.elapsed")
+    if ! jq -e '.choices[0]' >/dev/null 2>&1 <<<"$resp"; then
+      fail "$label generation failed: $(head -c 200 <<<"$resp")"
+      return 1
+    fi
+    ct=$(jq -r '.usage.completion_tokens // 0' <<<"$resp")
+    rates+=( "$(echo "scale=2; $ct / $elapsed" | bc)" )
+    if (( i == 0 )); then
+      tokens_of "$resp" > "$WORK/$label.tokens"
+      jq -r '.choices[0].message.content // ""' <<<"$resp" > "$WORK/$label.text"
+      jq '.choices[0].logprobs.content // []' <<<"$resp" > "$WORK/$label.logprobs.json"
+    fi
+  done
+  SIDE_RATE=$(median "${rates[@]}")
+  SIDE_CT=$ct
+  SIDE_NTOK=$(wc -l < "$WORK/$label.tokens")
+}
+
+# What the model thought at one token position: the token it took, and how far
+# ahead of the runner-up it was. A gap in the 1e-3 range is a coin flip that bf16
+# noise can tip either way; a gap of whole nats is a decision, and if the two
+# sides disagree there, speculation changed the answer rather than the arithmetic.
+logprob_detail() {  # <label> <index>
+  jq -r --argjson i "$2" '
+    (.[$i] // empty) as $e
+    | ($e.top_logprobs // []) as $t
+    | "chose \($e.token|tojson) @ \($e.logprob)"
+      + "   runners-up: " + ([$t[] | "\(.token|tojson)@\(.logprob)"] | join(", "))
+      + "   gap(1st-2nd)=" + (if ($t|length) >= 2
+                              then (($t[0].logprob - $t[1].logprob) | tostring)
+                              else "n/a" end)
+  ' "$WORK/$1.logprobs.json" 2>/dev/null
+}
+
+# Length of the common leading run of lines -- i.e. the index of the first
+# token that differs. NOT the total number of matching lines.
+common_prefix() {  # <file-a> <file-b>
+  awk 'NR==FNR { a[FNR]=$0; n=FNR; next }
+       { if (FNR > n || $0 != a[FNR]) { print FNR-1; found=1; exit } }
+       END { if (!found) print (n < FNR ? n : FNR) }' "$1" "$2"
+}
+
+# accepted / drafted, straight off the Prometheus endpoint.
+spec_metrics() {  # -> "<accepted> <drafted> <drafts>"
+  curl -sf "http://${HOST}/metrics" 2>/dev/null | awk '
+    /^vllm:spec_decode_num_accepted_tokens_total/ { a += $2 }
+    /^vllm:spec_decode_num_draft_tokens_total/    { d += $2 }
+    /^vllm:spec_decode_num_drafts_total/          { n += $2 }
+    END { printf "%d %d %d", a, d, n }'
+}
+
+echo "## muse-spec-check  model=$(basename "$MODEL")  host=$HOST  repeats=$REPEATS  max_tokens=$MAX_TOKENS"
+
+# --- stage 0: fast wiring check ----------------------------------------------
+# EAGER=1 skips torch.compile and MAX_MODEL_LEN=8192 keeps the KV allocation
+# small, so this boots in ~3 min instead of ~8. Everything that can be wrong
+# about the DFlash wiring -- aux capture, the encoder rename, the fc width, the
+# shared embedding, the drafter arch -- is wrong by the end of the first
+# forward, so there is no point paying for a compiled build to find out.
+if [[ "$SKIP_WIRING" == "1" ]]; then
+  echo
+  echo "## [0/5] wiring check SKIPPED (SKIP_WIRING=1)"
+else
+echo
+echo "## [0/5] wiring check (EAGER=$WIRING_EAGER, short context)"
+if ! boot wiring 1 EAGER="$WIRING_EAGER" MAX_MODEL_LEN=8192 MAX_BATCHED_TOKENS=2048; then
+  echo
+  echo "## the drafter did not come up. Grep the log for the usual suspects:"
+  echo "##   assert isinstance(model_output, tuple)   -> aux capture shim did not take"
+  echo "##   DFlash drafter expects 33280             -> fc width / target_layer_ids"
+  echo "##   'model' attribute / embed_tokens         -> embedding sharing"
+  echo "##   architectures .* not supported           -> --model-class-overrides"
+  echo "##   log: $LOG"
+  exit 1
+fi
+
+for marker in '\[muse-embed-norm\] re-attached' '\[muse-dflash\] aux capture installed' \
+              '\[muse-dflash\] drafter ready'; do
+  if grep -qE "$marker" "$LOG"; then ok "log has ${marker//\\/}"
+  else fail "log is MISSING ${marker//\\/}"; fi
+done
+if grep -qE 'auxiliary layers.*\(2, 14, 26, 38, 50\)|\[2, 14, 26, 38, 50\]' "$LOG"; then
+  ok "aux layers (2, 14, 26, 38, 50)"
+else
+  fail "aux layers not reported as (2, 14, 26, 38, 50)"
+  grep -iE 'auxiliary layers' "$LOG" | sed 's/^/          /'
+fi
+if grep -qE 'kv_sliding_layers=0' "$LOG"; then ok "draft KV window cleared"
+else fail "draft layers still carry a sliding KV spec (see muse_dflash.py)"; fi
+
+# One short generation, purely to make the drafter actually run.
+MAX_TOKENS_SAVED=$MAX_TOKENS
+MAX_TOKENS=64
+generate "$WORK/wiring.elapsed" > "$WORK/wiring.json"
+MAX_TOKENS=$MAX_TOKENS_SAVED
+if ! jq -e '.choices[0]' "$WORK/wiring.json" >/dev/null 2>&1; then
+  fail "wiring generation failed: $(head -c 200 "$WORK/wiring.json")"
+else
+  read -r W_ACC W_DRAFT _ < <(spec_metrics)
+  if (( W_DRAFT == 0 )); then
+    fail "drafter produced no draft tokens at all"
+  elif (( $(echo "$W_ACC / $W_DRAFT < 0.05" | bc -l) )); then
+    fail "acceptance ${W_ACC}/${W_DRAFT} is ~zero -- try DRAFT_EMBED_NORM=1 / DRAFT_CAUSAL=1"
+  else
+    ok "acceptance $(echo "scale=3; $W_ACC / $W_DRAFT" | bc) (${W_ACC}/${W_DRAFT})"
+  fi
+fi
+
+if (( FAILURES > 0 )); then
+  echo
+  echo "## wiring check FAILED ($FAILURES) -- not spending ~16 min on timings."
+  echo "## log: $LOG"
+  exit 1
+fi
+if [[ "$WIRING_ONLY" == "1" ]]; then
+  echo
+  echo "## wiring OK (WIRING_ONLY=1 -- skipping the timed comparison)"
+  exit 0
+fi
+fi   # end stage 0
+
+echo
+echo "## [1/5] baseline: SPEC=0"
+boot base 0 || exit 1
+run_side base || exit 1
+BASE_RATE=$SIDE_RATE BASE_CT=$SIDE_CT BASE_NTOK=$SIDE_NTOK
+echo "     ${BASE_RATE} tok/s (median of $REPEATS)  completion_tokens=$BASE_CT"
+
+echo
+echo "## [2/5] drafter: SPEC=1"
+boot spec 1 || exit 1
+run_side spec || exit 1
+SPEC_RATE=$SIDE_RATE SPEC_CT=$SIDE_CT
+read -r ACCEPTED DRAFTED DRAFTS < <(spec_metrics)
+echo "     ${SPEC_RATE} tok/s (median of $REPEATS)  completion_tokens=$SPEC_CT"
+
+echo
+echo "## [3/5] greedy parity"
+if [[ ! -s "$WORK/base.tokens" || ! -s "$WORK/spec.tokens" ]]; then
+  # No logprobs came back (older API shape?) -- fall back to the visible answer.
+  if diff -q "$WORK/base.text" "$WORK/spec.text" >/dev/null 2>&1; then
+    ok "content identical (no logprobs available, compared text)"
+  else
+    fail "content differs between SPEC=0 and SPEC=1 (no logprobs available)"
+  fi
+elif diff -q "$WORK/base.tokens" "$WORK/spec.tokens" >/dev/null 2>&1; then
+  ok "identical ($BASE_NTOK/$BASE_NTOK tokens match)"
+else
+  DIVERGE=$(common_prefix "$WORK/base.tokens" "$WORK/spec.tokens")
+  echo "     token $DIVERGE of $BASE_NTOK differs:"
+  echo "          SPEC=0: $(sed -n "$((DIVERGE + 1))p" "$WORK/base.tokens")"
+  echo "          SPEC=1: $(sed -n "$((DIVERGE + 1))p" "$WORK/spec.tokens")"
+  echo "          SPEC=0  $(logprob_detail base "$DIVERGE")"
+  echo "          SPEC=1  $(logprob_detail spec "$DIVERGE")"
+
+  # A differing token is only a fault if the target actually had a PREFERENCE
+  # that speculation overrode. Two things make it benign instead:
+  #   - the baseline's top two were separated by ~nothing, so which one wins is
+  #     decided by float noise, and
+  #   - the token SPEC=1 took is one of those tied front-runners.
+  # With the drafter on, the target evaluates a 16-position block rather than one
+  # position, so the GEMM shape and reduction order change; the resulting ~1e-5
+  # logit wobble is more than enough to flip an exact tie. That is arithmetic,
+  # not a different model.
+  TIE_EPS=${TIE_EPS:-0.01}
+  BASE_GAP=$(jq -r --argjson i "$DIVERGE" \
+    '(.[$i].top_logprobs // []) | if length >= 2 then (.[0].logprob - .[1].logprob) else 99 end' \
+    "$WORK/base.logprobs.json")
+  SPEC_TOK=$(sed -n "$((DIVERGE + 1))p" "$WORK/spec.tokens")
+  SPEC_TOK_RANKED=$(jq -r --argjson i "$DIVERGE" --argjson t "$SPEC_TOK" \
+    '[(.[$i].top_logprobs // [])[] | select(.token == $t)] | length' \
+    "$WORK/base.logprobs.json" 2>/dev/null || echo 0)
+
+  if (( $(echo "$BASE_GAP <= $TIE_EPS" | bc -l) )) && [[ "$SPEC_TOK_RANKED" != "0" ]]; then
+    ok "divergence is an argmax tie (baseline gap ${BASE_GAP} <= ${TIE_EPS}, and SPEC=1's"
+    echo "          token was among the baseline's tied front-runners) -- speculation did"
+    echo "          not override a preference, so output quality is unaffected"
+  else
+    fail "SPEC=1 took a token the baseline did NOT rank first, by ${BASE_GAP}"
+    echo "          This is a real verification fault, not numerics. Suspect"
+    echo "          MUSE_DRAFT_LOGIT_SCALE disagreeing with the target's LOGIT_SCALE."
+  fi
+fi
+
+echo
+echo "## [4/5] draft acceptance"
+if (( DRAFTED == 0 )); then
+  fail "no draft tokens recorded -- the drafter never ran (check SPEC=1 in the log)"
+else
+  RATE=$(echo "scale=3; $ACCEPTED / $DRAFTED" | bc)
+  LEN=$(echo "scale=2; 1 + $ACCEPTED / $DRAFTS" | bc)
+  echo "     acceptance rate  ${RATE}  (${ACCEPTED}/${DRAFTED} drafted tokens)"
+  echo "     mean accept len  ${LEN}  tokens per target forward (1.00 = no gain)"
+  # Below ~0.1 the drafter is running but proposing noise -- that is the
+  # DRAFT_EMBED_NORM / DRAFT_CAUSAL signal, not a correctness bug.
+  if (( $(echo "$RATE < 0.1" | bc) )); then
+    fail "acceptance below 0.1 -- try DRAFT_EMBED_NORM=0 and/or DRAFT_CAUSAL=0"
+  else
+    ok "acceptance is meaningful"
+  fi
+fi
+
+echo
+echo "## [5/5] report"
+SPEEDUP=$(echo "scale=2; $SPEC_RATE / $BASE_RATE" | bc)
+printf '     SPEC=0  %8s tok/s\n' "$BASE_RATE"
+printf '     SPEC=1  %8s tok/s   %sx\n' "$SPEC_RATE" "$SPEEDUP"
+echo
+if (( FAILURES == 0 )); then
+  echo "## all checks passed"
+else
+  echo "## $FAILURES check(s) FAILED"
+fi
+exit $(( FAILURES > 0 ? 1 : 0 ))

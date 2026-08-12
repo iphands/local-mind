@@ -83,14 +83,77 @@
 #   PARSERS=0 ./run-muse goes back to raw transcripts (and 400s on tools).
 #   Pointing the qwen3 parsers at this model makes things worse, not better.
 #
+# ---------------------------------------------------------------------------
+# SPEED -- the DFlash drafter (SPEC=1, on by default)
+# ---------------------------------------------------------------------------
+# Muse Glimmer ships a DFlash block-diffusion drafter, NOT an MTP head, so
+# ./run's --speculative-config '{"method":"mtp"}' is the wrong knob. DFlash
+# predicts a whole 16-token block in one forward pass and the target verifies
+# the block in parallel. Model card: 74.9 -> 233.4 tok/s (3.1x) on an RTX 5090.
+# The drafter lives next to the target, so the existing /models bind mount
+# already reaches it:
+#     meta-models/Muse-Glimmer-30B-assistant   4.8 GB bf16, 5 layers, block 16
+#
+# vLLM 0.27.1 supports the METHOD but not this CHECKPOINT. Four gaps:
+#
+#   * No aux hidden states -- THE ONE THAT KILLS THE SERVER. DFlash feeds on the
+#     target's hidden states at layers {1,13,25,37,49}. vLLM's Transformers
+#     backend advertises the EAGLE3 interface for this, but on Muse Glimmer it
+#     captures NOTHING: transformers 5.15 keys capture off a module-level
+#     registry populated in PreTrainedModel.__init__, and MuseGlimmerModel's
+#     entry is None, so vLLM's `if ... is None: self.model._can_record_outputs
+#     = {}` writes an instance attribute nothing reads. Three more layers of
+#     breakage stack on it. Symptom: the container dies during the profile run
+#     on `assert isinstance(model_output, tuple)`.
+#     FIXED HERE by shim 2 in patches/muse-embed-norm/sitecustomize.py.
+#   * No registered architecture. EAGLEConfig rewrites the draft's
+#     architectures MuseGlimmerAssistantModel -> DFlashMuseGlimmerAssistantModel
+#     (vllm/transformers_utils/configs/eagle.py:63-72) and that name is not in
+#     _SPECULATIVE_DECODING_MODELS. A DFlash* name never falls through to the
+#     Transformers backend either, so resolution hard-fails.
+#     FIXED HERE by patches/muse-dflash/muse_dflash.py, registered with
+#     --model-class-overrides. The drafter's layers are Qwen3-shaped verbatim,
+#     so it is a thin subclass of vLLM's own DFlashQwen3ForCausalLM plus a
+#     rename of the two `encoder.*` tensors.
+#   * Wrong config key layout. The drafter puts mask_token_id/target_layer_ids
+#     at the top level where vLLM wants a dflash_config dict, and ships no
+#     vocab_size at all (it has no embedding table). --hf-overrides cannot fix
+#     this: dict overrides are deliberately target-only
+#     (vllm/config/speculative.py:639-663).
+#     FIXED HERE by shim 3 in patches/muse-embed-norm/sitecustomize.py, which
+#     wraps SpeculativeConfig.hf_config_override -- the same seam vLLM uses
+#     in-tree to reshape every MTP checkpoint.
+#   * Sliding-window KV vs absolute slot writes. All 5 draft layers are
+#     sliding_attention, and DFlash writes context K/V at absolute cache slots.
+#     Left alone, everything past 2048 tokens lands in the shared null block --
+#     silent garbage, no error. FIXED HERE in muse_dflash.py by clearing the
+#     window on the Attention module, as laguna_dflash.py:117-121 does.
+#
+# The drafter ships no embed_tokens and no lm_head, so it borrows both from the
+# target. That is what makes BUG 2 matter twice over: rejection sampling
+# compares draft logits against target logits, so LOGIT_SCALE is passed through
+# to the drafter too (MUSE_DRAFT_LOGIT_SCALE) and the two must agree.
+#
+# TWO NON-OBVIOUS CONVENTIONS, both settled by the reference implementation that
+# ships in the image at transformers/models/muse_glimmer_assistant/ (read it
+# before changing either -- they are counter-intuitive and were guessed wrong
+# the first time):
+#   * The drafter embeds WITHOUT the target's embedding RMSNorm. See
+#     DRAFT_EMBED_NORM below and the comment at modeling_muse_glimmer.py:436.
+#   * The drafter's attention is NON-causal: inside the 16-token block the mask
+#     tokens attend bidirectionally, including to later mask tokens. See
+#     DRAFT_CAUSAL below.
+#
+# Verify with ./scripts/muse-spec-check -- a ~3 min EAGER=1 wiring check first,
+# then it boots both ways and asserts the greedy token ids are identical, which
+# is the sharp test: DFlash rejection sampling is output-preserving, so any
+# divergence means the wiring is wrong.
+#
 # Other things ./run gets wrong for this model, all deliberately dropped here:
 #
 #   * NO NVFP4 --linear-backend
 #       This checkpoint is bf16 ("dtype": "bfloat16", ~59.5 GB over 2 shards),
 #       not NVFP4-quantized. The NVFP4 GEMM knobs are meaningless here.
-#   * NO speculative decoding
-#       Muse Glimmer uses a DFlash block-diffusion drafter, not MTP. The drafter
-#       is a separate artifact and is not in this model dir.
 #   * NO --kv-cache-dtype fp8 by default
 #       This is a 32Q/2KV GQA model. With only 2 KV heads there is very little
 #       redundancy to absorb fp8 KV quantization error. Opt in with KV_FP8=1.
@@ -102,6 +165,10 @@
 #   PATCH=0 ./run-muse                 # drop the embed_norm patch -> garbage (BUG 1)
 #   LOGIT_SCALE=1.0 ./run-muse         # stock vLLM logits -> greedy collapse (BUG 2)
 #   PARSERS=0 ./run-muse               # drop the ATEM parsers -> raw transcript (BUG 3)
+#   SPEC=0 ./run-muse                  # no drafter, plain autoregressive decode
+#   SPEC_TOKENS=7 ./run-muse           # shorter draft block (default 15, = block_size-1)
+#   DRAFT_CAUSAL=1 ./run-muse          # causal drafter attention (default: non-causal)
+#   DRAFT_EMBED_NORM=1 ./run-muse      # drafter reads NORMED embeddings (default: raw)
 #   EAGER=1 ./run-muse                 # no torch.compile / CUDA graphs
 #   SWA=0 ./run-muse                   # don't hoist layer_types (see below)
 #   KV_FP8=1 ./run-muse                # fp8 KV cache (quality risk, 2 KV heads)
@@ -150,11 +217,24 @@ PATCH=${PATCH:-1}
 # (raw transcripts back in `content`, and 400 on any request carrying tools).
 PARSERS=${PARSERS:-1}
 
+# THE SPEED KNOB: the DFlash drafter. See the SPEED section in the header.
+SPEC=${SPEC:-1}                                  # 0 = plain autoregressive decode
+SPEC_TOKENS=${SPEC_TOKENS:-15}                   # DFlash issues 1 anchor + N masks per
+                                                 # request, so 15 fills exactly one
+                                                 # 16-token block (config block_size: 16)
+DRAFT=${DRAFT:-Muse-Glimmer-30B-assistant}       # sibling of $MODEL under $MODEL_FOLDER
+# Both of these follow the reference implementation that ships in the image at
+# transformers/models/muse_glimmer_assistant/ -- they are not guesses. See the
+# SPEED section above.
+DRAFT_CAUSAL=${DRAFT_CAUSAL:-0}                  # reference sets is_causal = False
+DRAFT_EMBED_NORM=${DRAFT_EMBED_NORM:-0}          # reference embeds WITHOUT the norm
+
 # patches/ is mounted whole at /vllm-patches; each subdirectory is one patch.
 PATCH_ROOT=$(cd "$(dirname "$0")/patches" && pwd)
 EMBED_PATCH=muse-embed-norm/sitecustomize.py
 ATEM_PLUGIN=atem-parsers/atem_parsers.py
-for f in "$EMBED_PATCH" "$ATEM_PLUGIN" atem-parsers/selftest.py; do
+DFLASH_MODULE=muse-dflash/muse_dflash.py
+for f in "$EMBED_PATCH" "$ATEM_PLUGIN" atem-parsers/selftest.py "$DFLASH_MODULE"; do
   [[ -f "$PATCH_ROOT/$f" ]] || { echo "missing $PATCH_ROOT/$f"; exit 1; }
 done
 
@@ -164,7 +244,8 @@ docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
 # ./run-muse --selftest -- exercise the ATEM parsers against vLLM's real parser
 # plumbing (ParserManager + DelegatingParser). No GPU, no server, no weights
 # beyond the tokenizer. Run it after every vLLM bump: that plumbing is internal
-# API and it does move.
+# API and it does move. Deliberately ahead of the SPEC checks below: this is an
+# offline parser test and must not need the drafter to be present.
 if [[ "$SELFTEST" == "1" ]]; then
   exec docker run --rm --entrypoint python \
     -v "$PATCH_ROOT":/vllm-patches:ro \
@@ -172,14 +253,70 @@ if [[ "$SELFTEST" == "1" ]]; then
     "$CONTAINER" /vllm-patches/atem-parsers/selftest.py "/models/$MODEL"
 fi
 
+if [[ "$SPEC" == "1" ]]; then
+  [[ -d "$MODEL_FOLDER/$DRAFT" ]] || {
+    echo "SPEC=1 but no drafter at $MODEL_FOLDER/$DRAFT -- use SPEC=0 or set DRAFT="; exit 1; }
+fi
+
+# NOTE for future debugging: getting torch.compile and the drafter to coexist
+# hinged on ONE detail. vLLM compiles the DECODER class -- here
+# MuseGlimmerTextModel -- and vllm/compilation/decorators.py:719 installs the
+# compiled entry point as `cls.__call__`, which then calls `self.forward(...)`.
+# So the traced region starts at __call__, and shim 2's aux pass-through has to
+# wrap __call__; wrapping forward puts it INSIDE the graph, where it either
+# silently captures nothing or dies with
+#     torch._dynamo.exc.Unsupported: ... trace method `get` of class `ContextVar`
+# NOTE: VISION does not interact with SPEC. --language-model-only only zeroes
+# limit_per_prompt (vllm/config/multimodal.py:350); it does not change the
+# resolved class, so the target is TransformersMultiModalForCausalLM either way.
+
 if [[ -n "${DETACH:-}" ]]; then _RUNMODE=(-d); else _RUNMODE=(-it); fi
 
 # sitecustomize.py on PYTHONPATH is auto-imported by CPython at startup, so the
-# patch lands in the API server and in every spawned engine/worker process.
-PATCH_ARGS=( -v "$PATCH_ROOT":/vllm-patches:ro )
-if [[ "$PATCH" == "1" ]]; then
-  PATCH_ARGS+=( -e PYTHONPATH=/vllm-patches/muse-embed-norm )
+# shims land in the API server, the engine core, every spawned worker and vLLM's
+# model-inspection subprocess. The second entry carries no sitecustomize -- it is
+# simply where `import muse_dflash` resolves for --model-class-overrides.
+#
+# PYTHONPATH is now set unconditionally (muse_dflash must be importable even with
+# the embed_norm shim off); each shim reads its own env var instead.
+PATCH_ARGS=(
+  -v "$PATCH_ROOT":/vllm-patches:ro
+  -e PYTHONPATH=/vllm-patches/muse-embed-norm:/vllm-patches/muse-dflash
+  -e MUSE_EMBED_NORM="$PATCH"                    # PATCH=0 -> reproduces BUG 1
+  -e MUSE_DFLASH="$SPEC"
+  -e MUSE_DRAFT_LOGIT_SCALE="$LOGIT_SCALE"       # keep drafter and target in step
+  -e MUSE_DRAFT_CAUSAL="$DRAFT_CAUSAL"
+  -e MUSE_DRAFT_EMBED_NORM="$DRAFT_EMBED_NORM"
+)
+# vLLM imports --reasoning-parser-plugin in the API server only. DFlash rebuilds
+# the draft VllmConfig inside the WORKER, which re-validates it and looks the
+# reasoning parser up there -- where the plugin was never loaded. Hand
+# sitecustomize the path so it can import it on demand. See shim 6.
+if [[ "$PARSERS" == "1" ]]; then
+  PATCH_ARGS+=( -e MUSE_ATEM_PLUGIN="/vllm-patches/$ATEM_PLUGIN" )
 fi
+
+# Pin the V2 model runner for spec decode. It is already what this dense target
+# gets by default, but the default hinges on `not model_config.is_moe`
+# (vllm/config/vllm.py:656-658) -- a coin flip we do not want to inherit. V2 also
+# skips V1's unconditional read of `target_model.config.image_token_index`
+# (llm_base_proposer.py:1397) for multimodal targets it does not recognise by
+# class name; MuseGlimmerConfig only has `image_token_id` and is @strict, so on
+# V1 that is an AttributeError. (sitecustomize aliases it too, belt and braces.)
+# V2=0 selects the V1 runner instead. Worth trying with EAGER=0: V1 compiles
+# piecewise and tolerates graph breaks, where V2 uses aot_compile_fullgraph and
+# turns any untraceable Python in the decoder into a hard error. Shim 5 covers
+# V1's image_token_index read.
+V2=${V2:-1}
+SPEC_ENV=()
+if [[ "$SPEC" == "1" ]]; then
+  SPEC_ENV=( -e VLLM_USE_V2_MODEL_RUNNER="$V2" )
+fi
+# AOT=0 turns off vLLM's ahead-of-time compile path. It defaults on for torch
+# >= 2.10 (envs.py:347-353) and is what makes the decoder a FULLGRAPH capture,
+# where any untraceable Python is a hard error rather than a graph break.
+# The plain torch.compile path is the fallback worth trying for compiled+DFlash.
+[[ -n "${AOT:-}" ]] && SPEC_ENV+=( -e VLLM_USE_AOT_COMPILE="$AOT" )
 
 # --- build the --hf-overrides payload ------------------------------------
 # 1) text_config.logit_scale -> restores output_multiplier (the loop fix).
@@ -209,6 +346,7 @@ CONTAINER_ARGS=(
   run "${_RUNMODE[@]}" --rm
   --name "$NAME"
   "${PATCH_ARGS[@]}"
+  "${SPEC_ENV[@]}"
   --entrypoint vllm
   --gpus device=0                                # RTX PRO 6000 only — never the 4060
   -e CUDA_DEVICE_ORDER=PCI_BUS_ID
@@ -275,6 +413,23 @@ if [[ "$PARSERS" == "1" ]]; then
   )
 fi
 
+# The DFlash drafter (SPEED section in the header).
+#   --model-class-overrides registers the out-of-tree drafter class under the
+#     name EAGLEConfig derives for this checkpoint. Registration happens on every
+#     ModelConfig.registry access (vllm/config/model.py:929), so it is spawn-safe
+#     and lands before the drafter is resolved. vLLM labels the flag
+#     dev/debug-only; the alternative is a vllm.general_plugins entry point,
+#     which would mean pip-installing into the image.
+#   --speculative-config must state the method: auto-detection is a substring
+#     match on the model path (vllm/config/speculative.py:886) and
+#     "Muse-Glimmer-30B-assistant" contains no "dflash".
+if [[ "$SPEC" == "1" ]]; then
+  VLLM_ARGS+=(
+    --model-class-overrides '{"DFlashMuseGlimmerAssistantModel": "muse_dflash:MuseGlimmerDFlashForCausalLM"}'
+    --speculative-config "{\"method\": \"dflash\", \"model\": \"/models/${DRAFT}\", \"num_speculative_tokens\": ${SPEC_TOKENS}}"
+  )
+fi
+
 [[ "$EAGER" == "1" ]] && VLLM_ARGS+=( --enforce-eager ) || VLLM_ARGS+=( --no-enforce-eager )
 [[ "$VISION" == "1" ]] || VLLM_ARGS+=( --language-model-only )
 [[ -n "$KV_FP8" ]] && VLLM_ARGS+=( --kv-cache-dtype fp8 )
@@ -286,6 +441,11 @@ echo "## Running $CONTAINER"
 echo "##   attn=$ATTN_BACKEND  logit_scale=$LOGIT_SCALE  swa=$SWA  vision=$VISION  reasoning=$REASONING"
 echo "##   ctx=$MAX_MODEL_LEN  kv=${KV_FP8:+fp8}${KV_FP8:-auto}  port=$PORT"
 echo "##   parsers=$([[ "$PARSERS" == "1" ]] && echo atem || echo none)  embed_norm_patch=$PATCH"
+if [[ "$SPEC" == "1" ]]; then
+  echo "##   spec=dflash:$DRAFT  draft_tokens=$SPEC_TOKENS  causal=$DRAFT_CAUSAL  draft_embed_norm=$DRAFT_EMBED_NORM"
+else
+  echo "##   spec=off"
+fi
 echo
 echo docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
 docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"

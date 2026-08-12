@@ -211,9 +211,26 @@ A further bump is not free: it drags torch and flashinfer with it (0.27.0 moved 
 budget a full multi-hour rebuild rather than an incremental one. Read the target tag's
 `requirements/cuda.txt` first and move `TORCH_REF`/`FLASHINFER_REF` in `./build` to match.
 
-`MuseGlimmer` still has no native implementation as of v0.27.0, so the
-`patches/muse-embed-norm/` sitecustomize shim and `run-muse`'s `--hf-overrides` are
-both still required.
+`MuseGlimmer` still has no native implementation as of v0.27.0, so three shims are
+required, all runtime — no rebuild:
+
+- `patches/muse-embed-norm/sitecustomize.py` hosts five shims (one `sitecustomize` per
+  `PYTHONPATH`, so they share a file). Two matter most: it restores the embedding RMSNorm the
+  Transformers fallback drops, and it repairs EAGLE3 aux hidden-state capture — vLLM's
+  Transformers backend advertises the interface but silently captures nothing on this model,
+  which kills the server on `assert isinstance(model_output, tuple)` the moment
+  speculation is on. It also reshapes the drafter's config, since `--hf-overrides`
+  cannot reach a draft config (dict overrides are target-only by design).
+- `run-muse`'s `--hf-overrides` supplies `text_config.logit_scale` and hoists
+  `layer_types`/`sliding_window`.
+- `patches/muse-dflash/muse_dflash.py` registers a drafter class for
+  `Muse-Glimmer-30B-assistant`; vLLM 0.27.1 supports the `dflash` *method* but has no
+  architecture for this checkpoint. It is a thin subclass of vLLM's own
+  `DFlashQwen3ForCausalLM` — after renaming the two `encoder.*` tensors, the checkpoint's
+  key set is structurally identical to `Qwen3.6-27B-DFlash`.
+
+Check the drafter with `./scripts/muse-spec-check` (greedy parity + acceptance rate +
+tok/s), and the parsers with `./scripts/muse-e2e`.
 
 ## Preflight — fail fast on an incompatible version set
 
