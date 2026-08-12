@@ -78,18 +78,29 @@ few, and they are replayed instead:
 `muse-native-sync` prints those core-file lines on **every** run. If they change,
 that is the signal to update the replays above.
 
-## Status
+## Status — it serves
 
-Verified against 0.27.1, offline:
+Booted `NATIVE=1 SPEC=0` on 0.27.1 and confirmed end to end:
 
-- all five vendored modules import
-- `_CONFIG_REGISTRY` resolves `muse_glimmer` → upstream's `MuseGlimmerConfig`
-- vLLM resolves `MuseGlimmerForConditionalGeneration` → the native class, and the
-  fallback warning is gone
+- `Resolved architecture: MuseGlimmerForConditionalGeneration` → the native
+  class, and **zero** "falling back to Transformers" warnings
+- weights load, `Application startup complete`, coherent output at both
+  temperature 0 and the production sampling settings
+- the ATEM parsers still split reasoning from content correctly
+- **27.4 tok/s vs 26.9** on the fallback (400 tokens, temp 0, same prompt) — a
+  ~2% difference, i.e. speed is not the reason to do this
 
-**Not yet verified: serving.** Import and resolution say nothing about whether
-weight loading, the multimodal processor and the attention wiring work on
-0.27.1. That needs a boot.
+The reason to do this is correctness. The native model applies **both**
+`output_multiplier` *and* the tanh `final_logit_softcapping`
+(`muse_glimmer.py:1630-1632`). The fallback path could only supply the
+multiplier, via `--hf-overrides text_config.logit_scale`; the softcap was the
+documented residual in `run-muse`'s BUG 2 notes. Native closes that gap, which
+is why `--hf-overrides` is dropped when `NATIVE=1` — forcing `logit_scale` on
+top of a model that already scales would double-apply it.
+
+Careful reading a "looks fine" result at temperature 0: argmax is invariant to
+positive scaling, so greedy output cannot reveal a wrong logit scale. The check
+above is the source (`muse_glimmer.py:1630`), not the sample.
 
 Also untested: `NATIVE=1` together with `SPEC=1`. Upstream drives the drafter
 with the stock `DFlashQwen3ForCausalLM`, same as `patches/muse-dflash` does, so
