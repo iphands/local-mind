@@ -1,0 +1,242 @@
+#!/usr/bin/env bash
+# Why does DFlash acceptance collapse on the real server but not on the bench?
+#
+#   ./scripts/muse-spec-probe            # boot SPEC=1 once, run four scenarios
+#   KEEP=1 ./scripts/muse-spec-probe     # leave the server up afterwards
+#
+# scripts/muse-spec-check measures ONE shape of request: a short prompt, one at a
+# time. That shape gets acceptance 0.21 and 3.6x. The live server, serving
+# opencode, gets acceptance 0.015 and a net slowdown. Something between those two
+# shapes is responsible, and the two candidates are context length and
+# concurrency.
+#
+# So: boot the drafter ONCE and walk it through four request shapes, diffing the
+# Prometheus counters around each. The counters are cumulative, so a delta over a
+# scenario is that scenario's acceptance in isolation -- four answers for the
+# price of one 8-minute boot instead of four.
+#
+#   A  short prompt,  1 stream    the bench shape; should reproduce ~0.21
+#   B  long prompt,   1 stream    isolates CONTEXT LENGTH
+#   C  short prompt,  3 streams   isolates CONCURRENCY
+#   D  long prompt,   3 streams   both at once == production
+#
+# What the outcomes mean:
+#   B collapses, C does not  -> the drafter's 2048-token sliding window is the
+#                               problem: on a long context it predicts from a
+#                               keyhole while the target sees everything. Look at
+#                               position 1 -- that is where it shows first.
+#   C collapses, B does not  -> batching. Speculation spends spare compute, and a
+#                               saturated server has none; gate SPEC on load.
+#   both collapse            -> they compound, and the drafter is only useful for
+#                               short single-stream work.
+#   neither collapses        -> the cause is in the real request content (ATEM
+#                               markup, tool calls), not its shape. Next step
+#                               would be replaying a captured opencode turn.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+MODEL=${1:-$HERE/models/vllm/meta-models/Muse-Glimmer-30B}
+NAME=vllm-muse
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+APIMODEL=${APIMODEL:-cosmo-6000}
+READY_TIMEOUT=${READY_TIMEOUT:-1200}
+MAX_TOKENS=${MAX_TOKENS:-200}
+CONCURRENCY=${CONCURRENCY:-3}      # matches the observed "Running: 3 reqs"
+KEEP=${KEEP:-0}
+LOGDIR=${LOGDIR:-$HERE/bench-logs}
+# Production sampling, not greedy -- muse-spec-check already showed these two
+# regimes differ, and this probe is about reproducing production.
+TEMP=${TEMP:-1.0}
+TOP_P=${TOP_P:-0.95}
+TOP_K=${TOP_K:-64}
+WORK=$(mktemp -d)
+
+# shellcheck source=../_bench-lib.sh
+source "$HERE/_bench-lib.sh"
+mkdir -p "$LOGDIR"
+for tool in curl jq docker bc; do
+  command -v "$tool" >/dev/null || { echo "## need $tool on PATH"; exit 2; }
+done
+
+LOGS_PID=""
+cleanup() {
+  [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null
+  rm -rf "$WORK"
+  if [[ "$KEEP" != "1" ]]; then
+    echo; echo "## stopping $NAME (KEEP=1 to leave it up)"
+    stop_server
+  fi
+}
+trap cleanup EXIT
+
+SHORT='Write a Python function that merges two sorted lists into one sorted list, then explain how it works step by step.'
+
+# A long, code-heavy context in the spirit of an agentic turn: real files from
+# this repo, then a question about them. Uses the patch stack itself, which is
+# conveniently around 10k tokens of dense code and prose.
+build_long_prompt() {
+  {
+    echo "Here are several files from a vLLM deployment repo."
+    echo
+    for f in run-muse patches/muse-dflash/muse_dflash.py \
+             patches/muse-embed-norm/sitecustomize.py; do
+      echo "===== $f ====="
+      cat "$HERE/$f"
+      echo
+    done
+    echo "Summarise what these files do together, then explain step by step how"
+    echo "the speculative decoding drafter is wired in."
+  } > "$WORK/long.txt"
+}
+
+# "<accepted> <drafted> <drafts> <pos0..pos14>" -- cumulative, diffed by caller.
+snapshot() {
+  curl -sf "http://${HOST}/metrics" 2>/dev/null | awk '
+    /^vllm:spec_decode_num_accepted_tokens_total/ { a += $2 }
+    /^vllm:spec_decode_num_draft_tokens_total/    { d += $2 }
+    /^vllm:spec_decode_num_drafts_total/          { n += $2 }
+    /^vllm:spec_decode_num_accepted_tokens_per_pos_total/ {
+      if (match($0, /position="[0-9]+"/)) {
+        p = substr($0, RSTART + 10, RLENGTH - 11); pos[p] += $2
+      }
+    }
+    END { printf "%d %d %d", a, d, n; for (i = 0; i < 15; i++) printf " %d", pos[i] + 0; print "" }'
+}
+
+ask_capture() {  # <prompt-file> -> response JSON on stdout
+  jq -n --arg model "$APIMODEL" --rawfile p "$1" --argjson mt "$MAX_TOKENS" \
+        --argjson t "$TEMP" --argjson tp "$TOP_P" --argjson tk "$TOP_K" \
+    '{model:$model, max_tokens:$mt, temperature:$t, top_p:$tp, top_k:$tk,
+      messages:[{role:"user", content:$p}]}' \
+  | curl -sS --max-time 600 -X POST "http://${HOST}/v1/chat/completions" \
+      -H 'Content-Type: application/json' -d @-
+}
+
+# One point on the context-length curve. Truncates the long context to roughly
+# <target> tokens and reports what the drafter managed at that length, using the
+# server's own prompt_tokens rather than a chars/4 guess.
+ctx_point() {  # <target-tokens>
+  local target=$1 before after resp ptok
+  { head -c $(( target * 4 )) "$WORK/long.txt"
+    printf '\n\nSummarise the code above in one paragraph.\n'; } > "$WORK/ctx.txt"
+  read -r -a before <<<"$(snapshot)"
+  resp=$(ask_capture "$WORK/ctx.txt")
+  read -r -a after <<<"$(snapshot)"
+  ptok=$(jq -r '.usage.prompt_tokens // 0' <<<"$resp")
+  local acc=$(( after[0] - before[0] ))
+  local drafted=$(( after[1] - before[1] ))
+  local drafts=$(( after[2] - before[2] ))
+  if (( drafts == 0 )); then printf '  %-8s  no drafts\n' "$ptok"; return; fi
+  printf '  %-8s  accept=%-6s len=%-5s pos1=%-6s\n' "$ptok" \
+    "$(echo "scale=3; $acc / $drafted" | bc)" \
+    "$(echo "scale=2; 1 + $acc / $drafts" | bc)" \
+    "$(echo "scale=3; (${after[3]} - ${before[3]}) / $drafts" | bc)"
+}
+
+ask() {  # <prompt-file>
+  jq -n --arg model "$APIMODEL" --rawfile p "$1" --argjson mt "$MAX_TOKENS" \
+        --argjson t "$TEMP" --argjson tp "$TOP_P" --argjson tk "$TOP_K" \
+    '{model:$model, max_tokens:$mt, temperature:$t, top_p:$tp, top_k:$tk,
+      messages:[{role:"user", content:$p}]}' \
+  | curl -sS --max-time 600 -X POST "http://${HOST}/v1/chat/completions" \
+      -H 'Content-Type: application/json' -d @- > /dev/null
+}
+
+scenario() {  # <label> <prompt-file> <streams> <description>
+  local label=$1 pfile=$2 streams=$3 desc=$4
+  local before after i
+  read -r -a before <<<"$(snapshot)"
+  local t0 t1
+  local pids=()
+  t0=$(date +%s.%N)
+  # wait on THESE pids only. A bare `wait` also waits for the `docker logs -f`
+  # follower started at boot, which never exits -- the scenarios then hang
+  # forever with the requests already served and nothing left to report.
+  for ((i = 0; i < streams; i++)); do ask "$pfile" & pids+=("$!"); done
+  wait "${pids[@]}"
+  t1=$(date +%s.%N)
+  read -r -a after <<<"$(snapshot)"
+
+  local acc=$(( after[0] - before[0] ))
+  local drafted=$(( after[1] - before[1] ))
+  local drafts=$(( after[2] - before[2] ))
+  local secs; secs=$(echo "$t1 - $t0" | bc)
+
+  if (( drafts == 0 )); then
+    printf '  %-2s %-34s  no drafts recorded\n' "$label" "$desc"
+    return
+  fi
+  local rate len pos1
+  rate=$(echo "scale=3; $acc / $drafted" | bc)
+  len=$(echo "scale=2; 1 + $acc / $drafts" | bc)
+  pos1=$(echo "scale=3; (${after[3]} - ${before[3]}) / $drafts" | bc)
+  printf '  %-2s %-34s  accept=%-6s len=%-5s pos1=%-6s  (%ss, %s tok/s agg)\n' \
+    "$label" "$desc" "$rate" "$len" "$pos1" \
+    "$(printf '%.0f' "$secs")" \
+    "$(echo "scale=1; $streams * $MAX_TOKENS / $secs" | bc)"
+}
+
+echo "## muse-spec-probe  temp=$TEMP  max_tokens=$MAX_TOKENS  concurrency=$CONCURRENCY"
+build_long_prompt
+echo "##   short prompt: $(wc -c < <(printf '%s' "$SHORT")) chars"
+echo "##   long prompt : $(wc -c < "$WORK/long.txt") chars (~$(( $(wc -c < "$WORK/long.txt") / 4 )) tokens)"
+
+LOG="$LOGDIR/muse-spec-probe.log"
+echo
+if [[ "${REUSE:-0}" == "1" ]] && curl -sf "http://${HOST}/health" >/dev/null 2>&1; then
+  # A boot costs ~14 min; if one is already serving on this port, use it. The
+  # caller is responsible for it having been started with SPEC=1.
+  echo "## reusing the server already answering on $HOST (REUSE=1)"
+  KEEP=1   # someone else owns this server -- do not tear down what we did not start
+else
+  : > "$LOG"
+  echo "## booting SPEC=1 once (log -> $LOG)"
+  stop_server
+  DETACH=1 SPEC=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" >> "$LOG" 2>&1
+  docker logs -f "$NAME" >> "$LOG" 2>&1 &
+  LOGS_PID=$!
+  if ! wait_ready; then
+    echo "##   NOT READY. Last 40 lines:"; tail -40 "$LOG" | sed 's/^/       /'
+    exit 1
+  fi
+  echo "##   ready"
+fi
+
+printf '%s' "$SHORT" > "$WORK/short.txt"
+# One throwaway request: the very first generation after boot also pays JIT and
+# cache warmup, which would otherwise be charged to scenario A.
+ask "$WORK/short.txt" >/dev/null 2>&1
+
+if [[ "${MODE:-shapes}" == "ctx" ]]; then
+  # Where exactly does it fall over? The drafter's sliding_window is 2048, so if
+  # that is the mechanism the curve should hold up to ~2k of context and drop
+  # sharply after. A smooth decline instead means the window is not the story and
+  # widening dflash_config.swa_window_size would not help.
+  echo
+  echo "## context-length bisect (single stream, one request per point)"
+  echo "##   prompt_tokens is the server's own count, not an estimate"
+  echo
+  printf '  %-8s  %s\n' "ctx" "drafter"
+  for target in 256 512 1024 1536 2048 3072 4096 8192 16384; do
+    ctx_point "$target"
+  done
+  echo
+  echo "## drafter sliding_window = 2048 (config.json). A cliff between the 2048"
+  echo "## and 3072 rows implicates it; a smooth slope exonerates it."
+  exit 0
+fi
+
+echo
+echo "## scenarios (accept = accepted/drafted, len = tokens committed per target"
+echo "##            forward, pos1 = acceptance of the FIRST draft token)"
+scenario A "$WORK/short.txt" 1              "short prompt, 1 stream"
+scenario B "$WORK/long.txt"  1              "long prompt,  1 stream"
+scenario C "$WORK/short.txt" "$CONCURRENCY" "short prompt, $CONCURRENCY streams"
+scenario D "$WORK/long.txt"  "$CONCURRENCY" "long prompt,  $CONCURRENCY streams"
+
+echo
+echo "## reference points from scripts/muse-spec-check:"
+echo "##   bench (short, 1 stream, temp 1.0)  accept=0.214  len=4.21  pos1~0.83"
+echo "##   live server (opencode)             accept=0.015  len=1.26  pos1~0.25"
+echo "## whichever scenario lands near the live numbers names the cause."

@@ -210,6 +210,14 @@ EAGER=${EAGER:-0}                                # 1 = --enforce-eager (no torch
 # Transformers fallback actually reads. LOGIT_SCALE=1.0 reproduces the loop.
 LOGIT_SCALE=${LOGIT_SCALE:-0.19611613513818404}
 
+# The drafter normally gets the SAME scale as the target -- that is the point:
+# rejection sampling at temperature > 0 compares p_target(x)/q_draft(x), so the
+# two distributions have to be on the same footing. Split out as its own knob
+# because that reasoning is unverified: argmax is invariant to positive scaling,
+# so a wrong value here is INVISIBLE at temperature 0 and only shows up as a
+# collapsed acceptance rate under real sampling. Vary it to test that.
+DRAFT_LOGIT_SCALE=${DRAFT_LOGIT_SCALE:-$LOGIT_SCALE}
+
 # THE OTHER FIX: restores the embedding RMSNorm the fallback drops. See the
 # header comment in that file. PATCH=0 disables it (reproduces the garbage).
 PATCH=${PATCH:-1}
@@ -284,7 +292,7 @@ PATCH_ARGS=(
   -e PYTHONPATH=/vllm-patches/muse-embed-norm:/vllm-patches/muse-dflash
   -e MUSE_EMBED_NORM="$PATCH"                    # PATCH=0 -> reproduces BUG 1
   -e MUSE_DFLASH="$SPEC"
-  -e MUSE_DRAFT_LOGIT_SCALE="$LOGIT_SCALE"       # keep drafter and target in step
+  -e MUSE_DRAFT_LOGIT_SCALE="$DRAFT_LOGIT_SCALE" # defaults to LOGIT_SCALE; see above
   -e MUSE_DRAFT_CAUSAL="$DRAFT_CAUSAL"
   -e MUSE_DRAFT_EMBED_NORM="$DRAFT_EMBED_NORM"
 )

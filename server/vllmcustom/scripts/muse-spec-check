@@ -63,6 +63,20 @@ APIMODEL=${APIMODEL:-cosmo-6000}            # one of ./run-muse's --served-model
 READY_TIMEOUT=${READY_TIMEOUT:-1200}        # s to wait for weight load + torch.compile
 REPEATS=${REPEATS:-3}                       # timed generations per side; median is reported
 MAX_TOKENS=${MAX_TOKENS:-400}
+# Sampling. TEMP=0 is the greedy regime the parity check needs; it is NOT what
+# the server actually serves. run-muse sets temperature 1.0 / top_p 0.95 /
+# top_k 64 per the model card, and that difference matters enormously for
+# speculative decoding: at temperature 0 verification is "does the draft token
+# equal the target's argmax", which is invariant to how the draft's logits are
+# scaled. Above 0 it becomes rejection sampling on min(1, p_target/q_draft),
+# which compares distribution SHAPES. A drafter that looks perfect at TEMP=0 can
+# be near-useless at TEMP=1.0. Always confirm at production sampling.
+TEMP=${TEMP:-0}
+TOP_P=${TOP_P:-0.95}
+TOP_K=${TOP_K:-64}
+SEED=${SEED:-1234}                          # pins sampling so TEMP>0 runs stay comparable
+SKIP_BASE=${SKIP_BASE:-0}                   # 1 = only boot SPEC=1 (reuse a known baseline)
+SPEC_TOKENS_USED=${SPEC_TOKENS:-15}         # mirrors run-muse's default, for the report only
 KEEP=${KEEP:-0}                             # 1 = leave the SPEC=1 server up when done
 WIRING_ONLY=${WIRING_ONLY:-0}               # 1 = stop after stage 0 (~3 min, no timings)
 WIRING_EAGER=${WIRING_EAGER:-1}             # 0 = compile the wiring boot too (slow, but it is
@@ -141,9 +155,17 @@ generate() {  # <elapsed-file> -> response JSON on stdout, seconds into the file
   local body t0 t1
   # top_logprobs is what makes a parity divergence diagnosable rather than just
   # reportable: it shows how close the runner-up was at the token that split.
+  local sampling
+  if [[ "$TEMP" == "0" ]]; then
+    sampling=$(jq -n '{temperature: 0}')
+  else
+    sampling=$(jq -n --argjson t "$TEMP" --argjson p "$TOP_P" --argjson k "$TOP_K" \
+                     --argjson s "$SEED" '{temperature:$t, top_p:$p, top_k:$k, seed:$s}')
+  fi
   body=$(jq -n --arg model "$APIMODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
-    '{model:$model, temperature:0, max_tokens:$mt, logprobs:true, top_logprobs:5,
-      messages:[{role:"user", content:$p}]}')
+               --argjson s "$sampling" \
+    '{model:$model, max_tokens:$mt, logprobs:true, top_logprobs:5,
+      messages:[{role:"user", content:$p}]} + $s')
   t0=$(date +%s.%N)
   curl -sS --max-time 600 -X POST "http://${HOST}/v1/chat/completions" \
     -H 'Content-Type: application/json' -d "$body"
@@ -291,11 +313,16 @@ fi
 fi   # end stage 0
 
 echo
-echo "## [1/5] baseline: SPEC=0"
-boot base 0 || exit 1
-run_side base || exit 1
-BASE_RATE=$SIDE_RATE BASE_CT=$SIDE_CT BASE_NTOK=$SIDE_NTOK
-echo "     ${BASE_RATE} tok/s (median of $REPEATS)  completion_tokens=$BASE_CT"
+if [[ "$SKIP_BASE" == "1" ]]; then
+  echo "## [1/5] baseline SKIPPED (SKIP_BASE=1)"
+  BASE_RATE="" BASE_NTOK=0
+else
+  echo "## [1/5] baseline: SPEC=0"
+  boot base 0 || exit 1
+  run_side base || exit 1
+  BASE_RATE=$SIDE_RATE BASE_CT=$SIDE_CT BASE_NTOK=$SIDE_NTOK
+  echo "     ${BASE_RATE} tok/s (median of $REPEATS)  completion_tokens=$BASE_CT"
+fi
 
 echo
 echo "## [2/5] drafter: SPEC=1"
@@ -307,7 +334,13 @@ echo "     ${SPEC_RATE} tok/s (median of $REPEATS)  completion_tokens=$SPEC_CT"
 
 echo
 echo "## [3/5] greedy parity"
-if [[ ! -s "$WORK/base.tokens" || ! -s "$WORK/spec.tokens" ]]; then
+if [[ "$TEMP" != "0" || "$SKIP_BASE" == "1" ]]; then
+  # At TEMP>0 the two sides sample independently, so differing tokens carry no
+  # information -- and speculative decoding is only distribution-preserving in
+  # expectation, not per-draw. Run TEMP=0 for the correctness check and TEMP>0
+  # for the throughput/acceptance numbers; they answer different questions.
+  echo "     skipped (TEMP=$TEMP${SKIP_BASE:+, SKIP_BASE=$SKIP_BASE}) -- only meaningful at TEMP=0 with a baseline"
+elif [[ ! -s "$WORK/base.tokens" || ! -s "$WORK/spec.tokens" ]]; then
   # No logprobs came back (older API shape?) -- fall back to the visible answer.
   if diff -q "$WORK/base.text" "$WORK/spec.text" >/dev/null 2>&1; then
     ok "content identical (no logprobs available, compared text)"
@@ -362,10 +395,16 @@ else
   LEN=$(echo "scale=2; 1 + $ACCEPTED / $DRAFTS" | bc)
   echo "     acceptance rate  ${RATE}  (${ACCEPTED}/${DRAFTED} drafted tokens)"
   echo "     mean accept len  ${LEN}  tokens per target forward (1.00 = no gain)"
-  # Below ~0.1 the drafter is running but proposing noise -- that is the
-  # DRAFT_EMBED_NORM / DRAFT_CAUSAL signal, not a correctness bug.
-  if (( $(echo "$RATE < 0.1" | bc) )); then
-    fail "acceptance below 0.1 -- try DRAFT_EMBED_NORM=0 and/or DRAFT_CAUSAL=0"
+  # The break-even point. Each step verifies SPEC_TOKENS+1 query positions and
+  # runs a drafter forward, to commit LEN tokens. Below ~1.5 committed the extra
+  # width is not being paid for and SPEC=1 is likely SLOWER than SPEC=0 -- which
+  # is exactly what production sampling exposed and TEMP=0 benchmarking hid.
+  if (( $(echo "$LEN < 1.5" | bc) )); then
+    fail "mean accept len ${LEN} is at/below break-even -- SPEC=1 is probably a NET LOSS here"
+    echo "          verifying $((SPEC_TOKENS_USED + 1)) positions per step to commit ${LEN} tokens."
+    echo "          Try a much smaller SPEC_TOKENS, or SPEC=0."
+  elif (( $(echo "$RATE < 0.1" | bc) )); then
+    fail "acceptance below 0.1 -- try DRAFT_EMBED_NORM=1 and/or DRAFT_CAUSAL=1"
   else
     ok "acceptance is meaningful"
   fi
