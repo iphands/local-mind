@@ -102,11 +102,52 @@ Careful reading a "looks fine" result at temperature 0: argmax is invariant to
 positive scaling, so greedy output cannot reveal a wrong logit scale. The check
 above is the source (`muse_glimmer.py:1630`), not the sample.
 
-Also untested: `NATIVE=1` together with `SPEC=1`. Upstream drives the drafter
-with the stock `DFlashQwen3ForCausalLM`, same as `patches/muse-dflash` does, so
-they should compose — but the draft-config shim (shim 3) and upstream's
-`MuseGlimmerAssistantConfig` both want to supply the same fields, and only one
-of them should win. Expect to have to sort that out.
+## `NATIVE=1` with `SPEC=1` — works, but do not use it
+
+It boots and serves, after two compat shims. It is measurably **worse** than
+either half on its own, so it is not the configuration to run.
+
+Getting there needed two backports, because the PR is branched off a newer
+`main` than v0.27.1 and the *speculative* paths are where that divergence bites:
+
+| symptom on 0.27.1 | fix |
+|---|---|
+| `AssertionError: Model instance must have 'model' attribute` | shim 8 — the EAGLE3 aux-layer lookup, verbatim from the PR's `interfaces.py` |
+| `AttributeError: 'MuseGlimmerModel' object has no attribute 'model'` | `_compat_decoder_is_its_own_model` in `muse_native.py` |
+
+Both are the same root cause: `MuseGlimmerForCausalLM` marks its inner
+`MuseGlimmerModel` AS the language model, so `get_language_model()` already
+returns the decoder and there is no further `.model`. Newer main writes
+`getattr(x, "model", x)` in both call sites; 0.27.1 does not.
+
+Of the PR's five core-file edits, only those needed replaying. `speculative.py`
+auto-detects the dflash method from architectures (run-muse passes it
+explicitly) and both `dflash.py` RoPE-propagation changes are inapplicable —
+Muse Glimmer is NEOX-style on both sides, which is already the default.
+
+Measured, temperature 1.0, same 114-char prompt (A/C are exact comparisons; the
+long prompt grew between runs so B/D are indicative only):
+
+| scenario | `NATIVE=0 SPEC=1` | `NATIVE=1 SPEC=1` |
+|---|---|---|
+| A short, 1 stream | .244 / len 4.66 / pos1 .800 / 102.1 tok/s | .164 / 3.46 / .793 / 81.5 |
+| B long, 1 stream | .037 / 1.56 / .456 / 21.3 | .024 / 1.36 / .353 / 18.7 |
+| C short, 3 streams | .243 / 4.64 / .783 / 272.3 | .138 / 3.07 / .670 / 203.8 |
+| D long, 3 streams | .039 / 1.58 / .485 / 93.4 | .030 / 1.45 / .406 / 82.6 |
+
+Note what moved in A: `pos1` is unchanged (.793 vs .800) while `len` falls
+4.66 → 3.46. The drafter's FIRST guess is as good as ever; the deeper ones get
+rejected more. That is the signature of a distribution mismatch rather than a
+broken drafter, and the likely cause is the softcap: the native target applies
+`* output_multiplier` **and** the tanh cap, while the drafter applies only the
+multiplier (`LogitsProcessor(scale=...)`, no cap). Rejection sampling compares
+`p_target/q_draft`, so making the target more correct while the drafter stays
+uncapped widens the gap — and a tanh cap acts on the tails, which is where the
+deeper draft positions live.
+
+Softcapping the drafter's logits to match would likely recover it, and is a real
+lead if speculation is ever wanted here. It would not rescue long context: even
+the better fallback numbers are a net loss past ~2k tokens.
 
 ## Note on the drafter
 

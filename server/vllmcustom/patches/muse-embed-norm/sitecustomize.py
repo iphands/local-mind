@@ -154,6 +154,7 @@ SPECULATIVE = "vllm.config.speculative"
 REASONING = "vllm.reasoning.abs_reasoning_parsers"
 TRANSFORMERS_BACKEND = "vllm.model_executor.models.transformers.base"
 TU_CONFIG = "vllm.transformers_utils.config"
+INTERFACES = "vllm.model_executor.models.interfaces"
 
 
 def _log(msg):
@@ -544,12 +545,61 @@ def _patch_native_configs(mod):
     _log(f"[muse-native] registered config types: {', '.join(registered)}")
 
 
+# ---------------------------------------------------------------------------
+# SHIM 8 -- EAGLE3 aux-layer lookup for a native multimodal model (NATIVE=1)
+# ---------------------------------------------------------------------------
+def _patch_eagle3_lookup(mod):
+    """Backport one core fix the native model depends on.
+
+    PR #51655 is branched off a newer main than v0.27.1, and its native model
+    relies on a change to SupportsEagle3.set_aux_hidden_state_layers that 0.27.1
+    does not have. 0.27.1 insists the language model have a further `.model`:
+
+        parent_ref = self.get_language_model()
+        assert hasattr(parent_ref, "model"), \
+            "Model instance must have 'model' attribute to set number of layers"
+        parent_ref.model._set_aux_hidden_state_layers(layers)
+
+    MuseGlimmerForCausalLM.get_language_model() returns the decoder itself,
+    which IS the EagleModelMixin and has no further `.model` -- so with
+    NATIVE=1 SPEC=1 that assertion fires and the engine dies before loading.
+    Newer main unwraps only when there is something to unwrap. Same logic here,
+    verbatim from the PR's interfaces.py.
+
+    Only touches the aux-hidden-state path, so it is inert unless speculative
+    decoding is on. Delete when ./build pins a vLLM that has it.
+    """
+    if os.environ.get("MUSE_NATIVE", "0") != "1":
+        return
+    cls = getattr(mod, "SupportsEagle3", None)
+    mixin = getattr(mod, "EagleModelMixin", None)
+    if cls is None or mixin is None or getattr(cls, "_muse_eagle3_lookup", False):
+        return
+
+    def set_aux_hidden_state_layers(self, layers):
+        parent_ref = self
+        if hasattr(self, "get_language_model"):
+            parent_ref = self.get_language_model()
+        elif hasattr(self, "language_model"):
+            parent_ref = self.language_model
+        holder = getattr(parent_ref, "model", parent_ref)
+        assert isinstance(holder, mixin), (
+            "Model instance must inherit from EagleModelMixin to set auxiliary layers"
+        )
+        holder._set_aux_hidden_state_layers(layers)
+
+    cls.set_aux_hidden_state_layers = set_aux_hidden_state_layers
+    cls._muse_eagle3_lookup = True
+    _log("[muse-native] backported the EAGLE3 aux-layer lookup from newer main")
+
+
 _PATCHES = {
     MODELING: _patch_modeling,
     SPECULATIVE: _patch_speculative,
     REASONING: _patch_parser_lookup,
     TRANSFORMERS_BACKEND: _patch_transformers_backend,
     TU_CONFIG: _patch_native_configs,
+    INTERFACES: _patch_eagle3_lookup,
 }
 
 

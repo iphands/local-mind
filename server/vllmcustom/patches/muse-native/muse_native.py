@@ -124,6 +124,36 @@ def register_configs() -> list[str]:
     return sorted(mapping)
 
 
+def _compat_decoder_is_its_own_model(native) -> None:
+    """Give the decoder a `.model` that is itself, for 0.27.1's spec-decode path.
+
+    0.27.1 expects one more wrapper layer than this model has. Both the EAGLE3
+    aux-layer lookup and the DFlash embedding/lm_head sharing do
+
+        target_inner = target_language_model.model
+
+    but MuseGlimmerForCausalLM marks its inner MuseGlimmerModel AS the language
+    model, so get_language_model() already returns the decoder and there is no
+    further `.model`. Newer main -- which this PR is branched off -- writes
+
+        getattr(target_language_model, "model", target_language_model)
+
+    in both places (#51655 touches interfaces.py and
+    v1/worker/gpu/spec_decode/dflash/utils.py for exactly this). Rewriting lines
+    inside vLLM functions is not something a shim can do cleanly, so express the
+    same unwrap from our side instead: the decoder answers `.model` with itself,
+    which is what both call sites are reaching for. It already carries the
+    `embed_tokens` they then read.
+
+    Inert on a vLLM that has the fallback -- getattr finds this and returns the
+    same object. Drop it when ./build pins a vLLM new enough.
+    """
+    cls = getattr(native, "MuseGlimmerModel", None)
+    if cls is None or "model" in vars(cls):
+        return
+    cls.model = property(lambda self: self)
+
+
 # PEP 562: resolve the model class on attribute access, so
 # --model-class-overrides can name `muse_native:MuseGlimmerForCausalLM` without
 # importing 66 KB of model code just to import this module.
@@ -132,6 +162,7 @@ def __getattr__(name: str):
         install()
         import vllm.model_executor.models.muse_glimmer as native
 
+        _compat_decoder_is_its_own_model(native)
         return getattr(native, name)
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
