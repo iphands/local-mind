@@ -120,6 +120,22 @@ pub fn all_tests() -> Vec<TestCase> {
             r#"Tool call with {}"" pattern is fixed to valid JSON"#,
             toolcall::test_malformed_arguments_fixed
         ),
+        // ── Fix interaction tests ───────────────────────────────────────────────
+        test!(
+            "toolcall/fixes/multiple_fixes_applied",
+            "Multiple fixes can be applied in sequence without breaking",
+            toolcall::test_multiple_fixes_applied
+        ),
+        test!(
+            "toolcall/fixes/ordering_preserves_valid",
+            "Fix ordering doesn't break valid responses",
+            toolcall::test_fix_ordering_preserves_valid_response
+        ),
+        test!(
+            "toolcall/fixes/streaming_with_fixes",
+            "Fixes work correctly with streaming responses",
+            toolcall::test_streaming_with_fixes
+        ),
         // ── Pass-through endpoints ───────────────────────────────────────────────
         test!(
             "passthrough/health",

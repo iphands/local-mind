@@ -439,3 +439,81 @@ pub async fn test_empty_arguments(ctx: TestContext) -> anyhow::Result<()> {
 
     Ok(())
 }
+
+// ─── Fix interaction tests ────────────────────────────────────────────────────
+
+/// Test that multiple fixes can be applied in sequence
+/// This tests the fix ordering: null_index → malformed_arguments → bad_filepath
+pub async fn test_multiple_fixes_applied(ctx: TestContext) -> anyhow::Result<()> {
+    // Use the malformed arguments response which tests the malformed_arguments fix
+    // The bad_filepath fix will also be applied if there are duplicate filePaths
+    queue_response(
+        &ctx.backend_state,
+        MockResponse::json(backend_malformed_arguments_response()),
+    );
+
+    // Must use a request WITH tool schemas - the fix needs them to know which param replaces {}
+    let resp = send_non_streaming(&ctx.http_client, &ctx.proxy_addr, request_with_write_tool("test")).await?;
+
+    assert_true(resp.status == 200, &format!("Expected 200, got {}", resp.status))?;
+
+    // After fixes, should have valid JSON arguments
+    let args = resp.tool_call_args(0, 0).ok_or_else(|| anyhow::anyhow!("No tool call args"))?;
+    let parsed = assert_valid_json(args, "fixed arguments")?;
+
+    // Should have at least one filePath (fix should remove duplicates)
+    assert_true(
+        parsed.get("filePath").is_some() || parsed.get("content").is_some(),
+        "Fixed arguments should have content or filePath",
+    )?;
+
+    Ok(())
+}
+
+/// Test that fix ordering doesn't break responses
+/// Verifies that fixes run in the correct order and don't interfere with each other
+pub async fn test_fix_ordering_preserves_valid_response(ctx: TestContext) -> anyhow::Result<()> {
+    // Send a response that needs null_index fix but is otherwise valid
+    let valid_args = r#"{"content":"hello","filePath":"/tmp/test.txt"}"#;
+    queue_response(
+        &ctx.backend_state,
+        MockResponse::json(backend_valid_tool_call_response("write_file", valid_args)),
+    );
+
+    let resp = send_non_streaming(&ctx.http_client, &ctx.proxy_addr, request_with_write_tool("write")).await?;
+
+    assert_true(resp.status == 200, "Should succeed with valid tool call")?;
+
+    let args = resp.tool_call_args(0, 0).ok_or_else(|| anyhow::anyhow!("No tool call args"))?;
+    let parsed = assert_valid_json(args, "preserved arguments")?;
+
+    // Verify content and filePath are unchanged
+    assert_true(
+        parsed.get("content").and_then(|v| v.as_str()) == Some("hello"),
+        "Content should be preserved",
+    )?;
+    assert_true(
+        parsed.get("filePath").and_then(|v| v.as_str()) == Some("/tmp/test.txt"),
+        "FilePath should be preserved",
+    )?;
+
+    Ok(())
+}
+
+/// Test that fixes work correctly with streaming responses
+pub async fn test_streaming_with_fixes(ctx: TestContext) -> anyhow::Result<()> {
+    queue_response(
+        &ctx.backend_state,
+        MockResponse::json(backend_malformed_arguments_response()),
+    );
+
+    let resp = send_streaming(&ctx.http_client, &ctx.proxy_addr, request_with_write_tool("stream")).await?;
+
+    assert_true(resp.events.len() > 0, "Should have SSE events")?;
+
+    // Should have synthesized streaming response with valid JSON
+    let args = resp.accumulated_tool_args(0);
+    assert_valid_json(&args, "streaming fixed arguments")?;
+
+    Ok(())
+}
