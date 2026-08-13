@@ -54,13 +54,27 @@ impl Default for DumpConfig {
 pub struct ServerConfig {
     pub port: u16,
     pub host: String,
-    
-    /// Maximum in-flight completion requests before returning 429. 0 = unlimited.
+
+    /// Maximum in-flight completion requests before returning 429.
+    ///
+    /// `0` (the default) means unlimited, which preserves the behavior of configs
+    /// written before this setting existed. Set a positive value to shed load
+    /// instead of piling it onto the backend.
+    ///
+    /// Only completion routes are limited. Monitoring endpoints (`/health`,
+    /// `/props`, `/slots`, `/v1/models`, `/metrics`, `/proxy/metrics`) are never
+    /// rejected, so a saturated proxy stays observable.
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_requests: usize,
 }
 
-pub fn default_max_concurrent() -> usize { 100 }
+/// Default concurrency limit: unlimited.
+///
+/// Deliberately `0` rather than a finite cap: silently capping existing
+/// deployments on upgrade would turn a config-file no-op into a source of 429s.
+pub fn default_max_concurrent() -> usize {
+    0
+}
 
 /// Backend llama-server configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -771,7 +785,8 @@ mod tests {
         };
         assert_eq!(config.port, 8066);
         assert_eq!(config.host, "0.0.0.0");
-        assert_eq!(config.max_concurrent_requests, 100);
+        // Unlimited by default - an absent config key must not start rejecting traffic.
+        assert_eq!(config.max_concurrent_requests, 0);
     }
 
     #[test]

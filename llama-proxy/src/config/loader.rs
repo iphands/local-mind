@@ -341,6 +341,22 @@ exporters:
     }
 
     #[test]
+    fn test_server_config_omitted_max_concurrent_is_unlimited() {
+        // Configs written before this setting existed must keep behaving as unlimited;
+        // defaulting to a finite cap would start shedding traffic on upgrade.
+        let yaml = "port: 8066\nhost: \"0.0.0.0\"\n";
+        let config: super::super::ServerConfig = serde_yaml::from_str(yaml).expect("should parse without the key");
+        assert_eq!(config.max_concurrent_requests, 0);
+    }
+
+    #[test]
+    fn test_server_config_explicit_max_concurrent_is_honored() {
+        let yaml = "port: 8066\nhost: \"0.0.0.0\"\nmax_concurrent_requests: 25\n";
+        let config: super::super::ServerConfig = serde_yaml::from_str(yaml).expect("should parse with the key");
+        assert_eq!(config.max_concurrent_requests, 25);
+    }
+
+    #[test]
     fn test_validate_server_config_zero_port() {
         let config = super::super::ServerConfig {
             port: 0,
