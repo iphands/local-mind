@@ -1,0 +1,80 @@
+#!/usr/bin/env python3
+"""Re-synthesize the qwen-conc-sweep results into a comparison table.
+
+Reads the jsonl the sweep appends to, so it can be run at any point mid-sweep to
+see what has landed. Pivots on concurrency, because the whole question is how
+each config behaves as concurrency rises -- a flat list of rows hides that.
+
+    ./scripts/qwen-conc-report                 # default jsonl
+    ./scripts/qwen-conc-report path/to.jsonl
+"""
+import json
+import sys
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent.parent
+src = Path(sys.argv[1]) if len(sys.argv) > 1 else HERE / "bench/qwen-conc-results.jsonl"
+if not src.exists():
+    sys.exit(f"no results yet at {src}")
+
+rows = [json.loads(l) for l in src.read_text().splitlines() if l.strip()]
+if not rows:
+    sys.exit("results file is empty")
+
+concs = sorted({r["conc"] for r in rows})
+by = {}
+for r in rows:
+    by.setdefault(r["config"], {})[r["conc"]] = r
+order = list(dict.fromkeys(r["config"] for r in rows))          # first-seen order
+complete = [c for c in order if len(by[c]) == len(concs)]
+
+def cell(c, k, key, fmt="{:.0f}"):
+    r = by[c].get(k)
+    return fmt.format(r[key]) if r and r.get(key) is not None else "-"
+
+print(f"# qwen-conc-sweep — {rows[0]['model']}")
+print(f"# {len(complete)} of {len(order)} configs complete "
+      f"(concurrency {', '.join(str(c) for c in concs)})\n")
+
+# --- aggregate decode: the throughput the box delivers ---
+print("## decode tok/s — AGGREGATE (total across streams)\n")
+hdr = "| config | " + " | ".join(f"conc {c}" for c in concs) + " | 1→max scaling |"
+print(hdr); print("|" + "---|" * (len(concs) + 2))
+rank = []
+for c in order:
+    vals = [by[c].get(k, {}).get("decode_agg") for k in concs]
+    got = [v for v in vals if v]
+    scale = f"{max(got)/vals[0]:.1f}x" if got and vals[0] else "-"
+    print(f"| {c} | " + " | ".join(f"{v:.1f}" if v else "-" for v in vals) + f" | {scale} |")
+    if len(got) == len(concs):
+        rank.append((max(got), c))
+
+# --- per-stream decode: what one user feels ---
+print("\n## decode tok/s — PER STREAM (what one user feels)\n")
+print("| config | " + " | ".join(f"conc {c}" for c in concs) + " | conc1→max loss |")
+print("|" + "---|" * (len(concs) + 2))
+for c in order:
+    vals = [by[c].get(k, {}).get("decode_per_stream") for k in concs]
+    loss = (f"-{100*(vals[0]-vals[-1])/vals[0]:.0f}%"
+            if vals[0] and vals[-1] else "-")
+    print(f"| {c} | " + " | ".join(f"{v:.1f}" if v else "-" for v in vals) + f" | {loss} |")
+
+# --- prefill / TTFT ---
+print("\n## TTFT (ms) and prefill (tok/s) — median of repeats, each pass a fresh prompt\n")
+print("| config | " + " | ".join(f"TTFT c{c} | prefill c{c}" for c in concs) + " |")
+print("|" + "---|" * (2 * len(concs) + 1))
+for c in order:
+    cells = []
+    for k in concs:
+        cells.append(cell(c, k, "ttft_cold_ms"))
+        cells.append(cell(c, k, "prefill_tps"))
+    print(f"| {c} | " + " | ".join(cells) + " |")
+
+if rank:
+    rank.sort(reverse=True)
+    print(f"\n**Best aggregate so far: `{rank[0][1]}` at {rank[0][0]:.1f} tok/s**", end="")
+    if len(rank) > 1:
+        d = 100 * (rank[0][0] - rank[1][0]) / rank[1][0]
+        print(f"  ({d:+.1f}% vs next best, `{rank[1][1]}`)")
+    else:
+        print()

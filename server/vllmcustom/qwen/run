@@ -10,7 +10,8 @@
 #   ATTN_BACKEND=triton MOE_BACKEND=flashinfer_trtllm ./qwen/run <model>
 #   NVFP4_BACKEND=cutlass ./qwen/run <model>       # NVFP4 GEMM kernel: cutlass | flashinfer-cudnn |
 #                                             #   flashinfer-cutlass | marlin | flashinfer-trtllm |
-#                                             #   flashinfer-b12x (SM12x CuTe DSL kernel)
+#                                             #   (flashinfer-b12x is listed by vLLM but has no
+#                                             #   NVFP4 kernel -- it fails at boot; measured 2026-08-13)
 #                                             #   (default cutlass = bench-fastest on sm120f).
 #                                             #   flashinfer-cudnn=safe fallback if FP4 GEMM hits the
 #                                             #   race-cond NaN; marlin=W4A16 fallback if FP4 misbehaves.
