@@ -14,7 +14,8 @@
 # Three consequences, and they invert what is worth optimising:
 #
 #   * Concurrency varies 1 to 9. A sample of the log showed concurrent=1 and I
-#     nearly built this around that; it is bursty, so both ends get measured.
+#     nearly built this around that; it is bursty, so it gets swept (default
+#     1,2,4 -- the range it actually spends its time in).
 #   * Completions are SHORT. At dur=1011ms for 57 tokens, TTFT is most of the
 #     wall clock. Decode tok/s is the smaller half of what a user feels.
 #   * Prefix cache hit rate runs ~97%: an agentic loop resends a growing
@@ -38,7 +39,10 @@ APIMODEL=${APIMODEL:-cosmo-6000}
 READY_TIMEOUT=${READY_TIMEOUT:-1200}
 MAX_TOKENS=${MAX_TOKENS:-200}          # matches the median real completion
 CTX=${CTX:-32000,100000}               # real traffic sits ~32-44k and goes past 100k
-CONC=${CONC:-1,8}                      # real traffic bursts between 1 and 9
+# Real traffic bursts between 1 and 9, but spends most of its time at the low
+# end, so sample that finely rather than jumping straight to the top. Widen with
+# CONC=1,2,4,8,9 when the question is specifically about burst behaviour.
+CONC=${CONC:-1,2,4}
 LOGDIR=${LOGDIR:-$HERE/bench-logs}
 WORK=$(mktemp -d)
 
