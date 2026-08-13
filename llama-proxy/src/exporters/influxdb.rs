@@ -95,6 +95,8 @@ impl MetricsExporter for InfluxDbExporter {
             .field("completion_tokens", metrics.completion_tokens as f64)
             .field("total_tokens", metrics.total_tokens as f64)
             .field("prompt_tps", metrics.prompt_tps)
+            .field("total_tps", metrics.total_tps)
+            .field("has_timing_split", metrics.has_timing_split)
             .field("generation_tps", metrics.generation_tps)
             .field("prompt_ms", metrics.prompt_ms)
             .field("generation_ms", metrics.generation_ms)

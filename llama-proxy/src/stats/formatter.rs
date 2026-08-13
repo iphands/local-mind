@@ -51,6 +51,23 @@ fn format_pretty(m: &RequestMetrics) -> String {
         .map(|c| format!("│ Concurrent: {:52}│\n", c))
         .unwrap_or_default();
 
+    // A prefill/decode split is only real when the backend reported one. For
+    // backends that do not (vLLM), show the throughput a single wall-clock
+    // duration can actually support rather than inventing a split.
+    let perf_lines = if m.has_timing_split {
+        format!(
+            "│   Prompt Processing: {:8.2} tokens/sec ({:7.1}ms)                │\n\
+             │   Generation:        {:8.2} tokens/sec ({:7.1}ms)                │\n",
+            m.prompt_tps, m.prompt_ms, m.generation_tps, m.generation_ms
+        )
+    } else {
+        format!(
+            "│   Total throughput:  {:8.2} tokens/sec                           │\n\
+             │   (backend reported no prefill/decode split)                     │\n",
+            m.total_tps
+        )
+    };
+
     format!(
         r#"┌──────────────────────────────────────────────────────────────────┐
 │ LLM Request Metrics                                              │
@@ -59,9 +76,7 @@ fn format_pretty(m: &RequestMetrics) -> String {
 │ Time:  {:56}│
 {}├──────────────────────────────────────────────────────────────────┤
 │ Performance                                                      │
-│   Prompt Processing: {:8.2} tokens/sec ({:7.1}ms)                │
-│   Generation:        {:8.2} tokens/sec ({:7.1}ms)                │
-├──────────────────────────────────────────────────────────────────┤
+{}├──────────────────────────────────────────────────────────────────┤
 │ Tokens                                                           │
 │   Input: {:6} │ Output: {:6} │ Total: {:6}                   │
 {}├──────────────────────────────────────────────────────────────────┤
@@ -73,10 +88,7 @@ fn format_pretty(m: &RequestMetrics) -> String {
         truncate(&m.model, 56),
         m.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
         extra_lines,
-        m.prompt_tps,
-        m.prompt_ms,
-        m.generation_tps,
-        m.generation_ms,
+        perf_lines,
         m.prompt_tokens,
         m.completion_tokens,
         m.total_tokens,
@@ -107,14 +119,22 @@ fn format_compact(m: &RequestMetrics) -> String {
         .map(|c| format!(" concurrent={}", c))
         .unwrap_or_default();
 
+    // Only claim a prefill/decode split when the backend actually reported one.
+    // vLLM does not emit llama.cpp's `timings`, so for it we print total
+    // throughput instead of two numbers that look measured and are not.
+    let tps_str = if m.has_timing_split {
+        format!("tps={:.2}/{:.2}", m.prompt_tps, m.generation_tps)
+    } else {
+        format!("tps={:.2}tot", m.total_tps)
+    };
+
     format!(
-        "model={}{} tokens={}/{} tps={:.2}s/{:.2}s {} {} finish={} dur={:.1}ms{}",
+        "model={}{} tokens={}/{} {} {} {} finish={} dur={:.1}ms{}",
         m.model,
         group_str,
         m.prompt_tokens,
         m.completion_tokens,
-        m.prompt_tps,
-        m.generation_tps,
+        tps_str,
         context_str,
         if m.streaming { "stream" } else { "sync" },
         m.finish_reason,
@@ -146,6 +166,8 @@ mod tests {
         m.generation_tps = 42.5;
         m.prompt_ms = 500.0;
         m.generation_ms = 1176.0;
+        m.has_timing_split = true;   // llama.cpp-style backend
+        m.total_tps = 125.0;
         m.streaming = true;
         m.finish_reason = "stop".to_string();
         m.duration_ms = 1200.0;
@@ -162,6 +184,43 @@ mod tests {
         assert!(output.contains("stream"));
         assert!(output.contains("stop"));
         assert!(output.contains("42.5"));
+    }
+
+    /// A backend that reports no `timings` (vLLM) must not be shown a
+    /// prefill/decode split -- only total throughput.
+    #[test]
+    fn test_format_compact_without_timing_split() {
+        let mut m = create_test_metrics();
+        m.has_timing_split = false;
+        m.prompt_tps = 0.0;
+        m.generation_tps = 0.0;
+        m.total_tps = 125.0;
+
+        let output = format_compact(&m);
+        assert!(output.contains("tps=125.00tot"), "got: {output}");
+        assert!(!output.contains("/0.00"), "must not print a fabricated split: {output}");
+    }
+
+    /// Regression: prompt/generation TPS were once derived from a hardcoded
+    /// 20%/80% split of the wall clock, which invented figures like 113,344
+    /// tok/s of prefill on a server measured at ~14.5k. Nothing may reintroduce
+    /// a split that the backend did not report.
+    #[test]
+    fn test_no_split_is_invented_from_duration() {
+        let mut m = create_test_metrics();
+        m.has_timing_split = false;
+        m.prompt_tps = 0.0;
+        m.generation_tps = 0.0;
+        m.prompt_tokens = 39240;
+        m.completion_tokens = 146;
+        m.total_tokens = 39386;
+        m.duration_ms = 1731.0;
+        m.total_tps = (m.total_tokens as f64 / m.duration_ms) * 1000.0;
+
+        let output = format_compact(&m);
+        // 39240 / (0.2 * 1731ms) * 1000 == 113344.89 -- the old fabricated value
+        assert!(!output.contains("113344"), "reintroduced the 20/80 estimate: {output}");
+        assert!(output.contains("tps=22753.32tot"), "got: {output}");
     }
 
     #[test]
@@ -368,6 +427,7 @@ mod tests {
         let mut m = create_test_metrics();
         m.prompt_tps = 123.45; // Prompt processing TPS
         m.generation_tps = 150.00; // Generation TPS
+        m.has_timing_split = true;
         m.finish_reason = "length".to_string();
         m.duration_ms = 600.0;
 

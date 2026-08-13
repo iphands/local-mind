@@ -27,14 +27,22 @@ pub struct RequestMetrics {
     pub completion_tokens: u64,
     /// Total tokens
     pub total_tokens: u64,
-    /// Prompt processing tokens per second
+    /// Prompt processing tokens per second. Only meaningful when the backend
+    /// reported a real prefill/decode split (llama.cpp `timings`); 0.0 otherwise.
     pub prompt_tps: f64,
-    /// Generation tokens per second
+    /// Generation tokens per second. Same caveat as `prompt_tps`.
     pub generation_tps: f64,
-    /// Prompt processing time in ms
+    /// Prompt processing time in ms. 0.0 when the backend did not report it.
     pub prompt_ms: f64,
-    /// Generation time in ms
+    /// Generation time in ms. 0.0 when the backend did not report it.
     pub generation_ms: f64,
+    /// total_tokens / wall clock. Always computable, and the only throughput
+    /// figure available for backends that do not report a prefill/decode split
+    /// (vLLM among them) on non-streaming requests.
+    pub total_tps: f64,
+    /// True when prompt_tps/generation_tps came from the backend rather than
+    /// being absent. Lets consumers tell "no split available" from "zero".
+    pub has_timing_split: bool,
     /// Total context size (n_ctx)
     pub context_total: Option<u64>,
     /// Context tokens used
@@ -84,6 +92,8 @@ impl RequestMetrics {
             generation_tps: 0.0,
             prompt_ms: 0.0,
             generation_ms: 0.0,
+            total_tps: 0.0,
+            has_timing_split: false,
             context_total: None,
             context_used: None,
             context_percent: None,
@@ -160,6 +170,7 @@ impl RequestMetrics {
             metrics.generation_ms = timings.get("predicted_ms").and_then(|t| t.as_f64()).unwrap_or(0.0);
             metrics.prompt_tps = timings.get("prompt_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0);
             metrics.generation_tps = timings.get("predicted_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0);
+            metrics.has_timing_split = true;
 
             // Context info - use prompt_n for actual context consumption
             if let Some(prompt_n) = timings.get("prompt_n").and_then(|t| t.as_u64()) {
@@ -188,28 +199,34 @@ impl RequestMetrics {
                 tracing::debug!("Using prompt_tokens as context_used: {}", metrics.prompt_tokens);
             }
 
-            // If no timings, estimate TPS from duration and token counts
+            // No `timings` means the backend did not tell us where the time went.
+            // `timings` is llama.cpp-specific (prompt_per_second/predicted_per_second),
+            // so every vLLM response lands here.
+            //
+            // This used to split the wall clock 20% prompt / 80% generation and
+            // divide the token counts by those. That is not a measurement, and it
+            // reads as one: on a vLLM server whose real prefill was measured at
+            // ~14.5k tok/s it reported 113,344 tok/s, purely because a 39k-token
+            // prompt was divided by 20% of a 1.7s request. The two figures were
+            // also locked to each other -- prompt_tps/generation_tps was always
+            // exactly 4 * prompt_tokens/completion_tokens -- so they carried no
+            // information the token counts did not already carry, while making
+            // short-completion requests look like a throughput collapse.
+            //
+            // Report only what a single duration can support: total throughput.
+            // A real split needs either backend timings or a measured TTFT, which
+            // is only observable on streaming responses.
             if duration_ms > 0.0 && metrics.total_tokens > 0 {
-                // Estimate: assume 20% of time for prompt, 80% for generation
-                let estimated_prompt_ms = duration_ms * 0.2;
-                let estimated_generation_ms = duration_ms * 0.8;
-
-                if metrics.prompt_tokens > 0 && estimated_prompt_ms > 0.0 {
-                    metrics.prompt_tps = (metrics.prompt_tokens as f64 / estimated_prompt_ms) * 1000.0;
-                    metrics.prompt_ms = estimated_prompt_ms;
-                }
-
-                if metrics.completion_tokens > 0 && estimated_generation_ms > 0.0 {
-                    metrics.generation_tps = (metrics.completion_tokens as f64 / estimated_generation_ms) * 1000.0;
-                    metrics.generation_ms = estimated_generation_ms;
-                }
-
                 tracing::debug!(
-                    "Estimated TPS - prompt: {:.2}, generation: {:.2}",
-                    metrics.prompt_tps,
-                    metrics.generation_tps
+                    "No backend timings; reporting total throughput only: {:.2} tok/s",
+                    (metrics.total_tokens as f64 / duration_ms) * 1000.0
                 );
             }
+        }
+
+        // Always available, whether or not the backend reported a split.
+        if duration_ms > 0.0 && metrics.total_tokens > 0 {
+            metrics.total_tps = (metrics.total_tokens as f64 / duration_ms) * 1000.0;
         }
 
         // Extract finish reason and output length (support both OpenAI and Anthropic formats)
@@ -716,5 +733,44 @@ mod tests {
         assert_eq!(metrics.finish_reason, "end_turn");
         // Verify context_used fallback (Anthropic format has no timings)
         assert_eq!(metrics.context_used, Some(100));
+    }
+
+    /// vLLM responses carry `usage` but no llama.cpp `timings`. That path used to
+    /// fabricate a prefill/decode split from a hardcoded 20%/80% division of the
+    /// wall clock. Assert it reports total throughput and leaves the split empty.
+    #[test]
+    fn test_no_timings_reports_total_only() {
+        let response = serde_json::json!({
+            "model": "cosmo-6000",
+            "usage": {"prompt_tokens": 39240, "completion_tokens": 146, "total_tokens": 39386},
+            "choices": [{"finish_reason": "tool_calls", "message": {"content": ""}}]
+        });
+        let request = serde_json::json!({"messages": []});
+        let m = RequestMetrics::from_response(&response, &request, false, 1731.0);
+
+        assert!(!m.has_timing_split);
+        assert_eq!(m.prompt_tps, 0.0, "must not invent a prefill rate");
+        assert_eq!(m.generation_tps, 0.0, "must not invent a decode rate");
+        // the old code produced 113344.89 here, on a server measured at ~14.5k tok/s
+        assert!((m.total_tps - 22753.32).abs() < 0.1, "total_tps was {}", m.total_tps);
+    }
+
+    /// A backend that does report timings keeps the real split.
+    #[test]
+    fn test_timings_present_keeps_split() {
+        let response = serde_json::json!({
+            "model": "m",
+            "usage": {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+            "timings": {"prompt_per_second": 200.5, "predicted_per_second": 42.5,
+                        "prompt_ms": 500.0, "predicted_ms": 1176.0},
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        });
+        let request = serde_json::json!({"messages": []});
+        let m = RequestMetrics::from_response(&response, &request, false, 1676.0);
+
+        assert!(m.has_timing_split);
+        assert_eq!(m.prompt_tps, 200.5);
+        assert_eq!(m.generation_tps, 42.5);
+        assert!(m.total_tps > 0.0, "total_tps should still be populated");
     }
 }
