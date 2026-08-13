@@ -22,7 +22,7 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 A=${1:?need MODEL_A}
 B=${2:?need MODEL_B}
-NAME=vllm-muse
+NAME=vllm
 PORT=${PORT:-8700}
 HOST="localhost:${PORT}"
 APIMODEL=${APIMODEL:-cosmo-6000}

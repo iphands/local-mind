@@ -63,7 +63,7 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 MODEL=${MODEL:-RedHatAI/Muse-Glimmer-30B-NVFP4}
-NAME=vllm-muse
+NAME=vllm
 PORT=${PORT:-8700}
 HOST="localhost:${PORT}"
 APIMODEL=${APIMODEL:-cosmo-6000}

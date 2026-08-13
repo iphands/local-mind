@@ -1,8 +1,9 @@
 #!/bin/bash
 # Serve Muse Glimmer 30B with the locally-built sm120 vLLM image.
 #
-#   ./muse/run                                   # RedHatAI/Muse-Glimmer-30B-NVFP4
+#   ./muse/run                                   # RedHatAI/Muse-Glimmer-30B-NVFP4 (default)
 #   ./muse/run meta-models/Muse-Glimmer-30B      # the original bf16 checkpoint
+#   ./muse/run ./models/vllm/RedHatAI/Muse-Glimmer-30B-NVFP4    # a full path works too
 #   ./muse/run --selftest                        # offline check of the ATEM parsers
 #
 # ---------------------------------------------------------------------------
@@ -219,7 +220,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 source "$HERE/../common/_run-lib.sh"
 
 # shellcheck disable=SC2034  # read by docker_core_args in common/_run-lib.sh
-NAME=vllm-muse
+NAME=vllm
 vllm_image
 
 SELFTEST=0
@@ -230,9 +231,12 @@ SELFTEST=0
 # under meta-models/ -- they are no longer siblings, and a per-model mount cannot
 # see both. MODEL/DRAFT are therefore paths RELATIVE to this root. That whole-root
 # mount is what common/_model-lib.sh does for every launcher.
-resolve_model "${1:-RedHatAI/Muse-Glimmer-30B-NVFP4}"
+# shellcheck disable=SC2034  # read by resolve_model in common/_model-lib.sh
+DEFAULT_MODEL=RedHatAI/Muse-Glimmer-30B-NVFP4     # relative to MODEL_ROOT (./models/vllm)
+resolve_model "${1:-}"
 
-PORT=${PORT:-8700}                               # 8702: coexists with ./qwen/run (8700) and dgemma (8701)
+PORT=${PORT:-8700}                               # same port and container name as every other
+                                                 # launcher: only one model is ever up at a time
 # flashinfer, and now measured rather than inherited from ./qwen/run.
 # ./scripts/muse-longctx-sweep, NVFP4, warm prefix, aggregate decode tok/s:
 #         ctx/conc     34k/1   34k/8   100k/1  100k/8

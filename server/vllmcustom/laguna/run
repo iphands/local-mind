@@ -1,8 +1,9 @@
 #!/bin/bash
 # Serve a model with the locally-built sm120 vLLM image (no docker pull).
 #
-#   ./laguna/run ./models/vllm/Qwen3.6-27B
-#   ./laguna/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4
+#   ./laguna/run                                     # Laguna-S-2.1-NVFP4 (default)
+#   ./laguna/run ./models/vllm/Laguna-S-2.1-NVFP4    # a path under models/vllm ...
+#   ./laguna/run Laguna-S-2.1-NVFP4                  # ... or just its name
 #
 # A/B backends/knobs without editing this file:
 #   ATTN_BACKEND=flashinfer ./laguna/run <model>
@@ -32,8 +33,9 @@ source "$HERE/../common/_run-lib.sh"
 NAME=vllm
 vllm_image
 
-MODEL_PATH=${1:?usage: ./laguna/run <path-to-model-dir>   (e.g. ./laguna/run ./models/vllm/Laguna-S-2.1-NVFP4)}
-resolve_model "$MODEL_PATH"
+# shellcheck disable=SC2034  # read by resolve_model in common/_model-lib.sh
+DEFAULT_MODEL=Laguna-S-2.1-NVFP4                 # relative to MODEL_ROOT (./models/vllm)
+resolve_model "${1:-}"
 
 PORT=${PORT:-8700}
 ATTN_BACKEND=${ATTN_BACKEND:-flashinfer}

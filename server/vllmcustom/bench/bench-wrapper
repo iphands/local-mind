@@ -26,7 +26,7 @@ set -uo pipefail   # NOT -e: we want to survive a failing config and keep going
 HERE=$(cd "$(dirname "$0")" && pwd)
 MODEL=${1:-/mnt/noir/scratch/ai/llm/models/vllm/Qwen3.5-122B-A10B-NVFP4}
 MODELBASE=$(basename "$MODEL")
-NAME=vllm                                   # must match ./qwen/run's container --name
+NAME=vllm                                   # every */run uses this name (one model up at a time)
 PORT=${PORT:-8700}
 HOST="localhost:${PORT}"
 APIMODEL=${APIMODEL:-cosmo-6000}            # one of ./qwen/run's --served-model-name aliases

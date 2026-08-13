@@ -36,7 +36,7 @@ set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 MODEL=${1:-$HERE/models/vllm/meta-models/Muse-Glimmer-30B}
-NAME=vllm-muse
+NAME=vllm
 PORT=${PORT:-8700}
 HOST="localhost:${PORT}"
 APIMODEL=${APIMODEL:-cosmo-6000}

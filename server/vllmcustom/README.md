@@ -28,12 +28,27 @@ there changes a bind mount silently rather than failing.
 `bench/` holds everything a benchmark writes, so wiping results is
 `rm -rf bench/bench-logs`.
 
+Every launcher uses the **same container name (`vllm`) and port (`8700`)** — only
+one model is ever up at a time, so `./bench/bench` and every sweep script find
+whichever one is running without being told which. Starting a second launcher
+while one is up fails on the name conflict rather than quietly serving the wrong
+model on another port.
+
+All of them take the model as `$1`, in any of these forms, and print what they
+resolved before doing anything slow:
+
+```bash
+./muse/run                                                # the default for that launcher
+./muse/run ./models/vllm/RedHatAI/Muse-Glimmer-30B-NVFP4  # a path under models/vllm
+./muse/run RedHatAI/Muse-Glimmer-30B-NVFP4                # or just the name
+```
+
 | script   | what it does |
 |----------|--------------|
 | `./container/build`| clone/pull pinned source into `$BUILD_DIR/src`, compile, tag image |
-| `./qwen/run`  | serve a model with the local image (GPU 0 only), OpenAI API on `:8700` |
-| `./muse/run`  | serve Muse Glimmer — same image, plus the shims in `muse/patches/` (see below) |
-| `./laguna/run`| serve Laguna-S with its DFlash drafter |
+| `./qwen/run`  | serve a model with the local image (GPU 0 only), OpenAI API on `:8700`. Default `Qwen3.5-122B-A10B-NVFP4` |
+| `./muse/run`  | serve Muse Glimmer — same image, plus the shims in `muse/patches/` (see below). Default `RedHatAI/Muse-Glimmer-30B-NVFP4` |
+| `./laguna/run`| serve Laguna-S with its DFlash drafter. Default `Laguna-S-2.1-NVFP4` |
 | `./bench/bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench/bench-results.md` |
 | `./bench/bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
 | `./bench/bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |
@@ -44,9 +59,9 @@ there changes a bind mount silently rather than failing.
 ## Quick start
 
 ```bash
-./container/build                                   # first build compiles torch from source (slow; see below)
+./container/build                              # first build compiles torch from source (slow; see below)
 ./qwen/run ./models/vllm/Qwen3.6-27B           # serves on http://localhost:8700/v1
-./bench/bench baseline                          # measure tok/s of the running server
+./bench/bench baseline                         # measure tok/s of the running server
 ```
 
 `models` is a symlink to `/mnt/noir/scratch/ai/llm/models`, so paths match the
@@ -54,6 +69,7 @@ old `server/vllm` scripts:
 
 ```bash
 ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4
+./qwen/run                                     # same thing — that model is the default
 ```
 
 ## Default version set (mutually compatible)
