@@ -226,17 +226,19 @@ impl FixRegistry {
     }
 
     /// Configure from config map
-    /// 
+    ///
     /// Accepts both spellings with and without trailing "_fix" for backward compatibility.
     /// For example, both "toolcall_null_index" and "toolcall_null_index_fix" will match
     /// a fix named "toolcall_null_index_fix".
-    /// 
+    ///
     /// The canonical fix name is used for internal tracking, regardless of which spelling
     /// the user provides in the config.
     pub fn configure(&mut self, config: &HashMap<String, crate::config::FixModuleConfig>) {
         for (name, module_config) in config {
             // Normalize: strip trailing "_fix" for comparison
             let normalized_name = name.strip_suffix("_fix").unwrap_or(name);
+            let mut matched = false;
+
             for fix in &self.fixes {
                 let fix_name = fix.name().strip_suffix("_fix").unwrap_or(fix.name());
                 if normalized_name == fix_name {
@@ -248,8 +250,20 @@ impl FixRegistry {
                         enabled = module_config.enabled,
                         "Configured fix (normalized config key)"
                     );
+                    matched = true;
                     break;
                 }
+            }
+
+            // A key that matches nothing is almost always a typo. Silently ignoring it
+            // means a fix the operator believes they disabled stays enabled.
+            if !matched {
+                let known: Vec<&str> = self.fixes.iter().map(|f| f.name()).collect();
+                tracing::warn!(
+                    config_key = %name,
+                    known_fixes = ?known,
+                    "Unknown fix name in config - ignoring this entry (check for a typo)"
+                );
             }
         }
     }
@@ -433,6 +447,46 @@ mod tests {
 
         registry.configure(&modules);
         assert!(!registry.is_enabled("toolcall_bad_filepath"));
+    }
+
+    #[test]
+    fn test_registry_configure_accepts_fix_suffix_spelling() {
+        // Both "toolcall_bad_filepath" and "toolcall_bad_filepath_fix" address the
+        // same fix, and either spelling must key off the canonical name.
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
+
+        let mut modules = HashMap::new();
+        modules.insert(
+            "toolcall_bad_filepath_fix".to_string(),
+            crate::config::FixModuleConfig {
+                enabled: false,
+                options: HashMap::new(),
+            },
+        );
+
+        registry.configure(&modules);
+        assert!(!registry.is_enabled("toolcall_bad_filepath"));
+    }
+
+    #[test]
+    fn test_registry_configure_typo_leaves_fix_untouched() {
+        // A misspelled key is ignored (and warned about) rather than silently
+        // matching some other fix.
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
+
+        let mut modules = HashMap::new();
+        modules.insert(
+            "toolcall_badfilepath".to_string(),
+            crate::config::FixModuleConfig {
+                enabled: false,
+                options: HashMap::new(),
+            },
+        );
+
+        registry.configure(&modules);
+        assert!(registry.is_enabled("toolcall_bad_filepath"));
     }
 
     #[test]
