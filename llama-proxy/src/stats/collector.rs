@@ -28,7 +28,8 @@ pub struct RequestMetrics {
     /// Total tokens
     pub total_tokens: u64,
     /// Prompt processing tokens per second. Only meaningful when the backend
-    /// reported a real prefill/decode split (llama.cpp `timings`); 0.0 otherwise.
+    /// reported a real prefill/decode split (llama.cpp `timings` or vLLM
+    /// `metrics`); 0.0 otherwise.
     pub prompt_tps: f64,
     /// Generation tokens per second. Same caveat as `prompt_tps`.
     pub generation_tps: f64,
@@ -37,12 +38,21 @@ pub struct RequestMetrics {
     /// Generation time in ms. 0.0 when the backend did not report it.
     pub generation_ms: f64,
     /// total_tokens / wall clock. Always computable, and the only throughput
-    /// figure available for backends that do not report a prefill/decode split
-    /// (vLLM among them) on non-streaming requests.
+    /// figure available when the backend reports no split at all.
     pub total_tps: f64,
     /// True when prompt_tps/generation_tps came from the backend rather than
     /// being absent. Lets consumers tell "no split available" from "zero".
     pub has_timing_split: bool,
+    /// Time the request spent queued before the engine scheduled it, in ms
+    /// (vLLM only). This is the direct answer to "is concurrency making
+    /// requests wait?" -- a rising queue time means saturation, which a falling
+    /// per-stream decode rate on its own does not establish.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queue_ms: Option<f64>,
+    /// Mean inter-token latency in ms (vLLM only). Its reciprocal is
+    /// steady-state decode speed with prefill excluded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mean_itl_ms: Option<f64>,
     /// Total context size (n_ctx)
     pub context_total: Option<u64>,
     /// Context tokens used
@@ -94,6 +104,8 @@ impl RequestMetrics {
             generation_ms: 0.0,
             total_tps: 0.0,
             has_timing_split: false,
+            queue_ms: None,
+            mean_itl_ms: None,
             context_total: None,
             context_used: None,
             context_percent: None,
@@ -216,9 +228,46 @@ impl RequestMetrics {
             // Report only what a single duration can support: total throughput.
             // A real split needs either backend timings or a measured TTFT, which
             // is only observable on streaming responses.
-            if duration_ms > 0.0 && metrics.total_tokens > 0 {
+            // vLLM reports the same information under `metrics`, but only when
+            // the server was started with --enable-per-request-metrics. Without
+            // that flag the key is present and null, which is exactly how this
+            // code ended up estimating instead of measuring.
+            //
+            // Field semantics are vLLM's own: generation_time_ms is the decode
+            // interval alone (first output token -> last), excluding queue wait
+            // and prefill; time_to_first_token_ms is measured from scheduling,
+            // so it excludes queue wait too.
+            if let Some(vm) = response.get("metrics").filter(|v| !v.is_null()) {
+                let f = |k: &str| vm.get(k).and_then(|v| v.as_f64()).filter(|v| *v > 0.0);
+
+                metrics.queue_ms = f("queue_time_ms");
+                metrics.mean_itl_ms = f("mean_itl_ms");
+
+                if let Some(ttft) = f("time_to_first_token_ms") {
+                    metrics.prompt_ms = ttft;
+                    if metrics.prompt_tokens > 0 {
+                        metrics.prompt_tps = (metrics.prompt_tokens as f64 / ttft) * 1000.0;
+                    }
+                }
+                if let Some(gen_ms) = f("generation_time_ms") {
+                    metrics.generation_ms = gen_ms;
+                    if metrics.completion_tokens > 0 {
+                        metrics.generation_tps = (metrics.completion_tokens as f64 / gen_ms) * 1000.0;
+                    }
+                }
+                metrics.has_timing_split = metrics.prompt_ms > 0.0 || metrics.generation_ms > 0.0;
+
                 tracing::debug!(
-                    "No backend timings; reporting total throughput only: {:.2} tok/s",
+                    "vLLM per-request metrics: ttft={:.1}ms gen={:.1}ms queue={:?}ms itl={:?}ms",
+                    metrics.prompt_ms,
+                    metrics.generation_ms,
+                    metrics.queue_ms,
+                    metrics.mean_itl_ms
+                );
+            } else if duration_ms > 0.0 && metrics.total_tokens > 0 {
+                tracing::debug!(
+                    "No backend timings and no vLLM metrics (is the server missing \
+                     --enable-per-request-metrics?); reporting total throughput only: {:.2} tok/s",
                     (metrics.total_tokens as f64 / duration_ms) * 1000.0
                 );
             }
@@ -772,5 +821,55 @@ mod tests {
         assert_eq!(m.prompt_tps, 200.5);
         assert_eq!(m.generation_tps, 42.5);
         assert!(m.total_tps > 0.0, "total_tps should still be populated");
+    }
+
+    /// vLLM with --enable-per-request-metrics returns a `metrics` object. It must
+    /// be used instead of the total-throughput fallback, and must produce a real
+    /// split rather than the old 20/80 estimate.
+    #[test]
+    fn test_vllm_per_request_metrics_are_used() {
+        let response = serde_json::json!({
+            "model": "cosmo-6000",
+            "usage": {"prompt_tokens": 16, "completion_tokens": 120, "total_tokens": 136},
+            "metrics": {
+                "time_to_first_token_ms": 291.44680208992213,
+                "generation_time_ms": 760.3732609422877,
+                "queue_time_ms": 12.5,
+                "mean_itl_ms": 6.3896912684225855,
+                "tokens_per_second": 114.0879549816357
+            },
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        });
+        let request = serde_json::json!({"messages": []});
+        let m = RequestMetrics::from_response(&response, &request, false, 1100.0);
+
+        assert!(m.has_timing_split, "vLLM metrics must count as a real split");
+        assert!((m.prompt_ms - 291.4468).abs() < 0.01);
+        assert!((m.generation_ms - 760.3733).abs() < 0.01);
+        // 120 tokens over the decode interval -- matches the 157.6 tok/s measured
+        // independently by scripts/qwen-conc-sweep for this config.
+        assert!((m.generation_tps - 157.82).abs() < 0.1, "got {}", m.generation_tps);
+        assert_eq!(m.queue_ms, Some(12.5));
+        assert!((m.mean_itl_ms.unwrap() - 6.3897).abs() < 0.01);
+    }
+
+    /// A null `metrics` (server without --enable-per-request-metrics) must fall
+    /// back to total throughput, NOT to an invented split.
+    #[test]
+    fn test_null_vllm_metrics_falls_back() {
+        let response = serde_json::json!({
+            "model": "cosmo-6000",
+            "usage": {"prompt_tokens": 39240, "completion_tokens": 146, "total_tokens": 39386},
+            "metrics": serde_json::Value::Null,
+            "choices": [{"finish_reason": "tool_calls", "message": {"content": ""}}]
+        });
+        let request = serde_json::json!({"messages": []});
+        let m = RequestMetrics::from_response(&response, &request, false, 1731.0);
+
+        assert!(!m.has_timing_split);
+        assert_eq!(m.prompt_tps, 0.0);
+        assert_eq!(m.generation_tps, 0.0);
+        assert_eq!(m.queue_ms, None);
+        assert!((m.total_tps - 22753.32).abs() < 0.1);
     }
 }

@@ -119,17 +119,29 @@ fn format_compact(m: &RequestMetrics) -> String {
         .map(|c| format!(" concurrent={}", c))
         .unwrap_or_default();
 
-    // Only claim a prefill/decode split when the backend actually reported one.
-    // vLLM does not emit llama.cpp's `timings`, so for it we print total
-    // throughput instead of two numbers that look measured and are not.
+    // Only claim a prefill/decode split when the backend actually reported one:
+    // llama.cpp's `timings`, or vLLM's `metrics` (which needs the server started
+    // with --enable-per-request-metrics; without it the field is null). Otherwise
+    // print total throughput rather than two numbers that look measured and are not.
     let tps_str = if m.has_timing_split {
         format!("tps={:.2}/{:.2}", m.prompt_tps, m.generation_tps)
     } else {
         format!("tps={:.2}tot", m.total_tps)
     };
 
+    // Queue time is the honest signal for "is concurrency hurting?" -- it is time
+    // the request sat waiting to be scheduled, so it rises only under real
+    // saturation, whereas a falling per-stream decode rate does not by itself
+    // mean the server is overloaded. Shown only when the backend reports it and
+    // it is not trivially zero.
+    let queue_str = m
+        .queue_ms
+        .filter(|q| *q >= 1.0)
+        .map(|q| format!(" queue={:.0}ms", q))
+        .unwrap_or_default();
+
     format!(
-        "model={}{} tokens={}/{} {} {} {} finish={} dur={:.1}ms{}",
+        "model={}{} tokens={}/{} {} {} {} finish={} dur={:.1}ms{}{}",
         m.model,
         group_str,
         m.prompt_tokens,
@@ -139,6 +151,7 @@ fn format_compact(m: &RequestMetrics) -> String {
         if m.streaming { "stream" } else { "sync" },
         m.finish_reason,
         m.duration_ms,
+        queue_str,
         concurrent_str
     )
 }
