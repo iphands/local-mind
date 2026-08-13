@@ -8,6 +8,7 @@ use axum::{
 use std::net::SocketAddr;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Arc;
+use tokio::sync::Semaphore;
 
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::trace::TraceLayer;
@@ -39,6 +40,9 @@ pub struct ProxyState {
     
     /// Counter for rejected requests at capacity
     pub rejected_requests: Arc<AtomicUsize>,
+    
+    /// Semaphore for enforcing concurrent request limit
+    pub concurrent_semaphore: Option<Arc<Semaphore>>,
 }
 
 /// Run the proxy server
@@ -165,6 +169,11 @@ pub async fn run_server(
         concurrent_requests: Arc::new(AtomicUsize::new(0)),
         backend_streaming_fallback_hits: Arc::new(AtomicUsize::new(0)),
         rejected_requests: Arc::new(AtomicUsize::new(0)),
+        concurrent_semaphore: if config.server.max_concurrent_requests > 0 {
+            Some(Arc::new(Semaphore::new(config.server.max_concurrent_requests)))
+        } else {
+            None  // Unlimited
+        },
     };
 
     // Build the router

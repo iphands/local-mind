@@ -10,6 +10,7 @@ use std::io::Read;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
+use tokio::sync::Semaphore;
 
 use super::server::ProxyState;
 use super::streaming::handle_streaming_response;
@@ -30,7 +31,11 @@ fn at_capacity_response(max: usize) -> Response {
         Json(serde_json::json!({
             "error": {
                 "type": "too_many_requests",
-                "message": format!("Server at capacity ({} concurrent requests), try again in 5 seconds", max)
+                "message": format!(
+                    "Server at capacity ({} concurrent requests). Increase max_concurrent_requests in config.yaml or scale with additional backend nodes",
+                    max
+                ),
+                "retry_after": 5
             }
         })),
     )
@@ -386,15 +391,22 @@ impl ProxyHandler {
         // Check concurrent request limit for completion routes only (not monitoring endpoints)
         // This must be AFTER the pass-through match to ensure health/status routes are never rejected
         let max_concurrent = self.state.config.server.max_concurrent_requests;
-        if max_concurrent > 0 {
-            // Try to acquire a permit using semaphore-style check
-            let current = self.state.concurrent_requests.load(Ordering::Relaxed);
-            if current >= max_concurrent {
-                // Reject the request
-                self.state.rejected_requests.fetch_add(1, Ordering::Relaxed);
-                return at_capacity_response(max_concurrent);
+        let _permit = if max_concurrent > 0 {
+            match self.state.concurrent_semaphore.as_ref() {
+                Some(semaphore) => match semaphore.clone().try_acquire_owned() {
+                    Ok(permit) => Some(permit),
+                    Err(_) => {
+                        // No permits available - reject the request
+                        self.state.rejected_requests.fetch_add(1, Ordering::Relaxed);
+                        return at_capacity_response(max_concurrent);
+                    }
+                },
+                None => None, // Unlimited mode
             }
-        }
+        } else {
+            None
+        };
+        // _permit is held until the end of the function, releasing the permit on drop
 
         // Remember if client wants streaming (for synthesis later)
         let client_wants_streaming = request_json
@@ -1155,6 +1167,7 @@ mod tests {
             concurrent_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             backend_streaming_fallback_hits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             rejected_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            concurrent_semaphore: Some(std::sync::Arc::new(Semaphore::new(100))), // Default limit for tests
         })
     }
 
