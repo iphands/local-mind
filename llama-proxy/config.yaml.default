@@ -9,6 +9,9 @@ server:
   port: 8066
   # Bind address
   host: "0.0.0.0"
+  # Maximum in-flight completion requests before returning 429 (0 = unlimited)
+  # Set this to protect backends from overload. Health/status routes are never rejected.
+  # max_concurrent_requests: 100
 
 # Backend llama-server configuration (single backend mode)
 backend:
