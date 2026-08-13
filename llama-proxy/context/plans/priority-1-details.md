@@ -211,6 +211,39 @@ Users can't distinguish "no data" from "fetch failed".
 **Naming**: this is *not* `/slots`. `fetch_context_total` (`context.rs:36`) tries `/props` first,
 then `/v1/models`, and returns `Option<u64>`.
 
+### ⚠️ Negative caching is required
+
+`context.rs` caches **successes** permanently (`CONTEXT_CACHE`, keyed by backend URL) but not
+failures, and the miss path runs on every request. A backend serving neither `/props` nor
+`/v1/models` would emit one warning per request, forever.
+
+**Add a warn-once helper next to the cache in `src/proxy/context.rs`:**
+
+```rust
+static WARNED_BACKENDS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
+
+/// Warn at most once per backend URL that context size could not be determined.
+pub async fn warn_context_fetch_failed_once(backend_url: &str, model: &str) {
+    let warned = WARNED_BACKENDS.get_or_init(|| RwLock::new(HashSet::new()));
+    {
+        if warned.read().await.contains(backend_url) {
+            return;
+        }
+    }
+    if warned.write().await.insert(backend_url.to_string()) {
+        tracing::warn!(
+            backend_url = %backend_url,
+            model = %model,
+            "Could not determine context size: neither /props nor /v1/models returned usable data. \
+             Context usage metrics will be incomplete for this backend."
+        );
+    }
+}
+```
+
+**Alternative for better testability**: Move `WARNED_BACKENDS` into `ProxyState` as an `Arc<RwLock<HashSet<String>>>`
+so warnings reset on server restart and are easier to test.
+
 ### Current Code
 
 **File**: `src/proxy/handler.rs:688-695`
@@ -332,6 +365,11 @@ pub struct ServerConfig {
 fn default_max_concurrent() -> usize { 100 }
 ```
 
+**⚠️ Critical: Limit placement** — The limit must be checked **AFTER** the pass-through match
+at `handler.rs:317-337`, NOT before. If checked before routing, `/health`, `/props`, `/slots`,
+`/v1/models`, `/metrics`, and `/proxy/metrics` all count toward the limit and get 429'd at capacity
+— precisely when monitoring needs them to work.
+
 **Config example** (add to `config.yaml.default`):
 ```yaml
 server:
@@ -361,7 +399,7 @@ nothing new:
 // In ProxyState
 pub request_permits: Option<Arc<tokio::sync::Semaphore>>, // None = unlimited
 
-// At the enforcement point
+// At the enforcement point (AFTER pass-through match)
 let _permit = match self.state.request_permits {
     Some(ref sem) => match Arc::clone(sem).try_acquire_owned() {
         Ok(p) => Some(p),
@@ -385,8 +423,8 @@ check there means `/health`, `/props`, `/slots`, `/v1/models`, `/metrics`, and `
 all count toward the limit and all get 429'd at capacity — precisely when monitoring needs to
 work.
 
-Place the check **after** the pass-through match at `handler.rs:317-337`, so only completion
-routes are gated. (Note this is also after backend selection, which is fine — selection is cheap
+**Place the check AFTER the pass-through match at `handler.rs:317-337`, so only completion
+routes are gated.** (Note this is also after backend selection, which is fine — selection is cheap
 and in-process.)
 
 #### Rejection response
@@ -432,26 +470,26 @@ Again: add it at both struct-literal sites (`server.rs:145`, `handler.rs:1010`).
 
 ---
 
-### Step 4: ~~Adaptive Per-Client Backoff~~ — **OUT OF SCOPE**
+### Step 4: ~~Adaptive Per-Client Backoff~~ — **DROPPED**
 
 The first draft proposed a `DashMap<client_id, Instant>` keyed on an `X-Client-ID` header. Neither
 Claude Code nor Opencode sends that header, so the key would always be `"unknown"` and the backoff
 would become a global 30-second lockout after a single rejection — strictly worse than the plain
-limit. Drop it. If per-client fairness is ever wanted, key on something that actually exists (API
-key hash or source socket address) and design it separately.
+limit. **Drop it entirely.**
+
+If per-client fairness is ever wanted, key on something that actually exists (API key hash or
+source socket address) and design it separately.
 
 ---
 
 ### Testing
 
-> ⚠️ **`tests/load/concurrent_limit.rs` will not run.** There is no `tests/` directory, and cargo
-> only auto-discovers `tests/*.rs` at the top level — nested files need a `tests/<dir>/main.rs` or
-> an explicit `[[test]]` in `Cargo.toml`.
-
-Use the existing **`e2e/`** crate: a standalone crate (own `Cargo.toml` and `Cargo.lock`, not a
-workspace member of the root crate) with a runner (`e2e/src/runner.rs`),
-a mock backend (`e2e/src/backend.rs`), test configs in `e2e/test_configs/`, and test modules in
-`e2e/src/tests/` registered via `e2e/src/tests/mod.rs`.
+> ⚠️ **`e2e/` is a separate crate.** It has its own `Cargo.toml` and `Cargo.lock`, NOT a workspace
+> member of the root crate. Run tests with:
+> ```bash
+> cd e2e && cargo test
+> ```
+> NOT with `cargo test` from the root.
 
 **Load test cases**:
 1. Proxy configured with `max_concurrent_requests: 50`; mock backend holds each request open.
@@ -500,28 +538,74 @@ by iterating `list_fixes()` — so only the per-module key is affected.)
 
 ### Fix
 
-Preferred — rename the fix to match the documented key and its siblings:
+**Preferred approach** — accept both spellings for backward compatibility:
 
-**File**: `src/fixes/toolcall_null_index_fix.rs:72`
+**File**: `src/fixes/registry.rs:229`
+```rust
+pub fn configure(&mut self, config: &HashMap<String, crate::config::FixModuleConfig>) {
+    for (name, module_config) in config {
+        // Normalize: strip trailing "_fix" for comparison
+        let normalized_name = name.strip_suffix("_fix").unwrap_or(name);
+        for fix in &self.fixes {
+            let fix_name = fix.name().strip_suffix("_fix").unwrap_or(fix.name());
+            if normalized_name == fix_name {
+                self.enabled.insert(name.clone(), module_config.enabled);
+                break;
+            }
+        }
+    }
+}
+```
+
+**Why**: Users may already have `toolcall_null_index_fix` in their configs. Accepting both spellings
+is safer than breaking existing configs.
+
+**Alternative** (if you prefer strict naming): Rename the fix in `toolcall_null_index_fix.rs:72`:
 ```rust
 fn name(&self) -> &str {
     "toolcall_null_index"
 }
 ```
+Then update all references in docs and configs.
 
-Then check for other references to the old string (`grep -rn toolcall_null_index_fix src/`) —
+Check for other references to the old string (`grep -rn toolcall_null_index_fix src/`) —
 `src/fixes/mod.rs:6,16` are the module path and type name (`ToolCallNullIndexFix`), which stay as
 they are.
-
-Alternative if backward compatibility with the `_fix` spelling matters: normalize in `configure`
-by stripping a trailing `_fix` from both sides before comparing. Slightly more forgiving, slightly
-more magic.
 
 ### Testing
 
 - Unit test in `registry.rs`: register the three default fixes, `configure` with
   `toolcall_null_index: { enabled: false }`, assert `is_enabled("toolcall_null_index") == false`.
+- Unit test in `registry.rs`: also test that `toolcall_null_index_fix: { enabled: false }` works
+  (backward compatibility).
 - e2e: assert `proxy_fixes_off.yaml` leaves a null tool-call index untouched.
+
+---
+
+## Test Coverage Additions
+
+**Add these test requirements to the plan**:
+
+### 1.1 Streaming Fallback Metrics
+- Verify counter increments when backend returns streaming despite `stream:false`
+- Verify `/proxy/metrics` shows the counter
+- Verify backend `/metrics` pass-through is unchanged
+
+### 1.2 Context-Fetch Failure Logging
+- Verify warning appears **once per backend URL**, not per request
+- Verify request still succeeds even when fetch fails
+- Verify warning message mentions `/props` and `/v1/models` (not `/slots`)
+
+### 1.3 Concurrent Request Limiting
+- Verify ~100 requests succeed when limit=100 and 150 are sent
+- Verify rest get 429 with `Retry-After: 5` and `Content-Type: application/json`
+- **Critical**: Verify `GET /health` returns 200 **while at capacity** (not 429)
+- Verify `/proxy/metrics` reports non-zero `llama_proxy_rejected_requests`
+
+### 1.4 Config Key Mismatch
+- Verify both `toolcall_null_index.enabled: false` and
+  `toolcall_null_index_fix.enabled: false` disable the fix
+- Verify `list-fixes` output matches the accepted config key
 
 ---
 

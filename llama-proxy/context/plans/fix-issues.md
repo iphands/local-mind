@@ -49,12 +49,17 @@ compatibility.
 > ⚠️ **Do not repurpose `/metrics`.** `handler.rs:317-337` currently pass-throughs
 > `/props`, `/slots`, `/health`, `/v1/health`, `/v1/models`, and `/metrics` to the backend.
 > Overwriting `/metrics` with proxy-local Prometheus output would shadow llama.cpp's / vLLM's
-> own metrics and break existing scrapers. Add `/proxy/metrics` instead.
+> own metrics and break existing scrapers. Add **`/proxy/metrics`** instead.
+>
+> **Placement**: Check path first and return early, OR place after backend selection. If placed
+> before backend selection and tries to call `load_balancer.select()`, it will 404 when no backend
+> matches the (missing) model field.
 
 **Acceptance Criteria**:
 - Counter increments when fallback occurs
 - Counter exposed at `/proxy/metrics`; backend `/metrics` pass-through unchanged
 - Warning logged on occurrence, escalating log level when it recurs
+- Not added to per-request `RequestMetrics` or InfluxDB points
 
 ---
 
@@ -69,12 +74,15 @@ compatibility.
 
 > ⚠️ **Negative caching is required.** `context.rs` caches successes permanently but not
 > failures, and it is called per request on the miss path. A backend exposing neither endpoint
-> would emit one warning per request forever. Warn once per backend URL (track a
-> `HashSet<String>` of already-warned URLs, or cache the negative result).
+> would emit one warning per request forever.
+>
+> **Solution**: Track warned URLs in a `static WARNED_BACKENDS: OnceLock<RwLock<HashSet<String>>>`
+> (or move into `ProxyState` for testability). Warn once per backend URL, then skip.
 
 **Acceptance Criteria**:
 - Warning logged when the fetch fails, at both call sites
-- At most one warning per backend URL
+- At most one warning per backend URL (no per-request spam)
+- Warning message mentions `/props` and `/v1/models`, not `/slots`
 - No impact on request success
 
 ---
@@ -117,14 +125,16 @@ compatibility.
 > ⚠️ **Do not apply the limit to monitoring routes.** `concurrent_requests` is incremented at
 > `handler.rs:264`, *before* routing — so `/health`, `/props`, `/v1/models`, and `/metrics` all
 > count toward the limit and would be rejected at capacity, exactly when monitoring needs them.
-> Place the capacity check **after** the pass-through match at `handler.rs:317-337`, so only
-> completion routes are gated.
+>
+> **Place the capacity check AFTER the pass-through match at `handler.rs:317-337`**, so only
+> completion routes are gated. Health/status routes must never be rejected.
 
 **Acceptance Criteria**:
 - Requests rejected with 429 when limit reached, without a race window
-- Health/status pass-through routes never rejected
+- Health/status pass-through routes never rejected (even at capacity)
 - `Content-Type: application/json` and `Retry-After` set on the rejection
 - Configurable via `config.yaml`, defaulting to 100
+- 0 = unlimited (disable the limit)
 
 ---
 
@@ -132,19 +142,38 @@ compatibility.
 **Goal**: Make the documented config key actually work
 
 **Problem**: `FixRegistry::configure` (`registry.rs:229`) matches config keys against
-`fix.name()`. That fix reports `"toolcall_null_index_fix"` (`toolcall_null_index_fix.rs:72`),
-but every config and doc uses `toolcall_null_index` — `README.md:115`, `config.yaml.default`,
-`e2e/test_configs/proxy_fixes_on.yaml:20`, `e2e/test_configs/proxy_fixes_off.yaml:20`. The key
-is silently ignored, so **the fix cannot be disabled**, and the e2e "fixes off" case is not
-testing what it claims. The other two fixes (`toolcall_bad_filepath`,
-`toolcall_malformed_arguments`) match their keys exactly.
+`fix.name()`. That fix reports `"toolcall_null_index_fix"` (`toolcall_null_index_fix.rs:72`), but
+every config and doc uses `toolcall_null_index` — `README.md:115`, `config.yaml.default`,
+`e2e/test_configs/proxy_fixes_on.yaml:20`, `e2e/test_configs/proxy_fixes_off.yaml:20`. The key is
+silently ignored, so **the fix cannot be disabled**, and the e2e "fixes off" case is not testing
+what it claims. The other two fixes (`toolcall_bad_filepath`, `toolcall_malformed_arguments`) match
+their keys exactly.
 
-**Files to Modify**:
-- `src/fixes/toolcall_null_index_fix.rs:72` — rename to `"toolcall_null_index"` (preferred, makes
-  it consistent with the other two), **or** `src/fixes/registry.rs:229` — accept both spellings.
+**Solution** — accept both spellings for backward compatibility:
+
+**File**: `src/fixes/registry.rs:229`
+```rust
+pub fn configure(&mut self, config: &HashMap<String, crate::config::FixModuleConfig>) {
+    for (name, module_config) in config {
+        // Normalize: strip trailing "_fix" for comparison
+        let normalized_name = name.strip_suffix("_fix").unwrap_or(name);
+        for fix in &self.fixes {
+            let fix_name = fix.name().strip_suffix("_fix").unwrap_or(fix.name());
+            if normalized_name == fix_name {
+                self.enabled.insert(name.clone(), module_config.enabled);
+                break;
+            }
+        }
+    }
+}
+```
+
+**Why**: Users may already have `toolcall_null_index_fix` in their configs. Accepting both spellings
+is safer than breaking existing configs.
 
 **Acceptance Criteria**:
 - Setting `toolcall_null_index.enabled: false` actually disables the fix
+- Setting `toolcall_null_index_fix.enabled: false` also works (backward compatibility)
 - `list-fixes` output and README agree with the accepted key
 - e2e `proxy_fixes_off.yaml` genuinely disables all three fixes
 
@@ -260,6 +289,13 @@ concrete case where one fix must suppress the others — there isn't one today.
 This is a process-global counter. Putting it in `RequestMetrics` would emit a monotonically
 increasing global into every stats line and into every InfluxDB point. It belongs only in the
 `/proxy/metrics` endpoint.
+
+### Per-client backoff — **DROPPED**
+The first draft proposed a `DashMap<client_id, Instant>` keyed on an `X-Client-ID` header. Neither
+Claude Code nor Opencode sends that header, so the key would always be `"unknown"` and the backoff
+would become a global 30-second lockout after a single rejection — strictly worse than the plain
+limit. **Drop it entirely.** If per-client fairness is ever wanted, key on something that actually
+exists (API key hash or source socket address) and design it separately.
 
 ---
 
