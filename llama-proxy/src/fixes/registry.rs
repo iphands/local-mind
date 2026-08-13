@@ -226,10 +226,30 @@ impl FixRegistry {
     }
 
     /// Configure from config map
+    /// 
+    /// Accepts both spellings with and without trailing "_fix" for backward compatibility.
+    /// For example, both "toolcall_null_index" and "toolcall_null_index_fix" will match
+    /// a fix named "toolcall_null_index_fix".
+    /// 
+    /// The canonical fix name is used for internal tracking, regardless of which spelling
+    /// the user provides in the config.
     pub fn configure(&mut self, config: &HashMap<String, crate::config::FixModuleConfig>) {
         for (name, module_config) in config {
-            if self.fixes.iter().any(|f| f.name() == name) {
-                self.enabled.insert(name.clone(), module_config.enabled);
+            // Normalize: strip trailing "_fix" for comparison
+            let normalized_name = name.strip_suffix("_fix").unwrap_or(name);
+            for fix in &self.fixes {
+                let fix_name = fix.name().strip_suffix("_fix").unwrap_or(fix.name());
+                if normalized_name == fix_name {
+                    // Insert with canonical fix name for consistency
+                    self.enabled.insert(fix.name().to_string(), module_config.enabled);
+                    tracing::debug!(
+                        config_key = %name,
+                        fix_name = %fix.name(),
+                        enabled = module_config.enabled,
+                        "Configured fix (normalized config key)"
+                    );
+                    break;
+                }
             }
         }
     }

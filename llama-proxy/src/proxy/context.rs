@@ -4,7 +4,7 @@
 //! - llama.cpp: Uses `/props` endpoint with `default_generation_settings.n_ctx`
 //! - vLLM/OpenAI-compatible: Uses `/v1/models` endpoint with `data[0].max_model_len`
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
@@ -16,6 +16,9 @@ enum BackendType {
 }
 
 static CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, (u64, BackendType)>>> = OnceLock::new();
+
+// Track which backends we've already warned about to avoid log spam
+static WARNED_BACKENDS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
 
 /// Fetch context total from backend with caching
 ///
@@ -165,6 +168,41 @@ fn cache_result(cache: &RwLock<HashMap<String, (u64, BackendType)>>, backend_url
     if let Ok(mut write_guard) = cache.try_write() {
         write_guard.insert(backend_url.to_string(), (value, backend_type));
     }
+}
+
+/// Warn at most once per backend URL that context size could not be determined.
+///
+/// This prevents log spam when a backend doesn't support `/props` or `/v1/models` endpoints.
+/// The warning is logged only once per backend URL, not on every request.
+///
+/// # Race condition note
+/// Under high concurrency, there's a small chance of duplicate warnings during the
+/// initial check-and-insert window, but this is bounded (at most 2 warnings per backend).
+pub async fn warn_context_fetch_failed_once(backend_url: &str, model: &str) {
+    let warned = WARNED_BACKENDS.get_or_init(|| RwLock::new(HashSet::new()));
+    
+    // Check first with read lock (fast path for already-warned backends)
+    {
+        let read_guard = warned.read().await;
+        if read_guard.contains(backend_url) {
+            return;
+        }
+    }
+    
+    // Upgrade to write lock - check again and insert atomically
+    let mut write_guard = warned.write().await;
+    if write_guard.insert(backend_url.to_string()) {
+        // We're the first to warn about this backend
+        tracing::warn!(
+            backend_url = %backend_url,
+            model = %model,
+            "Could not determine context size from backend (neither /props nor /v1/models returned usable data). \
+             This backend may not support context size reporting. \
+             Context window metrics will be incomplete for this backend. \
+             Supported backends: llama.cpp (/props), vLLM (/v1/models with max_model_len)"
+        );
+    }
+    // If insert() returned false, another task already warned - just return
 }
 
 #[cfg(test)]

@@ -21,6 +21,22 @@ use crate::config::StatsFormat;
 use crate::proxy::fetch_context_total;
 use crate::stats::{format_metrics, format_request_log, RequestMetrics};
 
+/// Response when server is at capacity
+fn at_capacity_response(max: usize) -> Response {
+    tracing::warn!(max = max, "Server at capacity, rejecting request");
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        [(header::RETRY_AFTER, "5")],
+        Json(serde_json::json!({
+            "error": {
+                "type": "too_many_requests",
+                "message": format!("Server at capacity ({} concurrent requests), try again in 5 seconds", max)
+            }
+        })),
+    )
+        .into_response()
+}
+
 /// Dump utilities for request/response debugging
 mod dump {
     use std::path::PathBuf;
@@ -336,8 +352,48 @@ impl ProxyHandler {
                 return self.proxy_passthrough(req, &backend.node).await;
             }
 
+            // Proxy-local metrics endpoint (distinct from backend's /metrics pass-through)
+            (&Method::GET, "/proxy/metrics") => {
+                let fallback_hits = self.state.backend_streaming_fallback_hits.load(Ordering::Relaxed);
+                let concurrent = self.state.concurrent_requests.load(Ordering::Relaxed);
+                let rejected = self.state.rejected_requests.load(Ordering::Relaxed);
+
+                let body = format!(
+                    "# HELP llama_proxy_backend_streaming_fallback_hits Total streaming fallback events\n\
+                     # TYPE llama_proxy_backend_streaming_fallback_hits counter\n\
+                     llama_proxy_backend_streaming_fallback_hits {}\n\
+                     # HELP llama_proxy_concurrent_requests Current in-flight requests\n\
+                     # TYPE llama_proxy_concurrent_requests gauge\n\
+                     llama_proxy_concurrent_requests {}\n\
+                     # HELP llama_proxy_rejected_requests Requests rejected at capacity\n\
+                     # TYPE llama_proxy_rejected_requests counter\n\
+                     llama_proxy_rejected_requests {}\n",
+                    fallback_hits, concurrent, rejected
+                );
+
+                return (
+                    StatusCode::OK,
+                    [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+                    body,
+                )
+                    .into_response();
+            }
+
             // All other routes continue with existing logic
             _ => {}
+        }
+
+        // Check concurrent request limit for completion routes only (not monitoring endpoints)
+        // This must be AFTER the pass-through match to ensure health/status routes are never rejected
+        let max_concurrent = self.state.config.server.max_concurrent_requests;
+        if max_concurrent > 0 {
+            // Try to acquire a permit using semaphore-style check
+            let current = self.state.concurrent_requests.load(Ordering::Relaxed);
+            if current >= max_concurrent {
+                // Reject the request
+                self.state.rejected_requests.fetch_add(1, Ordering::Relaxed);
+                return at_capacity_response(max_concurrent);
+            }
         }
 
         // Remember if client wants streaming (for synthesis later)
@@ -516,8 +572,27 @@ impl ProxyHandler {
             .unwrap_or(false);
 
         if is_streaming_response {
-            // Unexpected! We forced stream:false but got streaming response
-            tracing::warn!("Backend returned streaming response despite stream:false request");
+            // Unexpected! Backend ignored our stream:false request
+            let fallback_count = self
+                .state
+                .backend_streaming_fallback_hits
+                .fetch_add(1, Ordering::Relaxed)
+                + 1;
+            
+            tracing::warn!(
+                backend_url = %backend.node.base_url(),
+                fallback_count = fallback_count,
+                "Backend returned streaming response despite stream:false request"
+            );
+            
+            if fallback_count == 10 || fallback_count % 100 == 0 {
+                tracing::error!(
+                    fallback_count = fallback_count,
+                    "Backend streaming fallback has triggered {} times - check backend configuration",
+                    fallback_count
+                );
+            }
+            
             // Fall back to old streaming handler
             let concurrent_snapshot = self.state.concurrent_requests.load(Ordering::Relaxed);
             handle_streaming_response(
@@ -685,12 +760,22 @@ impl ProxyHandler {
 
                 // Fetch and set context_total for stats
                 if let Some(ref mut m) = metrics {
-                    if let Some(ctx_total) =
-                        fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref())
-                            .await
+                    match fetch_context_total(
+                        &backend.http_client,
+                        backend.base_url(),
+                        backend.strip_path_prefix.as_deref(),
+                    )
+                    .await
                     {
-                        m.context_total = Some(ctx_total);
-                        m.calculate_context_percent();
+                        Some(ctx_total) => {
+                            m.context_total = Some(ctx_total);
+                            m.calculate_context_percent();
+                        }
+                        None => {
+                            // Warn once per backend URL, not per request
+                            crate::proxy::warn_context_fetch_failed_once(backend.base_url(), &m.model).await;
+                            // Continue without context metrics - the request still succeeds
+                        }
                     }
                 }
 
@@ -1012,6 +1097,7 @@ mod tests {
             server: crate::config::ServerConfig {
                 port: 8066,
                 host: "0.0.0.0".to_string(),
+                max_concurrent_requests: crate::config::default_max_concurrent(),
             },
             backend: BackendConfig::default(),
             backends: None,
@@ -1067,6 +1153,8 @@ mod tests {
             log_augmented_request_text: false,
             dump_path: None,
             concurrent_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            backend_streaming_fallback_hits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            rejected_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         })
     }
 

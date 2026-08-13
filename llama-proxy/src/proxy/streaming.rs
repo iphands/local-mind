@@ -432,10 +432,16 @@ pub async fn handle_streaming_response(
                         };
 
                         // Fetch and set context_total
-                        if let Some(ctx_total) = fetch_context_total(&client, &backend_url, strip_path_prefix.as_deref()).await
-                        {
-                            metrics.context_total = Some(ctx_total);
-                            metrics.calculate_context_percent();
+                        match fetch_context_total(&client, &backend_url, strip_path_prefix.as_deref()).await {
+                            Some(ctx_total) => {
+                                metrics.context_total = Some(ctx_total);
+                                metrics.calculate_context_percent();
+                            }
+                            None => {
+                                // Warn once per backend URL, not per request
+                                crate::proxy::warn_context_fetch_failed_once(&backend_url, &metrics.model).await;
+                                // Continue without context metrics - the request still succeeds
+                            }
                         }
 
                         // Format and log stats

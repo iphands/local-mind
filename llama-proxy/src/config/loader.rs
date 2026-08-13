@@ -335,6 +335,7 @@ exporters:
         let config = super::super::ServerConfig {
             port: 8066,
             host: "0.0.0.0".to_string(),
+            max_concurrent_requests: super::super::default_max_concurrent(),
         };
         assert!(validate_server_config(&config).is_ok());
     }
@@ -344,6 +345,7 @@ exporters:
         let config = super::super::ServerConfig {
             port: 0,
             host: "0.0.0.0".to_string(),
+            max_concurrent_requests: super::super::default_max_concurrent(),
         };
         let result = validate_server_config(&config);
         assert!(result.is_err());

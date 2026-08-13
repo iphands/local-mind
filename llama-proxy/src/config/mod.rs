@@ -54,7 +54,13 @@ impl Default for DumpConfig {
 pub struct ServerConfig {
     pub port: u16,
     pub host: String,
+    
+    /// Maximum in-flight completion requests before returning 429. 0 = unlimited.
+    #[serde(default = "default_max_concurrent")]
+    pub max_concurrent_requests: usize,
 }
+
+pub fn default_max_concurrent() -> usize { 100 }
 
 /// Backend llama-server configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -761,9 +767,11 @@ mod tests {
         let config = ServerConfig {
             port: 8066,
             host: "0.0.0.0".to_string(),
+            max_concurrent_requests: default_max_concurrent(),
         };
         assert_eq!(config.port, 8066);
         assert_eq!(config.host, "0.0.0.0");
+        assert_eq!(config.max_concurrent_requests, 100);
     }
 
     #[test]
