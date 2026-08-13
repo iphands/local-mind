@@ -26,7 +26,7 @@
       "model": "cosmo-proxy/cosmo-proxy"
     },
     "multimodal-looker": {
-      "model": "zai-coding-plan/glm-4.6v"
+      "model": "cosmo-proxy/cosmo-proxy"
     },
     "oracle": {
       "model": "cosmo-proxy/cosmo-proxy"
