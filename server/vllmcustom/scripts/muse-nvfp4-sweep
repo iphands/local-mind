@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Which NVFP4 kernel path is fastest for THIS model on THIS card?
+#
+#   ./scripts/muse-nvfp4-sweep              # all configs below
+#   REPEATS=5 ./scripts/muse-nvfp4-sweep    # more timing samples each
+#   ONLY=cutlass,marlin ./scripts/muse-nvfp4-sweep
+#
+# NVFP4 got decode from 27 to 50 tok/s, but that is only ~41% of the memory
+# roofline where bf16 sat at ~80%. So the bottleneck moved: at batch 1 the GEMMs
+# have M=1, the FP4 tensor cores are starved, and W4A4 adds an activation-quant
+# pass per layer. Which kernel wins is an empirical question, and ./run's
+# "cutlass is fastest on sm120f" note was benched on MoE and Laguna shapes, not
+# Muse Glimmer's dense 6656x19968.
+#
+# Boots are ~40s now that the weights are page-cached and the AOT compile cache
+# is warm -- but CHANGING THE BACKEND CHANGES THE COMPILE CACHE KEY, so the first
+# boot of each config pays a real compile. Budget a few minutes per row.
+#
+# Correctness matters as much as speed here: a kernel that silently produces
+# garbage still reports a tok/s. Each row records the first 60 characters of the
+# reply so a broken one is obvious, and flags rows whose output disagrees with
+# the cutlass baseline at temperature 0.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+MODEL=${1:-RedHatAI/Muse-Glimmer-30B-NVFP4}
+NAME=vllm-muse
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+APIMODEL=${APIMODEL:-cosmo-6000}
+READY_TIMEOUT=${READY_TIMEOUT:-1200}
+REPEATS=${REPEATS:-3}
+MAX_TOKENS=${MAX_TOKENS:-200}
+LOGDIR=${LOGDIR:-$HERE/bench-logs}
+WORK=$(mktemp -d)
+PROMPT='Write a Python function that merges two sorted lists into one sorted list.'
+
+# shellcheck source=../_bench-lib.sh
+source "$HERE/_bench-lib.sh"
+mkdir -p "$LOGDIR"
+for tool in curl jq docker bc; do
+  command -v "$tool" >/dev/null || { echo "## need $tool"; exit 2; }
+done
+
+# label | env assignments passed through to run-muse
+CONFIGS=(
+  "cutlass|LINEAR_BACKEND=cutlass"
+  "flashinfer_cutlass|LINEAR_BACKEND=flashinfer_cutlass"
+  "flashinfer_cudnn|LINEAR_BACKEND=flashinfer_cudnn"
+  "flashinfer_trtllm|LINEAR_BACKEND=flashinfer_trtllm"
+  "marlin|LINEAR_BACKEND=marlin"
+  "auto|LINEAR_BACKEND=auto"
+  # vllm.py:232 pins fuse_norm_quant off while its sibling fuse_act_quant is on.
+  # For W4A4 that fusion folds the RMS-norm into the activation quantization --
+  # exactly the extra pass this scheme adds. Worth one row.
+  "cutlass+normquant|LINEAR_BACKEND=cutlass|EXTRA_ARGS=--compilation-config={\"pass_config\":{\"fuse_norm_quant\":true}}"
+)
+
+LOGS_PID=""
+cleanup() {
+  [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null
+  rm -rf "$WORK"
+  echo; echo "## stopping $NAME"; stop_server
+}
+trap cleanup EXIT
+
+ask() {  # -> response JSON, elapsed seconds into $1
+  local t0 t1 body
+  body=$(jq -n --arg m "$APIMODEL" --arg p "$PROMPT" --argjson mt "$MAX_TOKENS" \
+    '{model:$m, temperature:0, max_tokens:$mt, messages:[{role:"user",content:$p}]}')
+  t0=$(date +%s.%N)
+  curl -sS --max-time 300 -X POST "http://${HOST}/v1/chat/completions" \
+       -H 'Content-Type: application/json' -d "$body"
+  t1=$(date +%s.%N)
+  echo "$t1 - $t0" | bc > "$1"
+}
+
+printf '## muse-nvfp4-sweep  model=%s  repeats=%s  max_tokens=%s\n' \
+       "$MODEL" "$REPEATS" "$MAX_TOKENS"
+printf '##   baseline to beat: 50 tok/s (cutlass), 27 tok/s (bf16)\n\n'
+printf '  %-20s %9s  %-8s  %s\n' "backend" "tok/s" "vs base" "first 60 chars of reply"
+printf '  %-20s %9s  %-8s  %s\n' "--------------------" "---------" "--------" "----------------------"
+
+BASE_RATE="" BASE_TEXT=""
+for entry in "${CONFIGS[@]}"; do
+  IFS='|' read -r label env1 env2 <<<"$entry"
+  [[ -n "${ONLY:-}" && ",$ONLY," != *",$label,"* ]] && continue
+
+  log="$LOGDIR/nvfp4-$label.log"
+  : > "$log"
+  [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=""
+  stop_server
+  # shellcheck disable=SC2086
+  env $env1 ${env2:-} DETACH=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" >> "$log" 2>&1
+  docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
+
+  if ! wait_ready; then
+    why=$(grep -oiE 'not supported[^"]*|unsupported[^"]*|Error[^"]{0,70}' "$log" | tail -1)
+    printf '  %-20s %9s  %-8s  %s\n' "$label" "FAILED" "-" "${why:-see $log}"
+    continue
+  fi
+
+  ask "$WORK/e" >/dev/null 2>&1            # warm the first-request path
+  rates=()
+  for ((i=0;i<REPEATS;i++)); do
+    resp=$(ask "$WORK/e"); el=$(cat "$WORK/e")
+    ct=$(jq -r '.usage.completion_tokens // 0' <<<"$resp")
+    (( ct == 0 )) && continue
+    rates+=( "$(echo "scale=2; $ct / $el" | bc)" )
+    [[ $i == 0 ]] && text=$(jq -r '.choices[0].message.content // ""' <<<"$resp" | tr '\n' ' ' | cut -c1-60)
+  done
+  (( ${#rates[@]} == 0 )) && { printf '  %-20s %9s  %-8s  %s\n' "$label" "NO OUTPUT" "-" "see $log"; continue; }
+
+  rate=$(median "${rates[@]}")
+  if [[ -z "$BASE_RATE" ]]; then BASE_RATE=$rate; BASE_TEXT=$text; delta="base"
+  else delta=$(echo "scale=2; $rate / $BASE_RATE" | bc)x; fi
+  flag=""
+  [[ -n "$BASE_TEXT" && "$text" != "$BASE_TEXT" ]] && flag=" <DIFFERS>"
+  printf '  %-20s %9s  %-8s  %s%s\n' "$label" "$rate" "$delta" "${text:-<empty>}" "$flag"
+done
+
+echo
+echo "## <DIFFERS> means the greedy reply changed vs the first row -- kernels can"
+echo "## differ numerically, but a garbled reply there means that backend is wrong."

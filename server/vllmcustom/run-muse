@@ -1,9 +1,32 @@
 #!/bin/bash
-# Serve meta-models/Muse-Glimmer-30B with the locally-built sm120 vLLM image.
+# Serve Muse Glimmer 30B with the locally-built sm120 vLLM image.
 #
-#   ./run-muse                                   # serves the default path below
-#   ./run-muse ./models/vllm/meta-models/Muse-Glimmer-30B
+#   ./run-muse                                   # RedHatAI/Muse-Glimmer-30B-NVFP4
+#   ./run-muse meta-models/Muse-Glimmer-30B      # the original bf16 checkpoint
 #   ./run-muse --selftest                        # offline check of the ATEM parsers
+#
+# ---------------------------------------------------------------------------
+# WHY NVFP4 IS THE DEFAULT
+# ---------------------------------------------------------------------------
+# Single-stream decode is memory-bandwidth bound: every weight is read once per
+# token. The bf16 checkpoint is 52.9 GB of text-model weights, and this card
+# sustains roughly 1.6-1.8 TB/s, so the ceiling is ~30-34 tok/s. Measured: 27.
+# That is 80-90% of the roofline -- there is no software fix, the bytes are the
+# bytes.
+#
+# RedHatAI/Muse-Glimmer-30B-NVFP4 quantizes the 416 block linears to FP4 (W4A4,
+# compressed-tensors) and leaves lm_head, embed_tokens and the whole vision
+# tower in bf16. Per-token read drops to roughly 14 GB, moving the roofline to
+# ~120 tok/s. That is where the speed is; everything else in this file is worth
+# single-digit percentages by comparison.
+#
+# It also explains the model card's numbers. Its "74.9 -> 233.4 tok/s (3.1x)"
+# was measured on the K-Quant-17GB build, not bf16 -- the speculative speedup
+# sits ON TOP of quantization, which is why DFlash alone never got close.
+#
+# The drafter borrows the target's embed_tokens and lm_head, and this recipe
+# leaves both unquantized (`targets: ["Linear"]`, lm_head in `ignore`), so
+# SPEC=1 still composes. It is off by default -- see the SPEED section.
 #
 # ---------------------------------------------------------------------------
 # WHY THIS SCRIPT EXISTS (and why ./run produces loops/garbage on "Hi")
@@ -84,15 +107,22 @@
 #   Pointing the qwen3 parsers at this model makes things worse, not better.
 #
 # ---------------------------------------------------------------------------
-# SPEED -- the DFlash drafter (SPEC=1, on by default)
+# SPEED -- the DFlash drafter (SPEC=1; OFF by default, see the measurements)
 # ---------------------------------------------------------------------------
 # Muse Glimmer ships a DFlash block-diffusion drafter, NOT an MTP head, so
 # ./run's --speculative-config '{"method":"mtp"}' is the wrong knob. DFlash
 # predicts a whole 16-token block in one forward pass and the target verifies
 # the block in parallel. Model card: 74.9 -> 233.4 tok/s (3.1x) on an RTX 5090.
-# The drafter lives next to the target, so the existing /models bind mount
-# already reaches it:
 #     meta-models/Muse-Glimmer-30B-assistant   4.8 GB bf16, 5 layers, block 16
+#
+# DEFAULT OFF. It is a large win on short prompts and a NET LOSS past ~2k tokens
+# of context, which is where agentic work lives. Measured on bf16, temp 1.0:
+#     ctx   304   accept .895  len 14.42     ctx  4427  accept .121  len 2.81
+#     ctx  1620   accept .236  len  4.54     ctx 16577  accept .043  len 1.65
+# At 16k that is 21.3 tok/s against a 26.9 baseline. The step between 1620 and
+# 2187 is the drafter's own 2048-token sliding window; the decay past it is the
+# drafter running out of usable signal. See ./scripts/muse-spec-probe and the
+# commit messages for 6da9c19.
 #
 # vLLM 0.27.1 supports the METHOD but not this CHECKPOINT. Four gaps:
 #
@@ -174,7 +204,9 @@
 #   KV_FP8=1 ./run-muse                # fp8 KV cache (quality risk, 2 KV heads)
 #   REASONING=xhigh ./run-muse         # low | medium | high | xhigh
 #   VISION=0 ./run-muse                # drop the perception encoder (text only)
-#   ATTN_BACKEND=FLASHINFER ./run-muse
+#   ATTN_BACKEND=FLASH_ATTN ./run-muse   # default is flashinfer
+#   LINEAR_BACKEND= ./run-muse           # let vLLM pick the NVFP4 GEMM
+#   MAX_NUM_SEQS=3 ./run-muse            # the old, bf16-era concurrency
 #   MAX_MODEL_LEN=32768 ./run-muse
 #   IMAGE_TAG=cu1312-sm120 ./run-muse
 #   EXTRA_ARGS="--max-num-seqs 8" ./run-muse
@@ -190,15 +222,54 @@ CONTAINER="$IMAGE:$IMAGE_TAG"
 SELFTEST=0
 [[ "${1:-}" == "--selftest" ]] && { SELFTEST=1; shift; }
 
-MODEL_PATH=${1:-./models/vllm/meta-models/Muse-Glimmer-30B}
-MODEL=$(basename "$MODEL_PATH")
-MODEL_FOLDER=$(cd "$(dirname "$MODEL_PATH")" && pwd)   # absolute, for the bind mount
+# models/vllm is mounted whole at /models, rather than the model's own parent,
+# because the NVFP4 build lives under RedHatAI/ while the DFlash drafter lives
+# under meta-models/ -- they are no longer siblings, and a per-model mount cannot
+# see both. MODEL/DRAFT are therefore paths RELATIVE to this root.
+MODEL_ROOT=${MODEL_ROOT:-$(cd "$(dirname "$0")/models/vllm" && pwd)}
+_arg=${1:-RedHatAI/Muse-Glimmer-30B-NVFP4}
+if [[ -d "$_arg" ]]; then
+  # A full path, as ./scripts/muse-spec-* pass. Keep it relative to the root when
+  # it lives under it; otherwise fall back to mounting its own parent.
+  _abs=$(cd "$_arg" && pwd)
+  case "$_abs/" in
+    "$MODEL_ROOT"/*) MODEL=${_abs#"$MODEL_ROOT"/} ;;
+    *) MODEL_ROOT=$(dirname "$_abs"); MODEL=$(basename "$_abs") ;;
+  esac
+else
+  MODEL=$_arg
+fi
+[[ -d "$MODEL_ROOT/$MODEL" ]] || {
+  echo "no model at $MODEL_ROOT/$MODEL"
+  echo "pass a path, or set MODEL_ROOT=. Available:"
+  find "$MODEL_ROOT" -maxdepth 2 -name config.json -printf '  %h\n' 2>/dev/null | sed "s|$MODEL_ROOT/||"
+  exit 1; }
+MODEL_FOLDER=$MODEL_ROOT                          # what gets bind-mounted at /models
 
 PORT=${PORT:-8700}                               # 8702: coexists with ./run (8700) and dgemma (8701)
-ATTN_BACKEND=${ATTN_BACKEND:-FLASH_ATTN}
+# flashinfer is the bench-fastest attention on sm120f and what ./run uses for
+# every other NVFP4 model here. FLASH_ATTN is the fallback: both support the
+# non-causal attention DFlash needs (v1/attention/backend.py:371-372), so this
+# is a speed choice, not a correctness one.
+ATTN_BACKEND=${ATTN_BACKEND:-flashinfer}
+# NVFP4 GEMM kernel. EMPTY = let vLLM pick, which measured FASTEST here.
+#
+# ./run pins cutlass with the note "bench-fastest NVFP4 GEMM on sm120f", but that
+# was benched on its MoE and Laguna shapes and does not transfer to Muse
+# Glimmer's dense 6656x19968. ./scripts/muse-nvfp4-sweep, batch 1, temp 0:
+#     auto  69.82   flashinfer_cutlass 69.60   marlin 69.45
+#     flashinfer_cudnn 55.24   cutlass 51.72   flashinfer_trtllm FAILED
+# Forcing cutlass cost 26%. Three unrelated kernels landing within 0.4 of each
+# other says ~69.8 is the shape's batch-1 ceiling, not one kernel's quirk.
+# Re-run the sweep after a vLLM bump; this is exactly the kind of thing that moves.
+LINEAR_BACKEND=${LINEAR_BACKEND:-}
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-131072}           # == max_position_embeddings; do NOT exceed
-MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-8192}
+# NVFP4 frees ~36 GB of weights versus bf16, and that headroom is best spent on
+# KV cache: more concurrent sequences and longer prefill chunks. 3 sequences was
+# sized for a 59.6 GB bf16 model with almost no room left over.
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-16}
+MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-16384}  # bigger speeds long-context prefill/TTFT
 CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
 REASONING=${REASONING:-high}                     # model card: high/xhigh for coding + agentic
 VISION=${VISION:-1}                              # 1 = keep the ~1.8B ViT-G/14 perception encoder
@@ -226,11 +297,11 @@ PATCH=${PATCH:-1}
 PARSERS=${PARSERS:-1}
 
 # THE SPEED KNOB: the DFlash drafter. See the SPEED section in the header.
-SPEC=${SPEC:-1}                                  # 0 = plain autoregressive decode
+SPEC=${SPEC:-0}                                  # 1 = DFlash drafter; see the SPEED section
 SPEC_TOKENS=${SPEC_TOKENS:-15}                   # DFlash issues 1 anchor + N masks per
                                                  # request, so 15 fills exactly one
                                                  # 16-token block (config block_size: 16)
-DRAFT=${DRAFT:-Muse-Glimmer-30B-assistant}       # sibling of $MODEL under $MODEL_FOLDER
+DRAFT=${DRAFT:-meta-models/Muse-Glimmer-30B-assistant}   # relative to $MODEL_ROOT
 # Both of these follow the reference implementation that ships in the image at
 # transformers/models/muse_glimmer_assistant/ -- they are not guesses. See the
 # SPEED section above.
@@ -248,7 +319,13 @@ DRAFT_EMBED_NORM=${DRAFT_EMBED_NORM:-0}          # reference embeds WITHOUT the 
 # that exist only to paper over the fallback are turned off (see below) --
 # native reads output_multiplier, keeps the embedding RMSNorm and hoists
 # layer_types on its own.
-NATIVE=${NATIVE:-0}
+# ON by default. Without it vLLM has no MuseGlimmer* architecture and falls back
+# to the generic Transformers backend, logging
+#     TransformersMultiModalForCausalLM has no vLLM implementation, falling back
+# and taking every bug in the BUG 1/2/3 sections above with it. The native model
+# also applies the tanh softcap the fallback cannot (muse_glimmer.py:1630-1632).
+# NATIVE=0 goes back to the shimmed fallback if a vendored revision breaks.
+NATIVE=${NATIVE:-1}
 
 # patches/ is mounted whole at /vllm-patches; each subdirectory is one patch.
 PATCH_ROOT=$(cd "$(dirname "$0")/patches" && pwd)
@@ -386,7 +463,6 @@ CONTAINER_ARGS=(
   -e VLLM_WORKER_MULTIPROC_METHOD=spawn
   -e SAFETENSORS_FAST_GPU=1
   -e VLLM_LOG_STATS_INTERVAL=1
-  -e VLLM_SLEEP_WHEN_IDLE=1
   # NOTE: no VLLM_ALLOW_LONG_MAX_MODEL_LEN — 131072 is the real limit here.
   -p "0.0.0.0:${PORT}:8799"
   -v "$MODEL_FOLDER":/models:ro
@@ -416,7 +492,7 @@ VLLM_ARGS=(
   --enable-prefix-caching
   --enable-chunked-prefill
   --enable-prompt-tokens-details
-  --max-num-seqs 3
+  --max-num-seqs "$MAX_NUM_SEQS"
   --max-num-batched-tokens "$MAX_BATCHED_TOKENS"
 
   --attention-backend "$ATTN_BACKEND"
@@ -482,12 +558,17 @@ fi
 [[ "$EAGER" == "1" ]] && VLLM_ARGS+=( --enforce-eager ) || VLLM_ARGS+=( --no-enforce-eager )
 [[ "$VISION" == "1" ]] || VLLM_ARGS+=( --language-model-only )
 [[ -n "$KV_FP8" ]] && VLLM_ARGS+=( --kv-cache-dtype fp8 )
+# NVFP4 GEMM kernel. Harmless on an unquantized checkpoint -- vLLM only consults
+# it for a quantized linear method -- so it is not gated on the model.
+[[ -n "$LINEAR_BACKEND" ]] && VLLM_ARGS+=( --linear-backend "$LINEAR_BACKEND" )
 # shellcheck disable=SC2206
 [[ -n "${EXTRA_ARGS:-}" ]] && VLLM_ARGS+=( ${EXTRA_ARGS} )
 
 echo
 echo "## Running $CONTAINER"
-echo "##   attn=$ATTN_BACKEND  logit_scale=$LOGIT_SCALE  swa=$SWA  vision=$VISION  reasoning=$REASONING"
+echo "##   model=$MODEL"
+echo "##   attn=$ATTN_BACKEND  linear=${LINEAR_BACKEND:-auto}  seqs=$MAX_NUM_SEQS  batched=$MAX_BATCHED_TOKENS"
+echo "##   logit_scale=$LOGIT_SCALE  swa=$SWA  vision=$VISION  reasoning=$REASONING"
 echo "##   ctx=$MAX_MODEL_LEN  kv=${KV_FP8:+fp8}${KV_FP8:-auto}  port=$PORT"
 echo "##   parsers=$([[ "$PARSERS" == "1" ]] && echo atem || echo none)  embed_norm_patch=$PATCH"
 if [[ "$SPEC" == "1" ]]; then
