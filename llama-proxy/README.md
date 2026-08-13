@@ -36,6 +36,12 @@ An HTTP reverse proxy for [llama.cpp](https://github.com/ggerganov/llama.cpp) se
   - Per-node model override, API key, and TLS configuration
   - Catch-all group for unmatched models
 
+- **Concurrency Control**: Protect backend from overload
+  - `max_concurrent_requests`: Limit in-flight requests (default: 0 = unlimited)
+  - Returns HTTP 429 when saturated, rejecting new requests gracefully
+  - Monitoring endpoints always accessible for observability
+  - Semaphore-based enforcement for strict capacity tracking
+
 - **Streaming Synthesis**: Improved streaming reliability
   - `fake` mode: fetches complete JSON from backend, synthesizes SSE for clients
   - Eliminates delta calculation complexity and streaming fix edge cases
@@ -44,6 +50,12 @@ An HTTP reverse proxy for [llama.cpp](https://github.com/ggerganov/llama.cpp) se
 - **Request Augmentation** (experimental): Enrich requests before forwarding
   - Calls a fast LLM backend to generate additional context
   - Injects context into user messages transparently
+
+- **Reprompt Engine** (optional): Silently recover from premature stops
+  - Configurable prompt file with dynamic reload from disk
+  - Customizable retry count and done sentinels
+  - Returns clean stop on sentinel match; hides stops on tool call/content resume
+  - Logs stop responses for debugging (optional)
 
 - **Client Compatibility**: Works seamlessly with AI coding tools
   - Full OpenAI Chat Completions API support
@@ -146,6 +158,12 @@ exporters:
 #   model: "fast-model"
 #   prompt_file: "./augmenter/backend_prompt.md"
 #   request_prompt_file: "./augmenter/request_prompt.md"
+
+# Pre-parse detection (default: enabled with warn level)
+# Detects malformed JSON patterns BEFORE parsing for early error detection
+# detection:
+#   enabled: true
+#   log_level: "warn"  # warn | error | info
 ```
 
 ### Running the Proxy
@@ -196,11 +214,11 @@ llama-proxy check-config --config config.yaml
 llama-proxy test-backend --config config.yaml
 
 # Override settings from CLI
-llama-proxy run --port 8066 --backend-url http://localhost:8080
-llama-proxy run --log-level debug
-llama-proxy run --streaming-mode fake
-llama-proxy run --hide-requests        # suppress per-request log lines
-llama-proxy run --dump ./debug-dumps   # dump request/response pairs
+llama-proxy run --config config.yaml --port 8066
+llama-proxy run --config config.yaml --log-level debug
+llama-proxy run --config config.yaml --streaming-mode fake
+llama-proxy run --config config.yaml --hide-requests        # suppress per-request log lines
+llama-proxy run --config config.yaml --dump ./debug-dumps   # dump request/response pairs
 ```
 
 ## Example Metrics Output
@@ -433,6 +451,20 @@ pub fn create_default_registry() -> FixRegistry {
     registry
 }
 ```
+
+**Important: Fix Registration Order**
+
+The `create_default_registry()` function registers fixes in a critical order:
+
+1. **ToolCallNullIndexFix** (FIRST) - Foundational fix that assigns sequential indices
+   to tool calls lacking them. Other fixes assume valid indices exist.
+2. **ToolcallMalformedArgumentsFix** - Handles the specific `{}`":" pattern in arguments
+   before the broader filepath fix runs.
+3. **ToolcallBadFilepathFix** - Removes duplicate filePath keys (runs last as it's more general)
+
+**Note:** Config uses snake_case names (`toolcall_null_index`, `toolcall_malformed_arguments`,
+`toolcall_bad_filepath`) without the `_fix` suffix. See the rustdoc on
+`create_default_registry()` for detailed ordering requirements.
 
 #### 3. Add Configuration Support
 
@@ -740,6 +772,12 @@ cargo run -- list-fixes --verbose
 # Enable debug logging
 cargo run -- run --config config.yaml --log-level debug
 ```
+
+### Unknown fix name in config
+The proxy now warns at startup if a config key doesn't match any known fix.
+Both `toolcall_null_index` and `toolcall_null_index_fix` are accepted (the `_fix` suffix
+is normalized). A typo like `toolcall_badfilepath` (missing underscore) will trigger a
+warning listing all known fix names.
 
 ### Metrics not appearing
 Check that `stats.enabled: true` in your config and verify the format setting.
