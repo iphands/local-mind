@@ -24,6 +24,39 @@
 # unpinned (OMP/torch read the cpuset at init). So this measures "constrain where
 # existing threads may run", not "start vLLM with N cpus". A win here is real; a
 # loss might just be oversubscription that a restart would fix. Noted in output.
+# In the runs below no arm lost meaningfully, so that caveat never bit.
+#
+# ------------------------------------------------------------------------------
+# MEASURED (2026-08-12, NVFP4, prompt ~2048 tok, out 256, median of 3)
+# ------------------------------------------------------------------------------
+#
+#   arm          cpuset        conc1    conc2    conc4    conc8    conc9
+#   default      (unpinned)     70.0    140.0    279.6    554.2    620.8
+#   ccd0         0-7,16-23      70.0    139.3    279.2    554.2    619.9
+#   ccd0-nosmt   0-7            69.9    139.9    278.9    554.2    619.3
+#   ccd1         8-15,24-31     69.9    139.7    278.9    553.5    619.0
+#   ccd1-nosmt   8-15           69.8    139.5    278.5    552.0    616.3
+#   (conc2 from the first run; conc8/9 from the burst run. Both boots agree
+#    to within 0.4 t/s wherever they overlap.)
+#
+# ANSWER: do not pin. UNPINNED WINS EVERY ROW. Worst case is ccd1-nosmt at
+# -0.73% (conc 9). TTFT tracks it: 29-30ms at conc1, 106-111ms at conc8/9.
+#
+# The ordering is identical at all five concurrencies --
+# default >= ccd0 >= ccd0-nosmt ~= ccd1 > ccd1-nosmt -- which is exactly what
+# the highest_perf binning predicts, so the effect is probably real rather than
+# noise. It is just far too small to act on, and it points AWAY from pinning.
+#
+# Why the CPU never mattered: throughput scales 70 -> 620.8, i.e. 8.9x for 9x
+# the load. Neither CPU nor GPU is saturated at 9 streams. Decode is GPU-memory-
+# bandwidth-bound, --async-scheduling keeps the scheduler off the critical path,
+# and TP=1 at max-num-seqs 16 does not need cores. Even 8 worst-binned cores with
+# no SMT keep up.
+#
+# NOT TESTED, and the one place this could still bite: warm TTFT was 29-111ms
+# throughout, so the prefix cache served nearly everything and PREFILL was barely
+# exercised. Tokenization is the genuinely CPU-heavy part. If CCD pinning ever
+# matters on this box, cold 100k-token prefill is where to look.
 set -uo pipefail
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
