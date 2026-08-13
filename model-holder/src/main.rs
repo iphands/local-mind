@@ -106,33 +106,12 @@ struct HoldArgs {
 )]
 struct Args {
     #[command(subcommand)]
-    command: Option<Commands>,
-
-    /// Path(s) to model files - supports glob patterns (e.g., "model-*.gguf")
-    /// Used when no subcommand is specified (legacy mode)
-    #[arg(required = false)]
-    model_paths: Vec<String>,
-
-    /// Skip warming up pages (don't touch all pages after mmap)
-    #[arg(long, default_value_t = false)]
-    no_warmup: bool,
-
-    /// Page size for warmup reads (must be positive power of 2)
-    #[arg(long, default_value_t = DEFAULT_PAGE_SIZE)]
-    page_size: usize,
-
-    /// Don't lock pages in RAM (allow kernel to swap them out)
-    #[arg(long, default_value_t = false)]
-    no_mlock: bool,
-
-    /// Number of files to mlock in parallel
-    #[arg(long, default_value_t = 4)]
-    lock_threads: usize,
+    command: Commands,
 }
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Hold model files in memory (same as running without subcommand)
+    /// Hold model files in memory with TUI
     Hold(HoldArgs),
 
     /// Hold model files in memory and exit immediately after loading and locking
@@ -1299,7 +1278,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
 
     let result = match args.command {
-        Some(Commands::Hold(hold_args)) => hold_models_with_tui(
+        Commands::Hold(hold_args) => hold_models_with_tui(
             hold_args.model_paths,
             hold_args.no_warmup,
             hold_args.page_size,
@@ -1307,7 +1286,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hold_args.lock_threads,
         )
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) }),
-        Some(Commands::Oneshot(oneshot_args)) => hold_models_oneshot(
+        Commands::Oneshot(oneshot_args) => hold_models_oneshot(
             oneshot_args.model_paths,
             oneshot_args.no_warmup,
             oneshot_args.page_size,
@@ -1315,27 +1294,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             oneshot_args.lock_threads,
         )
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) }),
-        Some(Commands::Check { extensions }) => {
+        Commands::Check { extensions } => {
             check_mmaps(&extensions).map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
-        }
-        None => {
-            // Legacy mode: if model_paths provided, run hold
-            if !args.model_paths.is_empty() {
-                hold_models_with_tui(
-                    args.model_paths,
-                    args.no_warmup,
-                    args.page_size,
-                    args.no_mlock,
-                    args.lock_threads,
-                )
-                .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })
-            } else {
-                // No args, show help
-                eprintln!("Usage: model-holder [hold] <MODEL_PATHS>...");
-                eprintln!("       model-holder check");
-                eprintln!("\nRun 'model-holder --help' for more information.");
-                std::process::exit(1);
-            }
         }
     };
 
