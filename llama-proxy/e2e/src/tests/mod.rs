@@ -1,6 +1,7 @@
 //! Test registry - all test cases are registered here
 
 pub mod basic;
+pub mod concurrent;
 pub mod helpers;
 pub mod passthrough;
 pub mod toolcall;
@@ -166,6 +167,22 @@ pub fn all_tests() -> Vec<TestCase> {
             "passthrough/not_modified",
             "Pass-through endpoints are not modified by proxy fix logic",
             passthrough::test_passthrough_not_modified
+        ),
+        // ── Concurrent limiting tests ────────────────────────────────────────────
+        test!(
+            "concurrent/limit_enforcement",
+            "Concurrent requests are limited and excess get 429",
+            concurrent::test_concurrent_limit_enforcement
+        ),
+        test!(
+            "concurrent/health_not_rejected",
+            "Health endpoint never rejected even at capacity",
+            concurrent::test_health_not_rejected_at_capacity
+        ),
+        test!(
+            "concurrent/429_format",
+            "429 response has correct format and Retry-After header",
+            concurrent::test_429_response_format
         ),
     ]
 }
