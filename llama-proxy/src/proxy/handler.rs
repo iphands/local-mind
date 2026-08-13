@@ -10,7 +10,7 @@ use std::io::Read;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Instant;
-use tokio::sync::Semaphore;
+use tokio::sync::OwnedSemaphorePermit;
 
 use super::server::ProxyState;
 use super::streaming::handle_streaming_response;
@@ -360,53 +360,52 @@ impl ProxyHandler {
             // Proxy-local metrics endpoint (distinct from backend's /metrics pass-through)
             (&Method::GET, "/proxy/metrics") => {
                 let fallback_hits = self.state.backend_streaming_fallback_hits.load(Ordering::Relaxed);
-                let concurrent = self.state.concurrent_requests.load(Ordering::Relaxed);
                 let rejected = self.state.rejected_requests.load(Ordering::Relaxed);
 
+                // This scrape is itself counted in concurrent_requests (incremented at the
+                // top of handle()), so discount it - otherwise an idle proxy reports 1.
+                let concurrent = self.state.concurrent_requests.load(Ordering::Relaxed).saturating_sub(1);
+
                 let body = format!(
-                    "# HELP llama_proxy_backend_streaming_fallback_hits Total streaming fallback events\n\
-                     # TYPE llama_proxy_backend_streaming_fallback_hits counter\n\
-                     llama_proxy_backend_streaming_fallback_hits {}\n\
+                    "# HELP llama_proxy_backend_streaming_fallback_total Times the backend streamed despite stream:false\n\
+                     # TYPE llama_proxy_backend_streaming_fallback_total counter\n\
+                     llama_proxy_backend_streaming_fallback_total {}\n\
                      # HELP llama_proxy_concurrent_requests Current in-flight requests\n\
                      # TYPE llama_proxy_concurrent_requests gauge\n\
                      llama_proxy_concurrent_requests {}\n\
-                     # HELP llama_proxy_rejected_requests Requests rejected at capacity\n\
-                     # TYPE llama_proxy_rejected_requests counter\n\
-                     llama_proxy_rejected_requests {}\n",
+                     # HELP llama_proxy_rejected_requests_total Requests rejected at capacity\n\
+                     # TYPE llama_proxy_rejected_requests_total counter\n\
+                     llama_proxy_rejected_requests_total {}\n",
                     fallback_hits, concurrent, rejected
                 );
 
-                return (
-                    StatusCode::OK,
-                    [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
-                    body,
-                )
-                    .into_response();
+                return (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response();
             }
 
             // All other routes continue with existing logic
             _ => {}
         }
 
-        // Check concurrent request limit for completion routes only (not monitoring endpoints)
-        // This must be AFTER the pass-through match to ensure health/status routes are never rejected
+        // Check concurrent request limit for completion routes only (not monitoring endpoints).
+        // This must be AFTER the pass-through match so health/status routes are never rejected.
         let max_concurrent = self.state.config.server.max_concurrent_requests;
-        let _permit = if max_concurrent > 0 {
-            match self.state.concurrent_semaphore.as_ref() {
-                Some(semaphore) => match semaphore.clone().try_acquire_owned() {
-                    Ok(permit) => Some(permit),
+        let mut permit: Option<OwnedSemaphorePermit> = None;
+        if max_concurrent > 0 {
+            // A `None` semaphore means limiting was not armed at startup; treat as unlimited.
+            if let Some(semaphore) = self.state.concurrent_semaphore.as_ref() {
+                match semaphore.clone().try_acquire_owned() {
+                    Ok(p) => permit = Some(p),
                     Err(_) => {
-                        // No permits available - reject the request
+                        // No permits available - shed the request rather than queue it.
                         self.state.rejected_requests.fetch_add(1, Ordering::Relaxed);
                         return at_capacity_response(max_concurrent);
                     }
-                },
-                None => None, // Unlimited mode
+                }
             }
-        } else {
-            None
-        };
-        // _permit is held until the end of the function, releasing the permit on drop
+        }
+        // On the buffered path the permit drops when this function returns, which is
+        // after the backend call completes. On the streaming path it is moved into the
+        // response body instead - see the `permit.take()` at the streaming fallback.
 
         // Remember if client wants streaming (for synthesis later)
         let client_wants_streaming = request_json
@@ -585,18 +584,14 @@ impl ProxyHandler {
 
         if is_streaming_response {
             // Unexpected! Backend ignored our stream:false request
-            let fallback_count = self
-                .state
-                .backend_streaming_fallback_hits
-                .fetch_add(1, Ordering::Relaxed)
-                + 1;
-            
+            let fallback_count = self.state.backend_streaming_fallback_hits.fetch_add(1, Ordering::Relaxed) + 1;
+
             tracing::warn!(
                 backend_url = %backend.node.base_url(),
                 fallback_count = fallback_count,
                 "Backend returned streaming response despite stream:false request"
             );
-            
+
             if fallback_count == 10 || fallback_count % 100 == 0 {
                 tracing::error!(
                     fallback_count = fallback_count,
@@ -604,7 +599,7 @@ impl ProxyHandler {
                     fallback_count
                 );
             }
-            
+
             // Fall back to old streaming handler
             let concurrent_snapshot = self.state.concurrent_requests.load(Ordering::Relaxed);
             handle_streaming_response(
@@ -624,6 +619,11 @@ impl ProxyHandler {
                 Some(uri.to_string()),
                 Some(body_bytes.clone().to_vec()),
                 concurrent_snapshot,
+                // Hand the permit to the stream. This response body is lazy, so returning
+                // from handle() only means the headers are ready - the generation itself
+                // runs while the body is polled. Dropping the permit here would let the
+                // limiter admit new work for a slot that is still busy.
+                permit.take(),
             )
             .await
         } else {
@@ -772,12 +772,8 @@ impl ProxyHandler {
 
                 // Fetch and set context_total for stats
                 if let Some(ref mut m) = metrics {
-                    match fetch_context_total(
-                        &backend.http_client,
-                        backend.base_url(),
-                        backend.strip_path_prefix.as_deref(),
-                    )
-                    .await
+                    match fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref())
+                        .await
                     {
                         Some(ctx_total) => {
                             m.context_total = Some(ctx_total);
@@ -1167,7 +1163,7 @@ mod tests {
             concurrent_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             backend_streaming_fallback_hits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             rejected_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            concurrent_semaphore: Some(std::sync::Arc::new(Semaphore::new(100))), // Default limit for tests
+            concurrent_semaphore: Some(std::sync::Arc::new(tokio::sync::Semaphore::new(100))),
         })
     }
 

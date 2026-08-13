@@ -121,6 +121,11 @@ pub async fn handle_streaming_response(
     request_uri: Option<String>,
     request_body: Option<Vec<u8>>,
     concurrent_requests: usize,
+    // Concurrency permit for this request, if limiting is enabled. Held for the lifetime
+    // of the returned body rather than of this call: the response is a lazy stream, so
+    // the work this permit accounts for happens while the client polls the body, long
+    // after this function returns.
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
 ) -> Response {
     let status = backend_response.status();
     let headers = backend_response.headers().clone();
@@ -153,6 +158,11 @@ pub async fn handle_streaming_response(
     let request_json_for_dump = request_json.clone();
 
     let processed_stream = stream.then(move |chunk_result| {
+        // Keep the concurrency permit alive for as long as this stream is alive. The
+        // closure owns it, so it is released when the body completes or the client
+        // disconnects and axum drops the stream - not when handle() returns.
+        let _permit = &permit;
+
         let fix_registry = fix_registry.clone();
         let accumulated = accumulated_clone.clone();
         let tool_call_accumulator = tool_call_accumulator_clone.clone();
