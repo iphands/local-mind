@@ -18,8 +18,8 @@ glib2-devel
 glslc
 gtk3-devel
 gtk4-devel
-java-21-openjdk
-java-21-openjdk-devel
+java-25-openjdk
+java-25-openjdk-devel
 jq
 less
 libffi-devel
@@ -27,7 +27,7 @@ llvm
 llvm-devel
 lm_sensors-devel
 make
-maven-openjdk21
+maven-openjdk25
 nasm
 npm
 openssl

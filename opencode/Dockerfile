@@ -1,29 +1,6 @@
-FROM fedora:44 AS builder
-RUN echo "bump_008"
+FROM iphands/pkgcache-fedora:44 AS builder
 
-# Route dnf through the homelab pkgcache proxy (nginx reverse cache).
-# See /home/iphands/prog/slop/cache/scripts/fix-fedora -- same approach: Fedora's
-# stock repos use HTTPS + metalink, which a caching proxy can't serve, so we add
-# explicit baseurl repos pointing at the cache and disable the metalink ones.
-# gpgcheck stays on, so RPMs remain signature-verified over plain HTTP.
-RUN sed -i 's/^enabled=1/enabled=0/' /etc/yum.repos.d/fedora*.repo && \
-    cat > /etc/yum.repos.d/pkgcache.repo <<'EOF'
-[fedora-cache]
-name=Fedora $releasever - $basearch (cached via pkgcache)
-baseurl=http://noir.lan:3129/fedora/linux/releases/$releasever/Everything/$basearch/os/
-enabled=1
-gpgcheck=1
-gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-$releasever-$basearch
-skip_if_unavailable=True
-
-[updates-cache]
-name=Fedora $releasever - $basearch - Updates (cached via pkgcache)
-baseurl=http://noir.lan:3129/fedora/linux/updates/$releasever/Everything/$basearch/
-enabled=1
-gpgcheck=1
-gpgkey=file:///etc/pki/rpm-gpg/RPM-GPG-KEY-fedora-$releasever-$basearch
-skip_if_unavailable=True
-EOF
+RUN echo "bump_012"
 
 RUN dnf group install -y development-tools
 

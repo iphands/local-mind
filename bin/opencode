@@ -22,8 +22,14 @@ CONTAINER_ARGS=(
   -v ${ROOT}/opencode/container_data/local:/home/iphands/.local:rw
   -v ${ROOT}/opencode/container_data/.bash_history:/home/iphands/.bash_history:rw
   -v ${HOME}/prog:/home/iphands/prog:rw
+  -v ${HOME}/.gitignore:/home/iphands/.gitignore:ro
+
+  -v /mnt/noir/scratch:/mnt/noir/scratch:ro
+
   -v /mnt/noir/scratch/ai:/ai:ro
   -v /mnt/noir/scratch/ai/data/scratch:/scratch:rw
+  -v /mnt/noir/scratch/relocate:/mnt/noir/scratch/relocate:rw
+
   -v /run/docker.sock:/var/run/docker.sock:rw
 
   --gpus all
