@@ -1,0 +1,258 @@
+================================================================================
+CCD PINNING ANALYSIS — vLLM on RTX PRO 6000 Blackwell / Ryzen 9 5950X
+Captured: 2026-08-12
+Host kernel: 7.1.4-gentoo.027-gcc-bmq
+================================================================================
+
+--------------------------------------------------------------------------------
+1. CCD TOPOLOGY MAP (measured, not assumed)
+--------------------------------------------------------------------------------
+
+Authoritative source is L3 cache sharing (/sys/.../cache/index3/shared_cpu_list).
+On Zen 3 each CCD has one unified 32 MB L3, so the L3 sharing set IS the CCD.
+
+NOTE: topology/die_id reports 0 for ALL cpus on this kernel — it tracks the
+package, not the CCD. Do not use die_id to find CCDs on Zen. Use L3 sharing.
+
+  CCD   Physical cores   Logical CPUs (incl. SMT siblings)
+  ---   --------------   ---------------------------------
+  CCD0  cores 0-7        0-7,16-23
+  CCD1  cores 8-15       8-15,24-31
+
+SMT sibling pairing: cpu N pairs with cpu N+16 (0<->16, 1<->17, ... 15<->31).
+
+The naive "0-7 = CCD0" assumption happens to be CORRECT on this machine, but it
+was verified rather than assumed.
+
+
+--------------------------------------------------------------------------------
+2. NUMA / GPU LOCALITY — NO DIFFERENCE BETWEEN CCDs
+--------------------------------------------------------------------------------
+
+  numactl --hardware        -> "No NUMA available on this system"  (single node)
+  GPU sysfs numa_node       -> empty
+  GPU sysfs local_cpulist   -> 0-31
+  nvidia-smi topo -m        -> GPU0 CPU Affinity 0-31, NUMA Affinity 0
+
+The PCIe root complex lives on the IOD, not on either CCD. Both CCDs reach the
+IOD over Infinity Fabric symmetrically.
+
+=> There is NO NUMA-based or PCIe-proximity-based reason to prefer either CCD.
+   "CCD0 is closer to the GPU" is FALSE on this hardware.
+
+
+--------------------------------------------------------------------------------
+3. THE ACTUAL DECIDING FACTOR — amd_pstate PREFERRED-CORE RANKINGS
+--------------------------------------------------------------------------------
+
+  scaling_driver             : amd-pstate-epp
+  scaling_governor           : performance
+  amd_pstate/prefcore        : enabled
+
+Per-core ACPI CPPC highest_perf (higher = better-binned core):
+
+  CCD0                              CCD1
+  ----                              ----
+  core  0 : 226                     core  8 : 196
+  core  1 : 221                     core  9 : 181
+  core  2 : 236  <- best            core 10 : 176
+  core  3 : 231                     core 11 : 201  <- CCD1 best
+  core  4 : 206  <- CCD0 worst      core 12 : 171
+  core  5 : 236  <- best            core 13 : 166  <- worst overall
+  core  6 : 211                     core 14 : 186
+  core  7 : 216                     core 15 : 191
+
+  CCD0 range: 206 - 236   (mean ~223)
+  CCD1 range: 166 - 201   (mean ~184)
+
+*** ZERO OVERLAP. The worst CCD0 core (206) beats the best CCD1 core (201). ***
+
+This is a hard-binned 5950X where CCD0 is unambiguously the golden die.
+Fastest individual cores: cpu2 and cpu5 (236), then cpu3 (231), cpu0 (226).
+
+
+--------------------------------------------------------------------------------
+4. CONCLUSION / RECOMMENDATION
+--------------------------------------------------------------------------------
+
+PIN vLLM TO CCD0  ->  cpuset "0-7,16-23"
+
+Two reasons, NEITHER of which is GPU proximity:
+
+  (a) Every CCD0 core boosts materially higher (see section 3).
+  (b) Staying within one CCD keeps the hot working set in a single 32 MB L3 and
+      avoids cross-CCD coherence traffic over Infinity Fabric. Intra-CCD L3 hit
+      is on the order of tens of ns; a cross-CCD snoop goes out to the IOD and
+      costs roughly 2-3x. vLLM's critical path (Python scheduler loop + CUDA
+      launch) is latency-bound, which is exactly the workload that cares.
+
+CORRECTION to commonly-given advice: pinning to CCD0 does NOT defeat
+amd_pstate preferred-core / ITMT scheduling. CCD0 *is* the preferred set here.
+Pinning to CCD1 would be the thing that fights the scheduler.
+
+Risk to watch: restricting to 8C/16T from 32 threads. With TP=1, PP=1,
+max-num-seqs 16 this should be ample. Failure mode to watch for is the uvicorn
+API frontend / tokenizer starving under high concurrency.
+
+
+--------------------------------------------------------------------------------
+5. CURRENT STATE OF THE RUNNING CONTAINER
+--------------------------------------------------------------------------------
+
+  container            : vllm-muse
+  image                : iphands/vllm-blackwell:latest
+  HostConfig.CpusetCpus: (empty  -- NOT PINNED)
+  cpuset.cpus.effective: 0-31    (unrestricted)
+  IpcMode              : host
+  ShmSize              : 32 GiB
+  systemd slices present: vllm.slice, vllmbuild.slice
+
+  serve args (relevant):
+    --tensor-parallel-size 1 --pipeline-parallel-size 1
+    --async-scheduling
+    --enable-prefix-caching --enable-chunked-prefill
+    --max-num-seqs 16 --max-num-batched-tokens 16384
+    --max-model-len 131072 --gpu-memory-utilization 0.90
+    --attention-backend flashinfer
+    model: /models/RedHatAI/Muse-Glimmer-30B-NVFP4
+    served-model-name: cosmo-6000 (+ aliases), port 8799
+
+  env: VLLM_WORKER_MULTIPROC_METHOD=spawn, CUDA_DEVICE_ORDER=PCI_BUS_ID
+
+
+--------------------------------------------------------------------------------
+6. A/B TEST PROCEDURE  (no restart required)
+--------------------------------------------------------------------------------
+
+docker update changes the cgroup cpuset LIVE on a running container, so all
+arms can be tested against the same warm process.
+
+  # Arm A -- CCD0, with SMT  (expected winner)
+  docker update --cpuset-cpus="0-7,16-23" vllm-muse
+
+  # Arm B -- CCD1, with SMT  (control)
+  docker update --cpuset-cpus="8-15,24-31" vllm-muse
+
+  # Arm C -- CCD0, physical cores only (no SMT contention)
+  docker update --cpuset-cpus="0-7" vllm-muse
+
+  # Baseline / revert to unpinned
+  docker update --cpuset-cpus="" vllm-muse
+
+Verify the change actually landed:
+
+  cid=$(docker inspect vllm-muse --format '{{.Id}}')
+  cat /sys/fs/cgroup/system.slice/docker-$cid.scope/cpuset.cpus.effective
+
+Benchmark command (run from inside the container):
+
+  docker exec vllm-muse vllm bench serve \
+    --backend openai-chat --base-url http://127.0.0.1:8799 \
+    --endpoint /v1/chat/completions --model cosmo-6000 \
+    --dataset-name random --random-input-len 2048 --random-output-len 256 \
+    --max-concurrency 8 --num-prompts 64 --ignore-eos --seed 1234
+
+MEASUREMENT HYGIENE -- important:
+  * --enable-prefix-caching is ON. Keep --seed IDENTICAL across all arms.
+  * DISCARD the first run of each arm (it populates the prefix cache).
+    Otherwise you are benchmarking cache hits, not the CCD.
+  * Compare: output tok/s, TTFT p50/p99, ITL p50/p99, end-to-end latency.
+  * Arm C has a smaller cpuset; if it wins on ITL but loses on throughput,
+    that is SMT contention on the scheduler thread and is a real result.
+
+Note: --async-scheduling moves scheduling off the critical path onto its own
+thread, which generally benefits from having the SMT siblings available. That
+is the hypothesis Arm C tests.
+
+
+--------------------------------------------------------------------------------
+7. SEPARATE FINDING — PCIe LINK IS HALF WIDTH
+--------------------------------------------------------------------------------
+
+  nvidia-smi:
+    GPU0  RTX PRO 6000 Blackwell   gen 4/4   width  8/16
+    GPU1  RTX 4060                 gen 1/4   width  8/8
+
+  sysfs:
+    09:00.0 (PRO 6000)  cur=2.5 GT/s x8   max=32.0 GT/s PCIe x16
+    00:03.1 (root port) cur=2.5 GT/s x8   max=16.0 GT/s PCIe x8   <- KEY
+    00:03.2 (root port) cur=2.5 GT/s x8   max=16.0 GT/s PCIe x8
+
+Root port 00:03.1 reports max_link_width = x8. The board has bifurcated the
+CPU's x16 into x8/x8 to feed the RTX 4060. The 4060 is costing the PRO 6000
+half its lanes.
+
+Two independent caps:
+  * WIDTH x8   -- caused by the 4060 occupying the bifurcated half. FIXABLE by
+                  removing the 4060 (would give x16).
+  * GEN 4      -- the 5950X is a PCIe 4.0 part. The card is Gen5-capable
+                  (32 GT/s) but will never exceed Gen4 here. NOT FIXABLE.
+
+The idle 2.5 GT/s reading is normal NVIDIA link downtraining at idle, not a
+fault. nvidia-smi confirms gen 4 is the negotiated current gen.
+
+HONEST IMPACT ASSESSMENT:
+  For this workload -- TP=1, model fully resident in 96 GB VRAM, no CPU/KV
+  offload -- PCIe bandwidth affects MODEL LOAD TIME, not steady-state decode
+  throughput. Decode barely touches PCIe. This is worth knowing and worth
+  fixing if the 4060 is expendable, but it is NOT the reason for any given
+  tok/s number.
+
+  It WOULD become critical if CPU KV-offload or weight-offload were enabled.
+
+
+--------------------------------------------------------------------------------
+8. RELEVANT KERNEL / SYSTEM TUNING ALREADY IN PLACE
+--------------------------------------------------------------------------------
+
+  /proc/cmdline:
+    amd_iommu=off        -- good, removes IOMMU translation overhead on GPU DMA
+    mitigations=off      -- good for throughput
+    pcie_aspm=off        -- good, prevents link power-state latency
+    amd_pstate=active    -- with governor=performance
+    nomodeset, nvidia-drm.modeset=1
+
+  THP: [madvise]   (AnonHugePages 40 MB in use, no explicit hugepages reserved)
+  RAM: 125 GiB total, 0 swap
+  GPU: persistence mode Enabled, power limit 475 W, max SM clock 3090 MHz
+
+  Other PCIe consumers: Mellanox mlx4_0 NIC at Gen3 x8 (04:00.0),
+  NVMe at Gen3 x4 (01:00.0).
+
+
+--------------------------------------------------------------------------------
+9. USEFUL ROOT ONE-LINER (not yet run)
+--------------------------------------------------------------------------------
+
+Confirms the x8 is a board bifurcation decision rather than a degraded/errored
+link, and surfaces any PCIe AER correctable/uncorrectable errors:
+
+  sudo lspci -vv -s 00:03.1 -s 09:00.0 | grep -E 'Lnk(Cap|Sta|Ctl)|UESta|CESta|^[0-9a-f]'
+
+
+================================================================================
+COMMANDS USED TO GATHER THIS DATA (all read-only, no root required)
+================================================================================
+
+  lscpu -e=CPU,CORE,SOCKET,NODE,CACHE,ONLINE,MAXMHZ
+
+  for c in /sys/devices/system/cpu/cpu[0-9]*; do n=${c##*cpu}; \
+    printf '%-4s core=%s l3=%s\n' "$n" \
+      "$(cat $c/topology/core_id)" \
+      "$(cat $c/cache/index3/shared_cpu_list)"; done
+
+  for c in /sys/devices/system/cpu/cpu[0-9]*; do n=${c##*cpu}; \
+    printf '%s:%s ' "$n" "$(cat $c/acpi_cppc/highest_perf)"; done; echo
+
+  cat /sys/devices/system/cpu/amd_pstate/prefcore
+  numactl --hardware
+  nvidia-smi topo -m
+  nvidia-smi --query-gpu=index,name,pcie.link.gen.current,pcie.link.gen.max,\
+pcie.link.width.current,pcie.link.width.max --format=csv
+
+  for d in /sys/bus/pci/devices/*; do cs=$(cat $d/current_link_speed 2>/dev/null); \
+    [ -z "$cs" ] && continue; printf '%s cur=%s x%s max=%s x%s\n' "${d##*/}" \
+    "$cs" "$(cat $d/current_link_width)" "$(cat $d/max_link_speed)" \
+    "$(cat $d/max_link_width)"; done
+
+================================================================================
