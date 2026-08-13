@@ -247,6 +247,13 @@ pub trait ResponseFix: Send + Sync {
 }
 
 /// Create the default fix registry with all available fixes
+/// 
+/// Fix registration order is critical for correct operation:
+/// 1. **ToolCallNullIndexFix** (FIRST) - Foundational fix that assigns sequential indices
+///    to tool calls lacking them. Other fixes may assume valid indices exist.
+/// 2. **ToolcallMalformedArgumentsFix** - Handles the specific `{}`":" pattern in arguments
+///    before the broader filepath fix runs.
+/// 3. **ToolcallBadFilepathFix** - Removes duplicate filePath keys (runs last as it's more general)
 pub fn create_default_registry() -> FixRegistry {
     let mut registry = FixRegistry::new();
     // Register null index fix FIRST - it's foundational
