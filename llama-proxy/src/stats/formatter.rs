@@ -179,7 +179,7 @@ mod tests {
         m.generation_tps = 42.5;
         m.prompt_ms = 500.0;
         m.generation_ms = 1176.0;
-        m.has_timing_split = true;   // llama.cpp-style backend
+        m.has_timing_split = true; // llama.cpp-style backend
         m.total_tps = 125.0;
         m.streaming = true;
         m.finish_reason = "stop".to_string();

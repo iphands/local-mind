@@ -34,13 +34,13 @@ pub struct ProxyState {
     pub log_augmented_request_text: bool,
     pub dump_path: Option<Arc<std::path::PathBuf>>,
     pub concurrent_requests: Arc<AtomicUsize>,
-    
+
     /// Counter for when backend returns streaming despite stream:false
     pub backend_streaming_fallback_hits: Arc<AtomicUsize>,
-    
+
     /// Counter for rejected requests at capacity
     pub rejected_requests: Arc<AtomicUsize>,
-    
+
     /// Semaphore for enforcing concurrent request limit
     pub concurrent_semaphore: Option<Arc<Semaphore>>,
 }
@@ -172,7 +172,7 @@ pub async fn run_server(
         concurrent_semaphore: if config.server.max_concurrent_requests > 0 {
             Some(Arc::new(Semaphore::new(config.server.max_concurrent_requests)))
         } else {
-            None  // Unlimited
+            None // Unlimited
         },
     };
 

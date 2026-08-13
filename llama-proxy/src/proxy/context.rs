@@ -173,14 +173,16 @@ fn cache_result(cache: &RwLock<HashMap<String, (u64, BackendType)>>, backend_url
 /// Warn at most once per backend URL that context size could not be determined.
 ///
 /// This prevents log spam when a backend doesn't support `/props` or `/v1/models` endpoints.
-/// The warning is logged only once per backend URL, not on every request.
+/// The warning is logged exactly once per backend URL, not on every request.
 ///
-/// # Race condition note
-/// Under high concurrency, there's a small chance of duplicate warnings during the
-/// initial check-and-insert window, but this is bounded (at most 2 warnings per backend).
+/// # Concurrency
+/// Exactly-once holds even under concurrent callers: the read lock is only a fast path
+/// for backends already warned about, and the decision to log is made from the return
+/// value of `HashSet::insert` while holding the write lock. Racing callers therefore
+/// serialize on that lock and only the one whose insert returns `true` logs.
 pub async fn warn_context_fetch_failed_once(backend_url: &str, model: &str) {
     let warned = WARNED_BACKENDS.get_or_init(|| RwLock::new(HashSet::new()));
-    
+
     // Check first with read lock (fast path for already-warned backends)
     {
         let read_guard = warned.read().await;
@@ -188,7 +190,7 @@ pub async fn warn_context_fetch_failed_once(backend_url: &str, model: &str) {
             return;
         }
     }
-    
+
     // Upgrade to write lock - check again and insert atomically
     let mut write_guard = warned.write().await;
     if write_guard.insert(backend_url.to_string()) {

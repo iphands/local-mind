@@ -247,7 +247,7 @@ pub trait ResponseFix: Send + Sync {
 }
 
 /// Create the default fix registry with all available fixes
-/// 
+///
 /// Fix registration order is critical for correct operation:
 /// 1. **ToolCallNullIndexFix** (FIRST) - Foundational fix that assigns sequential indices
 ///    to tool calls lacking them. Other fixes may assume valid indices exist.

@@ -447,10 +447,7 @@ pub async fn test_empty_arguments(ctx: TestContext) -> anyhow::Result<()> {
 pub async fn test_multiple_fixes_applied(ctx: TestContext) -> anyhow::Result<()> {
     // Use the malformed arguments response which tests the malformed_arguments fix
     // The bad_filepath fix will also be applied if there are duplicate filePaths
-    queue_response(
-        &ctx.backend_state,
-        MockResponse::json(backend_malformed_arguments_response()),
-    );
+    queue_response(&ctx.backend_state, MockResponse::json(backend_malformed_arguments_response()));
 
     // Must use a request WITH tool schemas - the fix needs them to know which param replaces {}
     let resp = send_non_streaming(&ctx.http_client, &ctx.proxy_addr, request_with_write_tool("test")).await?;
@@ -458,7 +455,9 @@ pub async fn test_multiple_fixes_applied(ctx: TestContext) -> anyhow::Result<()>
     assert_true(resp.status == 200, &format!("Expected 200, got {}", resp.status))?;
 
     // After fixes, should have valid JSON arguments
-    let args = resp.tool_call_args(0, 0).ok_or_else(|| anyhow::anyhow!("No tool call args"))?;
+    let args = resp
+        .tool_call_args(0, 0)
+        .ok_or_else(|| anyhow::anyhow!("No tool call args"))?;
     let parsed = assert_valid_json(args, "fixed arguments")?;
 
     // Should have at least one filePath (fix should remove duplicates)
@@ -484,7 +483,9 @@ pub async fn test_fix_ordering_preserves_valid_response(ctx: TestContext) -> any
 
     assert_true(resp.status == 200, "Should succeed with valid tool call")?;
 
-    let args = resp.tool_call_args(0, 0).ok_or_else(|| anyhow::anyhow!("No tool call args"))?;
+    let args = resp
+        .tool_call_args(0, 0)
+        .ok_or_else(|| anyhow::anyhow!("No tool call args"))?;
     let parsed = assert_valid_json(args, "preserved arguments")?;
 
     // Verify content and filePath are unchanged
@@ -502,10 +503,7 @@ pub async fn test_fix_ordering_preserves_valid_response(ctx: TestContext) -> any
 
 /// Test that fixes work correctly with streaming responses
 pub async fn test_streaming_with_fixes(ctx: TestContext) -> anyhow::Result<()> {
-    queue_response(
-        &ctx.backend_state,
-        MockResponse::json(backend_malformed_arguments_response()),
-    );
+    queue_response(&ctx.backend_state, MockResponse::json(backend_malformed_arguments_response()));
 
     let resp = send_streaming(&ctx.http_client, &ctx.proxy_addr, request_with_write_tool("stream")).await?;
 
