@@ -189,18 +189,36 @@ async fn do_spawn_and_run(
     Ok(())
 }
 
-/// Find the proxy binary, trying release then debug builds
+/// Find the proxy binary to test.
+///
+/// Picks the most recently built candidate rather than a fixed release-then-debug
+/// order. A stale release binary sitting next to a fresh debug one would otherwise be
+/// tested silently, so the suite would report on code that is not the code just changed.
 fn find_proxy_bin() -> anyhow::Result<String> {
-    for candidate in DEFAULT_PROXY_BINS {
-        if std::path::Path::new(candidate).exists() {
-            println!("Using proxy binary: {}", candidate.bright_cyan());
-            return Ok(candidate.to_string());
-        }
+    let mut found: Vec<(std::time::SystemTime, &str)> = DEFAULT_PROXY_BINS
+        .iter()
+        .filter_map(|candidate| {
+            let mtime = std::fs::metadata(candidate).ok()?.modified().ok()?;
+            Some((mtime, *candidate))
+        })
+        .collect();
+
+    // Newest first
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let (_, newest) = found.first().ok_or_else(|| {
+        anyhow::anyhow!(
+            "No proxy binary found. Tried: {}\nBuild with: cd .. && cargo build --release",
+            DEFAULT_PROXY_BINS.join(", ")
+        )
+    })?;
+
+    println!("Using proxy binary: {}", newest.bright_cyan());
+    for (_, stale) in found.iter().skip(1) {
+        println!("  {} skipping older build: {}", "note:".yellow(), stale.bright_black());
     }
-    Err(anyhow::anyhow!(
-        "No proxy binary found. Tried: {}\nBuild with: cd .. && cargo build --release",
-        DEFAULT_PROXY_BINS.join(", ")
-    ))
+
+    Ok(newest.to_string())
 }
 
 /// Exit with code 1 if any tests failed
