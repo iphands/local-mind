@@ -155,6 +155,10 @@ REASONING = "vllm.reasoning.abs_reasoning_parsers"
 TRANSFORMERS_BACKEND = "vllm.model_executor.models.transformers.base"
 TU_CONFIG = "vllm.transformers_utils.config"
 INTERFACES = "vllm.model_executor.models.interfaces"
+W8A16FP8 = (
+    "vllm.model_executor.layers.quantization.compressed_tensors"
+    ".schemes.compressed_tensors_w8a16_fp8"
+)
 
 
 def _log(msg):
@@ -593,6 +597,66 @@ def _patch_eagle3_lookup(mod):
     _log("[muse-native] backported the EAGLE3 aux-layer lookup from newer main")
 
 
+# ---------------------------------------------------------------------------
+# SHIM 9 -- let an FP8-quantized lm_head reach the kernel (MUSE_FP8_LMHEAD=0 to disable)
+# ---------------------------------------------------------------------------
+# vLLM supports a quantized lm_head: get_quant_method has an explicit
+# `isinstance(layer, ParallelLMHead)` branch, and it binds
+# CompressedTensorsW8A16Fp8 correctly for our fp8lmhead checkpoint. Loading then
+# dies one step later:
+#
+#     humming_utils.py:465 in prepare_humming_layer
+#       shape_n_stacks = layer.output_partition_sizes
+#     AttributeError: 'ParallelLMHead' object has no attribute
+#                     'output_partition_sizes'
+#
+# ParallelLMHead subclasses VocabParallelEmbedding, not LinearBase, so it never
+# gets the attribute the Linear path takes for granted. This is an upstream
+# oversight rather than a design decision -- the comment two lines ABOVE the
+# failure special-cases this exact class:
+#
+#     # Use hasattr rather than getattr's default arg, which is evaluated
+#     # eagerly and would raise on layers lacking input_size (e.g. ParallelLMHead)
+#
+# They guarded input_size_per_partition for ParallelLMHead and then used
+# output_partition_sizes unguarded on the very next line.
+#
+# CompressedTensorsW8A16Fp8.create_weights already RECEIVES output_partition_sizes
+# and stores it as `logical_widths`; it just never sets the name the humming
+# kernel reads. So the fix is to record it under both names. Only fills the
+# attribute when it is missing, which makes it a no-op for every LinearBase layer.
+def _patch_w8a16_fp8_lmhead(mod):
+    if os.environ.get("MUSE_FP8_LMHEAD", "1") != "1":
+        return
+    cls = getattr(mod, "CompressedTensorsW8A16Fp8", None)
+    if cls is None or getattr(cls, "_muse_opsizes_installed", False):
+        return
+    real_create_weights = cls.create_weights
+
+    def create_weights(self, layer, input_size_per_partition,
+                       output_partition_sizes, *args, **kwargs):
+        real_create_weights(self, layer, input_size_per_partition,
+                            output_partition_sizes, *args, **kwargs)
+        # Mirror what LinearBase.__init__ would have set, deriving each the same
+        # way it does rather than guessing:
+        #   linear.py:347-349  output_partition_sizes = [output_size]
+        #   linear.py:267      has_bias = bias   (ParallelLMHead registers
+        #                      bias=None when bias=False, so test for None)
+        # Each is filled ONLY when absent, so this is a no-op on every real
+        # LinearBase layer and cannot mask an upstream fix.
+        if not hasattr(layer, "output_partition_sizes"):
+            layer.output_partition_sizes = list(output_partition_sizes)
+        if not hasattr(layer, "has_bias"):
+            layer.has_bias = getattr(layer, "bias", None) is not None
+        if not hasattr(layer, "layer_name"):
+            layer.layer_name = getattr(layer, "prefix", "") or ""
+        return None
+
+    cls.create_weights = create_weights
+    cls._muse_opsizes_installed = True
+    _log("[muse-fp8-lmhead] output_partition_sizes shim installed")
+
+
 _PATCHES = {
     MODELING: _patch_modeling,
     SPECULATIVE: _patch_speculative,
@@ -600,6 +664,7 @@ _PATCHES = {
     TRANSFORMERS_BACKEND: _patch_transformers_backend,
     TU_CONFIG: _patch_native_configs,
     INTERFACES: _patch_eagle3_lookup,
+    W8A16FP8: _patch_w8a16_fp8_lmhead,
 }
 
 

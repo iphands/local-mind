@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Greedy output diff between two checkpoints -- did quantization change what it says?
+#
+#   ./scripts/muse-quality-diff MODEL_A MODEL_B
+#   ./scripts/muse-quality-diff RedHatAI/Muse-Glimmer-30B-NVFP4 \
+#                               RedHatAI/Muse-Glimmer-30B-NVFP4-fp8lmhead
+#
+# THE FIELD NAME. This model reasons before answering, and on vLLM 0.27.1 the
+# reasoning lands in `message.reasoning` -- NOT `reasoning_content`, and NOT
+# `content`, which is null until the reasoning channel closes. Reading `.content`
+# alone returns "" for every short generation, so every comparison passes while
+# checking nothing. That exact bug shipped twice in this repo (muse-nvfp4-sweep,
+# then muse-fusion-sweep, where the "fix" guessed reasoning_content and was still
+# wrong). Verified against a live response before writing this:
+#     message keys: role, content, refusal, annotations, audio, function_call, reasoning
+# So: compare reasoning + content, and FAIL LOUDLY if both are empty.
+#
+# max_tokens is deliberately generous -- short caps truncate mid-reasoning and the
+# diff then measures where the cap fell, not what the model would have said.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+A=${1:?need MODEL_A}
+B=${2:?need MODEL_B}
+NAME=vllm-muse
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+APIMODEL=${APIMODEL:-cosmo-6000}
+READY_TIMEOUT=${READY_TIMEOUT:-1200}
+MAX_TOKENS=${MAX_TOKENS:-600}
+OUT=${OUT:-$HERE/bench-logs/quality}
+
+# shellcheck source=../_bench-lib.sh
+source "$HERE/_bench-lib.sh"
+mkdir -p "$OUT"
+
+PROMPTS=(
+  "List the first 8 prime numbers, then explain in one sentence why 1 is not prime."
+  "Write a Python function that merges two sorted lists into one sorted list. Just the code."
+  "What is 17 * 23? Show your working."
+  "Explain the difference between a mutex and a semaphore in two sentences."
+  "Write a bash one-liner that finds all files larger than 100MB under /var and sorts them by size."
+  "A train leaves at 14:35 and arrives at 17:10. How long is the journey?"
+  "In one sentence: what does the C keyword 'volatile' actually guarantee?"
+  "Name three failure modes of speculative decoding at long context."
+)
+
+capture() {  # <model> <tag>
+  local model=$1 tag=$2 i=0
+  echo "## booting $tag ($model)"
+  stop_server
+  DETACH=1 PORT="$PORT" "$HERE/run-muse" "$model" > "$OUT/$tag.boot.log" 2>&1
+  if ! wait_ready; then echo "!! $tag failed to boot -- see $OUT/$tag.boot.log"; return 1; fi
+
+  for p in "${PROMPTS[@]}"; do
+    i=$((i+1))
+    jq -nc --arg m "$APIMODEL" --arg p "$p" --argjson mt "$MAX_TOKENS" \
+      '{model:$m, temperature:0, max_tokens:$mt,
+        messages:[{role:"user",content:$p}]}' > "$OUT/.body.json"
+    curl -sS --max-time 600 -X POST "http://${HOST}/v1/chat/completions" \
+      -H 'Content-Type: application/json' --data-binary @"$OUT/.body.json" \
+      | python3 -c "
+import json,sys
+r=json.load(sys.stdin)
+m=r['choices'][0]['message']
+txt=(m.get('reasoning') or '')+'\n===ANSWER===\n'+(m.get('content') or '')
+sys.stdout.write(txt)
+" > "$OUT/$tag.$i.txt"
+    local n; n=$(tr -d '[:space:]' < "$OUT/$tag.$i.txt" | wc -c)
+    printf '   %-6s prompt %d: %6s chars\n' "$tag" "$i" "$n"
+    if [[ "$n" -lt 20 ]]; then
+      echo "   !! near-empty reply -- the diff below would be meaningless"
+    fi
+  done
+  stop_server
+}
+
+capture "$A" a || exit 1
+capture "$B" b || exit 1
+
+echo
+echo "## diff: A=$A   B=$B"
+same=0; diff_n=0
+for i in $(seq 1 ${#PROMPTS[@]}); do
+  if diff -q "$OUT/a.$i.txt" "$OUT/b.$i.txt" >/dev/null 2>&1; then
+    printf '  prompt %d: IDENTICAL\n' "$i"; same=$((same+1))
+  else
+    # First differing line, and how far in it is -- a late single-token divergence
+    # is an argmax tie; an early one, or a length blow-up, is not.
+    la=$(wc -l < "$OUT/a.$i.txt"); lb=$(wc -l < "$OUT/b.$i.txt")
+    first=$(diff "$OUT/a.$i.txt" "$OUT/b.$i.txt" | head -1)
+    printf '  prompt %d: DIFFERS (lines %s vs %s) %s\n' "$i" "$la" "$lb" "$first"
+    diff_n=$((diff_n+1))
+  fi
+done
+echo
+echo "## $same identical, $diff_n differing, of ${#PROMPTS[@]}"
+echo "## texts in $OUT/{a,b}.N.txt -- read the differing ones before trusting the count."

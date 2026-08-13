@@ -189,14 +189,17 @@ for entry in "${ARMS[@]}"; do
   fi
 
   # Correctness before perf: a fused graph that changes the answer is not a win.
-  # reasoning_content FIRST, then content. Reading only .content is a trap: this
-  # model reasons before answering, so at a modest max_tokens it is still inside
-  # the reasoning channel and .content comes back EMPTY. Every arm then compares
-  # equal-to-empty and the column reads "same" while checking nothing. That bug
-  # shipped in the first run of this script -- see the header.
+  # The field is `reasoning`, NOT `reasoning_content`, and NOT `content` (which is
+  # null until the reasoning channel closes). Verified against a live vLLM 0.27.1
+  # response -- message keys are:
+  #     role, content, refusal, annotations, audio, function_call, reasoning
+  # Reading .content alone returns "" for every short generation, so every arm
+  # compares equal-to-empty and the column reads "same" while checking nothing.
+  # That bug shipped twice here: once reading .content, then again "fixed" to
+  # reasoning_content, which is also wrong. Hence the empty-reply guard below.
   txt=$(curl -sS --max-time 300 -X POST "http://${HOST}/v1/chat/completions" \
           -H 'Content-Type: application/json' --data-binary @"$WORK/correct.json" \
-        | jq -r '((.choices[0].message.reasoning_content // "") + (.choices[0].message.content // ""))' \
+        | jq -r '((.choices[0].message.reasoning // "") + (.choices[0].message.content // ""))' \
         | tr -s '[:space:]' ' ')
   if [[ -z "${txt// /}" ]]; then
     printf '  %-12s EMPTY REPLY -- correctness check is not meaningful\n' "$label"

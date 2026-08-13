@@ -472,6 +472,10 @@ CONTAINER_ARGS=(
   -e VLLM_WORKER_MULTIPROC_METHOD=spawn
   -e SAFETENSORS_FAST_GPU=1
   -e VLLM_LOG_STATS_INTERVAL=1
+  # Ad-hoc env passthrough, space-separated NAME=VALUE pairs. For one-off diagnosis
+  # rather than anything the defaults should depend on, e.g.
+  #   ENV_EXTRA="VLLM_LOGGING_LEVEL=DEBUG" ./run-muse
+  ${ENV_EXTRA:+$(for _kv in $ENV_EXTRA; do printf -- '-e\n%s\n' "$_kv"; done)}
   # NOTE: no VLLM_ALLOW_LONG_MAX_MODEL_LEN — 131072 is the real limit here.
   -p "0.0.0.0:${PORT}:8799"
   -v "$MODEL_FOLDER":/models:ro

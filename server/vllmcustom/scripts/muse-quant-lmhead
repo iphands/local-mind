@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# Quantize lm_head to weight-only FP8 in a copy of the NVFP4 checkpoint.
+#
+#   ./scripts/muse-quant-lmhead --dry-run     # report only, write nothing
+#   ./scripts/muse-quant-lmhead
+#
+# Why: lm_head is 2.69 GB of bf16 read on EVERY decode step -- 16% of the 16.85 GB
+# read per token -- because the original recipe excluded it and tie_word_embeddings
+# is false, so it is a genuine second copy of the embedding matrix. Halving it to FP8
+# removes 1.345 GB/step. Against 1560 GB/s of measured achievable read bandwidth and
+# ~3.5ms/step of non-bandwidth overhead, that predicts 70.0 -> ~74.5 tok/s (+6.4%).
+#
+# Operates on TARGET (default ...-fp8lmhead), never on the original checkpoint, so the
+# revert is `rm -rf $TARGET` and the serving default is unaffected throughout.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+MODEL_ROOT=${MODEL_ROOT:-$(cd "$HERE/models/vllm" && pwd)}
+TARGET=${TARGET:-RedHatAI/Muse-Glimmer-30B-NVFP4-fp8lmhead}
+SOURCE=${SOURCE:-RedHatAI/Muse-Glimmer-30B-NVFP4}
+CONTAINER=${CONTAINER:-iphands/vllm-blackwell:latest}
+
+[[ -d "$MODEL_ROOT/$TARGET" ]] || {
+  echo "!! $MODEL_ROOT/$TARGET does not exist."
+  echo "   Create it first, e.g.:"
+  echo "     cp -r --reflink=always '$MODEL_ROOT/$SOURCE' '$MODEL_ROOT/$TARGET'"
+  exit 2
+}
+# Refuse to touch the source, whatever TARGET was set to.
+[[ "$TARGET" != "$SOURCE" ]] || { echo "!! TARGET must not be the source checkpoint"; exit 2; }
+
+echo "## quantizing lm_head -> FP8 (W8A16, per-channel) in $TARGET"
+echo "## source (untouched): $SOURCE"
+echo
+
+docker run --rm --entrypoint python3 \
+  -v "$MODEL_ROOT":/models \
+  -v "$HERE/scripts":/scripts:ro \
+  "$CONTAINER" /scripts/muse_quant_lmhead.py "/models/$TARGET" "$@" 2>&1 \
+  | grep -vE 'WARNING .*(Detected different devices|CUDA_DEVICE_ORDER)|^\s*$'
+
+echo
+echo "## next: boot it and REQUIRE the scheme to have bound --"
+echo "##   MODEL=$TARGET ./run-muse"
+echo "##   grep 'Using scheme.*lm_head' <log>"
