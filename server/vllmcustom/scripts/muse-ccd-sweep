@@ -1,0 +1,192 @@
+#!/usr/bin/env bash
+# Does pinning vLLM to a CCD help? -- 5950X, 2x8-core CCDs, one 32 MB L3 each.
+#
+#   ./scripts/muse-ccd-sweep
+#   CONC=1,2,4,8 ./scripts/muse-ccd-sweep
+#   ONLY=default,ccd0 ./scripts/muse-ccd-sweep
+#
+# Background (see ~/prog/slop/affinity/ccd_vllm_test.txt for the full capture):
+#   * CCD0 = cpus 0-7,16-23   CCD1 = cpus 8-15,24-31   (verified by L3 sharing,
+#     NOT by topology/die_id, which reports 0 for everything on this kernel).
+#   * SMT sibling of cpu N is cpu N+16.
+#   * This is a hard-binned part: every CCD0 core boosts higher than every CCD1
+#     core (highest_perf 206-236 vs 166-201, zero overlap). So "CCD0 vs CCD1" is
+#     really two effects at once -- better silicon AND single-L3 locality -- and
+#     this sweep cannot separate them. The nosmt arms are what isolate SMT.
+#   * There is NO NUMA or PCIe-proximity reason to prefer either CCD: single NUMA
+#     node, GPU hangs off the IOD, local_cpulist is 0-31 for both.
+#
+# Why no restart: docker update rewrites the cgroup cpuset live, so every arm is
+# measured against the SAME warm process -- no reload, no recompile, no cache
+# refill between arms. That removes the largest source of run-to-run variance.
+#
+# The caveat that buys: thread POOLS were already sized when the process started
+# unpinned (OMP/torch read the cpuset at init). So this measures "constrain where
+# existing threads may run", not "start vLLM with N cpus". A win here is real; a
+# loss might just be oversubscription that a restart would fix. Noted in output.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+MODEL=${MODEL:-RedHatAI/Muse-Glimmer-30B-NVFP4}
+NAME=vllm-muse
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+APIMODEL=${APIMODEL:-cosmo-6000}
+READY_TIMEOUT=${READY_TIMEOUT:-1200}
+MAX_TOKENS=${MAX_TOKENS:-256}
+PROMPT_TOKENS=${PROMPT_TOKENS:-2048}
+CONC=${CONC:-1,2,4}
+REPEATS=${REPEATS:-3}
+LOGDIR=${LOGDIR:-$HERE/bench-logs}
+WORK=$(mktemp -d)
+
+# shellcheck source=../_bench-lib.sh
+source "$HERE/_bench-lib.sh"
+mkdir -p "$LOGDIR"
+for tool in curl jq docker bc; do
+  command -v "$tool" >/dev/null || { echo "## need $tool"; exit 2; }
+done
+
+# label|cpuset   (empty cpuset = unpinned, docker's default)
+ARMS=(
+  "default|"
+  "ccd0|0-7,16-23"
+  "ccd1|8-15,24-31"
+  "ccd0-nosmt|0-7"
+  "ccd1-nosmt|8-15"
+)
+
+LOGS_PID=""
+BOOTED_HERE=0
+cleanup() {
+  [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null
+  rm -rf "$WORK"
+  # Always hand the container back unpinned, however we exit.
+  docker update --cpuset-cpus="" "$NAME" >/dev/null 2>&1
+  if [[ "$BOOTED_HERE" == "1" && "${KEEP:-0}" != "1" ]]; then
+    echo; echo "## stopping $NAME (KEEP=1 to leave it up)"; stop_server
+  fi
+}
+trap cleanup EXIT
+
+build_prompt() {
+  : > "$WORK/corpus.txt"
+  for f in run-muse patches/muse-embed-norm/sitecustomize.py \
+           patches/muse-dflash/muse_dflash.py scripts/muse-longctx-sweep; do
+    [[ -f "$HERE/$f" ]] && { echo "===== $f ====="; cat "$HERE/$f"; } >> "$WORK/corpus.txt"
+  done
+  while (( $(wc -c < "$WORK/corpus.txt") < $(( PROMPT_TOKENS * 5 )) )); do
+    cat "$WORK/corpus.txt" "$WORK/corpus.txt" > "$WORK/c2" && mv "$WORK/c2" "$WORK/corpus.txt"
+  done
+  head -c $(( PROMPT_TOKENS * 4 )) "$WORK/corpus.txt" > "$WORK/p.txt"
+  printf '\n\nIn one sentence, what kind of code is above?\n' >> "$WORK/p.txt"
+  # temperature 0 + ignore_eos: every arm generates EXACTLY MAX_TOKENS tokens of
+  # the same text. This model reasons before answering, so without ignore_eos the
+  # completion length varies and tok/s stops being comparable across arms.
+  # Body built once to a file -- a large prompt as a curl argv exceeds ARG_MAX.
+  jq -nc --arg m "$APIMODEL" --rawfile p "$WORK/p.txt" --argjson mt "$MAX_TOKENS" \
+    '{model:$m, temperature:0, max_tokens:$mt, ignore_eos:true, stream:true,
+      stream_options:{include_usage:true},
+      messages:[{role:"user",content:$p}]}' > "$WORK/body.json"
+}
+
+measure() {  # <slot> -> "<ttft_ms> <decode_tps> <total_ms> <prompt_tokens>"
+  local slot=${1:-0} t0 tf t1 line ptok ctok
+  local out="$WORK/stream.$slot"
+  t0=$(date +%s%N); tf=""
+  : > "$out"
+  while IFS= read -r line; do
+    [[ "$line" == data:* ]] || continue
+    [[ -z "$tf" ]] && tf=$(date +%s%N)
+    printf '%s\n' "${line#data: }" >> "$out"
+  done < <(curl -sSN --max-time 900 -X POST "http://${HOST}/v1/chat/completions" \
+             -H 'Content-Type: application/json' --data-binary @"$WORK/body.json")
+  t1=$(date +%s%N)
+  [[ -z "$tf" ]] && { echo "0 0 0 0"; return; }
+  ptok=$(grep -o '"prompt_tokens":[0-9]*' "$out" | tail -1 | cut -d: -f2)
+  ctok=$(grep -o '"completion_tokens":[0-9]*' "$out" | tail -1 | cut -d: -f2)
+  local ttft=$(( (tf - t0) / 1000000 )) total=$(( (t1 - t0) / 1000000 ))
+  local dec="0"
+  (( total > ttft && ${ctok:-0} > 0 )) && dec=$(echo "scale=1; ${ctok} * 1000 / ($total - $ttft)" | bc)
+  echo "$ttft $dec $total ${ptok:-0}"
+}
+
+measure_conc() {  # <n> -> "<median_ttft_ms> <agg_decode_tps>"
+  local n=$1 i pids=()
+  rm -f "$WORK"/m.* "$WORK"/stream.*
+  for ((i = 0; i < n; i++)); do
+    measure "$i" > "$WORK/m.$i" &
+    pids+=("$!")
+  done
+  # Wait on THESE pids only -- a bare `wait` would also block on the
+  # `docker logs -f` follower, which never exits.
+  wait "${pids[@]}" 2>/dev/null
+  if ! compgen -G "$WORK/m.*" >/dev/null; then echo "0 0"; return; fi
+  cat "$WORK"/m.* | awk '
+      { t[NR]=$1; d+=$2 }
+      END { if (NR==0) { print "0 0"; exit }
+            n=asort(t); print (n%2 ? t[(n+1)/2] : int((t[n/2]+t[n/2+1])/2)), d }'
+  rm -f "$WORK"/m.* "$WORK"/stream.*
+}
+
+set_cpuset() {  # <cpuset>  -- returns 0 if the cgroup actually reflects it
+  local want=$1 cid eff
+  docker update --cpuset-cpus="$want" "$NAME" >/dev/null 2>&1 || return 1
+  cid=$(docker inspect "$NAME" --format '{{.Id}}' 2>/dev/null)
+  eff=$(cat "/sys/fs/cgroup/system.slice/docker-$cid.scope/cpuset.cpus.effective" 2>/dev/null)
+  echo "$eff"
+}
+
+# ---- boot once, then never restart -------------------------------------------
+log="$LOGDIR/ccd-sweep.log"; : > "$log"
+if curl -sf "http://${HOST}/health" >/dev/null 2>&1; then
+  echo "## reusing the server already on :$PORT"
+else
+  echo "## booting $NAME (defaults) -- log: $log"
+  DETACH=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" >> "$log" 2>&1
+  docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
+  BOOTED_HERE=1
+  wait_ready || { echo "## BOOT FAILED -- see $log"; exit 1; }
+fi
+
+build_prompt
+echo
+echo "## muse-ccd-sweep  model=$MODEL  prompt~${PROMPT_TOKENS}tok  out=${MAX_TOKENS} (ignore_eos)"
+echo "##   repeats=$REPEATS (median)  conc=$CONC  one warm-up per arm, discarded"
+echo "##   CCD0=0-7,16-23  CCD1=8-15,24-31  SMT sibling of N is N+16"
+echo
+
+printf '  %-12s %-14s %5s %11s %12s\n' "arm" "cpuset" "conc" "ttft_ms" "decode_t/s"
+printf '  %-12s %-14s %5s %11s %12s\n' "------------" "--------------" "-----" "-----------" "------------"
+
+IFS=',' read -ra CONCS <<<"$CONC"
+for entry in "${ARMS[@]}"; do
+  IFS='|' read -r label cpuset <<<"$entry"
+  [[ -n "${ONLY:-}" && ",$ONLY," != *",$label,"* ]] && continue
+
+  eff=$(set_cpuset "$cpuset")
+  want_show=${cpuset:-"(unpinned)"}
+  # Verify the cgroup took it -- a silently-ignored docker update would make
+  # every arm identical and look like "pinning does nothing".
+  if [[ -n "$cpuset" && "$eff" != "$cpuset" ]]; then
+    printf '  %-12s %-14s  CPUSET DID NOT APPLY (effective=%s)\n' "$label" "$want_show" "${eff:-?}"
+    continue
+  fi
+
+  measure_conc 1 >/dev/null   # warm-up: populates prefix cache, settles clocks
+
+  for c in "${CONCS[@]}"; do
+    ttfts=(); decs=()
+    for ((r = 0; r < REPEATS; r++)); do
+      read -r t d < <(measure_conc "$c")
+      ttfts+=("$t"); decs+=("$d")
+    done
+    printf '  %-12s %-14s %5s %11s %12s\n' \
+           "$label" "$want_show" "$c" "$(median "${ttfts[@]}")" "$(median "${decs[@]}")"
+    label=""; want_show=""   # only label the first row of each arm
+  done
+done
+
+echo
+echo "## decode_t/s at conc>1 is AGGREGATE across streams; ttft_ms is the median stream."
+echo "## Thread pools were sized at boot under the unpinned cpuset -- see header."
