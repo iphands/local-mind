@@ -44,7 +44,7 @@ READY_TIMEOUT=${READY_TIMEOUT:-1200}
 MAX_TOKENS=${MAX_TOKENS:-200}
 CONCURRENCY=${CONCURRENCY:-3}      # matches the observed "Running: 3 reqs"
 KEEP=${KEEP:-0}
-LOGDIR=${LOGDIR:-$HERE/bench-logs}
+LOGDIR=${LOGDIR:-$HERE/bench/bench-logs}
 # Production sampling, not greedy -- muse-spec-check already showed these two
 # regimes differ, and this probe is about reproducing production.
 TEMP=${TEMP:-1.0}
@@ -52,8 +52,8 @@ TOP_P=${TOP_P:-0.95}
 TOP_K=${TOP_K:-64}
 WORK=$(mktemp -d)
 
-# shellcheck source=../_bench-lib.sh
-source "$HERE/_bench-lib.sh"
+# shellcheck source=../bench/_bench-lib.sh
+source "$HERE/bench/_bench-lib.sh"
 mkdir -p "$LOGDIR"
 for tool in curl jq docker bc; do
   command -v "$tool" >/dev/null || { echo "## need $tool on PATH"; exit 2; }
@@ -79,8 +79,8 @@ build_long_prompt() {
   {
     echo "Here are several files from a vLLM deployment repo."
     echo
-    for f in run-muse patches/muse-dflash/muse_dflash.py \
-             patches/muse-embed-norm/sitecustomize.py; do
+    for f in muse/run muse/patches/muse-dflash/muse_dflash.py \
+             muse/patches/muse-embed-norm/sitecustomize.py; do
       echo "===== $f ====="
       cat "$HERE/$f"
       echo
@@ -193,7 +193,7 @@ else
   : > "$LOG"
   echo "## booting SPEC=1 once (log -> $LOG)"
   stop_server
-  DETACH=1 SPEC=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" >> "$LOG" 2>&1
+  DETACH=1 SPEC=1 PORT="$PORT" "$HERE/muse/run" "$MODEL" >> "$LOG" 2>&1
   docker logs -f "$NAME" >> "$LOG" 2>&1 &
   LOGS_PID=$!
   if ! wait_ready; then

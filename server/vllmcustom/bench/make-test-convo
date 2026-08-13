@@ -6,9 +6,9 @@ a token budget is reached, wraps them in a single "summarize this engine" user
 message, and saves it to data/test-convo.json. bench-context tacks this on as the
 static 3rd turn (primes -> python -> quake2) to reach ~128k context in one turn.
 
-    ./make-test-convo                          # ~120k-token default
-    QUAKE_TOKEN_BUDGET=64000 ./make-test-convo
-    SUBSYS="src/server src/common" ./make-test-convo
+    ./bench/make-test-convo                          # ~120k-token default
+    QUAKE_TOKEN_BUDGET=64000 ./bench/make-test-convo
+    SUBSYS="src/server src/common" ./bench/make-test-convo
 
 Regenerable from vendor/yquake2 (gitignored); the output is gitignored too.
 """
@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-YQUAKE_DIR = Path(os.environ.get("YQUAKE_DIR", HERE / "vendor" / "yquake2"))
+YQUAKE_DIR = Path(os.environ.get("YQUAKE_DIR", HERE.parent / "vendor" / "yquake2"))
 SUBSYS = os.environ.get("SUBSYS", "src/common src/server src/game").split()
 BUDGET_TOKENS = int(os.environ.get("QUAKE_TOKEN_BUDGET", "120000"))
 # Measured: C code tokenizes at ~2.3-2.7 chars/token depending on which files land

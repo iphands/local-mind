@@ -50,7 +50,7 @@ either), so both are borrowed from the target by the generic proposer
 (vllm/v1/spec_decode/llm_base_proposer.py:1423-1585). See MUSE_DRAFT_EMBED_NORM
 below for the one wrinkle that creates.
 
-Registered by run-muse via
+Registered by muse/run via
     --model-class-overrides '{"DFlashMuseGlimmerAssistantModel": "muse_dflash:MuseGlimmerDFlashForCausalLM"}'
 with this directory on PYTHONPATH. The draft config is reshaped into the layout
 vLLM's DFlash code expects by patches/muse-embed-norm/sitecustomize.py -- see
@@ -194,7 +194,7 @@ class MuseGlimmerDFlashForCausalLM(DFlashQwen3ForCausalLM):
 
         # Draft logits are compared against target logits by rejection sampling,
         # so the drafter must apply the same output_multiplier the target does
-        # (run-muse feeds it to the target as text_config.logit_scale). An
+        # (muse/run feeds it to the target as text_config.logit_scale). An
         # unscaled drafter is 5.1x too sharp and acceptance collapses. Precedent:
         # Gemma4DSparkForCausalLM does the same with final_logit_softcapping.
         if getattr(self.config, "logit_scale", 1.0) == 1.0:

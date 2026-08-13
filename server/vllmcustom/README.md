@@ -4,30 +4,48 @@ A self-owned vLLM build for the **RTX PRO 6000 Blackwell (sm_120)**. No prebuilt
 images: PyTorch, FlashInfer, and vLLM are all compiled from source for
 `TORCH_CUDA_ARCH_LIST=12.0` on CUDA 13.
 
+## Layout
+
+```
+container/   build, push, Dockerfile, and the two build helpers (preflight, slice-setup)
+qwen/        run — Qwen3.5 / Qwen3.6
+laguna/      run — Laguna-S DFlash
+muse/        run — Muse Glimmer, plus patches/ (the shims it mounts at /vllm-patches)
+bench/       the measurement harness: bench, the sweeps, lib/, and all run artifacts
+scripts/     one-off probes and per-model sweeps (mostly Muse)
+notes/ plans/ vendor/ models/
+```
+
+Each `*/run` is a standalone launcher for one model family; they share nothing
+but the image. `bench/` holds everything a benchmark writes, so wiping results is
+`rm -rf bench/bench-logs`.
+
 | script   | what it does |
 |----------|--------------|
-| `./build`| clone/pull pinned source into `$BUILD_DIR/src`, compile, tag image |
-| `./run`  | serve a model with the local image (GPU 0 only), OpenAI API on `:8700` |
-| `./bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench-results.md` |
-| `./bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
-| `./bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |
-| `./make-test-convo`| build the static ~100k-token "summarize Quake II source" turn from `vendor/yquake2` into `data/test-convo.json` |
-| `./push` | `docker push` to `docker.io/iphands/vllm-blackwell` |
-| `lib/`   | the shared measurement client (`benchclient.py`) + the Python drivers the bench scripts invoke (`measure.py`, `ctxbench.py`) |
+| `./container/build`| clone/pull pinned source into `$BUILD_DIR/src`, compile, tag image |
+| `./qwen/run`  | serve a model with the local image (GPU 0 only), OpenAI API on `:8700` |
+| `./muse/run`  | serve Muse Glimmer — same image, plus the shims in `muse/patches/` (see below) |
+| `./laguna/run`| serve Laguna-S with its DFlash drafter |
+| `./bench/bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench/bench-results.md` |
+| `./bench/bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
+| `./bench/bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |
+| `./bench/make-test-convo`| build the static ~100k-token "summarize Quake II source" turn from `vendor/yquake2` into `bench/data/test-convo.json` |
+| `./container/push` | `docker push` to `docker.io/iphands/vllm-blackwell` |
+| `bench/lib/`   | the shared measurement client (`benchclient.py`) + the Python drivers the bench scripts invoke (`measure.py`, `ctxbench.py`) |
 
 ## Quick start
 
 ```bash
-./build                                   # first build compiles torch from source (slow; see below)
-./run ./models/vllm/Qwen3.6-27B           # serves on http://localhost:8700/v1
-./bench baseline                          # measure tok/s of the running server
+./container/build                                   # first build compiles torch from source (slow; see below)
+./qwen/run ./models/vllm/Qwen3.6-27B           # serves on http://localhost:8700/v1
+./bench/bench baseline                          # measure tok/s of the running server
 ```
 
 `models` is a symlink to `/mnt/noir/scratch/ai/llm/models`, so paths match the
 old `server/vllm` scripts:
 
 ```bash
-./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4
+./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4
 ```
 
 ## Default version set (mutually compatible)
@@ -52,38 +70,38 @@ Everything is a build-arg; the CUDA version becomes part of the tag so variants
 coexist:
 
 ```bash
-CUDA_VERSION=13.1.2 ./build               # -> iphands/vllm-blackwell:cu1312-sm120
-VLLM_REF=v0.25.1 TORCH_REF=v2.11.0 FLASHINFER_REF=v0.6.13 ./build
+CUDA_VERSION=13.1.2 ./container/build               # -> iphands/vllm-blackwell:cu1312-sm120
+VLLM_REF=v0.25.1 TORCH_REF=v2.11.0 FLASHINFER_REF=v0.6.13 ./container/build
 ```
 
 Then run a specific variant and benchmark it:
 
 ```bash
-IMAGE_TAG=cu1312-sm120 ./run ./models/vllm/Qwen3.6-27B
-./bench cu1312-flashinfer
+IMAGE_TAG=cu1312-sm120 ./qwen/run ./models/vllm/Qwen3.6-27B
+./bench/bench cu1312-flashinfer
 ```
 
 ## A/B-testing backends (runtime, no rebuild)
 
-Backends and the main perf knobs are runtime env on `./run`:
+Backends and the main perf knobs are runtime env on `./qwen/run`:
 
 ```bash
-ATTN_BACKEND=flashinfer ./run ./models/vllm/Qwen3.6-27B   # default (correct for Qwen3.5)
-ATTN_BACKEND=triton     ./run ./models/vllm/Qwen3.6-27B
-MOE_BACKEND=flashinfer_b12x ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4  # SM12x fused MoE (opt-in)
-NVFP4_BACKEND=cutlass   ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # NVFP4 GEMM kernel
-SPEC_TOKENS=3           ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # MTP tokens (default 2)
-CUDAGRAPH_MODE=FULL_AND_PIECEWISE ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4  # full CUDA graphs
-FLASHINFER_AUTOTUNE=1   ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # autotune during warmup
-MAX_BATCHED_TOKENS=32768 ./run ./models/vllm/Qwen3.6-27B  # faster long-context prefill (default 8192)
-EXTRA_ARGS="--max-num-seqs 8" ./run ./models/vllm/Qwen3.6-27B
+ATTN_BACKEND=flashinfer ./qwen/run ./models/vllm/Qwen3.6-27B   # default (correct for Qwen3.5)
+ATTN_BACKEND=triton     ./qwen/run ./models/vllm/Qwen3.6-27B
+MOE_BACKEND=flashinfer_b12x ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4  # SM12x fused MoE (opt-in)
+NVFP4_BACKEND=cutlass   ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # NVFP4 GEMM kernel
+SPEC_TOKENS=3           ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # MTP tokens (default 2)
+CUDAGRAPH_MODE=FULL_AND_PIECEWISE ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4  # full CUDA graphs
+FLASHINFER_AUTOTUNE=1   ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # autotune during warmup
+MAX_BATCHED_TOKENS=32768 ./qwen/run ./models/vllm/Qwen3.6-27B  # faster long-context prefill (default 8192)
+EXTRA_ARGS="--max-num-seqs 8" ./qwen/run ./models/vllm/Qwen3.6-27B
 ```
 
-Benchmark each with a distinct label; rows accumulate in `bench-results.md`:
+Benchmark each with a distinct label; rows accumulate in `bench/bench-results.md`:
 
 ```bash
-./bench cu1303-flashinfer
-./bench cu1303-cutlass-mtp2
+./bench/bench cu1303-flashinfer
+./bench/bench cu1303-cutlass-mtp2
 ```
 
 ## Performance tuning (sm120, single GPU)
@@ -92,7 +110,7 @@ Optimizing **single-stream decode tok/s** on one RTX PRO 6000. Distilled from th
 `vendor/rtx6kpro` community wiki (ignore its multi-GPU/NVLink/NCCL/DCP advice — we
 have one card).
 
-**Already optimal in `./run` / `./build` (leave alone):**
+**Already optimal in `./qwen/run` / `./container/build` (leave alone):**
 - **sm120f compile** (`FLASHINFER_CUDA_ARCH_LIST=12.0f`) — *the* critical NVFP4 fix;
   enables the `cvt.rn.satfinite.e2m1x2.f32` FP4 PTX path. Without `f`, NVFP4 is slower
   than int4.
@@ -127,11 +145,11 @@ have one card).
 `VLLM_LOG_STATS_INTERVAL=1` is on by default so each run prints live tok/s + MTP
 acceptance for comparison.
 
-**Automated sweep:** `./bench-wrapper` runs the whole matrix for you — it restarts
+**Automated sweep:** `./bench/bench-wrapper` runs the whole matrix for you — it restarts
 vLLM per config, warms up (mandelbrot prompt), measures (primes prompt), and prints a
 table of **CAP(W)** / TTFT / prefill / **TG (token-gen) tok/s**, appending to
-`bench-wrapper-results.md`. It also writes a long-term `bench-results.jsonl` (one
-record per run, written by `lib/measure.py`) that includes the **GPU0 power cap**
+`bench/bench-wrapper-results.md`. It also writes a long-term `bench/bench-results.jsonl` (one
+record per run, written by `bench/lib/measure.py`) that includes the **GPU0 power cap**
 (read — never set — via `nvidia-smi`) plus the image tag and vLLM version, so old rows
 stay comparable across rebuilds. Config lines are
 `<name> <NVFP4_BACKEND|-> <SPEC_TOKENS> [MOE_BACKEND|-]` (the MoE column is optional).
@@ -140,31 +158,31 @@ Each config is a full 122B reload (minutes), so the default 8-config sweep is
 long; trim via the `CONFIGS` env. Example:
 
 ```bash
-./bench-wrapper /mnt/noir/scratch/ai/llm/models/vllm/Qwen3.5-122B-A10B-NVFP4
-RUNS=3 ./bench-wrapper            # 3 measured runs/config, median TG
+./bench/bench-wrapper /mnt/noir/scratch/ai/llm/models/vllm/Qwen3.5-122B-A10B-NVFP4
+RUNS=3 ./bench/bench-wrapper            # 3 measured runs/config, median TG
 ```
 
-**Large-context decode (`./bench-context`):** `bench-wrapper` only exercises ~1k
+**Large-context decode (`./bench/bench-context`):** `bench/bench-wrapper` only exercises ~1k
 context, so it shows best-case decode. `bench-context` characterizes **TG vs. context
 depth** — the number that actually drops as the KV cache fills — two ways, per backend:
 - **convo**: a realistic 3-turn chat — (1) Bash prime sieve, (2) port to Python, (3) a
   static "summarize this Quake II source" turn that injects ~100k tokens of real C code
   (history is resent each turn, exercising prefix caching). Turn 3 is the big-context
-  measurement. **Generate that turn first** with `./make-test-convo` (reads
-  `vendor/yquake2` → `data/test-convo.json`); if it's missing, bench-context warns and
+  measurement. **Generate that turn first** with `./bench/make-test-convo` (reads
+  `vendor/yquake2` → `bench/data/test-convo.json`); if it's missing, bench/bench-context warns and
   skips turn 3.
 - **pad**: prompts padded to exact `PAD_SIZES` (default `8192 32768 65536 131072`),
   short generation — a clean, repeatable decode-vs-context curve to compare backends at
   the same depth.
 
 ```bash
-./make-test-convo                                 # build the ~100k-token quake2 turn (once)
-QUAKE_TOKEN_BUDGET=150000 ./make-test-convo       # bigger turn (default 120k budget ≈ 104k real)
-./bench-context                                   # ALL permutations (default): {auto,cutlass,cudnn,marlin} × MTP{0,1,2} + b12x
-PAD_SIZES="8192 32768" CONFIGS=$'cutlass cutlass 2' ./bench-context   # quick single-backend subset
+./bench/make-test-convo                                 # build the ~100k-token quake2 turn (once)
+QUAKE_TOKEN_BUDGET=150000 ./bench/make-test-convo       # bigger turn (default 120k budget ≈ 104k real)
+./bench/bench-context                                   # ALL permutations (default): {auto,cutlass,cudnn,marlin} × MTP{0,1,2} + b12x
+PAD_SIZES="8192 32768" CONFIGS=$'cutlass cutlass 2' ./bench/bench-context   # quick single-backend subset
 ```
 
-By default `./bench-context` (no args) runs the **full 14-config matrix** — every NVFP4
+By default `./bench/bench-context` (no args) runs the **full 14-config matrix** — every NVFP4
 backend × MTP {0,1,2} plus the SM12x b12x GEMM/MoE opt-ins, each a full reload +
 3-turn convo + pad-to-128k. Budget **hours**; trim with `CONFIGS=…` / `PAD_SIZES=…`
 for a faster pass. Config lines take the same optional 4th MoE-backend column as
@@ -173,11 +191,11 @@ bench-wrapper.
 The generator is deterministic (sorted files) so turn 3 is byte-identical across
 backends — a fair A/B at the same large context. Its `approx_tokens` is a chars/token
 estimate (default 2.3 chars/token, measured on this C corpus — the old 3.6 default
-made a 120k budget tokenize to ~190k, so regenerate `data/test-convo.json` if yours
+made a 120k budget tokenize to ~190k, so regenerate `bench/data/test-convo.json` if yours
 predates that); the **real** depth is the `context_tokens` bench-context reports for
 the `quake2` turn — tune `QUAKE_TOKEN_BUDGET` from that.
 
-Rows land in `bench-context-results.md` (tables) and `bench-results.jsonl` (with
+Rows land in `bench/bench-context-results.md` (tables) and `bench/bench-results.jsonl` (with
 `mode=convo|pad`, `turn_label`, `context_tokens`, `cached_tokens`, `answer_ttft_ms`,
 the watt cap, and image/vLLM-version provenance). Caveats: **MTP can crash at long
 context** (a failed turn is recorded and the run continues — use a `mtp0` row for a
@@ -202,28 +220,28 @@ recorded, not fatal); and in `convo` mode read **TG**, not TTFT (prefix caching)
 
 ### Version notes (Tier 3, investigated)
 The v0.27.0 bump was taken for architecture support, not decode throughput: it lands
-native `DiffusionGemmaForBlockDiffusion` (unblocking `./run-diffusiongemma`) plus
+native `DiffusionGemmaForBlockDiffusion` (unblocking `./qwen/run-diffusiongemma`) plus
 `LagunaForCausalLM` / `DFlashLagunaForCausalLM`. Decode-wise the earlier pinned set was
 already fine — flashinfer has carried the sm120f FP4 module since 0.6.12 (PR #2650).
 
 A further bump is not free: it drags torch and flashinfer with it (0.27.0 moved torch
 2.11.0 → 2.13.0), which invalidates the `torch-build` layer and most of ccache, so
 budget a full multi-hour rebuild rather than an incremental one. Read the target tag's
-`requirements/cuda.txt` first and move `TORCH_REF`/`FLASHINFER_REF` in `./build` to match.
+`requirements/cuda.txt` first and move `TORCH_REF`/`FLASHINFER_REF` in `./container/build` to match.
 
 `MuseGlimmer` still has no native implementation as of v0.27.0, so three shims are
 required, all runtime — no rebuild:
 
-- `patches/muse-embed-norm/sitecustomize.py` hosts five shims (one `sitecustomize` per
+- `muse/patches/muse-embed-norm/sitecustomize.py` hosts five shims (one `sitecustomize` per
   `PYTHONPATH`, so they share a file). Two matter most: it restores the embedding RMSNorm the
   Transformers fallback drops, and it repairs EAGLE3 aux hidden-state capture — vLLM's
   Transformers backend advertises the interface but silently captures nothing on this model,
   which kills the server on `assert isinstance(model_output, tuple)` the moment
   speculation is on. It also reshapes the drafter's config, since `--hf-overrides`
   cannot reach a draft config (dict overrides are target-only by design).
-- `run-muse`'s `--hf-overrides` supplies `text_config.logit_scale` and hoists
+- `muse/run`'s `--hf-overrides` supplies `text_config.logit_scale` and hoists
   `layer_types`/`sliding_window`.
-- `patches/muse-dflash/muse_dflash.py` registers a drafter class for
+- `muse/patches/muse-dflash/muse_dflash.py` registers a drafter class for
   `Muse-Glimmer-30B-assistant`; vLLM 0.27.1 supports the `dflash` *method* but has no
   architecture for this checkpoint. It is a thin subclass of vLLM's own
   `DFlashQwen3ForCausalLM` — after renaming the two `encoder.*` tensors, the checkpoint's
@@ -247,16 +265,16 @@ and vLLM's 404 CUDA targets:
     and you require flashinfer-python==0.6.17, ... unsatisfiable.
 ```
 
-`./build` now runs `scripts/preflight` first, which compares every pin against
+`./container/build` now runs `container/preflight` first, which compares every pin against
 the target vLLM's `requirements/cuda.txt` and confirms the `flashinfer-cubin`
 wheel is actually published. It runs **entirely on the host** — it never invokes
 `docker build`, so it cannot invalidate a layer.
 
 ```bash
-PREFLIGHT_ONLY=1 ./build                      # sync + check, then stop
-VLLM_REF=v0.28.0 PREFLIGHT_ONLY=1 ./build     # "would this vLLM work with my pins?"
-ALLOW_VERSION_MISMATCH=1 ./build              # build the untested combination anyway
-PREFLIGHT_OFFLINE=1 ./build                   # skip the wheel-index lookup
+PREFLIGHT_ONLY=1 ./container/build                      # sync + check, then stop
+VLLM_REF=v0.28.0 PREFLIGHT_ONLY=1 ./container/build     # "would this vLLM work with my pins?"
+ALLOW_VERSION_MISMATCH=1 ./container/build              # build the untested combination anyway
+PREFLIGHT_OFFLINE=1 ./container/build                   # skip the wheel-index lookup
 ```
 
 The second form is the useful one when a new release lands: it answers whether a
@@ -272,16 +290,16 @@ Preflight flags it precisely because the build won't.
 ## Caching — why builds aren't from scratch every time
 
 - **Source** lives in `$BUILD_DIR/src/{pytorch,flashinfer,vllm}` (default
-  `/mnt/noir/scratch/ai/vllm/build`). `./build` only `git fetch` + `checkout`s
+  `/mnt/noir/scratch/ai/vllm/build`). `./container/build` only `git fetch` + `checkout`s
   the pinned ref — **no re-clone**. Patch or `git checkout` in place to iterate.
-- **Compiler cache**: the Dockerfile uses BuildKit `--mount=type=cache` for
+- **Compiler cache**: the container/Dockerfile uses BuildKit `--mount=type=cache` for
   ccache + uv. This is the supported alternative to host bind mounts (Docker
   forbids arbitrary host bind mounts inside `RUN`) and persists across builds on
   the same daemon exactly like a bind mount would — so a small source change
   re-links in minutes instead of recompiling torch from scratch.
 - **Runtime caches** (HF downloads, `torch.compile`, FlashInfer JIT) bind-mount
   from `/mnt/noir/scratch/ai/vllm/cache` into the container, so model loads and
-  JIT compiles persist between `./run`s.
+  JIT compiles persist between `./qwen/run`s.
 
 To inspect/relocate the ccache on disk, export it:
 `docker buildx build ... --cache-to type=local,dest=$BUILD_DIR/ccache`.
@@ -301,7 +319,7 @@ untouched.
   knobs change how fast a build runs, never what it produces. Verified both ways
   — changing `MAX_JOBS` keeps layers `CACHED`, while a semantic change still
   invalidates. **Don't move them back into `ENV`.**
-- **`.git` is excluded in the Dockerfile**, via `COPY --exclude=.git
+- **`.git` is excluded in the container/Dockerfile**, via `COPY --exclude=.git
   --exclude=**/.git` (needs the `dockerfile:1.7-labs` syntax on line 1), rather
   than by `.dockerignore` files inside the source trees. Two reasons: pytorch's
   `.dockerignore` is a symlink to `.gitignore`, which does *not* exclude `.git`,
@@ -315,7 +333,7 @@ untouched.
   unable to detect version for /src/vllm"*. Note the scoped
   `SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM` does **not** work: `setup.py` calls
   `get_version()` with no `dist_name`, so the `_FOR_VLLM` suffix has nothing to
-  match. It sat in the Dockerfile doing nothing for as long as `.git` was present
+  match. It sat in the container/Dockerfile doing nothing for as long as `.git` was present
   to cover for it.
 
 Note `docker build --check` reports `unknown flag: exclude` here. That is a false
@@ -331,14 +349,14 @@ worst offender): 17 concurrent `cicc` held **82.3 GB** at one sample. A complete
 build then measured a **89.8 GiB peak at 14 jobs = 6.4 GB/job**, so an unbounded
 28-way build wants ~180 GB.
 
-`./build` is capped at `BUILD_MEM_GB` (default 110G) by two independent layers:
+`./container/build` is capped at `BUILD_MEM_GB` (default 110G) by two independent layers:
 
 - **Derived `MAX_JOBS`** — `BUILD_MEM_GB × MEM_HEADROOM_PCT / MEM_PER_JOB_GB`
   (defaults 80% and 6 GB), clamped to `nproc - 4`. On this box that's **14**
   jobs instead of 28: ~89 GiB at the measured rate against a 110 GiB cap. This
   is the prevention layer — no privileges, no setup. Setting `MAX_JOBS`
   explicitly bypasses the calculation entirely.
-- **A cgroup ceiling** — `./build` passes `--cgroup-parent=vllmbuild.slice`, a
+- **A cgroup ceiling** — `./container/build` passes `--cgroup-parent=vllmbuild.slice`, a
   systemd slice with `MemoryMax=110G`. That's the wall, where the OOM killer
   fires **scoped to that cgroup** — it kills an `nvcc`, not your desktop session
   or a running vLLM server. Containment, not prevention: hitting it still loses
@@ -377,10 +395,10 @@ build then measured a **89.8 GiB peak at 14 jobs = 6.4 GB/job**, so an unbounded
 Install the slice once, as root:
 
 ```bash
-su -c "$PWD/scripts/slice-setup"
+su -c "$PWD/container/slice-setup"
 ```
 
-Until you do, `./build` prints a warning and runs with `MAX_JOBS` as the only
+Until you do, `./container/build` prints a warning and runs with `MAX_JOBS` as the only
 limit — it never hard-fails on a missing slice. `docker buildx build` has no
 `--memory` flag (that was classic-builder only), so `--cgroup-parent` is the
 supported mechanism here; the BuildKit embedded in dockerd does honor it, and
@@ -390,7 +408,7 @@ supported mechanism here; the BuildKit embedded in dockerd does honor it, and
 > doesn't already exist — so pointing `--cgroup-parent` at a unit that was never
 > `systemctl start`ed silently gives you no ceiling at all, while `systemctl show`
 > still reports the configured 90G from the unit file. That's why `slice-setup`
-> starts the slice, and why `./build` verifies live kernel state (`memory.max`)
+> starts the slice, and why `./container/build` verifies live kernel state (`memory.max`)
 > rather than asking systemd for the unit's configured value.
 >
 > **Why the name has no dash:** systemd reads `-` in a slice name as a hierarchy
@@ -410,8 +428,8 @@ supported mechanism here; the BuildKit embedded in dockerd does honor it, and
 To retune, re-run both with a new budget — they read the same env var:
 
 ```bash
-BUILD_MEM_GB=64 su -c "$PWD/scripts/slice-setup"   # move the hard ceiling
-BUILD_MEM_GB=64 ./build                            # and the derived MAX_JOBS
+BUILD_MEM_GB=64 su -c "$PWD/container/slice-setup"   # move the hard ceiling
+BUILD_MEM_GB=64 ./container/build                            # and the derived MAX_JOBS
 ```
 
 > **Leave `NVCC_THREADS=1` alone.** vLLM's `setup.py` (`compute_num_jobs()`)
@@ -454,12 +472,12 @@ parallelism; if it brushes the ceiling, raise it.
   parallelism against peak RAM.
 - **Build state is on NFS** (`/mnt/noir/scratch`) by request; compile I/O is
   slower than local NVMe, mitigated by the ccache mount. Override with
-  `BUILD_DIR=/some/local/path ./build`.
+  `BUILD_DIR=/some/local/path ./container/build`.
 - The CUDA **devel** toolkit is kept in the final image because FlashInfer
   JIT-compiles kernels for sm_120 at runtime and needs `nvcc`.
 - Only **GPU 0** (the RTX PRO 6000) is exposed to the container; the RTX 4060 is
   never used.
-- `./push` needs `docker login` first (Docker Hub namespace `iphands`). It pushes
+- `./container/push` needs `docker login` first (Docker Hub namespace `iphands`). It pushes
   four tags — two moving, two pinned:
 
   | Tag | Meaning |
@@ -470,9 +488,9 @@ parallelism; if it brushes the ceiling, raise it.
   | `latest` | newest build of anything |
 
   The versions come from the image's own OCI labels (`ai.vllmcustom.*`, stamped
-  by the Dockerfile), never re-declared in `./push` — so a tag cannot claim a
+  by the container/Dockerfile), never re-declared in `./container/push` — so a tag cannot claim a
   version the image doesn't contain. `docker image inspect -f
   '{{json .Config.Labels}}' iphands/vllm-blackwell:latest` shows the full set.
-  `PUSH_DRY_RUN=1 ./push` prints the tags without publishing. Images built before
+  `PUSH_DRY_RUN=1 ./container/push` prints the tags without publishing. Images built before
   labels existed are rejected with a message rather than pushed under a guessed
   tag.

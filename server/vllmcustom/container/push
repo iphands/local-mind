@@ -1,8 +1,8 @@
 #!/bin/bash
 # Push the built image to Docker Hub. Run `docker login` first.
 #
-#   ./push                  # pushes the resolved tags for the last build
-#   TAG=cu1303-sm120 ./push # push a specific variant tag
+#   ./container/push                  # pushes the resolved tags for the last build
+#   TAG=cu1303-sm120 ./container/push # push a specific variant tag
 #
 # Tags pushed, for vLLM 0.27.1 on CUDA 13.0.3 at commit d6d029f:
 #
@@ -13,12 +13,15 @@
 #
 # The vLLM/CUDA versions are read from the image's own labels (stamped by the
 # Dockerfile), not re-declared here. An earlier version of this script kept its
-# own CUDA_VERSION with a "keep in sync with ./build" comment; that is exactly
+# own CUDA_VERSION with a "keep in sync with ./container/build" comment; that is exactly
 # how a tag ends up claiming a version the image does not contain.
 set -euo pipefail
 
 IMAGE=${IMAGE:-iphands/vllm-blackwell}
 REF=$(git rev-parse --short HEAD)
+# The whole project dir, not the CWD — the dirty check below has to cover every
+# subfolder that feeds a build, however this script was invoked.
+root=$(cd "$(dirname "$0")/.." && pwd)
 
 # TAG still has to be derived without the image, since it is how we *find* the
 # image. Default to the CUDA variant of whatever :latest actually is.
@@ -35,7 +38,7 @@ if [[ -z ${TAG:-} ]]; then
 fi
 
 docker image inspect "$IMAGE:$TAG" >/dev/null 2>&1 || {
-  echo "Image $IMAGE:$TAG not found locally. Run ./build first."; exit 1; }
+  echo "Image $IMAGE:$TAG not found locally. Run ./container/build first."; exit 1; }
 
 vllm_version=$(label ai.vllmcustom.vllm.version "$IMAGE:$TAG")
 if [[ -z $vllm_version ]]; then
@@ -59,7 +62,7 @@ fi
 
 # The git SHA describes the build recipe, not the vLLM source; a dirty tree means
 # the pushed image may not correspond to any commit.
-if [[ -n "$(git status --porcelain -- . 2>/dev/null)" ]]; then
+if [[ -n "$(git status --porcelain -- "$root" 2>/dev/null)" ]]; then
   echo "WARN: working tree is dirty — :$STAG names commit $REF but the build used uncommitted changes."
 fi
 

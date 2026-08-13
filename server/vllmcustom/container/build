@@ -1,13 +1,13 @@
 #!/bin/bash
 # Build the sm120-optimized vLLM image from source.
 #
-#   ./build                       # defaults: CUDA 13.0.3, vLLM v0.27.1 + torch v2.13.0 + flashinfer v0.6.16.post3
-#   CUDA_VERSION=13.1.2 ./build   # try a newer CUDA toolkit (produces a different tag)
-#   VLLM_REF=v0.25.1 ./build      # try a different vLLM (pin matching TORCH_REF/FLASHINFER_REF too)
-#   BUILD_MEM_GB=64 ./build       # tighter memory budget (lowers the derived MAX_JOBS)
+#   ./container/build                       # defaults: CUDA 13.0.3, vLLM v0.27.1 + torch v2.13.0 + flashinfer v0.6.16.post3
+#   CUDA_VERSION=13.1.2 ./container/build   # try a newer CUDA toolkit (produces a different tag)
+#   VLLM_REF=v0.25.1 ./container/build      # try a different vLLM (pin matching TORCH_REF/FLASHINFER_REF too)
+#   BUILD_MEM_GB=64 ./container/build       # tighter memory budget (lowers the derived MAX_JOBS)
 #
 # Memory: the build is capped at BUILD_MEM_GB (default 110G) two ways — a derived
-# MAX_JOBS, plus a kernel-enforced cgroup ceiling if ./scripts/slice-setup has
+# MAX_JOBS, plus a kernel-enforced cgroup ceiling if ./container/slice-setup has
 # been run once as root. See "Memory-capped builds" in the README.
 #
 # Source trees are cloned/pulled into $BUILD_DIR/src once and reused (no re-clone).
@@ -20,11 +20,11 @@ TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-12.0}      # sm_120 (RTX PRO 6000 B
 # Memory budget. MAX_JOBS is derived from it because parallel nvcc is what OOMs
 # this box (125 GB, no swap): each cicc holds 2-6 GB on the heavy sm120 template
 # kernels, so an unbounded 28 jobs can spike past 110 GB. Set MAX_JOBS directly
-# to bypass the calculation. ./scripts/slice-setup enforces the same budget as a
+# to bypass the calculation. ./container/slice-setup enforces the same budget as a
 # kernel-level backstop; see "Memory-capped builds" in the README.
 #
 # 110 rather than 90: a full build was measured at a 89.8 GiB peak, i.e. 0.2 GiB
-# under a 90 GiB ceiling. Keep this in step with ./scripts/slice-setup — the two
+# under a 90 GiB ceiling. Keep this in step with ./container/slice-setup — the two
 # read the same variable, but the slice has to be re-run to pick up a change.
 BUILD_MEM_GB=${BUILD_MEM_GB:-110}
 # Measured, not estimated: a complete build peaked at 89.8 GiB with 14 jobs =
@@ -72,8 +72,8 @@ IMAGE=${IMAGE:-iphands/vllm-blackwell}
 CUDA_TAG=${CUDA_VERSION//./}                            # 13.0.3 -> 1303
 TAG=${TAG:-cu${CUDA_TAG}-sm120}
 # $TAG is the moving "newest build of this CUDA variant" tag; $VTAG pins the vLLM
-# version so `docker images` says which vLLM an image actually carries. ./push
-# derives its tags from the image's labels, not from these — see ./push.
+# version so `docker images` says which vLLM an image actually carries. ./container/push
+# derives its tags from the image's labels, not from these — see ./container/push.
 VTAG="${TAG}-vllm${VLLM_VERSION}"
 
 BUILD_DIR=${BUILD_DIR:-/mnt/noir/scratch/ai/vllm/build}
@@ -110,7 +110,7 @@ echo
 SRC_DIR="$SRC_DIR" VLLM_REF="$VLLM_REF" \
 TORCH_VERSION="$TORCH_VERSION" FLASHINFER_VERSION="$FLASHINFER_VERSION" \
 TORCHVISION_VERSION="$TORCHVISION_VERSION" TORCHAUDIO_VERSION="$TORCHAUDIO_VERSION" \
-  "$here/scripts/preflight"
+  "$here/preflight"
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
   echo "## PREFLIGHT_ONLY=1 — stopping before docker build."
   exit 0
@@ -147,11 +147,11 @@ if [[ -n $cgroup_path && $live_max =~ ^[0-9]+$ ]]; then
   if [[ $live_max -ne $want_max ]]; then
     echo "## WARN: $CGROUP_PARENT is capped at $(( live_max / 1024 / 1024 / 1024 ))G"
     echo "##       but MAX_JOBS=$MAX_JOBS was derived from BUILD_MEM_GB=${BUILD_MEM_GB}G."
-    echo "##       Re-sync:  BUILD_MEM_GB=$BUILD_MEM_GB su -c '$here/scripts/slice-setup'"
+    echo "##       Re-sync:  BUILD_MEM_GB=$BUILD_MEM_GB su -c '$here/slice-setup'"
   fi
 else
   echo "## WARN: $CGROUP_PARENT is missing or uncapped — no hard ceiling on this build."
-  echo "##       Install it once:  su -c '$here/scripts/slice-setup'"
+  echo "##       Install it once:  su -c '$here/slice-setup'"
   echo "##       Proceeding with MAX_JOBS=$MAX_JOBS as the only limit."
 fi
 

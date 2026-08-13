@@ -6,11 +6,11 @@
 # PREFLIGHT_OFFLINE=1) queries the flashinfer wheel index. It never invokes
 # `docker build`, so it cannot touch the layer cache.
 #
-#   PREFLIGHT_ONLY=1 ./build        # sync sources, check versions, stop
-#   VLLM_REF=v0.28.0 PREFLIGHT_ONLY=1 ./build
+#   PREFLIGHT_ONLY=1 ./container/build        # sync sources, check versions, stop
+#   VLLM_REF=v0.28.0 PREFLIGHT_ONLY=1 ./container/build
 #                                   # "would this vLLM work with my pins?"
 #
-# ./build runs this automatically before building. ALLOW_VERSION_MISMATCH=1
+# ./container/build runs this automatically before building. ALLOW_VERSION_MISMATCH=1
 # downgrades every failure to a warning, for deliberately trying an untested
 # combination.
 #
@@ -24,7 +24,7 @@
 # Everything here is checkable in under a second first.
 set -euo pipefail
 
-: "${SRC_DIR:?run via ./build, or export SRC_DIR VLLM_REF TORCH_VERSION ... first}"
+: "${SRC_DIR:?run via ./container/build, or export SRC_DIR VLLM_REF TORCH_VERSION ... first}"
 : "${VLLM_REF:?}" "${TORCH_VERSION:?}" "${FLASHINFER_VERSION:?}"
 : "${TORCHVISION_VERSION:?}" "${TORCHAUDIO_VERSION:?}"
 
@@ -36,7 +36,7 @@ echo "## preflight: checking pins against vLLM $VLLM_REF"
 
 reqs=$(git -C "$SRC_DIR/vllm" show "$VLLM_REF:requirements/cuda.txt" 2>/dev/null) || {
   echo "## ERROR: cannot read requirements/cuda.txt at $VLLM_REF" >&2
-  echo "##        (is the ref fetched? ./build's sync_src does that)" >&2
+  echo "##        (is the ref fetched? ./container/build's sync_src does that)" >&2
   exit 1
 }
 

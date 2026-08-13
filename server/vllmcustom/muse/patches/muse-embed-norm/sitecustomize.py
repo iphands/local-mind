@@ -114,7 +114,7 @@ recognise by class name (llm_base_proposer.py:1397-1399):
 
 MuseGlimmerConfig only has `image_token_id` (configuration_muse_glimmer.py:194)
 and is @strict, so that is an AttributeError. Inert on the V2 runner -- which is
-what this model gets by default, and what run-muse pins -- but one config change
+what this model gets by default, and what muse/run pins -- but one config change
 away from mattering.
 
 SHIM 6 -- reasoning-parser plugin in worker processes (MUSE_ATEM_PLUGIN)
@@ -141,7 +141,7 @@ import sys
 # load, so a stale value here fails loudly rather than drafting garbage.
 _TARGET_VOCAB_SIZE = 202048
 _TARGET_NUM_LAYERS = 52
-# text_config.output_multiplier. run-muse passes its LOGIT_SCALE knob through as
+# text_config.output_multiplier. muse/run passes its LOGIT_SCALE knob through as
 # MUSE_DRAFT_LOGIT_SCALE so the A/B stays coherent across target and drafter --
 # rejection sampling compares the two models' logits, so they must agree.
 _TARGET_LOGIT_SCALE = 0.19611613513818404
@@ -400,7 +400,7 @@ def _normalize_draft_config(cfg):
 
     # Pre-prefixed, so EAGLEConfig leaves it alone rather than deriving a name
     # (vllm/transformers_utils/configs/eagle.py:63-72). This is the name
-    # --model-class-overrides registers in run-muse.
+    # --model-class-overrides registers in muse/run.
     cfg.architectures = [_DRAFT_ARCH]
 
     # rope_theta needs no help: the drafter ships rope_parameters.rope_theta

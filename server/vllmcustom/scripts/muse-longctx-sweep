@@ -43,11 +43,11 @@ CTX=${CTX:-32000,100000}               # real traffic sits ~32-44k and goes past
 # end, so sample that finely rather than jumping straight to the top. Widen with
 # CONC=1,2,4,8,9 when the question is specifically about burst behaviour.
 CONC=${CONC:-1,2,4}
-LOGDIR=${LOGDIR:-$HERE/bench-logs}
+LOGDIR=${LOGDIR:-$HERE/bench/bench-logs}
 WORK=$(mktemp -d)
 
-# shellcheck source=../_bench-lib.sh
-source "$HERE/_bench-lib.sh"
+# shellcheck source=../bench/_bench-lib.sh
+source "$HERE/bench/_bench-lib.sh"
 mkdir -p "$LOGDIR"
 for tool in curl jq docker bc; do
   command -v "$tool" >/dev/null || { echo "## need $tool"; exit 2; }
@@ -72,12 +72,12 @@ trap cleanup EXIT
 # Real source, not lorem ipsum, so attention sees the kind of content it serves.
 build_corpus() {
   : > "$WORK/corpus.txt"
-  for f in run-muse patches/muse-dflash/muse_dflash.py \
-           patches/muse-embed-norm/sitecustomize.py scripts/muse-spec-check \
+  for f in muse/run muse/patches/muse-dflash/muse_dflash.py \
+           muse/patches/muse-embed-norm/sitecustomize.py scripts/muse-spec-check \
            scripts/muse-spec-probe scripts/muse-nvfp4-sweep \
-           patches/muse-native/vendor/vllm/model_executor/models/muse_glimmer.py \
-           patches/muse-native/vendor/vllm/tool_parsers/muse_glimmer_tool_parser.py \
-           patches/atem-parsers/atem_parsers.py; do
+           muse/patches/muse-native/vendor/vllm/model_executor/models/muse_glimmer.py \
+           muse/patches/muse-native/vendor/vllm/tool_parsers/muse_glimmer_tool_parser.py \
+           muse/patches/atem-parsers/atem_parsers.py; do
     [[ -f "$HERE/$f" ]] && { echo "===== $f ====="; cat "$HERE/$f"; } >> "$WORK/corpus.txt"
   done
   # ~600 KB is enough for 128k tokens at ~4 chars/token.
@@ -160,7 +160,7 @@ for entry in "${CONFIGS[@]}"; do
   [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=""
   stop_server
   # shellcheck disable=SC2086
-  env $e1 ${e2:-} DETACH=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" >> "$log" 2>&1
+  env $e1 ${e2:-} DETACH=1 PORT="$PORT" "$HERE/muse/run" "$MODEL" >> "$log" 2>&1
   docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
   if ! wait_ready; then
     printf '  %-18s BOOT FAILED -- see %s\n\n' "$label" "$log"; continue

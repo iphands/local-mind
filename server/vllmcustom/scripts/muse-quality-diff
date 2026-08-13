@@ -28,10 +28,10 @@ HOST="localhost:${PORT}"
 APIMODEL=${APIMODEL:-cosmo-6000}
 READY_TIMEOUT=${READY_TIMEOUT:-1200}
 MAX_TOKENS=${MAX_TOKENS:-600}
-OUT=${OUT:-$HERE/bench-logs/quality}
+OUT=${OUT:-$HERE/bench/bench-logs/quality}
 
-# shellcheck source=../_bench-lib.sh
-source "$HERE/_bench-lib.sh"
+# shellcheck source=../bench/_bench-lib.sh
+source "$HERE/bench/_bench-lib.sh"
 mkdir -p "$OUT"
 
 PROMPTS=(
@@ -49,7 +49,7 @@ capture() {  # <model> <tag>
   local model=$1 tag=$2 i=0
   echo "## booting $tag ($model)"
   stop_server
-  DETACH=1 PORT="$PORT" "$HERE/run-muse" "$model" > "$OUT/$tag.boot.log" 2>&1
+  DETACH=1 PORT="$PORT" "$HERE/muse/run" "$model" > "$OUT/$tag.boot.log" 2>&1
   if ! wait_ready; then echo "!! $tag failed to boot -- see $OUT/$tag.boot.log"; return 1; fi
 
   for p in "${PROMPTS[@]}"; do

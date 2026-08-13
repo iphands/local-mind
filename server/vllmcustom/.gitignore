@@ -1,8 +1,8 @@
 vendor
-data/
 __pycache__/
-bench-logs/
-bench-results.md
-bench-results.jsonl
-bench-wrapper-results.md
-bench-context-results.md
+bench/data/
+bench/bench-logs/
+bench/bench-results.md
+bench/bench-results.jsonl
+bench/bench-wrapper-results.md
+bench/bench-context-results.md

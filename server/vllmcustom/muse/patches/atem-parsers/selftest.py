@@ -4,7 +4,7 @@ No GPU and no server: it builds the same composed parser the OpenAI chat
 endpoint builds (``ParserManager.get_parser``), feeds it recorded transcripts,
 and asserts both the one-shot and the token-by-token streaming paths agree.
 
-    ./run-muse --selftest          # runs this in the vLLM image
+    ./muse/run --selftest          # runs this in the vLLM image
 
 Run it after a vLLM bump: the streaming contract these parsers plug into
 (vllm/parser/abstract_parser.py) is internal API and does move.

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Does the Muse Glimmer DFlash drafter actually work, and is it actually faster?
-# (see ../run-muse, the "SPEED" section)
+# (see ../muse/run, the "SPEED" section)
 #
 #   ./scripts/muse-spec-check                 # boot both ways, compare
 #   REPEATS=5 ./scripts/muse-spec-check       # more timing samples per side
@@ -15,8 +15,8 @@
 # if that passes does it boot SPEC=0 and SPEC=1 properly for timings. Budget
 # ~20 minutes for a full clean run, ~3 for a failing one.
 #
-# All container output is streamed to bench-logs/ from the moment of launch.
-# run-muse uses `docker run --rm`, so a container that dies during load takes
+# All container output is streamed to bench/bench-logs/ from the moment of launch.
+# muse/run uses `docker run --rm`, so a container that dies during load takes
 # its logs with it -- reading them afterwards gets you "No such container" and
 # nothing else. (Which is exactly how the first SPEC=1 crash was lost.)
 #
@@ -25,7 +25,7 @@
 # cannot change what comes out: SPEC=0 and SPEC=1 must emit the SAME TOKENS. If
 # they do not, the wiring is wrong -- most likely one of
 #
-#   * the encoder rename in patches/muse-dflash/muse_dflash.py landed on the
+#   * the encoder rename in muse/patches/muse-dflash/muse_dflash.py landed on the
 #     wrong module, so `fc` or `hidden_norm` holds the other one's weights
 #   * MUSE_DRAFT_LOGIT_SCALE disagrees with the target's LOGIT_SCALE
 #   * target_layer_ids point at the wrong target layers
@@ -56,15 +56,15 @@ set -uo pipefail   # NOT -e: a failed stage must still print the report
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 MODEL=${1:-$HERE/models/vllm/meta-models/Muse-Glimmer-30B}
-NAME=vllm-muse                              # must match ./run-muse's --name
+NAME=vllm-muse                              # must match ./muse/run's --name
 PORT=${PORT:-8700}
 HOST="localhost:${PORT}"
-APIMODEL=${APIMODEL:-cosmo-6000}            # one of ./run-muse's --served-model-name aliases
+APIMODEL=${APIMODEL:-cosmo-6000}            # one of ./muse/run's --served-model-name aliases
 READY_TIMEOUT=${READY_TIMEOUT:-1200}        # s to wait for weight load + torch.compile
 REPEATS=${REPEATS:-3}                       # timed generations per side; median is reported
 MAX_TOKENS=${MAX_TOKENS:-400}
 # Sampling. TEMP=0 is the greedy regime the parity check needs; it is NOT what
-# the server actually serves. run-muse sets temperature 1.0 / top_p 0.95 /
+# the server actually serves. muse/run sets temperature 1.0 / top_p 0.95 /
 # top_k 64 per the model card, and that difference matters enormously for
 # speculative decoding: at temperature 0 verification is "does the draft token
 # equal the target's argmax", which is invariant to how the draft's logits are
@@ -76,19 +76,19 @@ TOP_P=${TOP_P:-0.95}
 TOP_K=${TOP_K:-64}
 SEED=${SEED:-1234}                          # pins sampling so TEMP>0 runs stay comparable
 SKIP_BASE=${SKIP_BASE:-0}                   # 1 = only boot SPEC=1 (reuse a known baseline)
-SPEC_TOKENS_USED=${SPEC_TOKENS:-15}         # mirrors run-muse's default, for the report only
+SPEC_TOKENS_USED=${SPEC_TOKENS:-15}         # mirrors muse/run's default, for the report only
 KEEP=${KEEP:-0}                             # 1 = leave the SPEC=1 server up when done
 WIRING_ONLY=${WIRING_ONLY:-0}               # 1 = stop after stage 0 (~3 min, no timings)
 WIRING_EAGER=${WIRING_EAGER:-1}             # 0 = compile the wiring boot too (slow, but it is
                                             #     the only way to exercise the compiled path)
 SKIP_WIRING=${SKIP_WIRING:-0}               # 1 = go straight to the timed boots (saves ~4 min
                                             #     when the wiring is already known good)
-LOGDIR=${LOGDIR:-$HERE/bench-logs}
+LOGDIR=${LOGDIR:-$HERE/bench/bench-logs}
 WORK=$(mktemp -d)
 FAILURES=0
 
-# shellcheck source=../_bench-lib.sh
-source "$HERE/_bench-lib.sh"                # stop_server, wait_ready, median
+# shellcheck source=../bench/_bench-lib.sh
+source "$HERE/bench/_bench-lib.sh"                # stop_server, wait_ready, median
 
 mkdir -p "$LOGDIR"
 for tool in curl jq docker bc; do
@@ -127,10 +127,10 @@ boot() {  # <label> <spec> [VAR=VAL ...]  -- (re)start the server
   stop_log_stream
   stop_server
   : > "$LOG"
-  echo "##   launching SPEC=$spec ${*:-} ./run-muse (log -> $LOG)"
-  env SPEC="$spec" DETACH=1 PORT="$PORT" "$@" "$HERE/run-muse" "$MODEL" >> "$LOG" 2>&1
+  echo "##   launching SPEC=$spec ${*:-} ./muse/run (log -> $LOG)"
+  env SPEC="$spec" DETACH=1 PORT="$PORT" "$@" "$HERE/muse/run" "$MODEL" >> "$LOG" 2>&1
 
-  # Stream the container's own output into the same file, starting NOW. run-muse
+  # Stream the container's own output into the same file, starting NOW. muse/run
   # uses `docker run --rm`, so a container that dies during load is removed with
   # its logs -- calling `docker logs` after the fact returns "No such container"
   # and the traceback is gone for good. Following from t=0 is what makes a crash

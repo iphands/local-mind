@@ -13,7 +13,7 @@ This module supplies both missing pieces, registered under the name `atem`:
     ATEMReasoningParser  -> splits the transcript into channels
     ATEMToolParser       -> turns <atem:invoke> blocks into OpenAI tool_calls
 
-Load it with (see ../../run-muse, which does this for you):
+Load it with (see ../run, which does this for you):
 
     --reasoning-parser atem  --reasoning-parser-plugin  <this file>
     --tool-call-parser atem  --tool-parser-plugin       <this file>

@@ -1,27 +1,27 @@
 #!/bin/bash
 # Serve a model with the locally-built sm120 vLLM image (no docker pull).
 #
-#   ./run ./models/vllm/Qwen3.6-27B
-#   ./run ./models/vllm/Qwen3.5-122B-A10B-NVFP4
+#   ./laguna/run ./models/vllm/Qwen3.6-27B
+#   ./laguna/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4
 #
 # A/B backends/knobs without editing this file:
-#   ATTN_BACKEND=flashinfer ./run <model>
-#   ATTN_BACKEND=triton MOE_BACKEND=flashinfer_trtllm ./run <model>
-#   NVFP4_BACKEND=cutlass ./run <model>       # NVFP4 GEMM kernel: cutlass | flashinfer-cudnn |
+#   ATTN_BACKEND=flashinfer ./laguna/run <model>
+#   ATTN_BACKEND=triton MOE_BACKEND=flashinfer_trtllm ./laguna/run <model>
+#   NVFP4_BACKEND=cutlass ./laguna/run <model>       # NVFP4 GEMM kernel: cutlass | flashinfer-cudnn |
 #                                             #   flashinfer-cutlass | marlin | flashinfer-trtllm |
 #                                             #   flashinfer-b12x (SM12x CuTe DSL kernel)
 #                                             #   (default cutlass = bench-fastest on sm120f).
 #                                             #   flashinfer-cudnn=safe fallback if FP4 GEMM hits the
 #                                             #   race-cond NaN; marlin=W4A16 fallback if FP4 misbehaves.
-#   MOE_BACKEND=flashinfer_b12x ./run <model> # SM12x fused MoE (excluded from vLLM auto-select; opt-in)
-#   SPEC_TOKENS=8 ./run <model>               # DFlash draft tokens (default 15 per model card; 0 = speculation off)
-#   CUDAGRAPH_MODE=FULL_AND_PIECEWISE ./run <model>   # full CUDA graphs (small-batch decode A/B)
-#   FLASHINFER_AUTOTUNE=1 ./run <model>       # FlashInfer autotuning during warmup
-#   MAX_BATCHED_TOKENS=32768 ./run <model>    # faster long-context prefill (default 8192)
-#   IMAGE_TAG=cu1312-sm120 ./run <model>      # run a specific build variant
-#   EXTRA_ARGS="--max-num-seqs 8" ./run <model>
+#   MOE_BACKEND=flashinfer_b12x ./laguna/run <model> # SM12x fused MoE (excluded from vLLM auto-select; opt-in)
+#   SPEC_TOKENS=8 ./laguna/run <model>               # DFlash draft tokens (default 15 per model card; 0 = speculation off)
+#   CUDAGRAPH_MODE=FULL_AND_PIECEWISE ./laguna/run <model>   # full CUDA graphs (small-batch decode A/B)
+#   FLASHINFER_AUTOTUNE=1 ./laguna/run <model>       # FlashInfer autotuning during warmup
+#   MAX_BATCHED_TOKENS=32768 ./laguna/run <model>    # faster long-context prefill (default 8192)
+#   IMAGE_TAG=cu1312-sm120 ./laguna/run <model>      # run a specific build variant
+#   EXTRA_ARGS="--max-num-seqs 8" ./laguna/run <model>
 #
-# Benchmark a variant against the running server: ./bench <label>
+# Benchmark a variant against the running server: ./bench/bench <label>
 set -euo pipefail
 
 NAME=vllm
@@ -29,7 +29,7 @@ IMAGE=${IMAGE:-iphands/vllm-blackwell}
 IMAGE_TAG=${IMAGE_TAG:-latest}
 CONTAINER="$IMAGE:$IMAGE_TAG"
 
-MODEL_PATH=${1:?usage: ./run <path-to-model-dir>   (e.g. ./run ./models/vllm/Qwen3.6-27B)}
+MODEL_PATH=${1:?usage: ./laguna/run <path-to-model-dir>   (e.g. ./laguna/run ./models/vllm/Qwen3.6-27B)}
 # basename/dirname (vs ${x%/*}) tolerate trailing slashes and slash-less paths
 MODEL=$(basename "$MODEL_PATH")
 MODEL_FOLDER=$(cd "$(dirname "$MODEL_PATH")" && pwd)   # absolute, for the bind mount
@@ -47,7 +47,7 @@ FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-}     # 1 = run FlashInfer autotuning
 CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
 
 docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
-  echo "Image $CONTAINER not found. Run ./build first."; exit 1; }
+  echo "Image $CONTAINER not found. Run ./container/build first."; exit 1; }
 
 # DETACH=1 -> run backgrounded (-d) for scripted benchmarking (bench-wrapper);
 # interactive (-it) otherwise.

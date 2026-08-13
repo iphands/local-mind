@@ -1,9 +1,9 @@
 #!/bin/bash
 # Serve Muse Glimmer 30B with the locally-built sm120 vLLM image.
 #
-#   ./run-muse                                   # RedHatAI/Muse-Glimmer-30B-NVFP4
-#   ./run-muse meta-models/Muse-Glimmer-30B      # the original bf16 checkpoint
-#   ./run-muse --selftest                        # offline check of the ATEM parsers
+#   ./muse/run                                   # RedHatAI/Muse-Glimmer-30B-NVFP4
+#   ./muse/run meta-models/Muse-Glimmer-30B      # the original bf16 checkpoint
+#   ./muse/run --selftest                        # offline check of the ATEM parsers
 #
 # ---------------------------------------------------------------------------
 # WHY NVFP4 IS THE DEFAULT
@@ -29,7 +29,7 @@
 # SPEC=1 still composes. It is off by default -- see the SPEED section.
 #
 # ---------------------------------------------------------------------------
-# WHY THIS SCRIPT EXISTS (and why ./run produces loops/garbage on "Hi")
+# WHY THIS SCRIPT EXISTS (and why ./qwen/run produces loops/garbage on "Hi")
 # ---------------------------------------------------------------------------
 # vLLM has NO native MuseGlimmerForConditionalGeneration implementation
 # (checked on 0.25.2 and again on 0.27.1.dev0: ModelRegistry.get_supported_archs()
@@ -53,7 +53,7 @@
 #   Measured against stock HF on the same 57-token prompt, hidden states diverge
 #   immediately: cosine 0.456 at layer 0, ~0.31 by layer 51. Output is garbage
 #   (a burst of <|eom|> and stray CJK) or degenerate repetition.
-#   FIXED HERE by patches/muse-embed-norm/sitecustomize.py, mounted on
+#   FIXED HERE by muse/patches/muse-embed-norm/sitecustomize.py, mounted on
 #   PYTHONPATH. With it, all 52 layers match HF at cosine >= 0.9992 (the
 #   remainder is ordinary bf16 kernel drift) and generation matches HF's.
 #
@@ -82,7 +82,7 @@
 #
 # Both workarounds exist only because there is no native implementation. When
 # vLLM ships one, drop --hf-overrides AND the sitecustomize patch together. To
-# re-verify after any vLLM bump: PATCH=0 ./run-muse and prompt "Hi" -- if the
+# re-verify after any vLLM bump: PATCH=0 ./muse/run and prompt "Hi" -- if the
 # reply is coherent, the fallback no longer drops embed_norm.
 #
 # ---------------------------------------------------------------------------
@@ -98,19 +98,19 @@
 #   any request carrying tools was rejected outright:
 #       "auto" tool choice requires --enable-auto-tool-choice and
 #       --tool-call-parser to be set
-#   FIXED HERE by patches/atem-parsers/atem_parsers.py, a --tool-parser-plugin
+#   FIXED HERE by muse/patches/atem-parsers/atem_parsers.py, a --tool-parser-plugin
 #   + --reasoning-parser-plugin registered under the name `atem`. Reasoning
 #   lands in `reasoning`, the answer in `content`, `<atem:invoke>` blocks come
-#   back as OpenAI tool_calls, streaming included. `./run-muse --selftest`
+#   back as OpenAI tool_calls, streaming included. `./muse/run --selftest`
 #   checks it against vLLM's real parser plumbing without a GPU or a server.
-#   PARSERS=0 ./run-muse goes back to raw transcripts (and 400s on tools).
+#   PARSERS=0 ./muse/run goes back to raw transcripts (and 400s on tools).
 #   Pointing the qwen3 parsers at this model makes things worse, not better.
 #
 # ---------------------------------------------------------------------------
 # SPEED -- the DFlash drafter (SPEC=1; OFF by default, see the measurements)
 # ---------------------------------------------------------------------------
 # Muse Glimmer ships a DFlash block-diffusion drafter, NOT an MTP head, so
-# ./run's --speculative-config '{"method":"mtp"}' is the wrong knob. DFlash
+# ./qwen/run's --speculative-config '{"method":"mtp"}' is the wrong knob. DFlash
 # predicts a whole 16-token block in one forward pass and the target verifies
 # the block in parallel. Model card: 74.9 -> 233.4 tok/s (3.1x) on an RTX 5090.
 #     meta-models/Muse-Glimmer-30B-assistant   4.8 GB bf16, 5 layers, block 16
@@ -135,13 +135,13 @@
 #     = {}` writes an instance attribute nothing reads. Three more layers of
 #     breakage stack on it. Symptom: the container dies during the profile run
 #     on `assert isinstance(model_output, tuple)`.
-#     FIXED HERE by shim 2 in patches/muse-embed-norm/sitecustomize.py.
+#     FIXED HERE by shim 2 in muse/patches/muse-embed-norm/sitecustomize.py.
 #   * No registered architecture. EAGLEConfig rewrites the draft's
 #     architectures MuseGlimmerAssistantModel -> DFlashMuseGlimmerAssistantModel
 #     (vllm/transformers_utils/configs/eagle.py:63-72) and that name is not in
 #     _SPECULATIVE_DECODING_MODELS. A DFlash* name never falls through to the
 #     Transformers backend either, so resolution hard-fails.
-#     FIXED HERE by patches/muse-dflash/muse_dflash.py, registered with
+#     FIXED HERE by muse/patches/muse-dflash/muse_dflash.py, registered with
 #     --model-class-overrides. The drafter's layers are Qwen3-shaped verbatim,
 #     so it is a thin subclass of vLLM's own DFlashQwen3ForCausalLM plus a
 #     rename of the two `encoder.*` tensors.
@@ -150,7 +150,7 @@
 #     vocab_size at all (it has no embedding table). --hf-overrides cannot fix
 #     this: dict overrides are deliberately target-only
 #     (vllm/config/speculative.py:639-663).
-#     FIXED HERE by shim 3 in patches/muse-embed-norm/sitecustomize.py, which
+#     FIXED HERE by shim 3 in muse/patches/muse-embed-norm/sitecustomize.py, which
 #     wraps SpeculativeConfig.hf_config_override -- the same seam vLLM uses
 #     in-tree to reshape every MTP checkpoint.
 #   * Sliding-window KV vs absolute slot writes. All 5 draft layers are
@@ -179,7 +179,7 @@
 # is the sharp test: DFlash rejection sampling is output-preserving, so any
 # divergence means the wiring is wrong.
 #
-# Other things ./run gets wrong for this model, all deliberately dropped here:
+# Other things ./qwen/run gets wrong for this model, all deliberately dropped here:
 #
 #   * NO NVFP4 --linear-backend
 #       This checkpoint is bf16 ("dtype": "bfloat16", ~59.5 GB over 2 shards),
@@ -192,26 +192,26 @@
 #       so 262144 is pure out-of-distribution extrapolation.
 #
 # A/B knobs without editing this file:
-#   PATCH=0 ./run-muse                 # drop the embed_norm patch -> garbage (BUG 1)
-#   LOGIT_SCALE=1.0 ./run-muse         # stock vLLM logits -> greedy collapse (BUG 2)
-#   PARSERS=0 ./run-muse               # drop the ATEM parsers -> raw transcript (BUG 3)
-#   SPEC=0 ./run-muse                  # no drafter, plain autoregressive decode
-#   SPEC_TOKENS=7 ./run-muse           # shorter draft block (default 15, = block_size-1)
-#   DRAFT_CAUSAL=1 ./run-muse          # causal drafter attention (default: non-causal)
-#   DRAFT_EMBED_NORM=1 ./run-muse      # drafter reads NORMED embeddings (default: raw)
-#   EAGER=1 ./run-muse                 # no torch.compile / CUDA graphs
-#   SWA=0 ./run-muse                   # don't hoist layer_types (see below)
-#   KV_FP8=1 ./run-muse                # fp8 KV cache (quality risk, 2 KV heads)
-#   REASONING=xhigh ./run-muse         # low | medium | high | xhigh
-#   VISION=0 ./run-muse                # drop the perception encoder (text only)
-#   ATTN_BACKEND=FLASH_ATTN ./run-muse   # default is flashinfer
-#   LINEAR_BACKEND= ./run-muse           # let vLLM pick the NVFP4 GEMM
-#   MAX_NUM_SEQS=3 ./run-muse            # the old, bf16-era concurrency
-#   MAX_MODEL_LEN=32768 ./run-muse
-#   IMAGE_TAG=cu1312-sm120 ./run-muse
-#   EXTRA_ARGS="--max-num-seqs 8" ./run-muse
+#   PATCH=0 ./muse/run                 # drop the embed_norm patch -> garbage (BUG 1)
+#   LOGIT_SCALE=1.0 ./muse/run         # stock vLLM logits -> greedy collapse (BUG 2)
+#   PARSERS=0 ./muse/run               # drop the ATEM parsers -> raw transcript (BUG 3)
+#   SPEC=0 ./muse/run                  # no drafter, plain autoregressive decode
+#   SPEC_TOKENS=7 ./muse/run           # shorter draft block (default 15, = block_size-1)
+#   DRAFT_CAUSAL=1 ./muse/run          # causal drafter attention (default: non-causal)
+#   DRAFT_EMBED_NORM=1 ./muse/run      # drafter reads NORMED embeddings (default: raw)
+#   EAGER=1 ./muse/run                 # no torch.compile / CUDA graphs
+#   SWA=0 ./muse/run                   # don't hoist layer_types (see below)
+#   KV_FP8=1 ./muse/run                # fp8 KV cache (quality risk, 2 KV heads)
+#   REASONING=xhigh ./muse/run         # low | medium | high | xhigh
+#   VISION=0 ./muse/run                # drop the perception encoder (text only)
+#   ATTN_BACKEND=FLASH_ATTN ./muse/run   # default is flashinfer
+#   LINEAR_BACKEND= ./muse/run           # let vLLM pick the NVFP4 GEMM
+#   MAX_NUM_SEQS=3 ./muse/run            # the old, bf16-era concurrency
+#   MAX_MODEL_LEN=32768 ./muse/run
+#   IMAGE_TAG=cu1312-sm120 ./muse/run
+#   EXTRA_ARGS="--max-num-seqs 8" ./muse/run
 #
-# Benchmark a variant against the running server: ./bench <label>
+# Benchmark a variant against the running server: ./bench/bench <label>
 set -euo pipefail
 
 NAME=vllm-muse
@@ -226,7 +226,7 @@ SELFTEST=0
 # because the NVFP4 build lives under RedHatAI/ while the DFlash drafter lives
 # under meta-models/ -- they are no longer siblings, and a per-model mount cannot
 # see both. MODEL/DRAFT are therefore paths RELATIVE to this root.
-MODEL_ROOT=${MODEL_ROOT:-$(cd "$(dirname "$0")/models/vllm" && pwd)}
+MODEL_ROOT=${MODEL_ROOT:-$(cd "$(dirname "$0")/../models/vllm" && pwd)}
 _arg=${1:-RedHatAI/Muse-Glimmer-30B-NVFP4}
 if [[ -d "$_arg" ]]; then
   # A full path, as ./scripts/muse-spec-* pass. Keep it relative to the root when
@@ -246,8 +246,8 @@ fi
   exit 1; }
 MODEL_FOLDER=$MODEL_ROOT                          # what gets bind-mounted at /models
 
-PORT=${PORT:-8700}                               # 8702: coexists with ./run (8700) and dgemma (8701)
-# flashinfer, and now measured rather than inherited from ./run.
+PORT=${PORT:-8700}                               # 8702: coexists with ./qwen/run (8700) and dgemma (8701)
+# flashinfer, and now measured rather than inherited from ./qwen/run.
 # ./scripts/muse-longctx-sweep, NVFP4, warm prefix, aggregate decode tok/s:
 #         ctx/conc     34k/1   34k/8   100k/1  100k/8
 #     flashinfer        68.8   535.8     66.5   505.3
@@ -258,7 +258,7 @@ PORT=${PORT:-8700}                               # 8702: coexists with ./run (87
 ATTN_BACKEND=${ATTN_BACKEND:-flashinfer}
 # NVFP4 GEMM kernel. EMPTY = let vLLM pick, which measured FASTEST here.
 #
-# ./run pins cutlass with the note "bench-fastest NVFP4 GEMM on sm120f", but that
+# ./qwen/run pins cutlass with the note "bench-fastest NVFP4 GEMM on sm120f", but that
 # was benched on its MoE and Laguna shapes and does not transfer to Muse
 # Glimmer's dense 6656x19968. ./scripts/muse-nvfp4-sweep, batch 1, temp 0:
 #     auto  69.82   flashinfer_cutlass 69.60   marlin 69.45
@@ -318,10 +318,10 @@ DRAFT_CAUSAL=${DRAFT_CAUSAL:-0}                  # reference sets is_causal = Fa
 DRAFT_EMBED_NORM=${DRAFT_EMBED_NORM:-0}          # reference embeds WITHOUT the norm
 
 # NATIVE=1 serves the model through upstream's in-flight native implementation
-# (vllm-project/vllm#51655) vendored into patches/muse-native/, instead of the
+# (vllm-project/vllm#51655) vendored into muse/patches/muse-native/, instead of the
 # generic Transformers backend. No rebuild -- the vendored tree is mounted and
 # loaded out of tree, so trying a newer revision of that PR costs
-#   ./scripts/muse-native-sync && NATIVE=1 ./run-muse
+#   ./scripts/muse-native-sync && NATIVE=1 ./muse/run
 # rather than a multi-hour image build.
 #
 # EXPERIMENTAL. The PR is unmerged and still moving. When it is on, the shims
@@ -336,7 +336,7 @@ DRAFT_EMBED_NORM=${DRAFT_EMBED_NORM:-0}          # reference embeds WITHOUT the 
 # NATIVE=0 goes back to the shimmed fallback if a vendored revision breaks.
 NATIVE=${NATIVE:-1}
 
-# patches/ is mounted whole at /vllm-patches; each subdirectory is one patch.
+# muse/patches/ is mounted whole at /vllm-patches; each subdirectory is one patch.
 PATCH_ROOT=$(cd "$(dirname "$0")/patches" && pwd)
 EMBED_PATCH=muse-embed-norm/sitecustomize.py
 ATEM_PLUGIN=atem-parsers/atem_parsers.py
@@ -346,9 +346,9 @@ for f in "$EMBED_PATCH" "$ATEM_PLUGIN" atem-parsers/selftest.py "$DFLASH_MODULE"
 done
 
 docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
-  echo "Image $CONTAINER not found. Run ./build first."; exit 1; }
+  echo "Image $CONTAINER not found. Run ./container/build first."; exit 1; }
 
-# ./run-muse --selftest -- exercise the ATEM parsers against vLLM's real parser
+# ./muse/run --selftest -- exercise the ATEM parsers against vLLM's real parser
 # plumbing (ParserManager + DelegatingParser). No GPU, no server, no weights
 # beyond the tokenizer. Run it after every vLLM bump: that plumbing is internal
 # API and it does move. Deliberately ahead of the SPEC checks below: this is an
@@ -368,7 +368,7 @@ fi
 # vendor/ is gitignored (regenerable upstream code, pinned by UPSTREAM), so a
 # fresh clone has the loader but not the files it loads.
 if [[ "$NATIVE" == "1" && ! -f "$PATCH_ROOT/muse-native/vendor/vllm/model_executor/models/muse_glimmer.py" ]]; then
-  echo "NATIVE=1 but patches/muse-native/vendor is empty."
+  echo "NATIVE=1 but muse/patches/muse-native/vendor is empty."
   echo "Fetch upstream's implementation first:  ./scripts/muse-native-sync"
   exit 1
 fi
@@ -474,7 +474,7 @@ CONTAINER_ARGS=(
   -e VLLM_LOG_STATS_INTERVAL=1
   # Ad-hoc env passthrough, space-separated NAME=VALUE pairs. For one-off diagnosis
   # rather than anything the defaults should depend on, e.g.
-  #   ENV_EXTRA="VLLM_LOGGING_LEVEL=DEBUG" ./run-muse
+  #   ENV_EXTRA="VLLM_LOGGING_LEVEL=DEBUG" ./muse/run
   ${ENV_EXTRA:+$(for _kv in $ENV_EXTRA; do printf -- '-e\n%s\n' "$_kv"; done)}
   # NOTE: no VLLM_ALLOW_LONG_MAX_MODEL_LEN — 131072 is the real limit here.
   -p "0.0.0.0:${PORT}:8799"
@@ -602,7 +602,7 @@ docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
 #   to=self<|message|>...chain of thought...<|eom|>
 #   <|start|>assistant to=user<|message|>...the actual answer...<|eot|>
 #
-# patches/atem-parsers/atem_parsers.py splits that into `reasoning` + `content`
+# muse/patches/atem-parsers/atem_parsers.py splits that into `reasoning` + `content`
 # and turns `<atem:invoke name=...>` blocks into OpenAI tool_calls. Two things
 # worth knowing:
 #
@@ -627,7 +627,7 @@ docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
 #
 # The parsers hook vLLM internals that are not public API (ParserManager,
 # DelegatingParser's streaming contract). After a vLLM bump run
-# `./run-muse --selftest` before trusting a server: it replays recorded
+# `./muse/run --selftest` before trusting a server: it replays recorded
 # transcripts through the real plumbing, one-shot and token-by-token.
 #
 # For the full thing -- selftest, then a server, then seven live checks over

@@ -2,14 +2,14 @@
 # Large-context decode benchmark: how TG (token-gen tok/s) degrades as the KV cache
 # fills, measured two ways, across the NVFP4 backend matrix.
 #
-#   ./bench-context                                   # ALL permutations (see DEFAULT_CONFIGS): long!
-#   ./bench-context /path/to/model
-#   PAD_SIZES="8192 32768" CONFIGS=$'cutlass cutlass 2' ./bench-context   # quick subset
+#   ./bench/bench-context                                   # ALL permutations (see DEFAULT_CONFIGS): long!
+#   ./bench/bench-context /path/to/model
+#   PAD_SIZES="8192 32768" CONFIGS=$'cutlass cutlass 2' ./bench/bench-context   # quick subset
 #
 # Two modes per backend (one vLLM launch each), driven by lib/ctxbench.py:
 #   convo : 3-turn conversation -- (1) Bash primes (dynamic), (2) port to Python
 #           (dynamic), (3) static "summarize this Quake II source" turn loaded from
-#           data/test-convo.json (run ./make-test-convo first). Turn 3 injects ~120k
+#           data/test-convo.json (run ./bench/make-test-convo first). Turn 3 injects ~120k
 #           tokens of real C source, so it measures decode at large depth inside a
 #           realistic chat (history resent each turn -> exercises prefix caching).
 #   pad   : prompt padded to exact PAD_SIZES (8k/32k/64k/128k), short generation,
@@ -24,14 +24,14 @@ set -uo pipefail   # NOT -e: survive a failing config/turn and keep going
 HERE=$(cd "$(dirname "$0")" && pwd)
 MODEL=${1:-/mnt/noir/scratch/ai/llm/models/vllm/Qwen3.5-122B-A10B-NVFP4}
 MODELBASE=$(basename "$MODEL")
-NAME=vllm                                    # must match ./run's container --name
+NAME=vllm                                    # must match ./qwen/run's container --name
 PORT=${PORT:-8700}
 HOST="localhost:${PORT}"
 APIMODEL=${APIMODEL:-cosmo-6000}
 READY_TIMEOUT=${READY_TIMEOUT:-1200}
 
 PAD_SIZES=${PAD_SIZES:-"8192 32768 65536 131072"}
-TESTCONVO=${TESTCONVO:-$HERE/data/test-convo.json}   # static quake2 turn (./make-test-convo)
+TESTCONVO=${TESTCONVO:-$HERE/data/test-convo.json}   # static quake2 turn (./bench/make-test-convo)
 GEN_CONVO=${GEN_CONVO:-1024}                 # tokens generated for the dynamic convo turns
 GEN_SUMMARY=${GEN_SUMMARY:-512}              # tokens generated for the big quake2 summarize turn
 GEN_PAD=${GEN_PAD:-256}                       # tokens generated per pad probe
@@ -89,7 +89,7 @@ while read -r cfg_name nvfp4 spec moe; do
   start_log="$LOGDIR/start-ctx-$cfg_name.log"
   echo "    launching vLLM ..."
   DETACH=1 PORT="$PORT" NVFP4_BACKEND="$nvfp4_env" SPEC_TOKENS="$spec" MOE_BACKEND="$moe_env" \
-    "$HERE/run" "$MODEL" > "$start_log" 2>&1
+    "$HERE/../qwen/run" "$MODEL" > "$start_log" 2>&1
 
   if ! wait_ready; then
     echo "    NOT READY -> see $start_log" | tee -a "$RESULTS"

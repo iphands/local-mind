@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 """Load upstream's in-flight native Muse Glimmer support, out of tree.
 
-vLLM 0.27.1 has no Muse Glimmer, so run-muse serves it through the generic
+vLLM 0.27.1 has no Muse Glimmer, so muse/run serves it through the generic
 Transformers backend:
 
     WARNING [utils.py:217] TransformersMultiModalForCausalLM has no vLLM
     implementation, falling back to Transformers implementation.
 
-That fallback is the reason patches/ exists at all -- it drops the embedding
+That fallback is the reason muse/patches/ exists at all -- it drops the embedding
 RMSNorm, ignores output_multiplier, reads layer_types from the wrong config
 level, and silently fails to capture the aux hidden states DFlash needs.
 
@@ -16,7 +16,7 @@ PR ADDS directly from vendor/, so the native path can be exercised without
 rebuilding the image -- a rebuild being multi-hour here, and the PR still moving.
 
     ./scripts/muse-native-sync      refresh vendor/ from the PR
-    NATIVE=1 ./run-muse             serve with it
+    NATIVE=1 ./muse/run             serve with it
 
 vendor/ is byte-identical to upstream and never edited, so a refresh is a copy
 rather than a merge. The handful of edits the PR makes to EXISTING core files
@@ -24,14 +24,14 @@ cannot be vendored (that would drag in an entire newer tree), so they are
 mirrored here and in sitecustomize instead:
 
     registry.py:530   MuseGlimmerForConditionalGeneration -> MuseGlimmerForCausalLM
-                      (run-muse passes this via --model-class-overrides)
+                      (muse/run passes this via --model-class-overrides)
     registry.py:630   MuseGlimmerAssistantModel -> qwen3_dflash.DFlashQwen3ForCausalLM
                       (note: upstream drives the drafter with the STOCK class,
-                       same as patches/muse-dflash does)
+                       same as muse/patches/muse-dflash does)
     config.py:104-107 the four muse_glimmer* config classes
                       (register_configs below)
 
-Delete the whole directory once the PR merges into a release ./build pins.
+Delete the whole directory once the PR merges into a release ./container/build pins.
 """
 
 import importlib.abc
@@ -146,7 +146,7 @@ def _compat_decoder_is_its_own_model(native) -> None:
     `embed_tokens` they then read.
 
     Inert on a vLLM that has the fallback -- getattr finds this and returns the
-    same object. Drop it when ./build pins a vLLM new enough.
+    same object. Drop it when ./container/build pins a vLLM new enough.
     """
     cls = getattr(native, "MuseGlimmerModel", None)
     if cls is None or "model" in vars(cls):

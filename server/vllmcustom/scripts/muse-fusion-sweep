@@ -72,17 +72,17 @@ MAX_TOKENS=${MAX_TOKENS:-256}
 PROMPT_TOKENS=${PROMPT_TOKENS:-2048}
 CONC=${CONC:-1,4}
 REPEATS=${REPEATS:-3}
-LOGDIR=${LOGDIR:-$HERE/bench-logs}
+LOGDIR=${LOGDIR:-$HERE/bench/bench-logs}
 WORK=$(mktemp -d)
 
-# shellcheck source=../_bench-lib.sh
-source "$HERE/_bench-lib.sh"
+# shellcheck source=../bench/_bench-lib.sh
+source "$HERE/bench/_bench-lib.sh"
 mkdir -p "$LOGDIR"
 for tool in curl jq docker bc; do
   command -v "$tool" >/dev/null || { echo "## need $tool"; exit 2; }
 done
 
-# Compact JSON only -- run-muse expands ${EXTRA_ARGS} unquoted, so any space in
+# Compact JSON only -- muse/run expands ${EXTRA_ARGS} unquoted, so any space in
 # the value would word-split into separate argv entries and corrupt the flag.
 PC='"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE"'
 ARMS=(
@@ -103,8 +103,8 @@ trap cleanup EXIT
 
 build_prompt() {
   : > "$WORK/corpus.txt"
-  for f in run-muse patches/muse-embed-norm/sitecustomize.py \
-           patches/muse-dflash/muse_dflash.py scripts/muse-longctx-sweep; do
+  for f in muse/run muse/patches/muse-embed-norm/sitecustomize.py \
+           muse/patches/muse-dflash/muse_dflash.py scripts/muse-longctx-sweep; do
     [[ -f "$HERE/$f" ]] && { echo "===== $f ====="; cat "$HERE/$f"; } >> "$WORK/corpus.txt"
   done
   while (( $(wc -c < "$WORK/corpus.txt") < $(( PROMPT_TOKENS * 5 )) )); do
@@ -173,7 +173,7 @@ for entry in "${ARMS[@]}"; do
   log="$LOGDIR/fusion-$label.log"; : > "$log"
   [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=""
   stop_server
-  EXTRA_ARGS="$extra" DETACH=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" >> "$log" 2>&1
+  EXTRA_ARGS="$extra" DETACH=1 PORT="$PORT" "$HERE/muse/run" "$MODEL" >> "$log" 2>&1
   docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
   if ! wait_ready; then
     printf '  %-12s BOOT FAILED -- see %s\n' "$label" "$log"; continue

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# End-to-end check of the Muse Glimmer ATEM parsers (see ../run-muse "BUG 3").
+# End-to-end check of the Muse Glimmer ATEM parsers (see ../muse/run "BUG 3").
 #
 #   ./scripts/muse-e2e                 # selftest, (re)start the server, run 7 live checks
 #   KEEP=1 ./scripts/muse-e2e          # leave the server running afterwards
@@ -11,11 +11,11 @@
 # the chain of thought glued to the answer, not a crash.
 #
 # Stages:
-#   0. ./run-muse --selftest        offline, replays recorded transcripts through
+#   0. ./muse/run --selftest        offline, replays recorded transcripts through
 #                                   vLLM's real parser plumbing. Catches the
 #                                   internal-API drift before burning a load.
 #   1. server                       reuses a healthy one on $PORT if there is
-#                                   one, otherwise DETACH=1 ./run-muse and waits
+#                                   one, otherwise DETACH=1 ./muse/run and waits
 #                                   for /health (several minutes: 60 GB + compile)
 #   2. live checks                  the seven below, against the running server
 #
@@ -44,19 +44,19 @@ set -uo pipefail   # NOT -e: a failing check must not abort the rest of the run
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 MODEL=${1:-$HERE/models/vllm/meta-models/Muse-Glimmer-30B}
-NAME=vllm-muse                              # must match ./run-muse's --name
+NAME=vllm-muse                              # must match ./muse/run's --name
 PORT=${PORT:-8700}
 HOST="localhost:${PORT}"
-APIMODEL=${APIMODEL:-cosmo-6000}            # one of ./run-muse's --served-model-name aliases
+APIMODEL=${APIMODEL:-cosmo-6000}            # one of ./muse/run's --served-model-name aliases
 READY_TIMEOUT=${READY_TIMEOUT:-1200}        # s to wait for weight load + torch.compile
 KEEP=${KEEP:-0}                             # 1 = leave the server up when done
-LOGDIR=${LOGDIR:-$HERE/bench-logs}
+LOGDIR=${LOGDIR:-$HERE/bench/bench-logs}
 STARTED_SERVER=0
 FAILURES=0
 CHECKS=0
 
-# shellcheck source=../_bench-lib.sh
-source "$HERE/_bench-lib.sh"                # stop_server, wait_ready (use NAME/HOST/READY_TIMEOUT)
+# shellcheck source=../bench/_bench-lib.sh
+source "$HERE/bench/_bench-lib.sh"                # stop_server, wait_ready (use NAME/HOST/READY_TIMEOUT)
 
 mkdir -p "$LOGDIR"
 for tool in curl jq docker; do
@@ -177,7 +177,7 @@ api_error() {  # <label> <response>
 echo "## muse-e2e  model=$(basename "$MODEL")  host=$HOST  api-model=$APIMODEL"
 echo
 echo "## stage 0: offline parser selftest"
-if ! "$HERE/run-muse" --selftest 2>&1 | grep -v FutureWarning | tail -3; then
+if ! "$HERE/muse/run" --selftest 2>&1 | grep -v FutureWarning | tail -3; then
   echo "## selftest FAILED -- the parsers no longer match this vLLM. Stopping."
   exit 1
 fi
@@ -191,8 +191,8 @@ if curl -sf "http://${HOST}/health" >/dev/null 2>&1; then
   echo "##   (it must have been started WITH the parsers; PARSERS=0 will fail check 3)"
 else
   start_log="$LOGDIR/muse-e2e-start.log"
-  echo "##   launching ./run-muse (log -> $start_log)"
-  DETACH=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" > "$start_log" 2>&1
+  echo "##   launching ./muse/run (log -> $start_log)"
+  DETACH=1 PORT="$PORT" "$HERE/muse/run" "$MODEL" > "$start_log" 2>&1
   STARTED_SERVER=1
   echo "##   waiting up to ${READY_TIMEOUT}s for weight load + compile ..."
   if ! wait_ready; then
@@ -396,5 +396,5 @@ if (( FAILURES == 0 )); then
 fi
 echo "## FAIL -- $FAILURES failed assertion(s) across $CHECKS checks"
 echo "##   server log: docker logs $NAME"
-echo "##   to isolate: PARSERS=0 ./run-muse  (raw transcripts; check 3 should 400)"
+echo "##   to isolate: PARSERS=0 ./muse/run  (raw transcripts; check 3 should 400)"
 exit 1

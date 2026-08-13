@@ -70,11 +70,11 @@ MAX_TOKENS=${MAX_TOKENS:-256}
 PROMPT_TOKENS=${PROMPT_TOKENS:-2048}
 CONC=${CONC:-1,2,4}
 REPEATS=${REPEATS:-3}
-LOGDIR=${LOGDIR:-$HERE/bench-logs}
+LOGDIR=${LOGDIR:-$HERE/bench/bench-logs}
 WORK=$(mktemp -d)
 
-# shellcheck source=../_bench-lib.sh
-source "$HERE/_bench-lib.sh"
+# shellcheck source=../bench/_bench-lib.sh
+source "$HERE/bench/_bench-lib.sh"
 mkdir -p "$LOGDIR"
 for tool in curl jq docker bc; do
   command -v "$tool" >/dev/null || { echo "## need $tool"; exit 2; }
@@ -104,8 +104,8 @@ trap cleanup EXIT
 
 build_prompt() {
   : > "$WORK/corpus.txt"
-  for f in run-muse patches/muse-embed-norm/sitecustomize.py \
-           patches/muse-dflash/muse_dflash.py scripts/muse-longctx-sweep; do
+  for f in muse/run muse/patches/muse-embed-norm/sitecustomize.py \
+           muse/patches/muse-dflash/muse_dflash.py scripts/muse-longctx-sweep; do
     [[ -f "$HERE/$f" ]] && { echo "===== $f ====="; cat "$HERE/$f"; } >> "$WORK/corpus.txt"
   done
   while (( $(wc -c < "$WORK/corpus.txt") < $(( PROMPT_TOKENS * 5 )) )); do
@@ -176,7 +176,7 @@ if curl -sf "http://${HOST}/health" >/dev/null 2>&1; then
   echo "## reusing the server already on :$PORT"
 else
   echo "## booting $NAME (defaults) -- log: $log"
-  DETACH=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" >> "$log" 2>&1
+  DETACH=1 PORT="$PORT" "$HERE/muse/run" "$MODEL" >> "$log" 2>&1
   docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
   BOOTED_HERE=1
   wait_ready || { echo "## BOOT FAILED -- see $log"; exit 1; }

@@ -8,7 +8,7 @@
 # NVFP4 got decode from 27 to 50 tok/s, but that is only ~41% of the memory
 # roofline where bf16 sat at ~80%. So the bottleneck moved: at batch 1 the GEMMs
 # have M=1, the FP4 tensor cores are starved, and W4A4 adds an activation-quant
-# pass per layer. Which kernel wins is an empirical question, and ./run's
+# pass per layer. Which kernel wins is an empirical question, and ./qwen/run's
 # "cutlass is fastest on sm120f" note was benched on MoE and Laguna shapes, not
 # Muse Glimmer's dense 6656x19968.
 #
@@ -31,18 +31,18 @@ APIMODEL=${APIMODEL:-cosmo-6000}
 READY_TIMEOUT=${READY_TIMEOUT:-1200}
 REPEATS=${REPEATS:-3}
 MAX_TOKENS=${MAX_TOKENS:-200}
-LOGDIR=${LOGDIR:-$HERE/bench-logs}
+LOGDIR=${LOGDIR:-$HERE/bench/bench-logs}
 WORK=$(mktemp -d)
 PROMPT='Write a Python function that merges two sorted lists into one sorted list.'
 
-# shellcheck source=../_bench-lib.sh
-source "$HERE/_bench-lib.sh"
+# shellcheck source=../bench/_bench-lib.sh
+source "$HERE/bench/_bench-lib.sh"
 mkdir -p "$LOGDIR"
 for tool in curl jq docker bc; do
   command -v "$tool" >/dev/null || { echo "## need $tool"; exit 2; }
 done
 
-# label | env assignments passed through to run-muse
+# label | env assignments passed through to muse/run
 CONFIGS=(
   "cutlass|LINEAR_BACKEND=cutlass"
   "flashinfer_cutlass|LINEAR_BACKEND=flashinfer_cutlass"
@@ -91,7 +91,7 @@ for entry in "${CONFIGS[@]}"; do
   [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=""
   stop_server
   # shellcheck disable=SC2086
-  env $env1 ${env2:-} DETACH=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" >> "$log" 2>&1
+  env $env1 ${env2:-} DETACH=1 PORT="$PORT" "$HERE/muse/run" "$MODEL" >> "$log" 2>&1
   docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
 
   if ! wait_ready; then

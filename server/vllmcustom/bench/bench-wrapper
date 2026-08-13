@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 # Sweep sm120 perf configs end-to-end: for each config it (re)starts vLLM via
-# ./run, waits until ready, warms up, measures, stops, then prints a table.
+# ./qwen/run, waits until ready, warms up, measures, stops, then prints a table.
 #
-#   ./bench-wrapper                                  # default model below
-#   ./bench-wrapper /path/to/model                   # explicit model
-#   RUNS=3 ./bench-wrapper                            # 3 measured runs/config (median TG)
-#   CONFIGS=$'cutlass-mtp2 cutlass 2\ncudnn-mtp2 flashinfer-cudnn 2' ./bench-wrapper
+#   ./bench/bench-wrapper                                  # default model below
+#   ./bench/bench-wrapper /path/to/model                   # explicit model
+#   RUNS=3 ./bench/bench-wrapper                            # 3 measured runs/config (median TG)
+#   CONFIGS=$'cutlass-mtp2 cutlass 2\ncudnn-mtp2 flashinfer-cudnn 2' ./bench/bench-wrapper
 #
 # Each config is a full 122B (re)load — expect several minutes EACH. The whole
 # default sweep is long; trim CONFIGS to iterate faster.
@@ -26,10 +26,10 @@ set -uo pipefail   # NOT -e: we want to survive a failing config and keep going
 HERE=$(cd "$(dirname "$0")" && pwd)
 MODEL=${1:-/mnt/noir/scratch/ai/llm/models/vllm/Qwen3.5-122B-A10B-NVFP4}
 MODELBASE=$(basename "$MODEL")
-NAME=vllm                                   # must match ./run's container --name
+NAME=vllm                                   # must match ./qwen/run's container --name
 PORT=${PORT:-8700}
 HOST="localhost:${PORT}"
-APIMODEL=${APIMODEL:-cosmo-6000}            # one of ./run's --served-model-name aliases
+APIMODEL=${APIMODEL:-cosmo-6000}            # one of ./qwen/run's --served-model-name aliases
 READY_TIMEOUT=${READY_TIMEOUT:-1200}        # s to wait for weight load + JIT before giving up
 RUNS=${RUNS:-1}                             # measured runs per config (median TG reported)
 GEN_TOKENS=${GEN_TOKENS:-1024}
@@ -79,7 +79,7 @@ while read -r cfg_name nvfp4 spec moe; do
 
   echo "    launching vLLM ..."
   DETACH=1 PORT="$PORT" NVFP4_BACKEND="$nvfp4_env" SPEC_TOKENS="$spec" MOE_BACKEND="$moe_env" \
-    "$HERE/run" "$MODEL" > "$start_log" 2>&1
+    "$HERE/../qwen/run" "$MODEL" > "$start_log" 2>&1
 
   if ! wait_ready; then
     echo "    NOT READY -> see $start_log"; docker logs "$NAME" > "$LOGDIR/crash-$cfg_name.log" 2>&1 || true

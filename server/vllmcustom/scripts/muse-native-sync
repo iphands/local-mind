@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Vendor the in-flight upstream Muse Glimmer support into patches/muse-native/.
+# Vendor the in-flight upstream Muse Glimmer support into muse/patches/muse-native/.
 #
 #   ./scripts/muse-native-sync            # fetch, vendor, report what moved
 #   ./scripts/muse-native-sync --check    # report only; writes nothing
 #   PR=51655 ./scripts/muse-native-sync   # a different PR (or REF=main once merged)
 #
-# vLLM 0.27.1 has no Muse Glimmer, so run-muse serves it through the generic
-# Transformers backend -- which is why patches/ is full of shims. PR #51655 adds
+# vLLM 0.27.1 has no Muse Glimmer, so muse/run serves it through the generic
+# Transformers backend -- which is why muse/patches/ is full of shims. PR #51655 adds
 # a native implementation. Rather than wait for it to merge and then rebuild the
 # image (multi-hour), vendor the files it ADDS and load them out-of-tree with
 # --model-class-overrides. Refreshing against upstream then costs one fetch and
@@ -20,7 +20,7 @@
 # WHAT IS NOT VENDORED: upstream's edits to EXISTING core files (registry.py,
 # transformers_utils/config.py, ...). Copying those wholesale would drag in
 # unrelated changes from a newer tree. Those few lines are mirrored by hand in
-# patches/muse-embed-norm/sitecustomize.py, so this script prints them every run
+# muse/patches/muse-embed-norm/sitecustomize.py, so this script prints them every run
 # -- if they change, that is your signal to update the shim.
 set -euo pipefail
 
@@ -28,7 +28,7 @@ HERE=$(cd "$(dirname "$0")/.." && pwd)
 PR=${PR:-51655}
 REF=${REF:-refs/pull/${PR}/head}
 REPO=${REPO:-https://github.com/vllm-project/vllm.git}
-DEST="$HERE/patches/muse-native"
+DEST="$HERE/muse/patches/muse-native"
 VENDOR="$DEST/vendor"
 STAMP="$DEST/UPSTREAM"
 CACHE=${CACHE:-/mnt/noir/scratch/ai/vllm/muse-native-src}
@@ -37,7 +37,7 @@ CHECK=0
 
 command -v git >/dev/null || { echo "need git"; exit 2; }
 
-# Deliberately NOT the ./build source tree: a stray PR ref in there could confuse
+# Deliberately NOT the ./container/build source tree: a stray PR ref in there could confuse
 # a later build, and this wants to be safe to run at any time.
 if [[ ! -d "$CACHE/.git" ]]; then
   echo "## cloning a scratch mirror -> $CACHE"
@@ -106,7 +106,7 @@ fi
 # The core-file edits we cannot vendor. Printed every run so drift is visible.
 echo
 echo "## upstream's edits to EXISTING core files -- mirror these by hand in"
-echo "## patches/muse-embed-norm/sitecustomize.py if they change:"
+echo "## muse/patches/muse-embed-norm/sitecustomize.py if they change:"
 for core in vllm/model_executor/models/registry.py vllm/transformers_utils/config.py; do
   echo "  --- $core"
   git -C "$CACHE" cat-file -p "FETCH_HEAD:$core" 2>/dev/null \
@@ -134,4 +134,4 @@ echo "## vendored $(printf '%s\n' "${FILES[@]}" | wc -l) files -> $VENDOR"
 echo "##   $ADDED added, $CHANGED changed"
 echo "## stamp -> $STAMP"
 echo
-echo "## next: NATIVE=1 ./run-muse    (no rebuild; the vendored tree is mounted read-only)"
+echo "## next: NATIVE=1 ./muse/run    (no rebuild; the vendored tree is mounted read-only)"

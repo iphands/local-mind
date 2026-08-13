@@ -1,6 +1,6 @@
 # muse-native — upstream's in-flight Muse Glimmer support, loaded without a rebuild
 
-vLLM 0.27.1 has no Muse Glimmer. `run-muse` therefore serves it through the
+vLLM 0.27.1 has no Muse Glimmer. `muse/run` therefore serves it through the
 generic Transformers backend:
 
 ```
@@ -8,7 +8,7 @@ WARNING [utils.py:217] TransformersMultiModalForCausalLM has no vLLM
 implementation, falling back to Transformers implementation.
 ```
 
-That fallback is why `patches/` exists: it drops the embedding RMSNorm, ignores
+That fallback is why `muse/patches/` exists: it drops the embedding RMSNorm, ignores
 `output_multiplier`, reads `layer_types` from the wrong config level, and
 silently fails to capture the aux hidden states DFlash needs.
 
@@ -23,7 +23,7 @@ rebuild here is multi-hour and the PR is still moving.
 
 ```bash
 ./scripts/muse-native-sync     # refresh vendor/ from the PR, report what moved
-NATIVE=1 ./run-muse            # serve with it — no rebuild
+NATIVE=1 ./muse/run            # serve with it — no rebuild
 ```
 
 Confirm it took: the fallback warning is gone and the log says
@@ -38,7 +38,7 @@ INFO [model.py:645] Resolved architecture: MuseGlimmerForConditionalGeneration
 `vendor/` is **gitignored** (`.gitignore:1`), matching how this repo treats every
 other vendored tree. It is regenerable and pinned: `UPSTREAM` records the exact
 commit, so `muse-native-sync` reproduces it byte for byte. A fresh clone must run
-the sync once before `NATIVE=1` will work — `run-muse` says so if you forget.
+the sync once before `NATIVE=1` will work — `muse/run` says so if you forget.
 
 ## Tracking upstream
 
@@ -52,7 +52,7 @@ the vendored commit; the sync prints `MOVED since last sync` and a per-file
 `new`/`CHANGED`/`same`/`STALE` line, so a refresh shows exactly what upstream
 touched.
 
-Once the PR merges into a release `./build` pins, delete this whole directory
+Once the PR merges into a release `./container/build` pins, delete this whole directory
 and the `NATIVE` knob — that is the win condition.
 
 ## What is vendored, and what is not
@@ -71,9 +71,9 @@ few, and they are replayed instead:
 
 | upstream | replayed in |
 |---|---|
-| `registry.py:530` `MuseGlimmerForConditionalGeneration` → `MuseGlimmerForCausalLM` | `run-muse` `--model-class-overrides` |
-| `registry.py:631` `DFlashMuseGlimmerAssistantModel` → `qwen3_dflash.DFlashQwen3ForCausalLM` | `patches/muse-dflash` (a subclass, for the `encoder.*` rename) |
-| `transformers_utils/config.py:104-107` four `muse_glimmer*` config classes | shim 7 in `patches/muse-embed-norm/sitecustomize.py` |
+| `registry.py:530` `MuseGlimmerForConditionalGeneration` → `MuseGlimmerForCausalLM` | `muse/run` `--model-class-overrides` |
+| `registry.py:631` `DFlashMuseGlimmerAssistantModel` → `qwen3_dflash.DFlashQwen3ForCausalLM` | `muse/patches/muse-dflash` (a subclass, for the `encoder.*` rename) |
+| `transformers_utils/config.py:104-107` four `muse_glimmer*` config classes | shim 7 in `muse/patches/muse-embed-norm/sitecustomize.py` |
 
 `muse-native-sync` prints those core-file lines on **every** run. If they change,
 that is the signal to update the replays above.
@@ -94,7 +94,7 @@ The reason to do this is correctness. The native model applies **both**
 `output_multiplier` *and* the tanh `final_logit_softcapping`
 (`muse_glimmer.py:1630-1632`). The fallback path could only supply the
 multiplier, via `--hf-overrides text_config.logit_scale`; the softcap was the
-documented residual in `run-muse`'s BUG 2 notes. Native closes that gap, which
+documented residual in `muse/run`'s BUG 2 notes. Native closes that gap, which
 is why `--hf-overrides` is dropped when `NATIVE=1` — forcing `logit_scale` on
 top of a model that already scales would double-apply it.
 
@@ -121,7 +121,7 @@ returns the decoder and there is no further `.model`. Newer main writes
 `getattr(x, "model", x)` in both call sites; 0.27.1 does not.
 
 Of the PR's five core-file edits, only those needed replaying. `speculative.py`
-auto-detects the dflash method from architectures (run-muse passes it
+auto-detects the dflash method from architectures (muse/run passes it
 explicitly) and both `dflash.py` RoPE-propagation changes are inapplicable —
 Muse Glimmer is NEOX-style on both sides, which is already the default.
 
@@ -152,7 +152,7 @@ the better fallback numbers are a net loss past ~2k tokens.
 ## Note on the drafter
 
 Upstream maps the DFlash draft head to the **stock** `qwen3_dflash`
-implementation — the same class `patches/muse-dflash` subclasses. So this PR is
+implementation — the same class `muse/patches/muse-dflash` subclasses. So this PR is
 not expected to change DFlash behaviour, including the long-context acceptance
 collapse measured in `6da9c19`. Same algorithm, same weights, same 2048-token
 window.

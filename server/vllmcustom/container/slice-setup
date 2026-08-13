@@ -1,24 +1,24 @@
 #!/bin/bash
-# Install the systemd slice that gives ./build a hard memory ceiling.
+# Install the systemd slice that gives ./container/build a hard memory ceiling.
 #
-#   su -c '/path/to/vllmcustom/scripts/slice-setup'    # install with defaults
-#   BUILD_MEM_GB=64 ./scripts/slice-setup              # re-run to change the budget
+#   su -c '/path/to/vllmcustom/container/slice-setup'    # install with defaults
+#   BUILD_MEM_GB=64 ./container/slice-setup              # re-run to change the budget
 #
-# ./build passes --cgroup-parent=$SLICE to `docker build`, so every RUN step
+# ./container/build passes --cgroup-parent=$SLICE to `docker build`, so every RUN step
 # lands in this cgroup. MemoryMax is enforced by the kernel: when the build
 # exceeds it the OOM killer fires *inside this cgroup only* — it kills an nvcc
 # instead of taking down the host (125 GB, no swap, so a host OOM is brutal).
 #
-# This is the backstop, not the primary defence. ./build also derives MAX_JOBS
+# This is the backstop, not the primary defence. ./container/build also derives MAX_JOBS
 # from the same BUILD_MEM_GB so it should never reach the ceiling in the first
 # place; see the "Memory-capped builds" section of the README.
 #
 # Idempotent — re-running overwrites the unit with the current values.
 set -euo pipefail
 
-# Keep this default identical to BUILD_MEM_GB in ../build — they are two halves
+# Keep this default identical to BUILD_MEM_GB in ./container/build — they are two halves
 # of one budget (that script derives MAX_JOBS from it; this one sets the ceiling
-# the kernel enforces). ./build warns at build time if the live cap disagrees
+# the kernel enforces). ./container/build warns at build time if the live cap disagrees
 # with what it was told, so a drift here surfaces rather than silently shrinking
 # the ceiling.
 BUILD_MEM_GB=${BUILD_MEM_GB:-110}
@@ -66,7 +66,7 @@ fi
 
 echo "## writing $unit (max=${BUILD_MEM_GB}G, no MemoryHigh — see comment above)"
 cat > "$unit" <<EOF
-# Managed by vllmcustom/scripts/slice-setup — re-run that to change limits.
+# Managed by vllmcustom/container/slice-setup — re-run that to change limits.
 [Unit]
 Description=vLLM source build (memory-capped)
 
@@ -99,4 +99,4 @@ if [[ ! $applied =~ ^[0-9]+$ ]]; then
 fi
 
 echo "## cgroup: $applied bytes at /sys/fs/cgroup$cgroup"
-echo "## done — ./build will now pick this up automatically."
+echo "## done — ./container/build will now pick this up automatically."

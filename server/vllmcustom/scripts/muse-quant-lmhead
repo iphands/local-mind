@@ -41,5 +41,5 @@ docker run --rm --entrypoint python3 \
 
 echo
 echo "## next: boot it and REQUIRE the scheme to have bound --"
-echo "##   MODEL=$TARGET ./run-muse"
+echo "##   MODEL=$TARGET ./muse/run"
 echo "##   grep 'Using scheme.*lm_head' <log>"
