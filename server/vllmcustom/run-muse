@@ -247,10 +247,14 @@ fi
 MODEL_FOLDER=$MODEL_ROOT                          # what gets bind-mounted at /models
 
 PORT=${PORT:-8700}                               # 8702: coexists with ./run (8700) and dgemma (8701)
-# flashinfer is the bench-fastest attention on sm120f and what ./run uses for
-# every other NVFP4 model here. FLASH_ATTN is the fallback: both support the
-# non-causal attention DFlash needs (v1/attention/backend.py:371-372), so this
-# is a speed choice, not a correctness one.
+# flashinfer, and now measured rather than inherited from ./run.
+# ./scripts/muse-longctx-sweep, NVFP4, warm prefix, aggregate decode tok/s:
+#         ctx/conc     34k/1   34k/8   100k/1  100k/8
+#     flashinfer        68.8   535.8     66.5   505.3
+#     FLASH_ATTN        65.9   451.6     63.7   408.7
+# 4% behind at one stream, 16-19% behind at eight -- the gap grows exactly where
+# real traffic bursts. FLASH_ATTN also cannot do fp8 KV on this card (below).
+# Both support the non-causal attention DFlash needs, so this is speed only.
 ATTN_BACKEND=${ATTN_BACKEND:-flashinfer}
 # NVFP4 GEMM kernel. EMPTY = let vLLM pick, which measured FASTEST here.
 #
@@ -273,7 +277,12 @@ MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-16384}  # bigger speeds long-context pr
 CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
 REASONING=${REASONING:-high}                     # model card: high/xhigh for coding + agentic
 VISION=${VISION:-1}                              # 1 = keep the ~1.8B ViT-G/14 perception encoder
-KV_FP8=${KV_FP8:-}                               # 1 = --kv-cache-dtype fp8 (off by default)
+# 1 = --kv-cache-dtype fp8. Left OFF: measured +0.6% to +2.6% (best at 100k,
+# single stream), which does not pay for the quality risk on a 32Q/2KV model --
+# two KV heads leave very little redundancy to absorb quantization error.
+# Note it only works WITH flashinfer here: FLASH_ATTN refuses it on sm120 with
+#   "FP8 KV cache requires FA3 on SM90 or FA4 on SM100"
+KV_FP8=${KV_FP8:-}
 SWA=${SWA:-1}                                    # 1 = hoist layer_types so interleaved SWA applies
 EAGER=${EAGER:-0}                                # 1 = --enforce-eager (no torch.compile / CUDA graphs)
 

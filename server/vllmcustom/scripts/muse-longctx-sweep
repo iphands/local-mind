@@ -1,0 +1,184 @@
+#!/usr/bin/env bash
+# What is fastest at the shape this server actually serves?
+#
+#   ./scripts/muse-longctx-sweep                 # all configs x all context points
+#   CTX=32000,100000 ./scripts/muse-longctx-sweep
+#   ONLY=flashinfer,flashinfer+kvfp8 ./scripts/muse-longctx-sweep
+#
+# Every other benchmark here used a 114-character prompt and measured decode
+# tok/s. Real traffic from llama-proxy looks nothing like that:
+#
+#   ctx=31839..44463 (regularly >100k)   completion=57..541 tokens
+#   finish=tool_calls   concurrency 1..9  decode 70-83 tok/s
+#
+# Three consequences, and they invert what is worth optimising:
+#
+#   * Concurrency varies 1 to 9. A sample of the log showed concurrent=1 and I
+#     nearly built this around that; it is bursty, so both ends get measured.
+#   * Completions are SHORT. At dur=1011ms for 57 tokens, TTFT is most of the
+#     wall clock. Decode tok/s is the smaller half of what a user feels.
+#   * Prefix cache hit rate runs ~97%: an agentic loop resends a growing
+#     transcript, so nearly all of each prompt is already in cache. The COLD
+#     prefill number is close to irrelevant; the WARM one is what you live with.
+#
+# So this measures TTFT cold and warm, plus decode, at real context lengths --
+# and varies the two knobs that only bite at long context: the attention backend
+# and the KV cache dtype. At 130k, KV is roughly 1.8 GB read per decode step
+# against 14.6 GB of weights, so fp8 KV is worth a few percent, not a
+# transformation. Attention backend could go either way; it was invisible in the
+# short-prompt sweep because KV usage there was 1.4%.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+MODEL=${MODEL:-RedHatAI/Muse-Glimmer-30B-NVFP4}
+NAME=vllm-muse
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+APIMODEL=${APIMODEL:-cosmo-6000}
+READY_TIMEOUT=${READY_TIMEOUT:-1200}
+MAX_TOKENS=${MAX_TOKENS:-200}          # matches the median real completion
+CTX=${CTX:-32000,100000}               # real traffic sits ~32-44k and goes past 100k
+CONC=${CONC:-1,8}                      # real traffic bursts between 1 and 9
+LOGDIR=${LOGDIR:-$HERE/bench-logs}
+WORK=$(mktemp -d)
+
+# shellcheck source=../_bench-lib.sh
+source "$HERE/_bench-lib.sh"
+mkdir -p "$LOGDIR"
+for tool in curl jq docker bc; do
+  command -v "$tool" >/dev/null || { echo "## need $tool"; exit 2; }
+done
+
+CONFIGS=(
+  "flashinfer|ATTN_BACKEND=flashinfer"
+  "flashinfer+kvfp8|ATTN_BACKEND=flashinfer|KV_FP8=1"
+  "flash_attn|ATTN_BACKEND=FLASH_ATTN"
+  "flash_attn+kvfp8|ATTN_BACKEND=FLASH_ATTN|KV_FP8=1"
+)
+
+LOGS_PID=""
+cleanup() {
+  [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null
+  rm -rf "$WORK"
+  echo; echo "## stopping $NAME"; stop_server
+}
+trap cleanup EXIT
+
+# A long, realistic corpus: this repo's own code and the vendored upstream model.
+# Real source, not lorem ipsum, so attention sees the kind of content it serves.
+build_corpus() {
+  : > "$WORK/corpus.txt"
+  for f in run-muse patches/muse-dflash/muse_dflash.py \
+           patches/muse-embed-norm/sitecustomize.py scripts/muse-spec-check \
+           scripts/muse-spec-probe scripts/muse-nvfp4-sweep \
+           patches/muse-native/vendor/vllm/model_executor/models/muse_glimmer.py \
+           patches/muse-native/vendor/vllm/tool_parsers/muse_glimmer_tool_parser.py \
+           patches/atem-parsers/atem_parsers.py; do
+    [[ -f "$HERE/$f" ]] && { echo "===== $f ====="; cat "$HERE/$f"; } >> "$WORK/corpus.txt"
+  done
+  # ~600 KB is enough for 128k tokens at ~4 chars/token.
+  while (( $(wc -c < "$WORK/corpus.txt") < 620000 )); do
+    cat "$WORK/corpus.txt" "$WORK/corpus.txt" > "$WORK/c2" && mv "$WORK/c2" "$WORK/corpus.txt"
+  done
+}
+
+prompt_for() {  # <target-tokens> -> writes $WORK/p.txt and $WORK/body.json
+  head -c $(( $1 * 4 )) "$WORK/corpus.txt" > "$WORK/p.txt"
+  printf '\n\nIn one sentence, what kind of code is above?\n' >> "$WORK/p.txt"
+  # Build the request body ONCE, to a file. A 128k-token prompt is ~512 KB, and
+  # passing that as a curl argument exceeds ARG_MAX:
+  #     /usr/bin/curl: Argument list too long
+  # so every request must post it with --data-binary @file. Building it once
+  # also keeps jq off the critical path when timing concurrent requests.
+  jq -nc --arg m "$APIMODEL" --rawfile p "$WORK/p.txt" --argjson mt "$MAX_TOKENS" \
+    '{model:$m, temperature:0, max_tokens:$mt, stream:true,
+      stream_options:{include_usage:true},
+      messages:[{role:"user",content:$p}]}' > "$WORK/body.json"
+}
+
+# Streamed request. TTFT is time to the first content chunk; decode tok/s is the
+# rest. Non-streaming cannot separate the two, and for 57-token completions the
+# split is the whole story.
+measure() {  # <slot> -> "<ttft_ms> <decode_tps> <total_ms> <prompt_tokens>"
+  local slot=${1:-0} t0 tf t1 line ptok ctok
+  local out="$WORK/stream.$slot"
+  t0=$(date +%s%N); tf=""
+  : > "$out"
+  while IFS= read -r line; do
+    [[ "$line" == data:* ]] || continue
+    [[ -z "$tf" ]] && tf=$(date +%s%N)
+    printf '%s\n' "${line#data: }" >> "$out"
+  done < <(curl -sSN --max-time 900 -X POST "http://${HOST}/v1/chat/completions" \
+             -H 'Content-Type: application/json' --data-binary @"$WORK/body.json")
+  t1=$(date +%s%N)
+  [[ -z "$tf" ]] && { echo "0 0 0 0"; return; }
+  ptok=$(grep -o '"prompt_tokens":[0-9]*' "$out" | tail -1 | cut -d: -f2)
+  ctok=$(grep -o '"completion_tokens":[0-9]*' "$out" | tail -1 | cut -d: -f2)
+  local ttft=$(( (tf - t0) / 1000000 )) total=$(( (t1 - t0) / 1000000 ))
+  local dec="0"
+  (( total > ttft && ${ctok:-0} > 0 )) && dec=$(echo "scale=1; ${ctok} * 1000 / ($total - $ttft)" | bc)
+  echo "$ttft $dec $total ${ptok:-0}"
+}
+
+# N identical requests at once. Reports the MEDIAN per-stream TTFT (what a user
+# waits) and the AGGREGATE decode rate (what the box delivers) -- at concurrency
+# those diverge, and only reporting one of them hides the trade.
+measure_conc() {  # <n> -> "<median_ttft_ms> <agg_decode_tps> <max_total_ms> <prompt_tokens>"
+  local n=$1 i pids=()
+  rm -f "$WORK"/m.* "$WORK"/stream.*
+  for ((i = 0; i < n; i++)); do
+    measure "$i" > "$WORK/m.$i" &
+    pids+=("$!")
+  done
+  # Wait on THESE pids only -- a bare `wait` would also block on the
+  # `docker logs -f` follower started at boot, which never exits.
+  wait "${pids[@]}" 2>/dev/null
+  if ! compgen -G "$WORK/m.*" >/dev/null; then echo "0 0 0 0"; return; fi
+  cat "$WORK"/m.* | awk '
+      { t[NR]=$1; d+=$2; if ($3>mx) mx=$3; if ($4>0) p=$4 }
+      END { if (NR==0) { print "0 0 0 0"; exit }
+            n=asort(t)
+            print (n%2 ? t[(n+1)/2] : int((t[n/2]+t[n/2+1])/2)), d, mx, p+0 }'
+  rm -f "$WORK"/m.* "$WORK"/stream.*
+}
+
+build_corpus
+echo "## muse-longctx-sweep  model=$MODEL  max_tokens=$MAX_TOKENS"
+echo "##   real traffic: ctx 32-44k (>100k regularly), completions 57-541 tok,"
+echo "##   ~97% prefix-cache hits, decode 70-83 tok/s -- warm TTFT is what you feel"
+echo
+
+for entry in "${CONFIGS[@]}"; do
+  IFS='|' read -r label e1 e2 <<<"$entry"
+  [[ -n "${ONLY:-}" && ",$ONLY," != *",$label,"* ]] && continue
+
+  log="$LOGDIR/longctx-$label.log"; : > "$log"
+  [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=""
+  stop_server
+  # shellcheck disable=SC2086
+  env $e1 ${e2:-} DETACH=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" >> "$log" 2>&1
+  docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
+  if ! wait_ready; then
+    printf '  %-18s BOOT FAILED -- see %s\n\n' "$label" "$log"; continue
+  fi
+
+  printf '  %-18s %8s %5s %11s %11s %12s\n' \
+         "$label" "ctx" "conc" "ttft_cold" "ttft_warm" "decode_agg"
+  IFS=',' read -ra POINTS <<<"$CTX"
+  IFS=',' read -ra CONCS <<<"$CONC"
+  for target in "${POINTS[@]}"; do
+    prompt_for "$target"
+    for c in "${CONCS[@]}"; do
+      # Cold once (nothing cached), then warm -- the warm pass is the real case,
+      # since an agentic loop resends a growing transcript.
+      read -r c_ttft _ _ ptok < <(measure_conc "$c")
+      read -r w_ttft w_dec _ _ < <(measure_conc "$c")
+      printf '  %-18s %8s %5s %10sms %10sms %8s t/s\n' \
+             "" "$ptok" "$c" "$c_ttft" "$w_ttft" "$w_dec"
+    done
+  done
+  echo
+done
+
+echo "## ttft_warm is the number that matters: an agentic loop resends a growing"
+echo "## transcript, so the prefix is almost always already in cache."
