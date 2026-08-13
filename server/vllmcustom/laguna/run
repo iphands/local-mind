@@ -24,113 +24,71 @@
 # Benchmark a variant against the running server: ./bench/bench <label>
 set -euo pipefail
 
-NAME=vllm
-IMAGE=${IMAGE:-iphands/vllm-blackwell}
-IMAGE_TAG=${IMAGE_TAG:-latest}
-CONTAINER="$IMAGE:$IMAGE_TAG"
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=../common/_run-lib.sh
+source "$HERE/../common/_run-lib.sh"
 
-MODEL_PATH=${1:?usage: ./laguna/run <path-to-model-dir>   (e.g. ./laguna/run ./models/vllm/Qwen3.6-27B)}
-# basename/dirname (vs ${x%/*}) tolerate trailing slashes and slash-less paths
-MODEL=$(basename "$MODEL_PATH")
-MODEL_FOLDER=$(cd "$(dirname "$MODEL_PATH")" && pwd)   # absolute, for the bind mount
+# shellcheck disable=SC2034  # read by docker_core_args in common/_run-lib.sh
+NAME=vllm
+vllm_image
+
+MODEL_PATH=${1:?usage: ./laguna/run <path-to-model-dir>   (e.g. ./laguna/run ./models/vllm/Laguna-S-2.1-NVFP4)}
+resolve_model "$MODEL_PATH"
 
 PORT=${PORT:-8700}
 ATTN_BACKEND=${ATTN_BACKEND:-flashinfer}
 MOE_BACKEND=${MOE_BACKEND:-}                     # empty = vLLM default
 NVFP4_BACKEND=${NVFP4_BACKEND:-cutlass}          # default cutlass = bench-fastest NVFP4 GEMM on sm120f
-SPEC_TOKENS=${SPEC_TOKENS:-0}                   # DFlash draft tokens (15 = model-card recommendation)
+SPEC_TOKENS=${SPEC_TOKENS:-0}                    # DFlash draft tokens (15 = model-card recommendation)
+DRAFT=${DRAFT:-Laguna-S-2.1-DFlash-NVFP4}        # relative to MODEL_ROOT, i.e. beside the target model
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-3}
 MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-8192}   # bigger (16384/32768) speeds long-context prefill/TTFT
 CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-}               # e.g. FULL_AND_PIECEWISE (A/B: full graphs help small-batch decode)
 FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-}     # 1 = run FlashInfer autotuning during warmup (A/B)
 CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
 
-docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
-  echo "Image $CONTAINER not found. Run ./container/build first."; exit 1; }
+require_image
 
-# DETACH=1 -> run backgrounded (-d) for scripted benchmarking (bench-wrapper);
-# interactive (-it) otherwise.
-if [[ -n "${DETACH:-}" ]]; then _RUNMODE=(-d); else _RUNMODE=(-it); fi
+# The drafter is mounted through the same /models as the target, so it has to
+# live under MODEL_ROOT. Check here rather than letting vLLM fail 60s into load.
+if [[ "$SPEC_TOKENS" != "0" ]]; then
+  [[ -d "$MODEL_FOLDER/$DRAFT" ]] || {
+    echo "no DFlash drafter at $MODEL_FOLDER/$DRAFT -- use SPEC_TOKENS=0 or set DRAFT="; exit 1; }
+fi
 
-CONTAINER_ARGS=(
-  run "${_RUNMODE[@]}" --rm
-  --name "$NAME"
-  # Force the `vllm serve` entrypoint (we pass `serve` as the first arg below).
-  # Required for speculative decoding: only `vllm serve` copies the positional
-  # model path onto the `model` field; the bare api_server module leaves `model`
-  # at vLLM's default (Qwen/Qwen3-0.6B), so the MTP draft loads that default and
-  # fails with "Unsupported speculative method: 'mtp'". --entrypoint REPLACES the
-  # image ENTRYPOINT, so this works whether or not the image has been rebuilt.
-  --entrypoint vllm
-  --gpus device=0                                # RTX PRO 6000 only — never the 4060
-  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+docker_core_args
+CONTAINER_ARGS+=(
   # NCCL vars are inert on this single-GPU deployment; kept in case TP/PP ever >1
   -e NCCL_P2P_LEVEL=4
   -e NCCL_IB_DISABLE=1
-  -e VLLM_WORKER_MULTIPROC_METHOD=spawn
-  -e SAFETENSORS_FAST_GPU=1
-  -e VLLM_LOG_STATS_INTERVAL=1                   # log tok/s + MTP acceptance every 1s (tuning)
-  -e VLLM_SLEEP_WHEN_IDLE=1                       # release SMs when no requests pending (idle power)
-  -p "0.0.0.0:${PORT}:8799"
-  -v "$MODEL_FOLDER":/models:ro
-  -v "$CACHE_DIR":/root/.cache:rw
-  --ipc=host
-  --shm-size=32g
-  --ulimit memlock=-1
-  --ulimit stack=67108864
+  -e VLLM_SLEEP_WHEN_IDLE=1                      # release SMs when no requests pending (idle power)
 )
+env_extra_args
 
-VLLM_ARGS=(
-  /models/"$MODEL"
-  --served-model-name cosmo-6000 cosmo-proxy claude-heavy claude-light claude-haiku-4-5-20251001
-  --host 0.0.0.0
-  --port 8799
-
-  --async-scheduling
-  --dtype auto
+vllm_core_args
+VLLM_ARGS+=(
   --enable-auto-tool-choice
-  --gpu-memory-utilization "$GPU_MEM_UTIL"
   --language-model-only
-  --max-model-len "$MAX_MODEL_LEN"
-  --pipeline-parallel-size 1
-  --tensor-parallel-size 1
-  --trust-remote-code
-
-  --enable-prefix-caching
-  --enable-chunked-prefill
-  --enable-prompt-tokens-details              # usage reports cached_tokens (bench logs prefix-cache hits)
-  --max-num-seqs 3
-  --max-num-batched-tokens "$MAX_BATCHED_TOKENS"
-
-  --attention-backend "$ATTN_BACKEND"
   --no-enforce-eager
+  --kv-cache-dtype fp8
 
   --tool-call-parser poolside_v1
   --reasoning-parser poolside_v1
-  --override-generation-config '{"temperature":0.7,"top_p":0.95}'
 
+  --override-generation-config '{"temperature":0.7,"top_p":0.95}'
   # --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
   --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true}'
-  --kv-cache-dtype fp8
 )
 
 # SPEC_TOKENS=0 disables speculation entirely (clean baseline); else add the DFlash
-# draft. Local copy beside the target model so the single /models mount covers both.
+# draft. It sits beside the target model so the single /models mount covers both.
 [[ "$SPEC_TOKENS" != "0" ]] && VLLM_ARGS+=( --speculative-config \
-  '{"method":"dflash","model":"/models/Laguna-S-2.1-DFlash-NVFP4","num_speculative_tokens":'"$SPEC_TOKENS"'}' )
-[[ -n "$MOE_BACKEND" ]] && VLLM_ARGS+=( --moe-backend "$MOE_BACKEND" )
-# NVFP4 GEMM backend: deprecated in v0.23 ("Use --linear-backend"), the
-# VLLM_NVFP4_GEMM_BACKEND env is now gone from vllm/envs.py entirely. v0.27.0 also
-# promoted flashinfer_b12x into the LinearBackend choices (vllm/config/kernel.py),
-# so the old env-only special case for it is obsolete — everything takes the flag.
-[[ -n "$NVFP4_BACKEND" ]] && VLLM_ARGS+=( --linear-backend "$NVFP4_BACKEND" )  # vLLM lowercases and maps - to _
-[[ -n "$CUDAGRAPH_MODE" ]] && VLLM_ARGS+=( --compilation-config '{"cudagraph_mode":"'"$CUDAGRAPH_MODE"'"}' )
-[[ -n "$FLASHINFER_AUTOTUNE" ]] && VLLM_ARGS+=( --enable-flashinfer-autotune )
-# shellcheck disable=SC2206
-[[ -n "${EXTRA_ARGS:-}" ]] && VLLM_ARGS+=( ${EXTRA_ARGS} )
+  '{"method":"dflash","model":"/models/'"$DRAFT"'","num_speculative_tokens":'"$SPEC_TOKENS"'}' )
+nvfp4_backend_args
+vllm_extra_args
 
 echo
 echo "## Running $CONTAINER  (attn=$ATTN_BACKEND moe=${MOE_BACKEND:-default} gpu0)"
-echo docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
-docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
+vllm_launch

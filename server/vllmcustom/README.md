@@ -8,6 +8,7 @@ images: PyTorch, FlashInfer, and vLLM are all compiled from source for
 
 ```
 container/   build, push, Dockerfile, and the two build helpers (preflight, slice-setup)
+common/      the shared launcher mechanism every */run sources
 qwen/        run — Qwen3.5 / Qwen3.6
 laguna/      run — Laguna-S DFlash
 muse/        run — Muse Glimmer, plus patches/ (the shims it mounts at /vllm-patches)
@@ -16,8 +17,15 @@ scripts/     one-off probes and per-model sweeps (mostly Muse)
 notes/ plans/ vendor/ models/
 ```
 
-Each `*/run` is a standalone launcher for one model family; they share nothing
-but the image. `bench/` holds everything a benchmark writes, so wiping results is
+Each `*/run` serves one model family and owns its own settings — parsers, sampling
+defaults, context length, patches. What they share is the plumbing, which lives in
+`common/`: resolving the image, turning a model argument into the `/models` bind
+mount, the docker flags, the `vllm serve` flags that are the same everywhere, and
+the launch. `common/_run-lib.sh` documents the call order a launcher must follow;
+`common/_model-lib.sh` is the model-path resolver on its own because a wrong answer
+there changes a bind mount silently rather than failing.
+
+`bench/` holds everything a benchmark writes, so wiping results is
 `rm -rf bench/bench-logs`.
 
 | script   | what it does |

@@ -214,10 +214,13 @@
 # Benchmark a variant against the running server: ./bench/bench <label>
 set -euo pipefail
 
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=../common/_run-lib.sh
+source "$HERE/../common/_run-lib.sh"
+
+# shellcheck disable=SC2034  # read by docker_core_args in common/_run-lib.sh
 NAME=vllm-muse
-IMAGE=${IMAGE:-iphands/vllm-blackwell}
-IMAGE_TAG=${IMAGE_TAG:-latest}
-CONTAINER="$IMAGE:$IMAGE_TAG"
+vllm_image
 
 SELFTEST=0
 [[ "${1:-}" == "--selftest" ]] && { SELFTEST=1; shift; }
@@ -225,26 +228,9 @@ SELFTEST=0
 # models/vllm is mounted whole at /models, rather than the model's own parent,
 # because the NVFP4 build lives under RedHatAI/ while the DFlash drafter lives
 # under meta-models/ -- they are no longer siblings, and a per-model mount cannot
-# see both. MODEL/DRAFT are therefore paths RELATIVE to this root.
-MODEL_ROOT=${MODEL_ROOT:-$(cd "$(dirname "$0")/../models/vllm" && pwd)}
-_arg=${1:-RedHatAI/Muse-Glimmer-30B-NVFP4}
-if [[ -d "$_arg" ]]; then
-  # A full path, as ./scripts/muse-spec-* pass. Keep it relative to the root when
-  # it lives under it; otherwise fall back to mounting its own parent.
-  _abs=$(cd "$_arg" && pwd)
-  case "$_abs/" in
-    "$MODEL_ROOT"/*) MODEL=${_abs#"$MODEL_ROOT"/} ;;
-    *) MODEL_ROOT=$(dirname "$_abs"); MODEL=$(basename "$_abs") ;;
-  esac
-else
-  MODEL=$_arg
-fi
-[[ -d "$MODEL_ROOT/$MODEL" ]] || {
-  echo "no model at $MODEL_ROOT/$MODEL"
-  echo "pass a path, or set MODEL_ROOT=. Available:"
-  find "$MODEL_ROOT" -maxdepth 2 -name config.json -printf '  %h\n' 2>/dev/null | sed "s|$MODEL_ROOT/||"
-  exit 1; }
-MODEL_FOLDER=$MODEL_ROOT                          # what gets bind-mounted at /models
+# see both. MODEL/DRAFT are therefore paths RELATIVE to this root. That whole-root
+# mount is what common/_model-lib.sh does for every launcher.
+resolve_model "${1:-RedHatAI/Muse-Glimmer-30B-NVFP4}"
 
 PORT=${PORT:-8700}                               # 8702: coexists with ./qwen/run (8700) and dgemma (8701)
 # flashinfer, and now measured rather than inherited from ./qwen/run.
@@ -345,8 +331,7 @@ for f in "$EMBED_PATCH" "$ATEM_PLUGIN" atem-parsers/selftest.py "$DFLASH_MODULE"
   [[ -f "$PATCH_ROOT/$f" ]] || { echo "missing $PATCH_ROOT/$f"; exit 1; }
 done
 
-docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
-  echo "Image $CONTAINER not found. Run ./container/build first."; exit 1; }
+require_image
 
 # ./muse/run --selftest -- exercise the ATEM parsers against vLLM's real parser
 # plumbing (ParserManager + DelegatingParser). No GPU, no server, no weights
@@ -384,8 +369,6 @@ fi
 # NOTE: VISION does not interact with SPEC. --language-model-only only zeroes
 # limit_per_prompt (vllm/config/multimodal.py:350); it does not change the
 # resolved class, so the target is TransformersMultiModalForCausalLM either way.
-
-if [[ -n "${DETACH:-}" ]]; then _RUNMODE=(-d); else _RUNMODE=(-it); fi
 
 # sitecustomize.py on PYTHONPATH is auto-imported by CPython at startup, so the
 # shims land in the API server, the engine core, every spawned worker and vLLM's
@@ -461,55 +444,22 @@ if [[ "$SWA" == "1" ]]; then
 fi
 HF_OVERRIDES+="}"
 
-CONTAINER_ARGS=(
-  run "${_RUNMODE[@]}" --rm
-  --name "$NAME"
-  "${PATCH_ARGS[@]}"
-  "${SPEC_ENV[@]}"
-  --entrypoint vllm
-  --gpus device=0                                # RTX PRO 6000 only — never the 4060
-  -e CUDA_DEVICE_ORDER=PCI_BUS_ID
-  -e VLLM_WORKER_MULTIPROC_METHOD=spawn
-  -e SAFETENSORS_FAST_GPU=1
-  -e VLLM_LOG_STATS_INTERVAL=1
-  # Ad-hoc env passthrough, space-separated NAME=VALUE pairs. For one-off diagnosis
-  # rather than anything the defaults should depend on, e.g.
-  #   ENV_EXTRA="VLLM_LOGGING_LEVEL=DEBUG" ./muse/run
-  ${ENV_EXTRA:+$(for _kv in $ENV_EXTRA; do printf -- '-e\n%s\n' "$_kv"; done)}
-  # NOTE: no VLLM_ALLOW_LONG_MAX_MODEL_LEN — 131072 is the real limit here.
-  -p "0.0.0.0:${PORT}:8799"
-  -v "$MODEL_FOLDER":/models:ro
-  -v "$CACHE_DIR":/root/.cache:rw
-  --ipc=host
-  --shm-size=32g
-  --ulimit memlock=-1
-  --ulimit stack=67108864
-)
+# NOTE: no VLLM_ALLOW_LONG_MAX_MODEL_LEN — 131072 is the real limit here, so the
+# core's --max-model-len "$MAX_MODEL_LEN" is the whole story.
+docker_core_args
+CONTAINER_ARGS+=( "${PATCH_ARGS[@]}" "${SPEC_ENV[@]}" )
+# Ad-hoc env passthrough, space-separated NAME=VALUE pairs. For one-off diagnosis
+# rather than anything the defaults should depend on, e.g.
+#   ENV_EXTRA="VLLM_LOGGING_LEVEL=DEBUG" ./muse/run
+# Last, so it can override anything above it -- including the MUSE_* patch env.
+env_extra_args
 
-VLLM_ARGS=(
-  /models/"$MODEL"
-  --served-model-name cosmo-6000 cosmo-proxy claude-heavy claude-light claude-haiku-4-5-20251001
-  --host 0.0.0.0
-  --port 8799
-
-  --async-scheduling
-  --dtype auto                                   # bf16 per config.json
-  --gpu-memory-utilization "$GPU_MEM_UTIL"
-  --max-model-len "$MAX_MODEL_LEN"
-  --pipeline-parallel-size 1
-  --tensor-parallel-size 1
-  --trust-remote-code                            # required: muse_glimmer is a transformers-backend model
-
-  # --hf-overrides is only added below when NATIVE=0; see the array append.
-
-  --enable-prefix-caching
-  --enable-chunked-prefill
-  --enable-prompt-tokens-details
-  --max-num-seqs "$MAX_NUM_SEQS"
-  --max-num-batched-tokens "$MAX_BATCHED_TOKENS"
-
-  --attention-backend "$ATTN_BACKEND"
-
+# Two things the core's shared flags mean specifically for this model:
+#   --dtype auto          bf16 per config.json
+#   --trust-remote-code   required: muse_glimmer is a transformers-backend model
+# --hf-overrides is only added below when NATIVE=0; see the array append.
+vllm_core_args
+VLLM_ARGS+=(
   # Model card "Best Practices": temperature 1.0 / top_p 0.95 / top_k 64.
   # These are only meaningful once LOGIT_SCALE is correct — on raw 5.1x logits
   # they are effectively temperature ~0.2.
@@ -574,8 +524,7 @@ fi
 # NVFP4 GEMM kernel. Harmless on an unquantized checkpoint -- vLLM only consults
 # it for a quantized linear method -- so it is not gated on the model.
 [[ -n "$LINEAR_BACKEND" ]] && VLLM_ARGS+=( --linear-backend "$LINEAR_BACKEND" )
-# shellcheck disable=SC2206
-[[ -n "${EXTRA_ARGS:-}" ]] && VLLM_ARGS+=( ${EXTRA_ARGS} )
+vllm_extra_args
 
 echo
 echo "## Running $CONTAINER"
@@ -590,8 +539,7 @@ else
   echo "##   spec=off"
 fi
 echo
-echo docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
-docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
+vllm_launch
 
 # ---------------------------------------------------------------------------
 # NOTES ON THE ATEM PARSERS (BUG 3 above)
