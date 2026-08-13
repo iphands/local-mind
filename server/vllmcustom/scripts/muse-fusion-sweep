@@ -1,0 +1,229 @@
+#!/usr/bin/env bash
+# Do vLLM's disabled fusion passes buy anything on NVFP4 Muse Glimmer?
+#
+#   ./scripts/muse-fusion-sweep
+#   ONLY=base,qk_rope ./scripts/muse-fusion-sweep
+#
+# Why bother. Measured 2026-08-12: decode reads 16.85 GB/step (text_decoder
+# 14.16 + lm_head 2.69; embed_tokens is a row lookup and the 3.84 GB vision tower
+# is untouched for text). At 70 tok/s that is 1179 GB/s against 1560 GB/s of
+# MEASURED achievable read bandwidth on this card -- 75.6%, so decode is NOT at
+# the roofline and ~24% is going somewhere GPU-internal. Fusion passes cut kernel
+# count and intermediate round-trips, which is exactly that bucket.
+#
+# vLLM ships these OFF for this config (from the boot log's pass_config):
+#     fuse_norm_quant: False   fuse_attn_quant: False
+#     enable_qk_norm_rope_fusion: False        (fuse_act_quant is already True)
+# qk_norm_rope is the one with an a priori reason to apply -- this model does
+# have QK-norm.
+#
+# THE TRAP this script exists to avoid: passing --compilation-config replaces the
+# whole CompilationConfig, so unspecified fields fall back to dataclass defaults
+# rather than to what vLLM auto-selected. Flip a fusion flag naively and you can
+# silently lose cudagraph_mode=FULL_AND_PIECEWISE -- then you measure a cudagraph
+# regression and call it a fusion result. So every arm re-asserts mode and
+# cudagraph_mode explicitly, and the run ABORTS if the boot log does not come
+# back with the same values the baseline had.
+#
+# Correctness is checked too: these passes rewrite the graph, so each arm must
+# reproduce the baseline's greedy text exactly. A fast wrong answer is not a win.
+#
+# ------------------------------------------------------------------------------
+# MEASURED (2026-08-12, NVFP4, prompt ~2048 tok, out 256, median of 3)
+# ------------------------------------------------------------------------------
+#
+#   arm          conc1 t/s   vs base   ttft c1   ttft c4   greedy reply
+#   base              70.0    1.000x     30ms      50ms    (reference)
+#   qk_rope           69.6     .994x     30ms      51ms    DEGENERATE
+#   norm_quant        69.8     .997x     29ms      51ms    ok
+#   attn_quant        70.0    1.000x     65ms     126ms    ok
+#   all               69.7     .995x     65ms     125ms    DEGENERATE
+#
+# ANSWER: none of them help. Every arm is within 0.6% of baseline on decode --
+# noise. So the ~24% gap to achievable bandwidth is NOT kernel-launch or
+# intermediate-round-trip overhead, and is not reachable this way. vLLM ships
+# these off for this config for good reason. Two actively hurt:
+#
+#   * attn_quant  -- 2.2x worse TTFT at conc1, 2.5x at conc4, decode unchanged.
+#                    It degrades PREFILL specifically.
+#   * qk_rope     -- emits degenerate text ('" then 1. 1. 1. 1 then 1...'), i.e.
+#                    it breaks this model's numerics. Also 0.6% slower. The `all`
+#                    arm just inherits both defects.
+#
+# CAVEAT ON THE FIRST RUN's correctness column: it read only .choices[0]
+# .message.content, which is EMPTY while the model is still in its reasoning
+# channel at max_tokens=120. base captured "" and the other arms compared
+# equal-to-empty, so "same" meant "both blank", not "both correct". Fixed below
+# to concatenate reasoning_content. The qk_rope/all DEGENERATE finding survives
+# that bug -- those arms leaked broken text into .content while base stayed
+# blank, which is signal, not artifact -- but the "ok" marks on norm_quant and
+# attn_quant come from the buggy run and are UNVERIFIED. Re-run to confirm them;
+# nothing here was adopted, so it changed no decision.
+set -uo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+MODEL=${MODEL:-RedHatAI/Muse-Glimmer-30B-NVFP4}
+NAME=vllm-muse
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+APIMODEL=${APIMODEL:-cosmo-6000}
+READY_TIMEOUT=${READY_TIMEOUT:-1200}
+MAX_TOKENS=${MAX_TOKENS:-256}
+PROMPT_TOKENS=${PROMPT_TOKENS:-2048}
+CONC=${CONC:-1,4}
+REPEATS=${REPEATS:-3}
+LOGDIR=${LOGDIR:-$HERE/bench-logs}
+WORK=$(mktemp -d)
+
+# shellcheck source=../_bench-lib.sh
+source "$HERE/_bench-lib.sh"
+mkdir -p "$LOGDIR"
+for tool in curl jq docker bc; do
+  command -v "$tool" >/dev/null || { echo "## need $tool"; exit 2; }
+done
+
+# Compact JSON only -- run-muse expands ${EXTRA_ARGS} unquoted, so any space in
+# the value would word-split into separate argv entries and corrupt the flag.
+PC='"mode":3,"cudagraph_mode":"FULL_AND_PIECEWISE"'
+ARMS=(
+  "base|"
+  "qk_rope|--compilation-config {$PC,\"pass_config\":{\"enable_qk_norm_rope_fusion\":true}}"
+  "norm_quant|--compilation-config {$PC,\"pass_config\":{\"fuse_norm_quant\":true}}"
+  "attn_quant|--compilation-config {$PC,\"pass_config\":{\"fuse_attn_quant\":true}}"
+  "all|--compilation-config {$PC,\"pass_config\":{\"enable_qk_norm_rope_fusion\":true,\"fuse_norm_quant\":true,\"fuse_attn_quant\":true}}"
+)
+
+LOGS_PID=""
+cleanup() {
+  [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null
+  rm -rf "$WORK"
+  echo; echo "## stopping $NAME"; stop_server
+}
+trap cleanup EXIT
+
+build_prompt() {
+  : > "$WORK/corpus.txt"
+  for f in run-muse patches/muse-embed-norm/sitecustomize.py \
+           patches/muse-dflash/muse_dflash.py scripts/muse-longctx-sweep; do
+    [[ -f "$HERE/$f" ]] && { echo "===== $f ====="; cat "$HERE/$f"; } >> "$WORK/corpus.txt"
+  done
+  while (( $(wc -c < "$WORK/corpus.txt") < $(( PROMPT_TOKENS * 5 )) )); do
+    cat "$WORK/corpus.txt" "$WORK/corpus.txt" > "$WORK/c2" && mv "$WORK/c2" "$WORK/corpus.txt"
+  done
+  head -c $(( PROMPT_TOKENS * 4 )) "$WORK/corpus.txt" > "$WORK/p.txt"
+  printf '\n\nIn one sentence, what kind of code is above?\n' >> "$WORK/p.txt"
+  # Perf body: ignore_eos so every arm emits exactly MAX_TOKENS of the same text.
+  jq -nc --arg m "$APIMODEL" --rawfile p "$WORK/p.txt" --argjson mt "$MAX_TOKENS" \
+    '{model:$m, temperature:0, max_tokens:$mt, ignore_eos:true, stream:true,
+      stream_options:{include_usage:true},
+      messages:[{role:"user",content:$p}]}' > "$WORK/body.json"
+  # Correctness body: short, greedy, NOT streamed, natural stop.
+  jq -nc --arg m "$APIMODEL" \
+    '{model:$m, temperature:0, max_tokens:120,
+      messages:[{role:"user",content:"List the first 8 prime numbers, then explain in one sentence why 1 is not prime."}]}' \
+    > "$WORK/correct.json"
+}
+
+measure() {
+  local slot=${1:-0} t0 tf t1 line ctok
+  local out="$WORK/stream.$slot"
+  t0=$(date +%s%N); tf=""
+  : > "$out"
+  while IFS= read -r line; do
+    [[ "$line" == data:* ]] || continue
+    [[ -z "$tf" ]] && tf=$(date +%s%N)
+    printf '%s\n' "${line#data: }" >> "$out"
+  done < <(curl -sSN --max-time 900 -X POST "http://${HOST}/v1/chat/completions" \
+             -H 'Content-Type: application/json' --data-binary @"$WORK/body.json")
+  t1=$(date +%s%N)
+  [[ -z "$tf" ]] && { echo "0 0"; return; }
+  ctok=$(grep -o '"completion_tokens":[0-9]*' "$out" | tail -1 | cut -d: -f2)
+  local ttft=$(( (tf - t0) / 1000000 )) total=$(( (t1 - t0) / 1000000 )) dec="0"
+  (( total > ttft && ${ctok:-0} > 0 )) && dec=$(echo "scale=1; ${ctok} * 1000 / ($total - $ttft)" | bc)
+  echo "$ttft $dec"
+}
+
+measure_conc() {
+  local n=$1 i pids=()
+  rm -f "$WORK"/m.* "$WORK"/stream.*
+  for ((i = 0; i < n; i++)); do measure "$i" > "$WORK/m.$i" & pids+=("$!"); done
+  wait "${pids[@]}" 2>/dev/null   # these pids only: a bare wait blocks on docker logs -f
+  if ! compgen -G "$WORK/m.*" >/dev/null; then echo "0 0"; return; fi
+  cat "$WORK"/m.* | awk '{t[NR]=$1; d+=$2}
+      END {if (NR==0) {print "0 0"; exit}
+           n=asort(t); print (n%2 ? t[(n+1)/2] : int((t[n/2]+t[n/2+1])/2)), d}'
+  rm -f "$WORK"/m.* "$WORK"/stream.*
+}
+
+build_prompt
+echo "## muse-fusion-sweep  model=$MODEL  prompt~${PROMPT_TOKENS}tok  out=${MAX_TOKENS} (ignore_eos)"
+echo "##   repeats=$REPEATS (median)  conc=$CONC  warm-up per arm, discarded"
+echo "##   baseline pass_config has fuse_act_quant=True and everything else False"
+echo
+
+printf '  %-12s %5s %11s %12s %9s  %s\n' "arm" "conc" "ttft_ms" "decode_t/s" "vs base" "correct"
+printf '  %-12s %5s %11s %12s %9s  %s\n' "------------" "-----" "-----------" "------------" "---------" "-------"
+
+IFS=',' read -ra CONCS <<<"$CONC"
+BASE1=""; BASETXT=""
+for entry in "${ARMS[@]}"; do
+  IFS='|' read -r label extra <<<"$entry"
+  [[ -n "${ONLY:-}" && ",$ONLY," != *",$label,"* ]] && continue
+
+  log="$LOGDIR/fusion-$label.log"; : > "$log"
+  [[ -n "$LOGS_PID" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=""
+  stop_server
+  EXTRA_ARGS="$extra" DETACH=1 PORT="$PORT" "$HERE/run-muse" "$MODEL" >> "$log" 2>&1
+  docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
+  if ! wait_ready; then
+    printf '  %-12s BOOT FAILED -- see %s\n' "$label" "$log"; continue
+  fi
+
+  # Guard: confirm the compile mode and cudagraph mode actually match baseline.
+  cg=$(grep -o "'cudagraph_mode': <CUDAGraphMode\.[A-Z_]*" "$log" | head -1 | sed "s/.*CUDAGraphMode\.//")
+  cm=$(grep -o "'mode': <CompilationMode\.[A-Z_]*" "$log" | head -1 | sed "s/.*CompilationMode\.//")
+  if [[ "$cg" != "FULL_AND_PIECEWISE" || "$cm" != "VLLM_COMPILE" ]]; then
+    printf '  %-12s COMPILE CONFIG DRIFTED (mode=%s cudagraph=%s) -- not comparable\n' \
+           "$label" "${cm:-?}" "${cg:-?}"
+    continue
+  fi
+
+  # Correctness before perf: a fused graph that changes the answer is not a win.
+  # reasoning_content FIRST, then content. Reading only .content is a trap: this
+  # model reasons before answering, so at a modest max_tokens it is still inside
+  # the reasoning channel and .content comes back EMPTY. Every arm then compares
+  # equal-to-empty and the column reads "same" while checking nothing. That bug
+  # shipped in the first run of this script -- see the header.
+  txt=$(curl -sS --max-time 300 -X POST "http://${HOST}/v1/chat/completions" \
+          -H 'Content-Type: application/json' --data-binary @"$WORK/correct.json" \
+        | jq -r '((.choices[0].message.reasoning_content // "") + (.choices[0].message.content // ""))' \
+        | tr -s '[:space:]' ' ')
+  if [[ -z "${txt// /}" ]]; then
+    printf '  %-12s EMPTY REPLY -- correctness check is not meaningful\n' "$label"
+  fi
+  if [[ -z "$BASETXT" ]]; then BASETXT="$txt"; ok="base"
+  elif [[ "$txt" == "$BASETXT" ]]; then ok="same"
+  else ok="DIFFERS"; fi
+  printf '%s\n' "$txt" > "$LOGDIR/fusion-$label.reply.txt"
+
+  measure_conc 1 >/dev/null   # warm-up
+
+  for c in "${CONCS[@]}"; do
+    ttfts=(); decs=()
+    for ((r = 0; r < REPEATS; r++)); do
+      read -r t d < <(measure_conc "$c")
+      ttfts+=("$t"); decs+=("$d")
+    done
+    md=$(median "${decs[@]}")
+    [[ "$c" == "1" && -z "$BASE1" ]] && BASE1="$md"
+    rel="-"
+    [[ "$c" == "1" && -n "$BASE1" ]] && rel=$(echo "scale=3; $md / $BASE1" | bc)x
+    printf '  %-12s %5s %11s %12s %9s  %s\n' \
+           "$label" "$c" "$(median "${ttfts[@]}")" "$md" "$rel" "$ok"
+    label=""; ok=""
+  done
+done
+
+echo
+echo "## 'correct' compares each arm's greedy reply to base verbatim; replies are in"
+echo "## $LOGDIR/fusion-*.reply.txt. DIFFERS means that pass changed the numerics."
