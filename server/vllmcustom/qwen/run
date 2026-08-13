@@ -16,7 +16,7 @@
 #                                             #   flashinfer-cudnn=safe fallback if FP4 GEMM hits the
 #                                             #   race-cond NaN; marlin=W4A16 fallback if FP4 misbehaves.
 #   MOE_BACKEND=flashinfer_b12x ./qwen/run <model> # SM12x fused MoE (excluded from vLLM auto-select; opt-in)
-#   SPEC_TOKENS=3 ./qwen/run <model>               # MTP speculative tokens (default 2; 0 = MTP off)
+#   SPEC_TOKENS=0 ./qwen/run <model>               # MTP off (default 3; >3 crashes at concurrency)
 #   CUDAGRAPH_MODE=FULL_AND_PIECEWISE ./qwen/run <model>   # full CUDA graphs (small-batch decode A/B)
 #   FLASHINFER_AUTOTUNE=1 ./qwen/run <model>       # FlashInfer autotuning during warmup
 #   MAX_BATCHED_TOKENS=32768 ./qwen/run <model>    # faster long-context prefill (default 8192)
@@ -42,10 +42,21 @@ PORT=${PORT:-8700}
 ATTN_BACKEND=${ATTN_BACKEND:-flashinfer}
 MOE_BACKEND=${MOE_BACKEND:-}                     # empty = vLLM default
 NVFP4_BACKEND=${NVFP4_BACKEND:-cutlass}          # default cutlass = bench-fastest NVFP4 GEMM on sm120f
-SPEC_TOKENS=${SPEC_TOKENS:-2}                    # MTP speculative tokens (2 = community sweet spot)
+# 3 is the measured optimum on Qwen3.5-122B-A10B-NVFP4: +19-22% aggregate decode
+# over 2 at concurrency 1/2/4, for no TTFT cost (scripts/qwen-conc-sweep,
+# 2026-08-13). Do NOT raise it further -- 4/5/6 all regress at low concurrency AND
+# reliably kill the engine at concurrency 4 with an illegal CUDA memory access in
+# gpu_model_runner.execute_model. Decode here is bandwidth-bound on expert weights,
+# which is why speculation is the only knob that moves: every kernel backend tested
+# landed inside 1.4% of each other.
+SPEC_TOKENS=${SPEC_TOKENS:-3}                    # MTP speculative tokens
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}
-MAX_NUM_SEQS=${MAX_NUM_SEQS:-3}
+# 3 would queue the 4th of 4 concurrent requests, so the box would look like it
+# stops scaling at 3. Measured at 8: 451 tok/s aggregate at concurrency 4 vs 158
+# at 1, i.e. 2.9x. KV is unaffected -- the cache is sized at boot (7.04 GiB,
+# 468k tokens); this only sets how many sequences may be scheduled at once.
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-8}
 MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-8192}   # bigger (16384/32768) speeds long-context prefill/TTFT
 CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-}               # e.g. FULL_AND_PIECEWISE (A/B: full graphs help small-batch decode)
 FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-}     # 1 = run FlashInfer autotuning during warmup (A/B)
