@@ -138,6 +138,13 @@ vllm_core_args() {
   _core_add --enable-prefix-caching
   _core_add --enable-chunked-prefill
   _core_add --enable-prompt-tokens-details   # usage reports cached_tokens (bench logs prefix-cache hits)
+  # Puts a real "metrics" object on every response: time_to_first_token_ms,
+  # generation_time_ms, queue_time_ms, mean_itl_ms, tokens_per_second. Off by
+  # default, and without it the field is present but null -- which is why
+  # llama-proxy was estimating a prefill/decode split from a 20/80 guess and
+  # reporting 113k tok/s of prefill on a server that does ~14.5k. Costs nothing;
+  # it only requires that --disable-log-stats is not set, and we never set it.
+  _core_add --enable-per-request-metrics
   _core_add --max-num-seqs "$MAX_NUM_SEQS"
   _core_add --max-num-batched-tokens "$MAX_BATCHED_TOKENS"
   _core_add --attention-backend "$ATTN_BACKEND"
