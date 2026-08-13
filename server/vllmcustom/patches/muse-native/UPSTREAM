@@ -1,7 +1,7 @@
 # Written by scripts/muse-native-sync. Do not edit by hand.
 pr: 51655
 ref: refs/pull/51655/head
-commit: 99a10304dce8945119bd0b1a072297803c52a749
-date: 2026-08-11
-subject: Merge pull request #5 from xianbaoqian/tiezhen/consolidate-muse-glimmer-tests
-synced: 2026-08-12T17:14:10Z
+commit: d17cb41a483ca77f3de38093ac8a710278227568
+date: 2026-08-13
+subject: Merge branch 'main' into tiezhen/new-model-support
+synced: 2026-08-13T04:14:39Z
