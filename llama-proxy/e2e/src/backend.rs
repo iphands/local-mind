@@ -60,6 +60,11 @@ async fn handle_chat_completions(State(state): State<SharedBackendState>, reques
         state.response_queue.pop_front().unwrap_or_else(default_completion_response)
     };
 
+    // Simulate generation time so tests can keep requests in flight
+    if mock_response.delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(mock_response.delay_ms)).await;
+    }
+
     Response::builder()
         .status(mock_response.status)
         .header("Content-Type", &mock_response.content_type)
@@ -138,6 +143,11 @@ pub async fn start(port: u16) -> anyhow::Result<SharedBackendState> {
 /// Helper to configure the next response for /v1/chat/completions
 pub fn queue_response(state: &SharedBackendState, response: MockResponse) {
     state.lock().unwrap().response_queue.push_back(response);
+}
+
+/// Helper to drop any responses still queued (e.g. ones a test queued but never consumed)
+pub fn clear_queued_responses(state: &SharedBackendState) {
+    state.lock().unwrap().response_queue.clear();
 }
 
 /// Helper to get all requests received since last clear

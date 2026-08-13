@@ -175,14 +175,29 @@ pub fn all_tests() -> Vec<TestCase> {
             concurrent::test_concurrent_limit_enforcement
         ),
         test!(
-            "concurrent/health_not_rejected",
-            "Health endpoint never rejected even at capacity",
-            concurrent::test_health_not_rejected_at_capacity
-        ),
-        test!(
             "concurrent/429_format",
             "429 response has correct format and Retry-After header",
             concurrent::test_429_response_format
+        ),
+        test!(
+            "concurrent/permits_released",
+            "Permits are returned after a burst so later requests succeed",
+            concurrent::test_permits_released_after_burst
+        ),
+        test!(
+            "concurrent/permits_released_streaming_fallback",
+            "Permits are released when a streaming-fallback response ends",
+            concurrent::test_permits_released_after_streaming_fallback
+        ),
+        test!(
+            "concurrent/monitoring_not_rejected",
+            "Monitoring routes stay reachable while at capacity",
+            concurrent::test_monitoring_not_rejected_at_capacity
+        ),
+        test!(
+            "concurrent/proxy_metrics",
+            "/proxy/metrics exposes proxy counters in Prometheus format",
+            concurrent::test_proxy_metrics_endpoint
         ),
     ]
 }

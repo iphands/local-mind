@@ -9,6 +9,11 @@ pub struct MockResponse {
     pub status: u16,
     pub body: String,
     pub content_type: String,
+    /// Artificial delay before the backend answers, in milliseconds.
+    ///
+    /// Lets a test hold requests in flight long enough to observe proxy behavior that
+    /// only appears under real concurrency (e.g. the request limiter shedding load).
+    pub delay_ms: u64,
 }
 
 impl MockResponse {
@@ -18,16 +23,36 @@ impl MockResponse {
             status: 200,
             body: body.into(),
             content_type: "application/json".to_string(),
+            delay_ms: 0,
         }
     }
 
     /// Create an error response
+    #[allow(dead_code)]
     pub fn error(status: u16, body: impl Into<String>) -> Self {
         Self {
             status,
             body: body.into(),
             content_type: "application/json".to_string(),
+            delay_ms: 0,
         }
+    }
+
+    /// Create an SSE response, simulating a backend that streams even though the
+    /// proxy asked for `stream:false`. This drives the proxy's streaming fallback path.
+    pub fn sse(body: impl Into<String>) -> Self {
+        Self {
+            status: 200,
+            body: body.into(),
+            content_type: "text/event-stream".to_string(),
+            delay_ms: 0,
+        }
+    }
+
+    /// Make the backend wait `ms` milliseconds before responding.
+    pub fn with_delay(mut self, ms: u64) -> Self {
+        self.delay_ms = ms;
+        self
     }
 }
 
@@ -69,9 +94,17 @@ impl SseEvent {
 pub struct ProxyResponse {
     pub status: u16,
     pub body: serde_json::Value,
+    /// Response headers, lowercased names. Needed to assert on things like `Retry-After`.
+    pub headers: std::collections::HashMap<String, String>,
 }
 
 impl ProxyResponse {
+    /// Look up a response header by (case-insensitive) name.
+    #[allow(dead_code)]
+    pub fn header(&self, name: &str) -> Option<&str> {
+        self.headers.get(&name.to_ascii_lowercase()).map(|s| s.as_str())
+    }
+
     /// Get a nested field using dot notation (e.g. "choices.0.message.content")
     pub fn get(&self, path: &str) -> Option<&serde_json::Value> {
         let mut current = &self.body;

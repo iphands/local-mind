@@ -31,6 +31,7 @@ pub async fn send_non_streaming(
         .map_err(|e| anyhow::anyhow!("Failed to send request to proxy: {}", e))?;
 
     let status = resp.status().as_u16();
+    let headers = collect_headers(&resp);
     let body_text = resp
         .text()
         .await
@@ -44,7 +45,15 @@ pub async fn send_non_streaming(
         )
     })?;
 
-    Ok(ProxyResponse { status, body })
+    Ok(ProxyResponse { status, body, headers })
+}
+
+/// Snapshot response headers into a lowercase-keyed map
+fn collect_headers(resp: &reqwest::Response) -> std::collections::HashMap<String, String> {
+    resp.headers()
+        .iter()
+        .filter_map(|(k, v)| v.to_str().ok().map(|v| (k.as_str().to_ascii_lowercase(), v.to_string())))
+        .collect()
 }
 
 /// Send a streaming chat completion request to the proxy, collect all SSE events
@@ -153,11 +162,12 @@ pub async fn send_get(client: &Client, proxy_addr: &str, path: &str) -> anyhow::
         .map_err(|e| anyhow::anyhow!("Failed to GET {}: {}", url, e))?;
 
     let status = resp.status().as_u16();
+    let headers = collect_headers(&resp);
     let body_text = resp.text().await.unwrap_or_default();
 
     let body: serde_json::Value = serde_json::from_str(&body_text).unwrap_or(serde_json::Value::String(body_text));
 
-    Ok(ProxyResponse { status, body })
+    Ok(ProxyResponse { status, body, headers })
 }
 
 #[cfg(test)]
