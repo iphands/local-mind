@@ -135,6 +135,9 @@ enum Commands {
     /// Hold model files in memory (same as running without subcommand)
     Hold(HoldArgs),
 
+    /// Hold model files in memory and exit immediately after loading and locking
+    Oneshot(HoldArgs),
+
     /// Check mmap status of model-holder and llama-server processes
     Check {
         /// Model file extensions to look for (comma-separated, no dots)
@@ -542,6 +545,104 @@ fn hold_models_with_tui(
 
     // Block until user exits (q/ESC sets should_exit in the UI thread)
     ui_handle.join().ok();
+
+    Ok(())
+}
+
+fn hold_models_oneshot(
+    model_paths: Vec<String>,
+    _no_warmup: bool,
+    page_size: usize,
+    _no_mlock: bool,
+    _lock_threads: usize,
+) -> Result<(), ModelHolderError> {
+    validate_page_size(page_size)?;
+
+    let paths = expand_globs(&model_paths)?;
+
+    if paths.is_empty() {
+        return Err(ModelHolderError::NoFilesFound("No files matched".to_string()));
+    }
+
+    eprintln!("model-holder oneshot: {} file(s)", paths.len());
+
+    let mut mapped_files: Vec<MappedFile> = Vec::new();
+
+    for path in &paths {
+        let file = File::open(path).map_err(|e| {
+            ModelHolderError::NoFilesFound(format!("Cannot open '{}': {}", path.display(), e))
+        })?;
+
+        let metadata = file.metadata().map_err(|e| {
+            ModelHolderError::NoFilesFound(format!(
+                "Cannot read metadata for '{}': {}",
+                path.display(),
+                e
+            ))
+        })?;
+
+        let size = metadata.len();
+
+        let mmap = unsafe { Mmap::map(&file) }.map_err(|e| {
+            ModelHolderError::NoFilesFound(format!("Cannot mmap '{}': {}", path.display(), e))
+        })?;
+
+        eprintln!(" mmap'd {} ({:.2} GB)", path.display(), size as f64 / BYTES_PER_GB);
+
+        mapped_files.push(MappedFile {
+            path: path.clone(),
+            mmap,
+            size,
+            mmap_duration: None,
+        });
+    }
+
+    eprintln!(" warming pages...");
+    let warmup_start = Instant::now();
+    for (idx, mf) in mapped_files.iter().enumerate() {
+        let _ = warmup_file(
+            &mf.mmap,
+            mf.size,
+            page_size,
+            idx + 1,
+            mapped_files.len(),
+        );
+    }
+    let elapsed = warmup_start.elapsed();
+    eprintln!(" warmup done in {:.2}s", elapsed.as_secs_f64());
+
+    eprintln!(" locking pages...");
+    let mut locked_bytes: u64 = 0;
+    let mut failed_files: Vec<String> = Vec::new();
+
+    for mf in &mapped_files {
+        let result = unsafe {
+            mlock(mf.mmap.as_ptr() as *const libc::c_void, mf.mmap.len())
+        };
+        if result == 0 {
+            locked_bytes += mf.size;
+        } else {
+            failed_files.push(mf.path.display().to_string());
+        }
+    }
+
+    for mf in &mapped_files {
+        unsafe {
+            madvise(
+                mf.mmap.as_ptr() as *mut libc::c_void,
+                mf.mmap.len(),
+                MADV_WILLNEED,
+            );
+        }
+    }
+
+    if failed_files.is_empty() {
+        eprintln!(" locked {:.2} GB in RAM", locked_bytes as f64 / BYTES_PER_GB);
+    } else {
+        eprintln!(" locked {:.2} GB in RAM, {} file(s) failed to lock (check ulimit -l and permissions)", locked_bytes as f64 / BYTES_PER_GB, failed_files.len());
+    }
+
+    let _ = mapped_files;
 
     Ok(())
 }
@@ -1204,6 +1305,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             hold_args.page_size,
             hold_args.no_mlock,
             hold_args.lock_threads,
+        )
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) }),
+        Some(Commands::Oneshot(oneshot_args)) => hold_models_oneshot(
+            oneshot_args.model_paths,
+            oneshot_args.no_warmup,
+            oneshot_args.page_size,
+            oneshot_args.no_mlock,
+            oneshot_args.lock_threads,
         )
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) }),
         Some(Commands::Check { extensions }) => {
