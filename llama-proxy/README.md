@@ -55,6 +55,8 @@ An HTTP reverse proxy for [llama.cpp](https://github.com/ggerganov/llama.cpp) se
   - Configurable prompt file with dynamic reload from disk
   - Customizable retry count and done sentinels
   - Returns clean stop on sentinel match; hides stops on tool call/content resume
+  - Never drops assistant text: a follow-up turn is merged into the stopped turn, never
+    substituted for it, so an answer the backend already gave always reaches the client
   - Logs stop responses for debugging (optional)
 
 - **Client Compatibility**: Works seamlessly with AI coding tools

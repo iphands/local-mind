@@ -3,8 +3,15 @@
 //! When finish_reason="stop" with no tool_calls, the engine injects a follow-up
 //! user message (loaded from config) and re-sends the request to the backend.
 //! - If the response contains any done_sentinel → return the original clean stop.
-//! - If the response has tool_calls or a non-stop finish_reason → return it (hiding the stop).
-//! - After max_retries exhaustion → return the last response seen.
+//! - If the response has tool_calls or a non-stop finish_reason → return it, with every
+//!   assistant text seen so far merged into its content.
+//! - After max_retries exhaustion → return the original stop, with every assistant text
+//!   seen so far merged into its content.
+//!
+//! The engine never drops assistant text it has already received. A follow-up turn is an
+//! *addition* to the stopped turn, never a replacement for it — otherwise a subagent whose
+//! whole job is to answer once (a code reviewer, say) has its answer silently swallowed and
+//! the client sees a session made entirely of tool calls with no text.
 //!
 //! When dynamic_prompt is enabled (default), the prompt file is re-read from disk on
 //! each trigger if its mtime has changed since the last read. This allows live edits
@@ -30,6 +37,7 @@ pub struct RepromptEngine {
     pub done_sentinels: Vec<String>,
     log_stop_responses: bool,
 }
+
 
 impl RepromptEngine {
     pub fn from_config(config: &RepromptConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -138,16 +146,58 @@ impl RepromptEngine {
         !has_tool_calls
     }
 
+
+    /// Pull the assistant text out of a response. Handles `content` as a plain string and as an
+    /// array of parts, falling back to `reasoning_content` for backends that put everything there.
     fn extract_assistant_text(response: &serde_json::Value) -> String {
-        response
+        let message = response
             .get("choices")
             .and_then(|c| c.as_array())
             .and_then(|c| c.first())
-            .and_then(|ch| ch.get("message"))
-            .and_then(|m| m.get("content"))
-            .and_then(|c| c.as_str())
+            .and_then(|ch| ch.get("message"));
+
+        let Some(message) = message else {
+            return String::new();
+        };
+
+        let from_content = match message.get("content") {
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(serde_json::Value::Array(parts)) => parts
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join(""),
+            _ => String::new(),
+        };
+
+        if !from_content.trim().is_empty() {
+            return from_content;
+        }
+
+        message
+            .get("reasoning_content")
+            .or_else(|| message.get("reasoning_text"))
+            .and_then(|r| r.as_str())
             .unwrap_or("")
             .to_string()
+    }
+
+    /// Overwrite `choices[0].message.content` with `text`, leaving everything else (tool_calls,
+    /// finish_reason, usage) untouched. Returns false when the response has no message to write
+    /// into — the caller must then fall back to a shape it can write, or the text is lost.
+    #[must_use]
+    fn set_assistant_text(response: &mut serde_json::Value, text: String) -> bool {
+        let Some(message) = response
+            .get_mut("choices")
+            .and_then(|c| c.as_array_mut())
+            .and_then(|c| c.first_mut())
+            .and_then(|ch| ch.get_mut("message"))
+        else {
+            return false;
+        };
+
+        message["content"] = serde_json::Value::String(text);
+        true
     }
 
     /// Returns true if the response has tool_calls or a non-stop finish_reason.
@@ -251,6 +301,10 @@ impl RepromptEngine {
         let prompt = self.resolve_prompt().await;
 
         let clean_stop = original_response.clone();
+        // Every assistant text seen so far, oldest first. Whatever we hand back to the client
+        // carries all of it — a follow-up turn adds to the stopped turn, it never replaces it.
+        let mut collected: Vec<String> = Vec::new();
+        Self::push_text(&mut collected, Self::extract_assistant_text(&original_response));
         let mut current = original_response;
 
         for attempt in 0..self.max_retries {
@@ -261,14 +315,8 @@ impl RepromptEngine {
             let new_resp = match Self::send_follow_up(&follow_up_req, backend).await {
                 Ok(r) => r,
                 Err(e) => {
-                    tracing::warn!(attempt, error = %e, "Reprompt request failed, returning last response");
-                    if self.log_stop_responses {
-                        tracing::info!(
-                            response = %serde_json::to_string_pretty(&current).unwrap_or_default(),
-                            "REPROMPT: client response (request failed)"
-                        );
-                    }
-                    return current;
+                    tracing::warn!(attempt, error = %e, "Reprompt request failed, returning collected text");
+                    return self.finish(clean_stop, collected, "request failed");
                 }
             };
 
@@ -276,44 +324,63 @@ impl RepromptEngine {
 
             if let Some(matched) = self.done_sentinels.iter().find(|s| new_text.contains(s.as_str())) {
                 tracing::info!(attempt, sentinel = %matched, "Reprompt: done sentinel found, returning original stop");
-                if self.log_stop_responses {
-                    tracing::info!(
-                        response = %serde_json::to_string_pretty(&clean_stop).unwrap_or_default(),
-                        "REPROMPT: client response (done sentinel)"
-                    );
-                }
-                return clean_stop;
+                // The sentinel turn is bookkeeping, not content — drop it and keep what we had.
+                return self.finish(clean_stop, collected, "done sentinel");
             }
 
             if Self::has_continuation(&new_resp) {
                 tracing::info!(attempt, "Reprompt: continuation found, returning new response");
+                Self::push_text(&mut collected, new_text);
+                let mut merged = new_resp;
+                if !Self::set_assistant_text(&mut merged, collected.join("\n\n")) {
+                    // Nowhere to put the text in the continuation — keep the stop turn instead
+                    // of trading a real answer for a malformed one.
+                    tracing::warn!("Reprompt: continuation has no message object, returning collected text");
+                    return self.finish(clean_stop, collected, "continuation unwritable");
+                }
                 if self.log_stop_responses {
                     tracing::info!(
-                        response = %serde_json::to_string_pretty(&new_resp).unwrap_or_default(),
+                        response = %serde_json::to_string_pretty(&merged).unwrap_or_default(),
                         "REPROMPT: client response (continuation)"
                     );
                 }
-                return new_resp;
+                return merged;
             }
 
             tracing::debug!(
                 attempt,
                 "Reprompt: follow-up also stopped without tool_calls, continuing loop"
             );
+            Self::push_text(&mut collected, new_text);
             current = new_resp;
         }
 
         tracing::warn!(
             max_retries = self.max_retries,
-            "Reprompt: exhausted retries, returning last response"
+            "Reprompt: exhausted retries, returning collected text"
         );
+        self.finish(clean_stop, collected, "exhausted retries")
+    }
+
+    fn push_text(collected: &mut Vec<String>, text: String) {
+        if !text.trim().is_empty() {
+            collected.push(text);
+        }
+    }
+
+    /// Return the original stop turn carrying every assistant text collected along the way.
+    fn finish(&self, mut clean_stop: serde_json::Value, collected: Vec<String>, reason: &str) -> serde_json::Value {
+        if !collected.is_empty() {
+            let _ = Self::set_assistant_text(&mut clean_stop, collected.join("\n\n"));
+        }
         if self.log_stop_responses {
             tracing::info!(
-                response = %serde_json::to_string_pretty(&current).unwrap_or_default(),
-                "REPROMPT: client response (exhausted retries)"
+                reason,
+                response = %serde_json::to_string_pretty(&clean_stop).unwrap_or_default(),
+                "REPROMPT: client response"
             );
         }
-        current
+        clean_stop
     }
 }
 
@@ -584,5 +651,187 @@ mod tests {
         assert_eq!(result, "New prompt.");
         // Verify internal state updated
         assert_eq!(*e.prompt.read().await, "New prompt.");
+    }
+
+    // --- helpers ---
+
+    fn req_with_tools(names: &[&str]) -> serde_json::Value {
+        let tools: Vec<serde_json::Value> = names
+            .iter()
+            .map(|n| serde_json::json!({"type": "function", "function": {"name": n}}))
+            .collect();
+        serde_json::json!({
+            "model": "test",
+            "messages": [{"role": "user", "content": "Review this"}],
+            "tools": tools
+        })
+    }
+
+
+    // --- text extraction ---
+
+    #[test]
+    fn test_extract_assistant_text_array_parts() {
+        let r = serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": [
+                {"type": "text", "text": "part one "},
+                {"type": "text", "text": "part two"}
+            ]}}]
+        });
+        assert_eq!(RepromptEngine::extract_assistant_text(&r), "part one part two");
+    }
+
+    #[test]
+    fn test_extract_assistant_text_falls_back_to_reasoning() {
+        let r = serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "", "reasoning_content": "thinking out loud"}}]
+        });
+        assert_eq!(RepromptEngine::extract_assistant_text(&r), "thinking out loud");
+    }
+
+    #[test]
+    fn test_extract_assistant_text_prefers_content_over_reasoning() {
+        let r = serde_json::json!({
+            "choices": [{"message": {"role": "assistant", "content": "the answer", "reasoning_content": "thinking"}}]
+        });
+        assert_eq!(RepromptEngine::extract_assistant_text(&r), "the answer");
+    }
+
+    #[test]
+    fn test_set_assistant_text_preserves_tool_calls() {
+        let mut r = tool_call_resp();
+        assert!(RepromptEngine::set_assistant_text(&mut r, "carried forward".into()));
+        assert_eq!(r["choices"][0]["message"]["content"], "carried forward");
+        assert_eq!(r["choices"][0]["message"]["tool_calls"][0]["id"], "c1");
+        assert_eq!(r["choices"][0]["finish_reason"], "tool_calls");
+    }
+
+    #[test]
+    fn test_set_assistant_text_reports_failure_without_message() {
+        let mut r = serde_json::json!({"choices": [{"finish_reason": "stop"}]});
+        assert!(!RepromptEngine::set_assistant_text(&mut r, "text".into()));
+    }
+
+    #[tokio::test]
+    async fn test_unwritable_continuation_keeps_original_text() {
+        // finish_reason=length with no message object → a continuation we cannot write into
+        let odd = serde_json::json!({"choices": [{"finish_reason": "length"}]});
+        let url = spawn_backend(vec![odd]).await;
+        let e = write_capable_engine(2);
+        let result = e
+            .maybe_reprompt(
+                stop_resp("the review that must survive"),
+                &req_with_tools(&["read", "write"]),
+                &node_at(url).await,
+            )
+            .await;
+        assert_eq!(result["choices"][0]["message"]["content"], "the review that must survive");
+    }
+
+    // --- never lose text ---
+
+    /// Serve a fixed queue of JSON bodies on 127.0.0.1, one per POST.
+    async fn spawn_backend(responses: Vec<serde_json::Value>) -> String {
+        use axum::{routing::post, Json, Router};
+        use std::sync::Mutex;
+
+        let queue = Arc::new(Mutex::new(std::collections::VecDeque::from(responses)));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let queue = queue.clone();
+                async move {
+                    let next = queue.lock().unwrap().pop_front();
+                    Json(next.unwrap_or_else(|| serde_json::json!({"error": "queue exhausted"})))
+                }
+            }),
+        );
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{}", addr)
+    }
+
+    fn write_capable_engine(max_retries: u32) -> RepromptEngine {
+        RepromptEngine {
+            prompt: RwLock::new("Continue or say DONE.".into()),
+            prompt_file: None,
+            last_mtime: RwLock::new(None),
+            dynamic_prompt: false,
+            max_retries,
+            done_sentinels: vec!["DONE_NO_MORE_PROXY_REPROMPT".into()],
+            log_stop_responses: false,
+        }
+    }
+
+    async fn node_at(url: String) -> Arc<BackendNode> {
+        let mut node = test_node();
+        node.url = url;
+        Arc::new(node)
+    }
+
+    #[tokio::test]
+    async fn test_continuation_carries_original_text_forward() {
+        // The regression this whole change exists for: a finished answer followed by a tool call
+        // used to be replaced by the tool call, leaving the client with no text at all.
+        let url = spawn_backend(vec![tool_call_resp()]).await;
+        let e = write_capable_engine(2);
+        let result = e
+            .maybe_reprompt(
+                stop_resp("**Issues**: [HIGH] null deref at foo.rs:12"),
+                &req_with_tools(&["read", "write"]),
+                &node_at(url).await,
+            )
+            .await;
+
+        let content = result["choices"][0]["message"]["content"].as_str().unwrap();
+        assert!(content.contains("[HIGH] null deref at foo.rs:12"), "got: {content}");
+        assert_eq!(result["choices"][0]["message"]["tool_calls"][0]["id"], "c1");
+    }
+
+    #[tokio::test]
+    async fn test_exhausted_retries_keeps_every_turn() {
+        let url = spawn_backend(vec![stop_resp("and one more thing"), stop_resp("plus this")]).await;
+        let e = write_capable_engine(2);
+        let result = e
+            .maybe_reprompt(
+                stop_resp("first half of the review"),
+                &req_with_tools(&["read", "write"]),
+                &node_at(url).await,
+            )
+            .await;
+
+        let content = result["choices"][0]["message"]["content"].as_str().unwrap();
+        assert!(content.contains("first half of the review"), "got: {content}");
+        assert!(content.contains("and one more thing"), "got: {content}");
+        assert!(content.contains("plus this"), "got: {content}");
+    }
+
+    #[tokio::test]
+    async fn test_done_sentinel_returns_original_without_sentinel() {
+        let url = spawn_backend(vec![stop_resp("DONE_NO_MORE_PROXY_REPROMPT")]).await;
+        let e = write_capable_engine(2);
+        let original = stop_resp("the complete review");
+        let result = e
+            .maybe_reprompt(original, &req_with_tools(&["read", "write"]), &node_at(url).await)
+            .await;
+
+        let content = result["choices"][0]["message"]["content"].as_str().unwrap();
+        assert_eq!(content, "the complete review");
+        assert!(!content.contains("DONE_NO_MORE_PROXY_REPROMPT"));
+    }
+
+    #[tokio::test]
+    async fn test_backend_failure_keeps_original_text() {
+        // Nothing listening on this port → send_follow_up errors on the first attempt.
+        let e = write_capable_engine(2);
+        let node = node_at("http://127.0.0.1:1".into()).await;
+        let result = e
+            .maybe_reprompt(stop_resp("the only answer"), &req_with_tools(&["read", "write"]), &node)
+            .await;
+        assert_eq!(result["choices"][0]["message"]["content"], "the only answer");
     }
 }
