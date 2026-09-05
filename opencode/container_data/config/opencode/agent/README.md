@@ -1,281 +1,91 @@
-# Local Mind Agent - Implementation Documentation
+# Local Mind Agents
 
-## Overview
+Three agents implement a mandatory-peer-review workflow: `local-mind` proposes and writes,
+`neckbeard` and `hoodie` review. Reviewers are read-only and cannot modify files.
 
-This implementation creates a custom agent called `local-mind` that **requires** parallel code review from two subagents (`neckbeard` and `hoodie`) before writing any files.
-
-## Architecture
-
-### How It Works
-
-The enforcement is achieved through a combination of:
-
-1. **Prompt Engineering** - The `local-mind` agent's system prompt contains explicit, mandatory instructions
-2. **Subagent Definition** - Two reviewer agents (`neckbeard` and `hoodie`) are defined as subagents
-3. **Task Tool** - The standard Task tool is used to invoke reviewers in parallel
-
-### File Structure
+## Files
 
 ```
 container_data/config/opencode/
+├── opencode.jsonc      # providers, default_agent, permissions
+├── oh-my-openagent.json # per-agent model overrides for the plugin's built-in agents
 └── agent/
-    ├── local-mind.md    # Primary agent with mandatory review workflow
-    ├── neckbeard.md         # Senior reviewer (correctness, bugs, style)
-    └── hoodie.md         # Junior reviewer (usability, performance, creativity)
+    ├── local-mind.md   # primary — proposes, coordinates review, writes
+    ├── neckbeard.md    # senior reviewer — correctness, bugs, security, patterns
+    └── hoodie.md       # junior reviewer — performance, usability, UX
 ```
 
-## Agent Details
+OpenCode loads `agent/*.md` from its config dir. The container mounts
+`container_data/config/` as `~/.config/`, so these land at `~/.config/opencode/agent/`.
 
-### local-mind (Primary Agent)
+## Agents
 
-**Location**: `container_data/config/opencode/agent/local-mind.md`
+| Agent | Mode | Model | Tools |
+|-------|------|-------|-------|
+| `local-mind` | primary | `cosmo-proxy/cosmo-proxy` | `"*": true` |
+| `neckbeard` | subagent | `cosmo-proxy/cosmo-proxy` | `read`, `grep`, `glob` only |
+| `hoodie` | subagent | `cosmo-proxy/cosmo-proxy` | `read`, `grep`, `glob` only |
 
-**Frontmatter**:
-```yaml
-name: local-mind
-description: Primary agent that MUST get code review before writing files
-mode: primary
-model: cosmo-01/cosmo-4060
-color: "#38A3EE"
-tools:
-  "*": true
-```
+All three route through `cosmo-proxy` (`http://cosmo.lan:8799/v1`), the Rust reverse proxy in
+`llama-proxy/`, which load-balances to the llama.cpp backends and applies response fixes.
 
-**Key Features**:
-- Has access to all tools (`"*": true`)
-- Uses cosmo-4060 model (more capable)
-- Explicit workflow instructions in system prompt
-- **CRITICAL RULE**: Must call both reviewers before Write/Edit
+Subagents (`mode: subagent`) do not appear in the agent switcher; they are reachable only via
+the `task` tool.
 
-**Required Workflow**:
-1. Draft code (show in response, don't write yet)
-2. Call `task` with `subagent_type: "neckbeard"` (parallel)
-3. Call `task` with `subagent_type: "hoodie"` (parallel)
-4. Wait for BOTH reviews
-5. Only then use Write/Edit tools
+## The workflow
 
-### neckbeard (Senior Reviewer)
+1. `local-mind` drafts the change and shows it — without writing it
+2. It calls `task` twice **in one message**, `subagent_type="neckbeard"` and
+   `subagent_type="hoodie"`, both with `run_in_background=false`
+3. It waits for both, then states what each said and what it decided
+4. Only then does it use Write/Edit
 
-**Location**: `container_data/config/opencode/agent/neckbeard.md`
+## Enforcement is prompt-based
 
-**Frontmatter**:
-```yaml
-name: neckbeard
-description: Senior Engineer code reviewer
-mode: subagent
-model: cosmo-01/cosmo-4060
-color: "#FF6B35"
-tools:
-  "*": false
-  "read": true
-  "grep": true
-  "glob": true
-```
+There is no hook or interceptor gating the Write tool. The workflow holds because the agent
+prompts state it explicitly, the reviewers physically cannot write (tool restrictions), and the
+review step is a tracked todo item.
 
-**Focus Areas**:
-- Correctness
-- Readability
-- Clean code
-- Code duplication
-- Scary bugs and corner cases
+This is worth being honest about: prompt-based enforcement is only as reliable as the model
+following it, and it interacts with the rest of the stack. Two failure modes we have actually hit:
 
-**Style**: Direct, thorough, can be harsh but acknowledges good work
+- **`run_in_background=true`** returns `Background task launched.` and a task ID — no review
+  content. The agent must call reviewers synchronously (`run_in_background=false`), or wait for
+  the completion notification and fetch with `background_output`. The agent prompts now mandate
+  the synchronous form.
+- **The proxy's reprompt engine** used to fire on a reviewer's finished answer (`finish_reason:
+  stop`, no tool calls looks identical to a premature stop) and could replace it with a
+  follow-up tool call, leaving the caller with a session of tool calls and no text — the
+  "subagent returned empty" symptom. Fixed in `llama-proxy/src/proxy/reprompt.rs`:
+  `skip_read_only_requests` skips agents that expose no mutating tools, and follow-up turns are
+  now merged into the stopped turn instead of replacing it.
 
-### hoodie (Junior Reviewer)
+## Adding a reviewer
 
-**Location**: `container_data/config/opencode/agent/hoodie.md`
-
-**Frontmatter**:
-```yaml
-name: hoodie
-description: Junior Engineer code reviewer
-mode: subagent
-model: cosmo-00/cosmo-6000
-color: "#44BA81"
-tools:
-  "*": false
-  "read": true
-  "grep": true
-  "glob": true
-```
-
-**Focus Areas**:
-- Usability
-- Performance improvements
-- Fun/creative additions
-- User experience
-
-**Style**: Enthusiastic, optimistic, encouraging
-
-## How Enforcement Works
-
-### Why Prompt-Based Enforcement is Sufficient
-
-You might wonder: "How do we guarantee the agent follows these rules?"
-
-The answer is that **oh-my-opencode's Sisyphus agent is designed to follow system prompts meticulously**. The prompt includes:
-
-1. **Clear hierarchy**: "CRITICAL RULE", "STOP. READ THIS CAREFULLY."
-2. **Explicit workflow**: Step-by-step instructions with examples
-3. **Consequences**: "FORBIDDEN from using Write tool"
-4. **Pattern reinforcement**: Multiple reminders throughout the prompt
-5. **Tool restrictions**: The reviewers have limited tools (no Write/Edit)
-
-### Why No Technical Enforcement is Needed
-
-After researching oh-my-opencode, I found that:
-
-1. **PreToolUse hooks** CAN intercept tool calls, but they:
-   - Run external commands (not ideal for state tracking)
-   - Add complexity
-   - Can be disabled via `disabled_hooks`
-
-2. **The prompt-based approach** is actually MORE reliable because:
-   - It's baked into the agent's core instructions
-   - Works across all contexts
-   - No external dependencies
-   - Follows oh-my-opencode's philosophy of "prompt engineering over complexity"
-
-3. **Oh-my-opencode's Sisyphus agent** is specifically designed to:
-   - Follow instructions obsessively
-   - Respect delegation patterns
-   - Use parallel subagents effectively
-
-## Configuration
-
-### opencode.jsonc
-
-```json
-{
-  "plugin": ["oh-my-opencode@latest"],
-  "$schema": "https://opencode.ai/config.json",
-  "default_agent": "local-mind",
-  "provider": {
-    "cosmo-00": {
-      "name": "cosmo-00",
-      "npm": "@ai-sdk/openai-compatible",
-      "models": { "cosmo-6000": { "name": "cosmo-6000" } },
-      "options": {
-        "baseURL": "http://cosmo.lan:8700/v1",
-        "apiKey": "deadbeef1234"
-      }
-    },
-    "cosmo-01": {
-      "name": "cosmo-01",
-      "npm": "@ai-sdk/openai-compatible",
-      "models": { "cosmo-4060": { "name": "cosmo-4060" } },
-      "options": {
-        "baseURL": "http://cosmo.lan:8701/v1",
-        "apiKey": "deadbeef1234"
-      }
-    }
-  }
-}
-```
-
-### Agent Loading
-
-OpenCode (with oh-my-opencode) automatically loads agents from:
-- `container_data/config/opencode/agent/*.md` (project-specific)
-- `~/.config/opencode/agent/*.md` (user-global)
-
-The `claude-code-agent-loader` feature parses the frontmatter and registers agents.
-
-## Testing the Setup
-
-### Verification Steps
-
-1. **Check agents are loaded**:
-   ```bash
-   opencode --list-agents
-   # Should show: local-mind, neckbeard, hoodie
-   ```
-
-2. **Test the workflow**:
-   - Start opencode with default_agent: local-mind
-   - Ask it to write a simple script
-   - Verify it:
-     - Shows the draft first
-     - Calls both reviewers in parallel
-     - Waits for both reviews
-     - Then writes the file
-
-3. **Verify reviewers are subagents**:
-   - They should NOT appear in the main agent switcher (mode: subagent)
-   - They should only be callable via Task tool
-
-## Extending the System
-
-### Adding More Reviewers
-
-To add another reviewer (e.g., `security`):
-
-1. Create `container_data/config/opencode/agent/security.md`:
-   ```yaml
-   ---
-   name: security
-   description: Security-focused code reviewer
-   mode: subagent
-   model: cosmo-01/cosmo-4060
-   tools:
-     "*": false
-     "read": true
-   ---
-   ```
-
-2. Update `local-mind.md` prompt to include:
-   ```markdown
-   **STEP 4**: Call the Task tool for security review:
-   ```
-   Tool: task
-   subagent_type: "security"
-   ```
-   ```
-
-### Making Review Optional
-
-To make reviews optional instead of mandatory:
-
-1. Change the prompt language from "FORBIDDEN" to "RECOMMENDED"
-2. Add conditions: "For files over 50 lines, get review"
-3. Use Task tool with `ask` permission instead of automatic
+1. Add `agent/<name>.md` with `mode: subagent`, `model: cosmo-proxy/cosmo-proxy`, and
+   `tools: {"*": false, "read": true, "grep": true, "glob": true}`
+2. Add the call to THE REVIEW PROTOCOL section of `local-mind.md`
+3. Give it the same "Delivering Your Answer" rules as `neckbeard.md` — final message is plain
+   text, never end on a tool call
 
 ## Troubleshooting
 
-### Agent Not Appearing
+**Agent doesn't load** — check the file is in `agent/*.md`, that the frontmatter has `name`,
+`mode`, and `model`, and that the YAML parses. Model must be `provider/model` and the provider
+must exist in `opencode.jsonc`.
 
-1. Check file is in `container_data/config/opencode/agent/*.md`
-2. Verify frontmatter has required fields (name, mode, model)
-3. Run `opencode --version` to ensure oh-my-opencode is loaded
-4. Check for JSON/YAML syntax errors in frontmatter
+**Reviews aren't happening** — confirm `default_agent` is `local-mind` in `opencode.jsonc`, and
+that the `task` tool is available to the primary.
 
-### Reviews Not Happening
+**Reviewer returns empty** — see "Enforcement is prompt-based" above. Check the proxy log for
+`Reprompt triggered`; a reviewer request should log `Reprompt skipped` instead.
 
-1. Ensure local-mind is the active agent (`opencode --list-agents`)
-2. Check that the prompt is being loaded correctly
-3. Verify the Task tool is available
-4. Check oh-my-opencode logs for errors
-
-### Reviewers Taking Too Long
-
-1. Use cheaper/faster models for reviewers (e.g., cosmo-6000)
-2. Add timeout configuration to Task calls
-3. Limit the scope of what reviewers check
+**Reviews are slow** — send snippets rather than whole files, and cap the reviewers' tool budget
+(both prompts currently suggest ~5 calls).
 
 ## References
 
-- [OpenCode Agents Documentation](https://opencode.ai/docs/agents)
-- [Oh My OpenCode README](https://github.com/code-yeongyu/oh-my-opencode)
-- [Agent Frontmatter Format](vendor/opencode/.opencode/agent/docs.md)
-
-## Summary
-
-This implementation uses **prompt engineering** as the enforcement mechanism because:
-
-1. ✅ It's simple and reliable
-2. ✅ Works with oh-my-opencode's architecture
-3. ✅ No external dependencies or hooks needed
-4. ✅ Follows the principle of "agent discipline through instructions"
-5. ✅ Easy to modify and extend
-
-The Sisyphus agent (which powers local-mind) is specifically designed to follow these kinds of workflow instructions meticulously. Combined with the parallel subagent capabilities of oh-my-opencode, this creates a robust code review system.
+- [OpenCode Agents](https://opencode.ai/docs/agents)
+- [oh-my-opencode](https://github.com/code-yeongyu/oh-my-opencode) — vendored read-only at
+  `opencode/vendor/oh-my-opencode/`
+- OpenCode source, vendored read-only at `opencode/vendor/opencode/`

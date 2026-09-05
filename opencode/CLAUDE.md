@@ -37,14 +37,24 @@ The `local-mind` agent is the primary agent that MUST delegate to both `neckbear
 3. Calls `task` tool with `subagent_type="hoodie"` for junior review
 4. Synthesizes feedback, then writes files
 
+Both review calls must use `run_in_background=false`. With `true`, oh-my-opencode's task tool
+returns only `Background task launched.` and a task ID — no review content — and the caller must
+wait for a completion notification and fetch it with `background_output`.
+
 ## Local LLM Providers
 
-Two local providers on the cosmo.lan network:
+All three agents use `cosmo-proxy/cosmo-proxy`. The other providers stay configured in
+`opencode.jsonc` for manual switching.
 
-| Provider | Endpoint | Model |
-|----------|----------|-------|
+| Provider | Endpoint | Model(s) |
+|----------|----------|----------|
+| cosmo-proxy | http://cosmo.lan:8799/v1 | cosmo-proxy, cosmo-heavy, cosmo-light |
 | cosmo-00 | http://cosmo.lan:8700/v1 | cosmo-6000 |
 | cosmo-01 | http://cosmo.lan:8701/v1 | cosmo-4060 |
+
+`cosmo-proxy` is the Rust reverse proxy in `../llama-proxy/`. It load-balances to the llama.cpp
+backends, applies tool-call fixes, and runs the reprompt engine. Its behaviour affects agent
+behaviour — see `../llama-proxy/README.md`.
 
 ## Config Location
 
@@ -56,5 +66,6 @@ The container mounts `container_data/config/` as `~/.config/`, so OpenCode finds
 
 - `container_data/config/opencode/opencode.jsonc` - Provider config, default_agent setting
 - `container_data/config/opencode/agent/local-mind.md` - Primary agent with delegation rules
-- `container_data/config/opencode/agent/neckbeard.md` - Senior reviewer (model: cosmo-01/cosmo-4060)
-- `container_data/config/opencode/agent/hoodie.md` - Junior reviewer (model: cosmo-00/cosmo-6000)
+- `container_data/config/opencode/agent/neckbeard.md` - Senior reviewer (read-only: read/grep/glob)
+- `container_data/config/opencode/agent/hoodie.md` - Junior reviewer (read-only: read/grep/glob)
+- `container_data/config/opencode/agent/README.md` - Agent architecture and troubleshooting
