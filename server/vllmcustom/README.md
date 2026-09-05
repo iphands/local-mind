@@ -82,12 +82,17 @@ vLLM `v0.28.0` pins these (see its `requirements/cuda.txt`), so they are the def
 | PyTorch    | v2.13.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0` |
 | FlashInfer | v0.6.16.post3 (**from source**) | `FLASHINFER_CUDA_ARCH_LIST=12.0f` |
 | vLLM       | v0.28.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0`, `VLLM_USE_PRECOMPILED=0` |
-| torchvision/torchaudio | 0.28.0 (cu132 wheel) / 2.11.0 (cu130 wheel), `--no-deps` | not perf-critical |
+| torchaudio | v2.11.0 (**from source**, small) | `TORCH_CUDA_ARCH_LIST=12.0` |
+| torchvision | 0.28.0 (`+cu132` wheel, `--no-deps`) | not perf-critical |
 
 torchaudio 2.11.0 alongside torch 2.13.0 is not a typo — that is upstream's own pairing.
-torchaudio comes from the cu130 index because it never published cu132 wheels; a cu130
-wheel runs on any 13.x toolkit (shared `libcudart.so.13`). `./container/preflight` checks
-both wheels exist before anything compiles.
+torchaudio is built from source because no `+cu132` wheel exists and a `+cu130` one does
+**not** work: torchaudio and torchvision both compare their compiled CUDA major.minor with
+`torch.version.cuda` at import and raise (`PyTorch has CUDA version 13.2 whereas TorchAudio
+has CUDA version 13.0`); transformers imports torchaudio at module load, so that error
+kills `vllm serve` outright. torchvision's `+cu132` wheel exists, so it stays prebuilt;
+`./container/preflight` checks it is published before anything compiles, and the
+vllm-openai stage imports all three so a mismatch fails the build, not the first run.
 `flashinfer-cubin` stopped publishing to PyPI after 0.6.13, so the build pulls it from
 `--extra-index-url https://flashinfer.ai/whl/` (matching vLLM's `requirements/cuda.txt`).
 

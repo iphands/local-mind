@@ -73,7 +73,7 @@ check torch "$TORCH_VERSION" \
 check torchvision "$TORCHVISION_VERSION" \
   "installed --no-deps from download.pytorch.org; a wrong pin silently disables multimodal"
 check torchaudio  "$TORCHAUDIO_VERSION" \
-  "installed --no-deps from download.pytorch.org"
+  "built from source at TORCHAUDIO_REF; vLLM's torchaudio== pin would pull PyPI's cu130 wheel instead, which refuses to import next to a CUDA != 13.0 torch"
 
 # The cubin wheel is a prebuilt blob fetched from flashinfer.ai/whl (it left PyPI
 # after 0.6.13). If the pinned version is absent the build dies deep inside
@@ -95,11 +95,12 @@ if [[ ${PREFLIGHT_OFFLINE:-0} != 1 ]]; then
   fi
 fi
 
-# torchvision/torchaudio are installed --no-deps from download.pytorch.org, and a
-# missing wheel only prints a WARN in the vllm-openai stage (multimodal silently
-# gone). torchaudio never published cu132 wheels and torchvision only has a wheel
-# per CUDA minor, so check the exact (version, index) pair up front. Optional:
-# TORCHVISION_INDEX/TORCHAUDIO_INDEX are set by ./container/build.
+# torchvision is installed --no-deps from download.pytorch.org, and a missing
+# wheel only prints a WARN in the vllm-openai stage (multimodal silently gone).
+# It only has a wheel per CUDA minor, and the minor must match torch's (import-
+# time check), so verify the exact (version, index) pair up front. Optional:
+# TORCHVISION_INDEX is set by ./container/build. (torchaudio is built from
+# source -- no cu132 wheel exists -- so there is nothing to check for it here.)
 if [[ ${PREFLIGHT_OFFLINE:-0} != 1 ]]; then
   wheel_check() { # $1=dist  $2=version  $3=index (cu132)
     [[ -z ${3:-} ]] && return 0
@@ -117,7 +118,6 @@ if [[ ${PREFLIGHT_OFFLINE:-0} != 1 ]]; then
     fi
   }
   wheel_check torchvision "$TORCHVISION_VERSION" "${TORCHVISION_INDEX:-}"
-  wheel_check torchaudio  "$TORCHAUDIO_VERSION"  "${TORCHAUDIO_INDEX:-}"
 fi
 
 if (( fail )); then

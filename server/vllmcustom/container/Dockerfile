@@ -3,10 +3,13 @@
 # Source-built, sm120-optimized vLLM for the RTX PRO 6000 Blackwell.
 #
 # Everything on the LLM-critical path (PyTorch, FlashInfer, vLLM) is compiled
-# from source for sm_120 (TORCH_CUDA_ARCH_LIST=12.0). torchvision/torchaudio are
-# pulled as prebuilt cu13x wheels with --no-deps (not perf critical; only needed
-# so vLLM imports cleanly). Each has its own index: torchvision follows the CUDA
-# minor (cu132), torchaudio only ever published cu130 wheels -- see vllm-openai.
+# from source for sm_120 (TORCH_CUDA_ARCH_LIST=12.0). torchvision is pulled as a
+# prebuilt wheel from the CUDA-minor-matched index (cu132); torchaudio is built
+# from source because no cu132 wheel exists -- and a cu130 one is NOT usable:
+# both torchvision and torchaudio compare their compiled CUDA major.minor with
+# torch.version.cuda at import and raise on mismatch (learned the hard way:
+# "PyTorch has CUDA version 13.2 whereas TorchAudio has CUDA version 13.0").
+# transformers imports torchaudio at module load, so that error kills `vllm`.
 #
 # Version notes (checked 2026-09-05; see README "Default version set"):
 #   - vLLM v0.28.0 pins torch 2.13.0 / flashinfer 0.6.16.post3. v0.29.0rc4 and
@@ -108,6 +111,35 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     mkdir -p /wheels && cp dist/*.whl /wheels/ && \
     uv pip install dist/*.whl && \
     ccache -s
+
+###############################################################################
+# Stage: torchaudio-build — torchaudio from source against the source torch
+###############################################################################
+# Separate from the flashinfer -> vllm chain so it never invalidates those
+# layers. Small: one CppExtension/CUDAExtension (rnnt, align, ctc decoder), no
+# submodules, no cmake. BUILD_VERSION pins the clean wheel version (setup.py
+# would otherwise append +<sha>, which we have no .git for anyway) so vLLM's
+# torchaudio==2.11.0 pin resolves to this wheel in vllm-openai.
+FROM torch-build AS torchaudio-build
+
+ARG TORCH_CUDA_ARCH_LIST=12.0
+ARG TORCHAUDIO_VERSION=2.11.0
+ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
+    BUILD_VERSION=${TORCHAUDIO_VERSION} \
+    USE_CUDA=1 BUILD_RNNT=1 BUILD_ALIGN=1 BUILD_CUDA_CTC_DECODER=1 BUILD_CPP_TEST=0
+
+COPY --from=torchaudio --exclude=.git --exclude=**/.git . /src/torchaudio
+WORKDIR /src/torchaudio
+RUN --mount=type=cache,target=/root/.cache/ccache \
+    --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=secret,id=buildjobs \
+    { [ -f /run/secrets/buildjobs ] && . /run/secrets/buildjobs; } ; \
+    : "${MAX_JOBS:=8}" ; export MAX_JOBS ; \
+    python setup.py bdist_wheel && \
+    mkdir -p /wheels-torchaudio && cp dist/torchaudio-*.whl /wheels-torchaudio/ && \
+    ls -la /wheels-torchaudio && \
+    uv pip install --no-deps /wheels-torchaudio/*.whl && \
+    python -c "import torch, torchaudio; print('torchaudio', torchaudio.__version__, 'cuda', torch.ops._torchaudio.cuda_version())"
 
 ###############################################################################
 # Stage: flashinfer-build — FlashInfer from source against the source torch
@@ -222,30 +254,30 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 FROM base AS vllm-openai
 
 ARG TORCHVISION_VERSION=0.28.0
-# Not a stale pin: vLLM's requirements/cuda.txt really does pair torchaudio 2.11.0
-# with torch 2.13.0 / torchvision 0.28.0. Keep it in step with upstream, not with torch.
-ARG TORCHAUDIO_VERSION=2.11.0
-# Wheel index per package (download.pytorch.org/whl/<index>). They differ on
-# purpose: torchvision publishes a wheel per CUDA minor (cu130, cu132, ...) so
-# ./build derives it from CUDA_VERSION; torchaudio is in maintenance and only
-# ever shipped cu130 (verified 2026-09-05: whl/cu132/torchaudio/ lists nothing).
-# A cu130 torchaudio on a 13.2 toolkit is fine -- CUDA 13.x minor versions share
-# libcudart.so.13, and torchaudio links libtorch, not its own CUDA kernels.
+# torchvision publishes a wheel per CUDA minor (cu130, cu132, ...); ./build
+# derives the index from CUDA_VERSION and preflight checks the wheel exists. The
+# wheel's CUDA minor MUST equal torch's: torchvision/extension.py compares them
+# at import and raises. (torchaudio has the same check and no cu132 wheel, which
+# is why it is built from source in torchaudio-build instead.)
 ARG TORCHVISION_INDEX=cu132
-ARG TORCHAUDIO_INDEX=cu130
 
-# All locally-built wheels (torch, flashinfer, vllm).
+# All locally-built wheels (torch, flashinfer, vllm, torchaudio). Installing
+# them in one resolve lets vLLM's torch==/torchaudio== pins land on our wheels
+# instead of PyPI's cu130 builds.
 COPY --from=vllm-build /wheels /wheels
+COPY --from=torchaudio-build /wheels-torchaudio /wheels
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install /wheels/*.whl && \
     { uv pip install --no-deps --index-url https://download.pytorch.org/whl/${TORCHVISION_INDEX} \
         torchvision==${TORCHVISION_VERSION} || \
       echo "WARN: torchvision ${TORCHVISION_VERSION} ${TORCHVISION_INDEX} wheel unavailable; multimodal disabled"; } && \
-    { uv pip install --no-deps --index-url https://download.pytorch.org/whl/${TORCHAUDIO_INDEX} \
-        torchaudio==${TORCHAUDIO_VERSION} || \
-      echo "WARN: torchaudio ${TORCHAUDIO_VERSION} ${TORCHAUDIO_INDEX} wheel unavailable; audio disabled"; } && \
-    rm -rf /wheels
+    rm -rf /wheels && \
+    # Fail the build here, not at `vllm serve`, if any CUDA-minor check trips.
+    python -c "import torch, torchvision, torchaudio; \
+               print('torch', torch.__version__, torch.version.cuda, \
+                     'torchvision', torchvision.__version__, \
+                     'torchaudio', torchaudio.__version__)"
 
 ENV VLLM_HOST_IP=0.0.0.0 \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
