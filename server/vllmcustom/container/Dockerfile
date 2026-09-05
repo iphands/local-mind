@@ -186,6 +186,20 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
 # Verify with `vllm.__version__` after changing either.
 COPY --from=vllm --exclude=.git --exclude=**/.git . /src/vllm
 WORKDIR /src/vllm
+# vLLM's CMake fetches vllm-flash-attention (FetchContent, pinned sha) and builds
+# it with its OWN arch rules, ignoring TORCH_CUDA_ARCH_LIST: FA2 as sm_80+PTX
+# (PTX-JIT'd on sm120, never native) and FA3 as 192 Hopper-only kernels that,
+# with no sm90 target, get nvcc's default sm_75 -- 818 MB that cannot run here.
+# Hook a PATCH_COMMAND into the FetchContent declaration so the clone is edited
+# in place: FA2 -> the requested archs, FA3 -> off. Rationale and the exact
+# edits live in the patch script. The grep asserts the hook landed on the git
+# branch of the declaration (the VLLM_FLASH_ATTN_SRC_DIR branch has no clone to
+# patch), so a vLLM bump that rewrites this file fails here, not 40 min later.
+COPY patches/vllm-flash-attn-arch.py /opt/patches/vllm-flash-attn-arch.py
+RUN f=cmake/external_projects/vllm_flash_attn.cmake && \
+    sed -i '/GIT_PROGRESS TRUE/a\          PATCH_COMMAND /opt/venv/bin/python /opt/patches/vllm-flash-attn-arch.py' "$f" && \
+    [ "$(grep -c 'PATCH_COMMAND /opt/venv/bin/python /opt/patches/vllm-flash-attn-arch.py' "$f")" = 1 ] && \
+    grep -A4 'GIT_REPOSITORY https://github.com/vllm-project/flash-attention.git' "$f"
 # Don't let vLLM's pinned torch wheel clobber our source build.
 # v0.23.0 replaced requirements/build.txt with a requirements/build/<platform>.txt
 # split; use the cuda list. use_existing_torch.py globs requirements/**/*.txt, so it

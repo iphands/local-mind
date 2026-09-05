@@ -2,3 +2,4 @@
 # never via the default context. Keep the default context to ~nothing.
 *
 !Dockerfile
+!patches/

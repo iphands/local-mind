@@ -1,0 +1,26 @@
+#!/bin/bash
+# Print which GPU architectures each compiled extension in an image actually
+# contains (SASS per `cuobjdump --list-elf`, plus any embedded PTX). This is how
+# the FA2 sm_80 / FA3 sm_75 waste was found; run it after a build to confirm the
+# image is sm_120-only.
+#
+#   ./container/archs                       # iphands/vllm-blackwell:latest
+#   ./container/archs iphands/vllm-blackwell:cu1321-sm120
+set -euo pipefail
+IMAGE=${1:-${IMAGE:-iphands/vllm-blackwell}:${IMAGE_TAG:-latest}}
+docker run --rm --entrypoint bash "$IMAGE" -c '
+sp=/opt/venv/lib/python3.12/site-packages
+summ() { cuobjdump --list-elf "$1" 2>/dev/null | grep -oE "sm_[0-9a-z]+" | sort | uniq -c | awk "{printf \"%s x%s  \", \$2, \$1}"; }
+ptx()  { cuobjdump --list-ptx "$1" 2>/dev/null | grep -oE "sm_[0-9a-z]+" | sort -u | tr "\n" " "; }
+printf "%-42s %8s  %s\n" "extension" "size" "SASS (count)  [PTX]"
+for f in $sp/vllm/*.so $sp/vllm/vllm_flash_attn/*.so $sp/torch/lib/libtorch_cuda.so; do
+  [ -f "$f" ] || continue
+  s=$(summ "$f"); p=$(ptx "$f")
+  printf "%-42s %8s  %s%s\n" "${f#$sp/}" "$(du -h "$f" | cut -f1)" "${s:-(no GPU code)  }" "${p:+[PTX: $p]}"
+done
+n=$(find $sp/flashinfer_jit_cache -name "*.so" 2>/dev/null | wc -l)
+if [ "$n" -gt 0 ]; then
+  printf "%-42s %8s  " "flashinfer_jit_cache ($n modules)" "$(du -sh $sp/flashinfer_jit_cache | cut -f1)"
+  find $sp/flashinfer_jit_cache -name "*.so" | while read -r f; do cuobjdump --list-elf "$f" 2>/dev/null | grep -oE "sm_[0-9a-z]+"; done | sort | uniq -c | awk "{printf \"%s x%s  \", \$2, \$1}"; echo
+fi
+'

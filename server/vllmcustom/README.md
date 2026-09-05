@@ -103,6 +103,29 @@ both wheels exist before anything compiles.
 vLLM upstream still builds its own images on CUDA 13.0.3, so `CUDA_VERSION=13.0.3` is the
 conservative fallback if 13.2.1 misbehaves (it produces the separate `cu1303-sm120` tag).
 
+### sm120-only: what the build actually emits
+
+`TORCH_CUDA_ARCH_LIST=12.0` is honoured by torch, FlashInfer (`12.0f`) and vLLM's own
+kernels, but **not** by the vllm-flash-attention sub-build that vLLM's CMake fetches and
+compiles inside the vllm stage. Measured on the cu1303 image with `./container/archs`:
+
+| extension | upstream result on a 12.0-only build | fix |
+|---|---|---|
+| `_vllm_fa2_C` (FA2) | 76 kernels as **sm_80 SASS + PTX**, no sm_120 — ran only via driver PTX JIT | built for the requested archs (sm_120 native) |
+| `_vllm_fa3_C` (FA3, Hopper-only) | 192 kernels, 818 MB, as **sm_75** (empty arch list → nvcc default) — unusable on Blackwell | not built; empty stub target keeps `setup.py` happy |
+
+The patch is `container/patches/vllm-flash-attn-arch.py`, hooked in as the FetchContent
+`PATCH_COMMAND` by the Dockerfile (vllm-build stage). It asserts each edit matches exactly
+once, so a vLLM bump that moves those lines fails at that step rather than silently
+reverting. FA3 is never selectable on sm120 (`flash_attn_interface.py` try/excepts the
+import), so nothing usable is lost; the vllm stage drops ~260 of its ~400 CUDA compile
+units. Verify any build with:
+
+```bash
+./container/archs                       # every .so should say sm_120 only (a few Marlin +PTX
+                                        # fallbacks show as single sm_80/89/90 entries — fine)
+```
+
 ## Trying other CUDA / versions
 
 Everything is a build-arg; the CUDA version becomes part of the tag so variants
