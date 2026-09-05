@@ -104,6 +104,11 @@ backend:
 #   # Log the full response body on every reprompt trigger — both the stop that fired it
 #   # and the final response returned to the client. Flip on to debug client-side state issues.
 #   log_stop_responses: false
+#   # Skip the engine for requests that offer no file-mutating tool (default: true).
+#   # Those are read-only subagents — code reviewers, explorers — which answer once and have no
+#   # task list to resume. Reprompting them only sends them back out searching, and delays or
+#   # buries the answer the caller is waiting on.
+#   skip_read_only_requests: true
 
 # Response fix modules (default: enabled with all fixes active)
 # fixes:

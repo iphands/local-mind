@@ -13,6 +13,10 @@
 //! whole job is to answer once (a code reviewer, say) has its answer silently swallowed and
 //! the client sees a session made entirely of tool calls with no text.
 //!
+//! Requests that expose no file-mutating tools are skipped entirely (see
+//! `request_is_read_only`). Those are read-only subagents: they have no task list to resume,
+//! so the continue-prompt only pushes them into more pointless searching.
+//!
 //! When dynamic_prompt is enabled (default), the prompt file is re-read from disk on
 //! each trigger if its mtime has changed since the last read. This allows live edits
 //! to the prompt without restarting the proxy.
@@ -36,8 +40,28 @@ pub struct RepromptEngine {
     pub max_retries: u32,
     pub done_sentinels: Vec<String>,
     log_stop_responses: bool,
+    /// Skip the whole engine for requests that expose no file-mutating tools
+    skip_read_only_requests: bool,
 }
 
+/// Tool names that mean the caller can change something. A request offering none of these is a
+/// read-only agent. Covers both OpenCode ids (`bash`, `write`, `edit`, `apply_patch`, `todowrite`,
+/// `task`) and the Claude Code spellings, matched case-insensitively.
+const MUTATING_TOOL_NAMES: &[&str] = &[
+    "apply_patch",
+    "applypatch",
+    "bash",
+    "edit",
+    "multiedit",
+    "notebookedit",
+    "patch",
+    "run_command",
+    "shell",
+    "str_replace_editor",
+    "task",
+    "todowrite",
+    "write",
+];
 
 impl RepromptEngine {
     pub fn from_config(config: &RepromptConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
@@ -64,6 +88,7 @@ impl RepromptEngine {
             max_retries: config.max_retries,
             done_sentinels: config.done_sentinels.clone(),
             log_stop_responses: config.log_stop_responses,
+            skip_read_only_requests: config.skip_read_only_requests,
         })
     }
 
@@ -146,6 +171,26 @@ impl RepromptEngine {
         !has_tool_calls
     }
 
+    /// Returns true when the request offers no tool that can change anything — the signature of a
+    /// read-only subagent. Missing or malformed `tools` returns false so plain chat keeps the
+    /// engine's original behaviour.
+    pub fn request_is_read_only(request: &serde_json::Value) -> bool {
+        let tools = match request.get("tools").and_then(|t| t.as_array()) {
+            Some(t) if !t.is_empty() => t,
+            _ => return false,
+        };
+
+        !tools.iter().any(|tool| {
+            let name = tool
+                .get("function")
+                .and_then(|f| f.get("name"))
+                .or_else(|| tool.get("name"))
+                .and_then(|n| n.as_str())
+                .unwrap_or("");
+            let name = name.to_ascii_lowercase();
+            MUTATING_TOOL_NAMES.contains(&name.as_str())
+        })
+    }
 
     /// Pull the assistant text out of a response. Handles `content` as a plain string and as an
     /// array of parts, falling back to `reasoning_content` for backends that put everything there.
@@ -285,6 +330,11 @@ impl RepromptEngine {
             return original_response;
         }
 
+        if self.skip_read_only_requests && Self::request_is_read_only(original_request) {
+            tracing::debug!("Reprompt skipped: request exposes no mutating tools (read-only agent)");
+            return original_response;
+        }
+
         tracing::info!(
             max_retries = self.max_retries,
             "Reprompt triggered: finish_reason=stop with no tool_calls"
@@ -398,6 +448,7 @@ mod tests {
             max_retries: 3,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
+            skip_read_only_requests: true,
         }
     }
 
@@ -536,6 +587,7 @@ mod tests {
             done_sentinels: vec!["DONE".into()],
             dynamic_prompt: false,
             log_stop_responses: false,
+            skip_read_only_requests: true,
         };
         let e = RepromptEngine::from_config(&cfg).unwrap();
         assert_eq!(e.max_retries, 2);
@@ -551,6 +603,7 @@ mod tests {
             done_sentinels: vec!["DONE".into()],
             dynamic_prompt: false,
             log_stop_responses: false,
+            skip_read_only_requests: true,
         };
         assert!(RepromptEngine::from_config(&cfg).is_err());
     }
@@ -565,6 +618,7 @@ mod tests {
             done_sentinels: vec!["DONE".into()],
             dynamic_prompt: false,
             log_stop_responses: false,
+            skip_read_only_requests: true,
         };
         assert!(RepromptEngine::from_config(&cfg).is_err());
     }
@@ -598,6 +652,7 @@ mod tests {
             max_retries: 3,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
+            skip_read_only_requests: true,
         };
         assert_eq!(e.resolve_prompt().await, "Static text.");
     }
@@ -618,6 +673,7 @@ mod tests {
             max_retries: 3,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
+            skip_read_only_requests: true,
         };
         // mtime hasn't changed, should return cached prompt without re-reading
         assert_eq!(e.resolve_prompt().await, "File prompt.");
@@ -646,6 +702,7 @@ mod tests {
             max_retries: 3,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
+            skip_read_only_requests: true,
         };
         let result = e.resolve_prompt().await;
         assert_eq!(result, "New prompt.");
@@ -653,7 +710,7 @@ mod tests {
         assert_eq!(*e.prompt.read().await, "New prompt.");
     }
 
-    // --- helpers ---
+    // --- read-only skip gate ---
 
     fn req_with_tools(names: &[&str]) -> serde_json::Value {
         let tools: Vec<serde_json::Value> = names
@@ -667,6 +724,53 @@ mod tests {
         })
     }
 
+    #[test]
+    fn test_request_is_read_only_reviewer_tools() {
+        // neckbeard / hoodie expose exactly these
+        assert!(RepromptEngine::request_is_read_only(&req_with_tools(&[
+            "read", "grep", "glob"
+        ])));
+    }
+
+    #[test]
+    fn test_request_is_read_only_false_when_can_write() {
+        assert!(!RepromptEngine::request_is_read_only(&req_with_tools(&[
+            "read", "grep", "glob", "write", "edit", "bash"
+        ])));
+    }
+
+    #[test]
+    fn test_request_is_read_only_false_for_single_mutating_tool() {
+        assert!(!RepromptEngine::request_is_read_only(&req_with_tools(&["read", "todowrite"])));
+    }
+
+    #[test]
+    fn test_request_is_read_only_matches_case_insensitively() {
+        // Claude Code spells them capitalised
+        assert!(!RepromptEngine::request_is_read_only(&req_with_tools(&["Read", "Bash"])));
+    }
+
+    #[test]
+    fn test_request_is_read_only_false_without_tools() {
+        // Plain chat keeps the engine's original behaviour
+        let req = serde_json::json!({"model": "test", "messages": []});
+        assert!(!RepromptEngine::request_is_read_only(&req));
+        let req = serde_json::json!({"model": "test", "tools": []});
+        assert!(!RepromptEngine::request_is_read_only(&req));
+    }
+
+    #[tokio::test]
+    async fn test_maybe_reprompt_skips_read_only_request() {
+        // No backend is running — if the gate failed to short-circuit, send_follow_up would
+        // error out and we'd still get a response back, so assert on identity instead.
+        let e = engine();
+        let node = Arc::new(test_node());
+        let original = stop_resp("**Issues**: none. Looks good.");
+        let result = e
+            .maybe_reprompt(original.clone(), &req_with_tools(&["read", "grep", "glob"]), &node)
+            .await;
+        assert_eq!(result, original);
+    }
 
     // --- text extraction ---
 
@@ -764,6 +868,7 @@ mod tests {
             max_retries,
             done_sentinels: vec!["DONE_NO_MORE_PROXY_REPROMPT".into()],
             log_stop_responses: false,
+            skip_read_only_requests: true,
         }
     }
 

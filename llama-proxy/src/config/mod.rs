@@ -422,10 +422,19 @@ pub struct RepromptConfig {
     /// Useful for debugging why the client-side state isn't updating correctly.
     #[serde(default)]
     pub log_stop_responses: bool,
+    /// Skip the engine for requests that expose no file-mutating tools (default: true).
+    /// Those are read-only subagents — code reviewers, explorers — which have no task list to
+    /// resume, so the continue-prompt only pushes them into more searching and delays their answer.
+    #[serde(default = "default_reprompt_skip_read_only")]
+    pub skip_read_only_requests: bool,
 }
 
 fn default_reprompt_max_retries() -> u32 {
     3
+}
+
+fn default_reprompt_skip_read_only() -> bool {
+    true
 }
 
 fn default_reprompt_done_sentinels() -> Vec<String> {
@@ -471,6 +480,7 @@ impl Default for RepromptConfig {
             done_sentinels: default_reprompt_done_sentinels(),
             dynamic_prompt: default_reprompt_dynamic_prompt(),
             log_stop_responses: false,
+            skip_read_only_requests: default_reprompt_skip_read_only(),
         }
     }
 }

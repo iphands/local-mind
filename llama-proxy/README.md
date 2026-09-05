@@ -57,6 +57,8 @@ An HTTP reverse proxy for [llama.cpp](https://github.com/ggerganov/llama.cpp) se
   - Returns clean stop on sentinel match; hides stops on tool call/content resume
   - Never drops assistant text: a follow-up turn is merged into the stopped turn, never
     substituted for it, so an answer the backend already gave always reaches the client
+  - Skips read-only requests (`skip_read_only_requests`, default on): a request offering no
+    file-mutating tool is a read-only subagent that answers once and has no task list to resume
   - Logs stop responses for debugging (optional)
 
 - **Client Compatibility**: Works seamlessly with AI coding tools
