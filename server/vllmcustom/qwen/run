@@ -76,14 +76,19 @@ env_extra_args
 vllm_core_args
 VLLM_ARGS+=(
   --enable-auto-tool-choice
-  --language-model-only
+  # --language-model-only
   --no-enforce-eager
   --kv-cache-dtype fp8
 
   --reasoning-parser qwen3
   --tool-call-parser qwen3_coder
 
-  --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
+  # For 3.5 122B
+  # --override-generation-config '{ "temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
+
+  # For 3.8 27B
+  --override-generation-config '{ "temperature": 0.7, "top_p": 0.80, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0 }'
+
   --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true}'
 )
 
