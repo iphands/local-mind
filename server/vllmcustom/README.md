@@ -74,19 +74,34 @@ old `server/vllm` scripts:
 
 ## Default version set (mutually compatible)
 
-vLLM `v0.27.0` pins these (see its `requirements/cuda.txt`), so they are the defaults:
+vLLM `v0.28.0` pins these (see its `requirements/cuda.txt`), so they are the defaults:
 
 | component  | ref/version | arch flags |
 |------------|-------------|------------|
-| CUDA       | 13.0.3 (`cudnn-devel-ubuntu24.04`) | — |
+| CUDA       | 13.2.1 (`cudnn-devel-ubuntu24.04`) | — |
 | PyTorch    | v2.13.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0` |
 | FlashInfer | v0.6.16.post3 (**from source**) | `FLASHINFER_CUDA_ARCH_LIST=12.0f` |
-| vLLM       | v0.27.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0`, `VLLM_USE_PRECOMPILED=0` |
-| torchvision/torchaudio | 0.28.0 / 2.11.0 (cu130 wheels, `--no-deps`) | not perf-critical |
+| vLLM       | v0.28.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0`, `VLLM_USE_PRECOMPILED=0` |
+| torchvision/torchaudio | 0.28.0 (cu132 wheel) / 2.11.0 (cu130 wheel), `--no-deps` | not perf-critical |
 
 torchaudio 2.11.0 alongside torch 2.13.0 is not a typo — that is upstream's own pairing.
+torchaudio comes from the cu130 index because it never published cu132 wheels; a cu130
+wheel runs on any 13.x toolkit (shared `libcudart.so.13`). `./container/preflight` checks
+both wheels exist before anything compiles.
 `flashinfer-cubin` stopped publishing to PyPI after 0.6.13, so the build pulls it from
 `--extra-index-url https://flashinfer.ai/whl/` (matching vLLM's `requirements/cuda.txt`).
+
+### Why not newer (as of 2026-09-05)
+
+| candidate | status | blocker |
+|---|---|---|
+| torch 2.14.0 (2026-08-26) | released | no vLLM release **or rc** pins it — v0.29.0rc4 and `main` still pin 2.13.0 |
+| FlashInfer 0.6.18.post1 (2026-09-04) | released | vLLM's wheel hard-pins `flashinfer-python==X`; v0.28.0 wants 0.6.16.post3, v0.29.0rc4 wants 0.6.18 |
+| CUDA 13.3.1 | image published; driver 610.43.03 ≥ its 610.43.02 floor | not in torch's binary matrix (12.6/12.9/13.0/13.2), no FlashInfer/vLLM CI; 13.3+ nvcc changed its dry-run output (broke sccache upstream) |
+| vLLM v0.29.0 | at rc4 (2026-09-04) | not tagged yet; when it is: `VLLM_REF=v0.29.0 FLASHINFER_REF=v0.6.18 ./container/build` |
+
+vLLM upstream still builds its own images on CUDA 13.0.3, so `CUDA_VERSION=13.0.3` is the
+conservative fallback if 13.2.1 misbehaves (it produces the separate `cu1303-sm120` tag).
 
 ## Trying other CUDA / versions
 
@@ -94,15 +109,16 @@ Everything is a build-arg; the CUDA version becomes part of the tag so variants
 coexist:
 
 ```bash
-CUDA_VERSION=13.1.2 ./container/build               # -> iphands/vllm-blackwell:cu1312-sm120
+CUDA_VERSION=13.3.1 ./container/build               # -> iphands/vllm-blackwell:cu1331-sm120 (untested upstream)
+CUDA_VERSION=13.0.3 ./container/build               # -> iphands/vllm-blackwell:cu1303-sm120 (vLLM's own CI toolkit)
 VLLM_REF=v0.25.1 TORCH_REF=v2.11.0 FLASHINFER_REF=v0.6.13 ./container/build
 ```
 
 Then run a specific variant and benchmark it:
 
 ```bash
-IMAGE_TAG=cu1312-sm120 ./qwen/run ./models/vllm/Qwen3.6-27B
-./bench/bench cu1312-flashinfer
+IMAGE_TAG=cu1303-sm120 ./qwen/run ./models/vllm/Qwen3.6-27B
+./bench/bench cu1303-flashinfer
 ```
 
 ## A/B-testing backends (runtime, no rebuild)
@@ -506,9 +522,9 @@ parallelism; if it brushes the ceiling, raise it.
 
   | Tag | Meaning |
   |---|---|
-  | `cu1303-sm120` | newest build of this CUDA variant |
-  | `cu1303-sm120-vllm0.27.1` | pinned to the vLLM version |
-  | `cu1303-sm120-vllm0.27.1-d6d029f` | pinned to vLLM version *and* build commit |
+  | `cu1321-sm120` | newest build of this CUDA variant |
+  | `cu1321-sm120-vllm0.28.0` | pinned to the vLLM version |
+  | `cu1321-sm120-vllm0.28.0-d6d029f` | pinned to vLLM version *and* build commit |
   | `latest` | newest build of anything |
 
   The versions come from the image's own OCI labels (`ai.vllmcustom.*`, stamped

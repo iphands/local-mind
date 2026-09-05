@@ -4,11 +4,11 @@
 #   ./container/push                  # pushes the resolved tags for the last build
 #   TAG=cu1303-sm120 ./container/push # push a specific variant tag
 #
-# Tags pushed, for vLLM 0.27.1 on CUDA 13.0.3 at commit d6d029f:
+# Tags pushed, for vLLM 0.28.0 on CUDA 13.2.1 at commit d6d029f:
 #
-#   cu1303-sm120                     moving — newest build of this CUDA variant
-#   cu1303-sm120-vllm0.27.1          pinned to the vLLM version
-#   cu1303-sm120-vllm0.27.1-d6d029f  pinned to vLLM version *and* build commit
+#   cu1321-sm120                     moving — newest build of this CUDA variant
+#   cu1321-sm120-vllm0.28.0          pinned to the vLLM version
+#   cu1321-sm120-vllm0.28.0-d6d029f  pinned to vLLM version *and* build commit
 #   latest                           moving — newest build of anything
 #
 # The vLLM/CUDA versions are read from the image's own labels (stamped by the

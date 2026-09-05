@@ -4,15 +4,24 @@
 #
 # Everything on the LLM-critical path (PyTorch, FlashInfer, vLLM) is compiled
 # from source for sm_120 (TORCH_CUDA_ARCH_LIST=12.0). torchvision/torchaudio are
-# pulled as cu130 wheels with --no-deps (not perf critical; only needed so vLLM
-# imports cleanly).
+# pulled as prebuilt cu13x wheels with --no-deps (not perf critical; only needed
+# so vLLM imports cleanly). Each has its own index: torchvision follows the CUDA
+# minor (cu132), torchaudio only ever published cu130 wheels -- see vllm-openai.
+#
+# Version notes (checked 2026-09-05; see README "Default version set"):
+#   - vLLM v0.28.0 pins torch 2.13.0 / flashinfer 0.6.16.post3. v0.29.0rc4 and
+#     main still pin torch 2.13.0 (flashinfer 0.6.18), so torch 2.14.0 (released
+#     2026-08-26) is not yet usable with any vLLM.
+#   - CUDA 13.2.1 is the newest toolkit torch 2.13.0 officially builds against
+#     (its binary matrix is 12.6/12.9/13.0/13.2). 13.3.x exists and the host
+#     driver supports it, but no torch/flashinfer/vLLM release has CI on it.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,
 # vllm=) by ./build, so the giant repos never enter the default build context.
 # ccache + uv caches use BuildKit cache mounts so an incremental change re-links
 # in minutes instead of recompiling torch from scratch.
 
-ARG CUDA_VERSION=13.0.3
+ARG CUDA_VERSION=13.2.1
 ARG BASE_IMAGE=nvidia/cuda:${CUDA_VERSION}-cudnn-devel-ubuntu24.04
 
 ###############################################################################
@@ -154,7 +163,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 FROM flashinfer-build AS vllm-build
 
 ARG TORCH_CUDA_ARCH_LIST=12.0
-ARG VLLM_VERSION=0.27.0
+ARG VLLM_VERSION=0.28.0
 # VLLM_VERSION_OVERRIDE, *not* SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM. The
 # scoped form does not work here: setup.py calls setuptools-scm's get_version()
 # with no dist_name (setup.py:1026), so there is nothing for the _FOR_VLLM suffix
@@ -171,7 +180,7 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
 # setuptools-scm derives the version from git tags — so VLLM_VERSION_OVERRIDE
 # above is load-bearing, not belt-and-braces: without it this build fails with
 # "setuptools-scm was unable to detect version for /src/vllm".
-# It also yields a clean 0.27.1 rather than the 0.27.1.dev0+g<sha>.d<date> that
+# It also yields a clean 0.28.0 rather than the 0.28.0.dev0+g<sha>.d<date> that
 # git derivation produced (use_existing_torch.py edits pyproject.toml before
 # setup.py runs, so the tree is always dirty by then).
 # Verify with `vllm.__version__` after changing either.
@@ -202,15 +211,26 @@ ARG TORCHVISION_VERSION=0.28.0
 # Not a stale pin: vLLM's requirements/cuda.txt really does pair torchaudio 2.11.0
 # with torch 2.13.0 / torchvision 0.28.0. Keep it in step with upstream, not with torch.
 ARG TORCHAUDIO_VERSION=2.11.0
+# Wheel index per package (download.pytorch.org/whl/<index>). They differ on
+# purpose: torchvision publishes a wheel per CUDA minor (cu130, cu132, ...) so
+# ./build derives it from CUDA_VERSION; torchaudio is in maintenance and only
+# ever shipped cu130 (verified 2026-09-05: whl/cu132/torchaudio/ lists nothing).
+# A cu130 torchaudio on a 13.2 toolkit is fine -- CUDA 13.x minor versions share
+# libcudart.so.13, and torchaudio links libtorch, not its own CUDA kernels.
+ARG TORCHVISION_INDEX=cu132
+ARG TORCHAUDIO_INDEX=cu130
 
 # All locally-built wheels (torch, flashinfer, vllm).
 COPY --from=vllm-build /wheels /wheels
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install /wheels/*.whl && \
-    { uv pip install --no-deps --index-url https://download.pytorch.org/whl/cu130 \
-        torchvision==${TORCHVISION_VERSION} torchaudio==${TORCHAUDIO_VERSION} || \
-      echo "WARN: torchvision/torchaudio cu130 wheels unavailable; multimodal disabled"; } && \
+    { uv pip install --no-deps --index-url https://download.pytorch.org/whl/${TORCHVISION_INDEX} \
+        torchvision==${TORCHVISION_VERSION} || \
+      echo "WARN: torchvision ${TORCHVISION_VERSION} ${TORCHVISION_INDEX} wheel unavailable; multimodal disabled"; } && \
+    { uv pip install --no-deps --index-url https://download.pytorch.org/whl/${TORCHAUDIO_INDEX} \
+        torchaudio==${TORCHAUDIO_VERSION} || \
+      echo "WARN: torchaudio ${TORCHAUDIO_VERSION} ${TORCHAUDIO_INDEX} wheel unavailable; audio disabled"; } && \
     rm -rf /wheels
 
 ENV VLLM_HOST_IP=0.0.0.0 \

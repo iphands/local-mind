@@ -1,9 +1,11 @@
 #!/bin/bash
 # Build the sm120-optimized vLLM image from source.
 #
-#   ./container/build                       # defaults: CUDA 13.0.3, vLLM v0.27.1 + torch v2.13.0 + flashinfer v0.6.16.post3
-#   CUDA_VERSION=13.1.2 ./container/build   # try a newer CUDA toolkit (produces a different tag)
+#   ./container/build                       # defaults: CUDA 13.2.1, vLLM v0.28.0 + torch v2.13.0 + flashinfer v0.6.16.post3
+#   CUDA_VERSION=13.0.3 ./container/build   # the previous toolkit (produces a different tag, cu1303-sm120)
 #   VLLM_REF=v0.25.1 ./container/build      # try a different vLLM (pin matching TORCH_REF/FLASHINFER_REF too)
+#   VLLM_REF=v0.29.0 FLASHINFER_REF=v0.6.18 ./container/build
+#                                           # the next set once v0.29.0 is tagged (rc4 pins flashinfer 0.6.18, torch 2.13.0)
 #   BUILD_MEM_GB=64 ./container/build       # tighter memory budget (lowers the derived MAX_JOBS)
 #
 # Memory: the build is capped at BUILD_MEM_GB (default 110G) two ways — a derived
@@ -15,7 +17,12 @@
 set -euo pipefail
 
 # --- knobs (override via env) ------------------------------------------------
-CUDA_VERSION=${CUDA_VERSION:-13.0.3}
+# 13.2.1 = newest toolkit torch 2.13.0 officially builds against (binary matrix
+# 12.6/12.9/13.0/13.2). 13.3.x is published and the host driver (610.43.03) meets
+# its 610.43.02 floor, but no torch/flashinfer/vLLM release has CI on 13.3 yet,
+# and flashinfer notes 13.3+ nvcc changed its dry-run output (broke sccache).
+# vLLM itself only CI-builds on 13.0.3, so that is the safe fallback variant.
+CUDA_VERSION=${CUDA_VERSION:-13.2.1}
 TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST:-12.0}      # sm_120 (RTX PRO 6000 Blackwell)
 # Memory budget. MAX_JOBS is derived from it because parallel nvcc is what OOMs
 # this box (125 GB, no swap): each cicc holds 2-6 GB on the heavy sm120 template
@@ -55,8 +62,13 @@ MAX_JOBS=${MAX_JOBS:-$(( _jobs_by_mem < _jobs_by_cpu ? _jobs_by_mem : _jobs_by_c
 # last stage.
 NVCC_THREADS=${NVCC_THREADS:-1}
 
-# Mutually-compatible default set (vLLM v0.27.1 pins torch 2.13.0 / flashinfer 0.6.16.post3).
-VLLM_REF=${VLLM_REF:-v0.27.1}
+# Mutually-compatible default set (vLLM v0.28.0 pins torch 2.13.0 / flashinfer
+# 0.6.16.post3 -- see its requirements/cuda.txt; ./container/preflight checks this).
+# Not bumped further on purpose (2026-09-05): torch 2.14.0 is out but no vLLM
+# release or rc pins it, and flashinfer 0.6.18.post1 is newer than anything vLLM
+# pins (v0.29.0rc4 = 0.6.18). vLLM's wheel hard-pins flashinfer-python==X, so the
+# flashinfer ref can only move together with VLLM_REF.
+VLLM_REF=${VLLM_REF:-v0.28.0}
 TORCH_REF=${TORCH_REF:-v2.13.0}
 FLASHINFER_REF=${FLASHINFER_REF:-v0.6.16.post3}
 
@@ -67,6 +79,13 @@ VLLM_VERSION=${VLLM_VERSION:-${VLLM_REF#v}}
 FLASHINFER_VERSION=${FLASHINFER_VERSION:-${FLASHINFER_REF#v}}   # prebuilt cubin wheel pin
 TORCHVISION_VERSION=${TORCHVISION_VERSION:-0.28.0}
 TORCHAUDIO_VERSION=${TORCHAUDIO_VERSION:-2.11.0}      # upstream pairs 2.11.0 with torch 2.13.0
+# Prebuilt-wheel indexes (download.pytorch.org/whl/<index>). torchvision tracks the
+# CUDA minor (13.2.1 -> cu132); torchaudio only ever published cu130 wheels, and a
+# cu130 wheel runs fine on any 13.x toolkit (shared libcudart.so.13). Preflight
+# verifies both wheels actually exist before anything compiles.
+_cu_minor=${CUDA_VERSION%.*}                            # 13.2.1 -> 13.2
+TORCHVISION_INDEX=${TORCHVISION_INDEX:-cu${_cu_minor//./}}
+TORCHAUDIO_INDEX=${TORCHAUDIO_INDEX:-cu130}
 
 IMAGE=${IMAGE:-iphands/vllm-blackwell}
 CUDA_TAG=${CUDA_VERSION//./}                            # 13.0.3 -> 1303
@@ -110,6 +129,7 @@ echo
 SRC_DIR="$SRC_DIR" VLLM_REF="$VLLM_REF" \
 TORCH_VERSION="$TORCH_VERSION" FLASHINFER_VERSION="$FLASHINFER_VERSION" \
 TORCHVISION_VERSION="$TORCHVISION_VERSION" TORCHAUDIO_VERSION="$TORCHAUDIO_VERSION" \
+TORCHVISION_INDEX="$TORCHVISION_INDEX" TORCHAUDIO_INDEX="$TORCHAUDIO_INDEX" \
   "$here/preflight"
 if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
   echo "## PREFLIGHT_ONLY=1 — stopping before docker build."
@@ -182,6 +202,8 @@ DOCKER_BUILDKIT=1 docker build \
   --secret id=buildjobs,src="$jobs_file" \
   --build-arg TORCHVISION_VERSION="$TORCHVISION_VERSION" \
   --build-arg TORCHAUDIO_VERSION="$TORCHAUDIO_VERSION" \
+  --build-arg TORCHVISION_INDEX="$TORCHVISION_INDEX" \
+  --build-arg TORCHAUDIO_INDEX="$TORCHAUDIO_INDEX" \
   --target vllm-openai \
   -t "$IMAGE:$TAG" \
   -t "$IMAGE:$VTAG" \

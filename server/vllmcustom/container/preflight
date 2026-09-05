@@ -95,6 +95,31 @@ if [[ ${PREFLIGHT_OFFLINE:-0} != 1 ]]; then
   fi
 fi
 
+# torchvision/torchaudio are installed --no-deps from download.pytorch.org, and a
+# missing wheel only prints a WARN in the vllm-openai stage (multimodal silently
+# gone). torchaudio never published cu132 wheels and torchvision only has a wheel
+# per CUDA minor, so check the exact (version, index) pair up front. Optional:
+# TORCHVISION_INDEX/TORCHAUDIO_INDEX are set by ./container/build.
+if [[ ${PREFLIGHT_OFFLINE:-0} != 1 ]]; then
+  wheel_check() { # $1=dist  $2=version  $3=index (cu132)
+    [[ -z ${3:-} ]] && return 0
+    local url="https://download.pytorch.org/whl/$3/$1/" page
+    if page=$(curl -sS --max-time 20 "$url" 2>/dev/null) && [[ -n $page ]]; then
+      if grep -qE "$1-$2(%2B|\+)$3-cp312-cp312-manylinux[^\"<]*x86_64" <<<"$page"; then
+        note "$1 $2+$3 wheel present at download.pytorch.org ✓"
+      else
+        bad "$1 $2 has no +$3 cp312/x86_64 wheel at $url"
+        note "  -> vllm-openai would WARN and skip it (multimodal/audio disabled)"
+        note "  -> published: $(grep -oE "$1-[0-9][0-9.]*(%2B|\+)$3" <<<"$page" | sed "s/%2B/+/" | sort -uV | tail -4 | tr '\n' ' ')"
+      fi
+    else
+      note "$1: $url unreachable, skipped (set PREFLIGHT_OFFLINE=1 to silence)"
+    fi
+  }
+  wheel_check torchvision "$TORCHVISION_VERSION" "${TORCHVISION_INDEX:-}"
+  wheel_check torchaudio  "$TORCHAUDIO_VERSION"  "${TORCHAUDIO_INDEX:-}"
+fi
+
 if (( fail )); then
   echo "##"
   if [[ ${ALLOW_VERSION_MISMATCH:-0} == 1 ]]; then
