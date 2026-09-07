@@ -814,8 +814,11 @@ fn hold_models(
     Ok(())
 }
 
-/// Warm up memory-mapped file by reading all pages
-#[allow(dead_code)]
+/// Warm up a memory-mapped file by reading every page.
+///
+/// `file_idx` is the 0-based index of this file in the batch. It is shown to
+/// the user as `file_idx + 1`, so the first file displays as `1`. Callers must
+/// pass the raw `enumerate()` index — do NOT pre-increment it.
 fn warmup_file(
     mmap: &Mmap,
     file_size: u64,
