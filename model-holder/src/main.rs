@@ -530,10 +530,10 @@ fn hold_models_with_tui(
 
 fn hold_models_oneshot(
     model_paths: Vec<String>,
-    _no_warmup: bool,
+    no_warmup: bool,
     page_size: usize,
-    _no_mlock: bool,
-    _lock_threads: usize,
+    no_mlock: bool,
+    lock_threads: usize,
 ) -> Result<(), ModelHolderError> {
     validate_page_size(page_size)?;
 
@@ -543,7 +543,7 @@ fn hold_models_oneshot(
         return Err(ModelHolderError::NoFilesFound("No files matched".to_string()));
     }
 
-    eprintln!("model-holder oneshot: {} file(s)", paths.len());
+    println!("model-holder oneshot: {} file(s)", paths.len());
 
     let mut mapped_files: Vec<MappedFile> = Vec::new();
 
@@ -566,7 +566,7 @@ fn hold_models_oneshot(
             ModelHolderError::NoFilesFound(format!("Cannot mmap '{}': {}", path.display(), e))
         })?;
 
-        eprintln!(" mmap'd {} ({:.2} GB)", path.display(), size as f64 / BYTES_PER_GB);
+        println!(" mmap'd {} ({})", path.display(), format_size_bytes(size));
 
         mapped_files.push(MappedFile {
             path: path.clone(),
@@ -576,52 +576,79 @@ fn hold_models_oneshot(
         });
     }
 
-    eprintln!(" warming pages...");
-    let warmup_start = Instant::now();
-    for (idx, mf) in mapped_files.iter().enumerate() {
-        let _ = warmup_file(
-            &mf.mmap,
-            mf.size,
-            page_size,
-            idx,
-            mapped_files.len(),
-        );
-    }
-    let elapsed = warmup_start.elapsed();
-    eprintln!(" warmup done in {:.2}s", elapsed.as_secs_f64());
-
-    eprintln!(" locking pages...");
-    let mut locked_bytes: u64 = 0;
-    let mut failed_files: Vec<String> = Vec::new();
-
-    for mf in &mapped_files {
-        let result = unsafe {
-            mlock(mf.mmap.as_ptr() as *const libc::c_void, mf.mmap.len())
-        };
-        if result == 0 {
-            locked_bytes += mf.size;
-        } else {
-            failed_files.push(mf.path.display().to_string());
+    if !no_warmup {
+        println!(" warming pages...");
+        let warmup_start = Instant::now();
+        for (idx, mf) in mapped_files.iter().enumerate() {
+            warmup_file(&mf.mmap, mf.size, page_size, idx, mapped_files.len()).map_err(|e| {
+                ModelHolderError::NoFilesFound(format!(
+                    "Warmup failed for '{}': {}",
+                    mf.path.display(),
+                    e
+                ))
+            })?;
         }
-    }
-
-    for mf in &mapped_files {
-        unsafe {
-            madvise(
-                mf.mmap.as_ptr() as *mut libc::c_void,
-                mf.mmap.len(),
-                MADV_WILLNEED,
-            );
-        }
-    }
-
-    if failed_files.is_empty() {
-        eprintln!(" locked {:.2} GB in RAM", locked_bytes as f64 / BYTES_PER_GB);
+        let elapsed = warmup_start.elapsed();
+        println!(" warmup done in {:.2}s", elapsed.as_secs_f64());
     } else {
-        eprintln!(" locked {:.2} GB in RAM, {} file(s) failed to lock (check ulimit -l and permissions)", locked_bytes as f64 / BYTES_PER_GB, failed_files.len());
+        println!(" skipping warmup (--no-warmup)");
     }
 
-    let _ = mapped_files;
+    if !no_mlock {
+        println!(" locking pages...");
+        let concurrency = lock_threads.max(1);
+        let locked_bytes = AtomicU64::new(0);
+        let failed_files: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+        for chunk in mapped_files.chunks(concurrency) {
+            std::thread::scope(|s| {
+                for mf in chunk {
+                    let locked_bytes = &locked_bytes;
+                    let failed_files = &failed_files;
+                    s.spawn(move || {
+                        let file_path = mf.path.display().to_string();
+                        // Safety: locking a valid mmap region we just created
+                        let result = unsafe {
+                            mlock(mf.mmap.as_ptr() as *const libc::c_void, mf.mmap.len())
+                        };
+                        if result == 0 {
+                            locked_bytes.fetch_add(mf.size, Ordering::Relaxed);
+                        } else {
+                            failed_files.lock().unwrap().push(file_path);
+                        }
+                    });
+                }
+            });
+        }
+
+        for mf in &mapped_files {
+            unsafe {
+                madvise(
+                    mf.mmap.as_ptr() as *mut libc::c_void,
+                    mf.mmap.len(),
+                    MADV_WILLNEED,
+                );
+            }
+        }
+
+        let locked = locked_bytes.load(Ordering::Relaxed);
+        let mut failed = failed_files.into_inner().unwrap();
+        failed.sort();
+        if failed.is_empty() {
+            println!(" locked {} in RAM", format_size_bytes(locked));
+        } else {
+            println!(
+                " locked {} in RAM, {} file(s) failed to lock (check ulimit -l and permissions)",
+                format_size_bytes(locked),
+                failed.len()
+            );
+            for path in &failed {
+                println!("   - {}", path);
+            }
+        }
+    } else {
+        println!(" skipping mlock (--no-mlock)");
+    }
 
     Ok(())
 }
