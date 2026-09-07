@@ -583,7 +583,7 @@ fn hold_models_oneshot(
             &mf.mmap,
             mf.size,
             page_size,
-            idx + 1,
+            idx,
             mapped_files.len(),
         );
     }
