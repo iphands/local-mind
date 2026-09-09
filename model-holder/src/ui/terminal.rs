@@ -17,11 +17,36 @@ pub struct UIRenderer {
 }
 
 impl UIRenderer {
-    pub fn new() -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn new(should_exit: Arc<AtomicBool>) -> Result<Self, Box<dyn std::error::Error>> {
         let mut stdout = stdout();
         execute!(stdout, EnterAlternateScreen)?;
-        terminal::enable_raw_mode()?;
-        let terminal = Terminal::new(CrosstermBackend::new(stdout))?;
+        // If raw mode or Terminal::new fails we are already inside the alternate
+        // screen; leaving it here is the difference between a readable error and a
+        // vanished shell.
+        let terminal = match terminal::enable_raw_mode().and_then(|_| {
+            Terminal::new(CrosstermBackend::new(stdout))
+        }) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = terminal::disable_raw_mode();
+                let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+                return Err(e.into());
+            }
+        };
+
+        // Restore the terminal at panic time rather than at end-of-unwind, so the
+        // message lands on a usable screen and so a panic anywhere else in the
+        // process (main's lock unwraps, mlock workers, oneshot) cannot leak raw mode.
+        // The flag goes first: the hook is process-global, so a panic in main or an
+        // mlock worker must also stop a UI thread that is still drawing.
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            should_exit.store(true, Ordering::SeqCst);
+            let _ = terminal::disable_raw_mode();
+            let _ = execute!(std::io::stdout(), LeaveAlternateScreen);
+            prev_hook(info);
+        }));
+
         Ok(UIRenderer { terminal })
     }
 
@@ -61,9 +86,30 @@ impl UIRenderer {
     }
 }
 
+/// Restores the terminal if `run` unwinds before reaching its own `cleanup`, so a panic
+/// in the draw path cannot leave the user's shell in raw mode on the alternate screen.
+///
+/// `cleanup` runs twice on the normal path (explicit call, then this). That is
+/// deliberate and harmless; errors are swallowed here because this may fire during
+/// unwind, where a second failure would abort the process.
+impl Drop for UIRenderer {
+    fn drop(&mut self) {
+        let _ = self.cleanup();
+    }
+}
+
 fn handle_key(app: &mut AppState, key: KeyEvent, should_exit: &Arc<AtomicBool>) {
     if app.filter_mode {
         match key.code {
+            // Must precede `Char(c)`: Ctrl-C arrives as Char('c') + CONTROL and would
+            // otherwise be swallowed as filter text, leaving no way out of filter mode.
+            // Cancels the prompt rather than the session — quitting here would munmap
+            // the cache the user came here to hold.
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.filter_mode = false;
+                app.filter_input.clear();
+                app.scroll_offset = 0;
+            }
             KeyCode::Enter => {
                 app.filter_mode = false;
                 app.scroll_offset = 0;
@@ -84,6 +130,11 @@ fn handle_key(app: &mut AppState, key: KeyEvent, should_exit: &Arc<AtomicBool>) 
     } else if app.show_help {
         match key.code {
             KeyCode::Char('h') | KeyCode::Esc | KeyCode::Char('q') => {
+                app.show_help = false;
+            }
+            // Raw mode swallows the keystroke otherwise, so this is the one arm that
+            // must not fall through to `_`: the reflex press has to close the modal.
+            KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.show_help = false;
             }
             _ => {}
@@ -146,6 +197,10 @@ fn render_ui(frame: &mut Frame, app: &AppState) {
 fn render_title(frame: &mut Frame, area: Rect, app: &AppState) {
     let overall = if app.all_locked {
         "● locked"
+    } else if app.warmup_complete && !app.failed_lock_files.is_empty() {
+        // Warmup finishing is not the job finishing: with locks refused the most
+        // prominent cell must not claim success while the bar shouts the opposite.
+        "● partial"
     } else if app.warmup_complete {
         "● complete"
     } else {
@@ -204,21 +259,12 @@ fn render_title(frame: &mut Frame, area: Rect, app: &AppState) {
     let available_width = area.width as usize;
     let max_pattern_len = available_width.saturating_sub(left.len() + right.len() + 4);
     let pattern_display = if pattern_display.len() > max_pattern_len && max_pattern_len > 10 {
-        // Truncate with ellipsis
-        format!("…{}", &pattern_display[pattern_display.len().saturating_sub(max_pattern_len - 1)..])
+        tail_to_bytes(&pattern_display, max_pattern_len)
     } else {
         pattern_display
     };
     
     let title_text = format!("{}{}{}", left, pattern_display, right);
-
-    let _status_color = if app.all_locked {
-        Color::Green
-    } else if app.warmup_complete {
-        Color::Cyan
-    } else {
-        Color::Yellow
-    };
 
     let line = Line::from(vec![
         Span::styled(
@@ -293,24 +339,27 @@ fn render_statusbar(frame: &mut Frame, area: Rect, app: &AppState) {
                     .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "  Enter/ESC to confirm ",
+                "  Enter/Esc close · ^C clear ",
                 Style::default().fg(Color::DarkGray).bg(Color::Yellow),
             ),
         ])
     } else {
         let failed = app.failed_lock_files.len();
-        let lock_hint = if failed > 0 {
-            format!("   ⚠ {} file(s) not locked  h info", failed)
+        if failed > 0 {
+            // The nav cheatsheet and the failure pointer cannot share 80 columns, and
+            // when locks fail the failure IS the headline — replace rather than append.
+            Line::from(Span::styled(
+                format!("  ⚠ {} file(s) NOT locked — press h for details", failed),
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ))
         } else {
-            String::new()
-        };
-        Line::from(vec![
-            Span::styled(
-                "  ↑↓/jk scroll   / filter   x clear   s size   p speed   d default   q quit",
+            Line::from(Span::styled(
+                "  ↑↓/jk scroll   / filter   x clear   s/p sort   h help   q quit & unlock",
                 Style::default().fg(Color::DarkGray),
-            ),
-            Span::styled(lock_hint, Style::default().fg(Color::Yellow)),
-        ])
+            ))
+        }
     };
 
     frame.render_widget(Paragraph::new(content), area);
@@ -318,6 +367,11 @@ fn render_statusbar(frame: &mut Frame, area: Rect, app: &AppState) {
 
 /// Total width of all non-name columns (size + progress + mmap + lock + total + status + gaps)
 const RIGHT_COLS: usize = 69;
+
+/// Key cheatsheet, mirrored into the help overlay because a lock failure replaces it
+/// on the status bar for the whole session — `failed_lock_files` is set once and is
+/// never cleared, so the bar would otherwise be its only home and it is not there.
+const NAV_KEYS: &str = "Keys: ↑↓/jk  / filter  x clear  s/p/d  q quit & unlock";
 
 fn make_row(
     name: &str, name_style: Style, name_width: usize,
@@ -560,65 +614,58 @@ fn render_scrollbar(frame: &mut Frame, area: Rect, total: usize, visible: usize,
 fn render_help_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
     let failed = &app.failed_lock_files;
 
-    // Box: up to 20 rows tall, 64 cols wide, centered
+    // Box: up to 64 cols wide, centered
     let box_w = 64u16.min(area.width.saturating_sub(4));
-    let content_lines = 5 + failed.len() as u16; // header + blank + files + blank + footer
-    let box_h = (content_lines + 2).min(area.height.saturating_sub(4)); // +2 for border
-    let x = area.x + area.width.saturating_sub(box_w) / 2;
-    let y = area.y + area.height.saturating_sub(box_h) / 2;
-    let popup_area = Rect::new(x, y, box_w, box_h);
+    // Borders::ALL costs one cell per side.
+    let inner_w = box_w.saturating_sub(2) as usize;
 
-    // Clear the area beneath the popup first
-    frame.render_widget(Clear, popup_area);
-
-    let block = Block::default()
-        .title(" Lock Failures ")
-        .borders(Borders::ALL)
-        .border_style(Style::default().fg(Color::Yellow));
-
-    let inner = block.inner(popup_area);
-    frame.render_widget(block, popup_area);
-
-    let inner_w = inner.width as usize;
-
-    // Build lines
     let mut lines: Vec<Line> = Vec::new();
 
-    lines.push(Line::from(Span::styled(
-        format!("{} file(s) could not be locked in RAM:", failed.len()),
-        Style::default().fg(Color::Yellow),
-    )));
-    lines.push(Line::from(""));
-
-    for path in failed {
-        let display = if path.len() > inner_w.saturating_sub(2) {
-            format!(
-                "  …{}",
-                &path[path.len().saturating_sub(inner_w.saturating_sub(3))..]
-            )
+    if failed.is_empty() {
+        // An empty failure list is not proof of success: `--no-mlock` leaves it empty
+        // too, so only `all_locked` may be described as locked.
+        let (msg, color) = if app.all_locked {
+            ("Every file locked successfully.", Color::Green)
         } else {
-            format!("  {}", path)
+            ("Nothing failed to lock.", Color::DarkGray)
         };
+        lines.push(Line::from(Span::styled(msg, Style::default().fg(color))));
+    } else {
         lines.push(Line::from(Span::styled(
-            display,
-            Style::default().fg(Color::Red),
+            format!("{} file(s) could not be locked in RAM:", failed.len()),
+            Style::default().fg(Color::Yellow),
+        )));
+        lines.push(Line::from(""));
+
+        for path in failed {
+            let display = if path.len() > inner_w.saturating_sub(2) {
+                format!("  {}", tail_to_bytes(path, inner_w.saturating_sub(2)))
+            } else {
+                format!("  {}", path)
+            };
+            lines.push(Line::from(Span::styled(
+                display,
+                Style::default().fg(Color::Red),
+            )));
+        }
+
+        // Remediating a failure that did not happen is advice nobody asked for.
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "Fix: ",
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("ulimit -l unlimited", Style::default().fg(Color::Cyan)),
+        ]));
+        lines.push(Line::from(Span::styled(
+            "      (add to ~/.bashrc or /etc/security/limits.conf)",
+            Style::default().fg(Color::DarkGray),
         )));
     }
 
-    lines.push(Line::from(""));
-    lines.push(Line::from(vec![
-        Span::styled(
-            "Fix: ",
-            Style::default()
-                .fg(Color::White)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::styled("ulimit -l unlimited", Style::default().fg(Color::Cyan)),
-    ]));
-    lines.push(Line::from(Span::styled(
-        "      (add to ~/.bashrc or /etc/security/limits.conf)",
-        Style::default().fg(Color::DarkGray),
-    )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
         "Speed columns (locked files):",
@@ -638,9 +685,38 @@ fn render_help_overlay(frame: &mut Frame, area: Rect, app: &AppState) {
     )));
     lines.push(Line::from(""));
     lines.push(Line::from(Span::styled(
-        "Press h or ESC to close",
+        NAV_KEYS,
         Style::default().fg(Color::DarkGray),
     )));
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "Press h, Esc or ^C to close",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    // Height comes from the lines themselves: the failure block and the fix prose are
+    // both conditional, so any fixed count here would silently clip one of them.
+    let box_h = (lines.len() as u16 + 2).min(area.height.saturating_sub(4)); // +2 for border
+    let x = area.x + area.width.saturating_sub(box_w) / 2;
+    let y = area.y + area.height.saturating_sub(box_h) / 2;
+    let popup_area = Rect::new(x, y, box_w, box_h);
+
+    // Clear the area beneath the popup first
+    frame.render_widget(Clear, popup_area);
+
+    // The close hint is in the title as well as the footer: a short terminal clamps
+    // box_h and drops the footer, and a modal with no visible exit is a trap.
+    let block = Block::default()
+        .title(if failed.is_empty() {
+            " Help (h/Esc/^C close) "
+        } else {
+            " Lock Failures (h/Esc/^C close) "
+        })
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow));
+
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
 
     frame.render_widget(Paragraph::new(lines), inner);
 }
@@ -681,12 +757,40 @@ fn format_size_bytes(bytes: u64) -> String {
 
 fn truncate_str(s: &str, max_chars: usize) -> String {
     if max_chars < 2 {
-        return s[..max_chars.min(s.len())].to_string();
+        return String::new();
     }
     match s.char_indices().nth(max_chars - 1) {
         None => s.to_string(),
         Some((byte_pos, _)) => format!("{}…", &s[..byte_pos]),
     }
+}
+
+/// Keep the tail of `s` within `max_bytes` of UTF-8, cutting only on a char boundary.
+///
+/// Slicing at `len() - n` panics on any non-ASCII filename, and CJK model names are a
+/// primary use of this tool. Budgeting bytes matches the byte-based widths the
+/// surrounding layout arithmetic already uses, and is display-safe here: display cells
+/// never exceed bytes, so this under-fills rather than overflows the column.
+fn tail_to_bytes(s: &str, max_bytes: usize) -> String {
+    const ELLIPSIS: &str = "…";
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    if max_bytes <= ELLIPSIS.len() {
+        return String::new();
+    }
+    let budget = max_bytes - ELLIPSIS.len();
+    let mut start = s.len();
+    let mut used = 0usize;
+    for (i, ch) in s.char_indices().rev() {
+        let w = ch.len_utf8();
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        start = i;
+    }
+    format!("{}{}", ELLIPSIS, &s[start..])
 }
 
 #[cfg(test)]
@@ -905,5 +1009,73 @@ mod tests {
 
         assert_eq!(header.width(), row.width(), "locking: header width ({}) must equal row width ({})", header.width(), row.width());
         assert!(row.width() <= content_width as usize, "locking row must fit in content area");
+    }
+
+    /// The overlay is the only home for the cheatsheet during a lock failure, so it
+    /// must fit the modal's own interior at the widest box the code can produce.
+    #[test]
+    fn nav_keys_line_fits_the_help_overlay() {
+        let box_w = 64u16.min(80 - 4);
+        let inner_w = box_w.saturating_sub(2) as usize;
+        let cells = NAV_KEYS
+            .chars()
+            .map(|c| if c == '↑' || c == '↓' { 2 } else { 1 })
+            .sum::<usize>();
+        assert!(
+            cells <= inner_w,
+            "NAV_KEYS is {} cells, modal interior is {}",
+            cells,
+            inner_w
+        );
+        assert!(NAV_KEYS.contains("q quit"));
+    }
+
+    /// The exact shape that panicked: a CJK glob title tail-truncated at a byte offset
+    /// landing inside a 3-byte char. Must not panic at any budget.
+    #[test]
+    fn tail_to_bytes_never_splits_a_char() {
+        let cjk = " 模型目录模型目录/* (2)";
+        assert!(cjk.len() > 20);
+        for budget in 0..=cjk.len() + 5 {
+            let out = tail_to_bytes(cjk, budget);
+            assert!(
+                out.len() <= budget.max(3),
+                "budget {}: {:?} is {} bytes",
+                budget,
+                out,
+                out.len()
+            );
+            if let Some(tail) = out.strip_prefix('…') {
+                assert!(cjk.ends_with(tail), "budget {} lost the tail: {:?}", budget, out);
+            } else {
+                assert!(
+                    out.is_empty() || out == cjk,
+                    "budget {} gave {:?}",
+                    budget,
+                    out
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn tail_to_bytes_keeps_the_tail_and_degrades_cleanly() {
+        assert_eq!(tail_to_bytes("this is too long", 10), "…oo long");
+        assert_eq!(tail_to_bytes("short", 100), "short");
+        assert_eq!(tail_to_bytes("模型目录.gguf", 6), "…guf");
+        assert_eq!(tail_to_bytes("模型目录.gguf", 3), "");
+        assert_eq!(tail_to_bytes("anything", 0), "");
+    }
+
+    /// `truncate_str` sliced `&s[..max_chars]` on its degenerate branch, which panics
+    /// the same way when the first char is multi-byte.
+    #[test]
+    fn truncate_str_handles_tiny_and_multibyte_budgets() {
+        assert_eq!(truncate_str("模型目录", 0), "");
+        assert_eq!(truncate_str("模型目录", 1), "");
+        assert_eq!(truncate_str("模型目录", 2), "模…");
+        assert_eq!(truncate_str("模型目录", 3), "模型…");
+        assert_eq!(truncate_str("model.gguf", 100), "model.gguf");
+        assert_eq!(truncate_str("model.gguf", 6), "model…");
     }
 }

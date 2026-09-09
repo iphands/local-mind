@@ -274,13 +274,27 @@ fn expand_globs(patterns: &[String]) -> Result<Vec<PathBuf>, ModelHolderError> {
     }
 }
 
+/// Lock the shared app state, tolerating a poisoned mutex.
+///
+/// Poison means the UI thread died mid-draw. The worker must still fall through to
+/// `join()` — that is what turns the death into a reported error — so unwrapping here
+/// would replace a clean report with a `PoisonError` panic in `main`.
+fn lock_state(state: &Arc<Mutex<AppState>>) -> std::sync::MutexGuard<'_, AppState> {
+    state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Warm up memory-mapped file by reading all pages, updating shared state for the UI thread.
+///
+/// Returns `ErrorKind::Interrupted` once `should_exit` is set. The check rides the
+/// existing progress throttle, so the per-page loop stays branch-free and latency is
+/// bounded by that throttle (~100 ms) regardless of file size.
 fn warmup_file_with_tui(
     mmap: &Mmap,
     file_size: u64,
     page_size: usize,
     state: &Arc<Mutex<AppState>>,
     file_path: &str,
+    should_exit: &AtomicBool,
 ) -> io::Result<u64> {
     let total_pages = (file_size as usize + page_size - 1) / page_size;
     let mut checksum: u64 = 0;
@@ -295,6 +309,9 @@ fn warmup_file_with_tui(
         if page_index % PROGRESS_UPDATE_INTERVAL == 0
             || last_update_time.elapsed() > Duration::from_millis(PROGRESS_UPDATE_TIMEOUT_MS)
         {
+            if should_exit.load(Ordering::Relaxed) {
+                return Err(io::Error::new(io::ErrorKind::Interrupted, "interrupted by user"));
+            }
             let elapsed = start_time.elapsed();
             let bytes_done = (page_index * page_size) as f64;
             let elapsed_f64 = elapsed.as_secs_f64();
@@ -345,11 +362,14 @@ fn hold_models_with_tui(
 
     let paths = expand_globs(&model_paths)?;
 
-    let terminal = UIRenderer::new()
-        .map_err(|e| ModelHolderError::UIError(format!("Failed to initialize terminal: {}", e)))?;
-
     let state = Arc::new(Mutex::new(AppState::new()));
     let should_exit = Arc::new(AtomicBool::new(false));
+
+    // `should_exit` is handed in so the panic hook can stop a UI thread that is still
+    // drawing at 30fps; otherwise a panic in main or an mlock worker restores the
+    // terminal while the UI keeps repainting over it.
+    let terminal = UIRenderer::new(Arc::clone(&should_exit))
+        .map_err(|e| ModelHolderError::UIError(format!("Failed to initialize terminal: {}", e)))?;
 
     {
         let mut app = state.lock().unwrap();
@@ -368,10 +388,17 @@ fn hold_models_with_tui(
     });
 
     let mut mapped_files: Vec<MappedFile> = Vec::new();
+    let locked_bytes = AtomicU64::new(0);
+
+    let aborted = || should_exit.load(Ordering::Relaxed);
 
     for path in &paths {
+        if aborted() {
+            break;
+        }
+
         {
-            let mut app = state.lock().unwrap();
+            let mut app = lock_state(&state);
             app.find_file_mut(&path.display().to_string())
                 .map(|f| f.stage = FileStage::Found);
         }
@@ -398,7 +425,7 @@ fn hold_models_with_tui(
 
         let size = metadata.len();
         {
-            let mut app = state.lock().unwrap();
+            let mut app = lock_state(&state);
             app.find_file_mut(&path.display().to_string())
                 .map(|f| f.set_size(size));
             app.update_total_size();
@@ -416,7 +443,7 @@ fn hold_models_with_tui(
         let mmap_duration = mmap_start.elapsed();
 
         {
-            let mut app = state.lock().unwrap();
+            let mut app = lock_state(&state);
             app.find_file_mut(&path.display().to_string())
                 .map(|f| f.mark_mapped());
         }
@@ -438,24 +465,39 @@ fn hold_models_with_tui(
 
     if !no_warmup {
         for mapped_file in mapped_files.iter() {
-            let _ = warmup_file_with_tui(
+            if aborted() {
+                break;
+            }
+            // Interrupted means the user quit; anything else is a real failure and
+            // must not be swallowed.
+            if let Err(e) = warmup_file_with_tui(
                 &mapped_file.mmap,
                 mapped_file.size,
                 page_size,
                 &state,
                 &mapped_file.path.display().to_string(),
-            );
+                &should_exit,
+            ) {
+                if e.kind() == io::ErrorKind::Interrupted {
+                    break;
+                }
+                debug!("Warmup failed for '{}': {}", mapped_file.path.display(), e);
+            }
         }
 
-        state.lock().unwrap().warmup_complete();
+        if !aborted() {
+            lock_state(&state).warmup_complete();
+        }
     }
 
     if !no_mlock {
         let concurrency = lock_threads.max(1);
-        let _locked_bytes = AtomicU64::new(0);
         let failed_files: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
         for chunk in mapped_files.chunks(concurrency) {
+            if aborted() {
+                break;
+            }
             // Mark all files in this chunk as Locking before spawning threads
             for mf in chunk {
                 let fp = mf.path.display().to_string();
@@ -470,7 +512,7 @@ fn hold_models_with_tui(
                 for mf in chunk {
                     let state = &state;
                     let failed_files = &failed_files;
-                    let _locked_bytes = &_locked_bytes;
+                    let locked_bytes = &locked_bytes;
                     let mmap_duration = mf.mmap_duration; // Capture mmap_duration
                     s.spawn(move || {
                         let file_path = mf.path.display().to_string();
@@ -479,7 +521,7 @@ fn hold_models_with_tui(
                             mlock(mf.mmap.as_ptr() as *const libc::c_void, mf.mmap.len())
                         };
                         if result == 0 {
-                            _locked_bytes.fetch_add(mf.size, Ordering::Relaxed);
+                            locked_bytes.fetch_add(mf.size, Ordering::Relaxed);
                             let lock_duration = start.elapsed();
                             let lock_speed = if lock_duration.as_secs_f64() > 0.0 {
                                 mf.size as f64 / lock_duration.as_secs_f64() / BYTES_PER_MB
@@ -503,28 +545,76 @@ fn hold_models_with_tui(
             });
         }
 
-        // madvise pass (sequential is fine here)
-        for mapped_file in &mapped_files {
-            unsafe {
-                madvise(
-                    mapped_file.mmap.as_ptr() as *mut libc::c_void,
-                    mapped_file.mmap.len(),
-                    MADV_WILLNEED,
-                );
+        // madvise pass (sequential is fine here) — pointless once we're bailing
+        if !aborted() {
+            for mapped_file in &mapped_files {
+                unsafe {
+                    madvise(
+                        mapped_file.mmap.as_ptr() as *mut libc::c_void,
+                        mapped_file.mmap.len(),
+                        MADV_WILLNEED,
+                    );
+                }
             }
         }
 
-        let failed = failed_files.into_inner().unwrap();
-        if failed.is_empty() {
-            state.lock().unwrap().all_locked();
-        } else if let Ok(mut app) = state.lock() {
-            app.failed_lock_files = failed;
+        let failed = failed_files.into_inner().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if aborted() {
+            // Still worth a breadcrumb: a ulimit problem seen during an aborted run
+            // is the same one the next run will hit.
+            for path in &failed {
+                debug!("Lock skipped (aborted) for '{}'", path);
+            }
+        } else if failed.is_empty() {
+            lock_state(&state).all_locked();
+        } else {
+            lock_state(&state).failed_lock_files = failed;
         }
     }
 
-    // Block until user exits (q/ESC sets should_exit in the UI thread)
-    ui_handle.join().ok();
+    // The UI thread restores the terminal (its own cleanup, or the panic hook / Drop if
+    // it unwound) before join() returns, so anything printed below lands on a usable
+    // screen rather than inside a raw-mode alternate screen.
+    let ui_result = ui_handle.join().map_err(|panic| {
+        let msg = panic
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| panic.downcast_ref::<&str>().copied())
+            .unwrap_or("unknown panic");
+        ModelHolderError::UIError(format!("UI thread panicked: {}", msg))
+    });
 
+    // The one question after a holder goes away is "did my RAM come back", and a bare
+    // prompt does not answer it. Drop before printing so the sentence is a fact by the
+    // time it is read, not a promise about function return.
+    let held = mapped_files.len();
+    let bytes: u64 = mapped_files.iter().map(|mf| mf.size).sum();
+    drop(mapped_files);
+
+    if aborted() || ui_result.is_err() {
+        // Read the counter, not `FileStage`s: the mlock workers publish successes here,
+        // so a UI thread that died mid-draw cannot zero the tally the way a poisoned
+        // state read would. Bytes is also the number the user actually wants.
+        let locked = locked_bytes.load(Ordering::Relaxed);
+        if held == 0 {
+            eprintln!("model-holder: nothing was mapped — nothing pinned");
+        } else {
+            let locked_part = match (locked, bytes) {
+                (0, _) => "nothing was locked".to_string(),
+                (l, b) if l == b => "all of it was locked".to_string(),
+                (l, _) => format!("{} of it was locked", format_size_bytes(l)),
+            };
+            eprintln!(
+                "model-holder: released {} mapping{} ({}) — {}, none pinned now",
+                held,
+                if held == 1 { "" } else { "s" },
+                format_size_bytes(bytes),
+                locked_part
+            );
+        }
+    }
+
+    ui_result?;
     Ok(())
 }
 
@@ -1294,10 +1384,22 @@ fn check_mmaps(extensions: &str) -> Result<(), ModelHolderError> {
 /// Truncate string to maximum length with ellipsis
 fn truncate_string(s: &str, max_len: usize) -> String {
     if s.len() <= max_len {
-        s.to_string()
-    } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        return s.to_string();
     }
+    if max_len < 4 {
+        return String::new();
+    }
+    // Cut on a char boundary: `&s[..max_len - 3]` panics inside a multi-byte char,
+    // and cmdline strings are arbitrary bytes from /proc.
+    let budget = max_len - 3;
+    let mut end = 0usize;
+    for (i, ch) in s.char_indices() {
+        if i + ch.len_utf8() > budget {
+            break;
+        }
+        end = i + ch.len_utf8();
+    }
+    format!("{}...", &s[..end])
 }
 
 /// Main entry point
@@ -1467,6 +1569,32 @@ mod tests {
         assert_eq!(truncate_string("short", 10), "short");
         assert_eq!(truncate_string("exactly10!", 10), "exactly10!");
         assert_eq!(truncate_string("this is too long", 10), "this is...");
+    }
+
+    /// `&s[..max_len - 3]` panicked when the cut landed inside a multi-byte char, and
+    /// cmdline strings come from /proc. Every budget must be survivable.
+    #[test]
+    fn test_truncate_string_multibyte_never_splits() {
+        let cjk = "模型目录/推理服务";
+        assert!(cjk.len() > 12);
+        assert_eq!(truncate_string(cjk, cjk.len()), cjk);
+        assert_eq!(truncate_string("模型目录", 5), "...");
+        assert_eq!(truncate_string(cjk, 3), "");
+        assert_eq!(truncate_string(cjk, 0), "");
+        for max_len in 0..=cjk.len() + 6 {
+            let out = truncate_string(cjk, max_len);
+            assert!(out.len() <= max_len.max(3), "max_len {} gave {:?}", max_len, out);
+            if let Some(head) = out.strip_suffix("...") {
+                assert!(cjk.starts_with(head), "max_len {} lost the head", max_len);
+            } else {
+                assert!(
+                    out.is_empty() || out == cjk,
+                    "max_len {} gave {:?}",
+                    max_len,
+                    out
+                );
+            }
+        }
     }
 
     #[test]
