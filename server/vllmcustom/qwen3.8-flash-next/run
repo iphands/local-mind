@@ -89,7 +89,7 @@ GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.92}               # card value; the Mamba-block b
 # 131072 is under the 135168 that the field report found fits beside the MTP
 # draft head (262144 does not: KV 7.57 GiB vs 5.95 GiB left). SPEC_TOKENS=0
 # lifts that ceiling back to the native 262144.
-MAX_MODEL_LEN=${MAX_MODEL_LEN:-131072}
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}
 # Card pins 36 at 32k; the report ran 64 at 135k. Each sequence reserves GDN
 # state up front, so fewer seqs = more KV pool. 16 is twice what ./qwen/run
 # found this box's traffic ever needs (4 concurrent agents) and stays well
