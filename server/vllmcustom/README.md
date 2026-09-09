@@ -11,6 +11,7 @@ container/   build, push, Dockerfile, and the two build helpers (preflight, slic
 common/      the shared launcher mechanism every */run sources
 qwen/        run — Qwen3.5 / Qwen3.6
 laguna/      run — Laguna-S DFlash
+qwen3.8-flash-next/  run — Qwen3.8-Flash-Next 180B on one GPU (PR-branch image, n-gram table in host RAM)
 muse/        run — Muse Glimmer, plus patches/ (the shims it mounts at /vllm-patches)
 bench/       the measurement harness: bench, the sweeps, lib/, and all run artifacts
 scripts/     one-off probes and per-model sweeps (mostly Muse)
@@ -49,6 +50,7 @@ resolved before doing anything slow:
 | `./qwen/run`  | serve a model with the local image (GPU 0 only), OpenAI API on `:8700`. Default `Qwen3.5-122B-A10B-NVFP4` |
 | `./muse/run`  | serve Muse Glimmer — same image, plus the shims in `muse/patches/` (see below). Default `RedHatAI/Muse-Glimmer-30B-NVFP4` |
 | `./laguna/run`| serve Laguna-S with its DFlash drafter. Default `Laguna-S-2.1-NVFP4` |
+| `./qwen3.8-flash-next/run`| serve Qwen3.8-Flash-Next (180B-A6B) single-GPU via the `vllm/vllm-openai:qwen38-flash-next` PR-branch image — the only one with the PLE CPU-offload path (vllm#53899); NOT the local build. Default `primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8` |
 | `./bench/bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench/bench-results.md` |
 | `./bench/bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
 | `./bench/bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |

@@ -122,8 +122,12 @@ _core_add() {
 # are deliberately NOT here -- they stay in each launcher where they can be read
 # next to the model's own notes.
 vllm_core_args() {
+  # ATTN_BACKEND may be EMPTY (set, but blank): that means "let vLLM pick", and
+  # the flag is simply not emitted. qwen3.8-flash-next/run needs that because
+  # its sparse-attention indexer constrains the backend choice and the model
+  # card's numbers were all taken with the image's auto-selection.
   : "${MODEL:?}" "${GPU_MEM_UTIL:?}" "${MAX_MODEL_LEN:?}" "${MAX_NUM_SEQS:?}" \
-    "${MAX_BATCHED_TOKENS:?}" "${ATTN_BACKEND:?}"
+    "${MAX_BATCHED_TOKENS:?}" "${ATTN_BACKEND?ATTN_BACKEND must be set (empty = vLLM default)}"
   VLLM_ARGS=( /models/"$MODEL" )
   _core_add --served-model-name cosmo-6000 cosmo-proxy claude-heavy claude-light claude-haiku-4-5-20251001
   _core_add --host 0.0.0.0
@@ -147,7 +151,7 @@ vllm_core_args() {
   _core_add --enable-per-request-metrics
   _core_add --max-num-seqs "$MAX_NUM_SEQS"
   _core_add --max-num-batched-tokens "$MAX_BATCHED_TOKENS"
-  _core_add --attention-backend "$ATTN_BACKEND"
+  [[ -n "$ATTN_BACKEND" ]] && _core_add --attention-backend "$ATTN_BACKEND"
   return 0
 }
 
