@@ -1,11 +1,15 @@
 #!/bin/bash
 # Build the sm120-optimized vLLM image from source.
 #
-#   ./container/build                       # defaults: CUDA 13.2.1, vLLM v0.28.0 + torch v2.13.0 + flashinfer v0.6.16.post3 + torchaudio v2.11.0
+#   ./container/build                       # defaults: CUDA 13.2.1, vLLM v0.29.0 + torch v2.13.0 + flashinfer v0.6.18 + torchaudio v2.11.0
 #   CUDA_VERSION=13.0.3 ./container/build   # the previous toolkit (produces a different tag, cu1303-sm120)
 #   VLLM_REF=v0.25.1 ./container/build      # try a different vLLM (pin matching TORCH_REF/FLASHINFER_REF too)
-#   VLLM_REF=v0.29.0 FLASHINFER_REF=v0.6.18 ./container/build
-#                                           # the next set once v0.29.0 is tagged (rc4 pins flashinfer 0.6.18, torch 2.13.0)
+#   VLLM_REF=v0.28.0 FLASHINFER_REF=v0.6.16.post3 ./container/build
+#                                           # the previous set (same torch / torchaudio / torchvision)
+#   VLLM_REF=main ./container/build         # SNAPSHOT: the main commit pinned in VLLM_MAIN_SHA below, with its own
+#                                           # flashinfer pin; tagged cu1321-sm120-main, never touches :latest
+#   VLLM_REF=<sha> FLASHINFER_REF=v0.6.x ./container/build
+#                                           # any other untagged commit; pin flashinfer to ITS requirements/cuda.txt
 #   BUILD_MEM_GB=64 ./container/build       # tighter memory budget (lowers the derived MAX_JOBS)
 #
 # Memory: the build is capped at BUILD_MEM_GB (default 110G) two ways — a derived
@@ -62,20 +66,43 @@ MAX_JOBS=${MAX_JOBS:-$(( _jobs_by_mem < _jobs_by_cpu ? _jobs_by_mem : _jobs_by_c
 # last stage.
 NVCC_THREADS=${NVCC_THREADS:-1}
 
-# Mutually-compatible default set (vLLM v0.28.0 pins torch 2.13.0 / flashinfer
-# 0.6.16.post3 -- see its requirements/cuda.txt; ./container/preflight checks this).
-# Not bumped further on purpose (2026-09-05): torch 2.14.0 is out but no vLLM
-# release or rc pins it, and flashinfer 0.6.18.post1 is newer than anything vLLM
-# pins (v0.29.0rc4 = 0.6.18). vLLM's wheel hard-pins flashinfer-python==X, so the
-# flashinfer ref can only move together with VLLM_REF.
-VLLM_REF=${VLLM_REF:-v0.28.0}
+# Mutually-compatible default set (vLLM v0.29.0 pins torch 2.13.0 / flashinfer
+# 0.6.18 -- see its requirements/cuda.txt; ./container/preflight checks this).
+# Not bumped further on purpose (2026-09-11): torch 2.14.0 is out but no vLLM
+# release pins it (v0.29.0 and main are both on 2.13.0), and flashinfer
+# 0.6.18.post1 / 0.7.0rc1 are newer than what v0.29.0 pins (main is on
+# 0.6.18.post1). vLLM's wheel hard-pins flashinfer-python==X, so the flashinfer
+# ref can only move together with VLLM_REF.
+#
+# Snapshot builds (an untagged vLLM commit). `VLLM_REF=main` means the commit
+# pinned in VLLM_MAIN_SHA, NOT the moving branch tip -- bump the sha deliberately
+# so a build can be reproduced and its flashinfer pin re-checked. Any other
+# non-tag ref (a full sha, origin/main, a branch) is taken as given, and then
+# FLASHINFER_REF must be whatever that commit's requirements/cuda.txt pins
+# (preflight refuses otherwise). Snapshots get their own tag family (see TAG
+# below) and never move :latest, so ./qwen/run and friends keep the release
+# build while ./qwen3.8-flash-next/run-exp picks the snapshot up by tag.
+VLLM_MAIN_SHA=1ee4be4dbc576f2158913a89598ccfa9dec9391e   # main @ 2026-09-12: torch 2.13.0 / flashinfer 0.6.18.post1
+VLLM_MAIN_FLASHINFER_REF=v0.6.18.post1
+VLLM_REF=${VLLM_REF:-v0.29.0}
+if [[ $VLLM_REF == main ]]; then
+  VLLM_REF=$VLLM_MAIN_SHA
+  FLASHINFER_REF=${FLASHINFER_REF:-$VLLM_MAIN_FLASHINFER_REF}
+fi
+# A release is vX.Y.Z; anything else is a snapshot.
+if [[ $VLLM_REF =~ ^v[0-9] ]]; then VLLM_SNAPSHOT=0; else VLLM_SNAPSHOT=1; fi
 TORCH_REF=${TORCH_REF:-v2.13.0}
-FLASHINFER_REF=${FLASHINFER_REF:-v0.6.16.post3}
+FLASHINFER_REF=${FLASHINFER_REF:-v0.6.18}
 
 # Clean PEP 440 versions (strip leading 'v') baked into the wheels so vLLM's
 # torch==X pin resolves to our source build instead of pulling from PyPI.
 TORCH_VERSION=${TORCH_VERSION:-${TORCH_REF#v}}
-VLLM_VERSION=${VLLM_VERSION:-${VLLM_REF#v}}
+# A snapshot has no tag to strip; its version is derived after sync_src below,
+# once the commit is checked out (it needs the commit's date and sha).
+(( VLLM_SNAPSHOT )) || VLLM_VERSION=${VLLM_VERSION:-${VLLM_REF#v}}
+# The release a snapshot of main is heading for. Cosmetic: it only prefixes the
+# .dev version below and nothing compares it. Bump when a new vX.Y.0 is cut.
+VLLM_NEXT_VERSION=${VLLM_NEXT_VERSION:-0.30.0}
 FLASHINFER_VERSION=${FLASHINFER_VERSION:-${FLASHINFER_REF#v}}   # prebuilt cubin wheel pin
 TORCHVISION_VERSION=${TORCHVISION_VERSION:-0.28.0}
 # torchaudio is built from source (pytorch/audio). 2.11.0 is upstream's pairing
@@ -91,11 +118,16 @@ TORCHVISION_INDEX=${TORCHVISION_INDEX:-cu${_cu_minor//./}}
 
 IMAGE=${IMAGE:-iphands/vllm-blackwell}
 CUDA_TAG=${CUDA_VERSION//./}                            # 13.0.3 -> 1303
-TAG=${TAG:-cu${CUDA_TAG}-sm120}
-# $TAG is the moving "newest build of this CUDA variant" tag; $VTAG pins the vLLM
-# version so `docker images` says which vLLM an image actually carries. ./container/push
-# derives its tags from the image's labels, not from these — see ./container/push.
-VTAG="${TAG}-vllm${VLLM_VERSION}"
+# $TAG is the moving "newest build of this CUDA variant" tag; $VTAG (set after
+# sync_src, once VLLM_VERSION is known) pins the vLLM version so `docker images`
+# says which vLLM an image actually carries. Snapshots live under a -main suffix
+# of their own so they never shadow the release build. ./container/push derives
+# its tags from the image's labels, not from these — see ./container/push.
+if (( VLLM_SNAPSHOT )); then
+  TAG=${TAG:-cu${CUDA_TAG}-sm120-main}
+else
+  TAG=${TAG:-cu${CUDA_TAG}-sm120}
+fi
 
 BUILD_DIR=${BUILD_DIR:-/mnt/noir/scratch/ai/vllm/build}
 SRC_DIR="$BUILD_DIR/src"
@@ -122,6 +154,17 @@ sync_src pytorch    https://github.com/pytorch/pytorch.git        "$TORCH_REF"
 sync_src flashinfer https://github.com/flashinfer-ai/flashinfer.git "$FLASHINFER_REF"
 sync_src vllm       https://github.com/vllm-project/vllm.git        "$VLLM_REF"
 sync_src torchaudio https://github.com/pytorch/audio.git             "$TORCHAUDIO_REF"
+
+# Snapshot wheel version: <next release>.dev<commit date>+g<sha7> -- PEP 440, in
+# the shape of upstream's nightlies, so `vllm --version` inside the image says
+# which commit is running. The date sorts, the sha identifies. Docker tags cannot
+# carry the '+', so $VTAG (and ./container/push) turn it into '-'.
+if (( VLLM_SNAPSHOT )); then
+  _vllm_sha7=$(git -C "$SRC_DIR/vllm" rev-parse --short=7 HEAD)
+  _vllm_date=$(git -C "$SRC_DIR/vllm" show -s --format=%cd --date=format:%Y%m%d HEAD)
+  VLLM_VERSION=${VLLM_VERSION:-"${VLLM_NEXT_VERSION}.dev${_vllm_date}+g${_vllm_sha7}"}
+fi
+VTAG="${TAG}-vllm${VLLM_VERSION//+/-}"
 
 # Fail fast on an incompatible version set. This is host-side only — it never
 # runs `docker build`, so it cannot invalidate a layer. Worth the second: a
@@ -189,6 +232,13 @@ trap 'rm -f "$jobs_file"' EXIT
 printf 'MAX_JOBS=%s\nNVCC_THREADS=%s\n' "$MAX_JOBS" "$NVCC_THREADS" > "$jobs_file"
 
 echo
+# :latest is the release build's alias only; a snapshot must not take it over.
+tag_args=(-t "$IMAGE:$TAG" -t "$IMAGE:$VTAG")
+if (( VLLM_SNAPSHOT )); then
+  echo "## SNAPSHOT build of vLLM $VLLM_REF (wheel version $VLLM_VERSION); :latest is left alone."
+else
+  tag_args+=(-t "$IMAGE:latest")
+fi
 echo "## building $IMAGE:$TAG  (cuda=$CUDA_VERSION torch=$TORCH_REF flashinfer=$FLASHINFER_REF vllm=$VLLM_REF torchaudio=$TORCHAUDIO_REF arch=$TORCH_CUDA_ARCH_LIST mem=${BUILD_MEM_GB}G jobs=$MAX_JOBS)"
 
 DOCKER_BUILDKIT=1 docker build \
@@ -202,16 +252,19 @@ DOCKER_BUILDKIT=1 docker build \
   --build-arg TORCH_CUDA_ARCH_LIST="$TORCH_CUDA_ARCH_LIST" \
   --build-arg TORCH_VERSION="$TORCH_VERSION" \
   --build-arg VLLM_VERSION="$VLLM_VERSION" \
+  --build-arg VLLM_REF="$VLLM_REF" \
   --build-arg FLASHINFER_VERSION="$FLASHINFER_VERSION" \
   --secret id=buildjobs,src="$jobs_file" \
   --build-arg TORCHVISION_VERSION="$TORCHVISION_VERSION" \
   --build-arg TORCHAUDIO_VERSION="$TORCHAUDIO_VERSION" \
   --build-arg TORCHVISION_INDEX="$TORCHVISION_INDEX" \
   --target vllm-openai \
-  -t "$IMAGE:$TAG" \
-  -t "$IMAGE:$VTAG" \
-  -t "$IMAGE:latest" \
+  "${tag_args[@]}" \
   "$here"
 
 echo
-echo "## built $IMAGE:$TAG (also tagged :$VTAG and :latest)"
+if (( VLLM_SNAPSHOT )); then
+  echo "## built $IMAGE:$TAG (also tagged :$VTAG; :latest untouched)"
+else
+  echo "## built $IMAGE:$TAG (also tagged :$VTAG and :latest)"
+fi

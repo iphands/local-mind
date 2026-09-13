@@ -4,12 +4,19 @@
 #   ./container/push                  # pushes the resolved tags for the last build
 #   TAG=cu1303-sm120 ./container/push # push a specific variant tag
 #
-# Tags pushed, for vLLM 0.28.0 on CUDA 13.2.1 at commit d6d029f:
+# Tags pushed, for vLLM 0.29.0 on CUDA 13.2.1 at commit d6d029f:
 #
 #   cu1321-sm120                     moving — newest build of this CUDA variant
-#   cu1321-sm120-vllm0.28.0          pinned to the vLLM version
-#   cu1321-sm120-vllm0.28.0-d6d029f  pinned to vLLM version *and* build commit
+#   cu1321-sm120-vllm0.29.0          pinned to the vLLM version
+#   cu1321-sm120-vllm0.29.0-d6d029f  pinned to vLLM version *and* build commit
 #   latest                           moving — newest build of anything
+#
+# A snapshot build (VLLM_REF=main ./container/build) lives under its own tag and is
+# pushed by naming it: TAG=cu1321-sm120-main ./container/push. Its version label
+# is 0.30.0.dev<date>+g<sha7>; the '+' is not legal in a docker tag and becomes
+# '-', so the pinned tags read cu1321-sm120-main-vllm0.30.0.dev20260912-g1ee4be4[-<commit>].
+# :latest is only pushed when it IS the image being pushed (it never is for a
+# snapshot; ./container/build does not retag :latest for those).
 #
 # The vLLM/CUDA versions are read from the image's own labels (stamped by the
 # Dockerfile), not re-declared here. An earlier version of this script kept its
@@ -47,17 +54,23 @@ if [[ -z $vllm_version ]]; then
   exit 1
 fi
 
-VTAG="${TAG}-vllm${vllm_version}"
+VTAG="${TAG}-vllm${vllm_version//+/-}"   # PEP 440 local segment '+' is not tag-legal
 STAG="${VTAG}-${REF}"
 
-echo "## $IMAGE:$TAG carries vllm=$vllm_version torch=$(label ai.vllmcustom.torch.version "$IMAGE:$TAG") flashinfer=$(label ai.vllmcustom.flashinfer.version "$IMAGE:$TAG")"
+echo "## $IMAGE:$TAG carries vllm=$vllm_version ($(label ai.vllmcustom.vllm.ref "$IMAGE:$TAG")) torch=$(label ai.vllmcustom.torch.version "$IMAGE:$TAG") flashinfer=$(label ai.vllmcustom.flashinfer.version "$IMAGE:$TAG")"
 
 # The pinned tags describe $TAG, NOT :latest — :latest may be a different (more
-# recently built) variant. Warn when they diverge so a stale push is obvious.
-if docker image inspect "$IMAGE:latest" >/dev/null 2>&1 &&
-   [[ "$(docker image inspect -f '{{.Id}}' "$IMAGE:$TAG")" != \
-      "$(docker image inspect -f '{{.Id}}' "$IMAGE:latest")" ]]; then
-  echo "WARN: $IMAGE:latest is a different image than $IMAGE:$TAG (last build was another variant?)"
+# recently built) variant, and a snapshot build never takes :latest at all. Only
+# push :latest when it is this very image; otherwise pushing it would publish
+# a different image under a name this run never looked at.
+push_latest=0
+if docker image inspect "$IMAGE:latest" >/dev/null 2>&1; then
+  if [[ "$(docker image inspect -f '{{.Id}}' "$IMAGE:$TAG")" == \
+        "$(docker image inspect -f '{{.Id}}' "$IMAGE:latest")" ]]; then
+    push_latest=1
+  else
+    echo "WARN: $IMAGE:latest is a different image than $IMAGE:$TAG (another variant, or a snapshot?) — not pushing :latest"
+  fi
 fi
 
 # The git SHA describes the build recipe, not the vLLM source; a dirty tree means
@@ -66,16 +79,19 @@ if [[ -n "$(git status --porcelain -- "$root" 2>/dev/null)" ]]; then
   echo "WARN: working tree is dirty — :$STAG names commit $REF but the build used uncommitted changes."
 fi
 
+tags=("$TAG" "$VTAG" "$STAG")
+(( push_latest )) && tags+=(latest)
+
 if [[ ${PUSH_DRY_RUN:-0} == 1 ]]; then
   echo "## PUSH_DRY_RUN=1 — would tag and push:"
-  for t in "$TAG" "$VTAG" "$STAG" latest; do echo "##   docker.io/$IMAGE:$t"; done
+  for t in "${tags[@]}"; do echo "##   docker.io/$IMAGE:$t"; done
   exit 0
 fi
 
 docker tag "$IMAGE:$TAG" "$IMAGE:$VTAG"
 docker tag "$IMAGE:$TAG" "$IMAGE:$STAG"
 
-for t in "$TAG" "$VTAG" "$STAG" latest; do
+for t in "${tags[@]}"; do
   echo "## pushing docker.io/$IMAGE:$t"
   docker push "docker.io/$IMAGE:$t"
 done

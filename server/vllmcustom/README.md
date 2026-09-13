@@ -76,14 +76,14 @@ old `server/vllm` scripts:
 
 ## Default version set (mutually compatible)
 
-vLLM `v0.28.0` pins these (see its `requirements/cuda.txt`), so they are the defaults:
+vLLM `v0.29.0` pins these (see its `requirements/cuda.txt`), so they are the defaults:
 
 | component  | ref/version | arch flags |
 |------------|-------------|------------|
 | CUDA       | 13.2.1 (`cudnn-devel-ubuntu24.04`) | — |
 | PyTorch    | v2.13.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0` |
-| FlashInfer | v0.6.16.post3 (**from source**) | `FLASHINFER_CUDA_ARCH_LIST=12.0f` |
-| vLLM       | v0.28.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0`, `VLLM_USE_PRECOMPILED=0` |
+| FlashInfer | v0.6.18 (**from source**) | `FLASHINFER_CUDA_ARCH_LIST=12.0f` |
+| vLLM       | v0.29.0 (**from source**) | `TORCH_CUDA_ARCH_LIST=12.0`, `VLLM_USE_PRECOMPILED=0` |
 | torchaudio | v2.11.0 (**from source**, small) | `TORCH_CUDA_ARCH_LIST=12.0` |
 | torchvision | 0.28.0 (`+cu132` wheel, `--no-deps`) | not perf-critical |
 
@@ -102,10 +102,10 @@ vllm-openai stage imports all three so a mismatch fails the build, not the first
 
 | candidate | status | blocker |
 |---|---|---|
-| torch 2.14.0 (2026-08-26) | released | no vLLM release **or rc** pins it — v0.29.0rc4 and `main` still pin 2.13.0 |
-| FlashInfer 0.6.18.post1 (2026-09-04) | released | vLLM's wheel hard-pins `flashinfer-python==X`; v0.28.0 wants 0.6.16.post3, v0.29.0rc4 wants 0.6.18 |
+| torch 2.14.0 (2026-08-26) | released | no vLLM release pins it — v0.29.0 and `main` still pin 2.13.0 |
+| FlashInfer 0.6.18.post1 (2026-09-04), 0.7.0rc1 (2026-09-09) | released | vLLM's wheel hard-pins `flashinfer-python==X`; v0.29.0 wants 0.6.18 (`main` is on 0.6.18.post1) |
 | CUDA 13.3.1 | image published; driver 610.43.03 ≥ its 610.43.02 floor | not in torch's binary matrix (12.6/12.9/13.0/13.2), no FlashInfer/vLLM CI; 13.3+ nvcc changed its dry-run output (broke sccache upstream) |
-| vLLM v0.29.0 | at rc4 (2026-09-04) | not tagged yet; when it is: `VLLM_REF=v0.29.0 FLASHINFER_REF=v0.6.18 ./container/build` |
+| vLLM v0.30.0 | not tagged (2026-09-11) | when it is: `VLLM_REF=v0.30.0 FLASHINFER_REF=<its requirements/cuda.txt pin> PREFLIGHT_ONLY=1 ./container/build` first |
 
 vLLM upstream still builds its own images on CUDA 13.0.3, so `CUDA_VERSION=13.0.3` is the
 conservative fallback if 13.2.1 misbehaves (it produces the separate `cu1303-sm120` tag).
@@ -553,9 +553,10 @@ parallelism; if it brushes the ceiling, raise it.
   | Tag | Meaning |
   |---|---|
   | `cu1321-sm120` | newest build of this CUDA variant |
-  | `cu1321-sm120-vllm0.28.0` | pinned to the vLLM version |
-  | `cu1321-sm120-vllm0.28.0-d6d029f` | pinned to vLLM version *and* build commit |
-  | `latest` | newest build of anything |
+  | `cu1321-sm120-vllm0.29.0` | pinned to the vLLM version |
+  | `cu1321-sm120-vllm0.29.0-d6d029f` | pinned to vLLM version *and* build commit |
+  | `latest` | newest build of anything (only pushed when it is the image being pushed) |
+  | `cu1321-sm120-main[-vllm0.30.0.dev20260912-g1ee4be4[-d6d029f]]` | a `VLLM_REF=main` snapshot, pushed with `TAG=cu1321-sm120-main`; never `:latest` |
 
   The versions come from the image's own OCI labels (`ai.vllmcustom.*`, stamped
   by the container/Dockerfile), never re-declared in `./container/push` — so a tag cannot claim a

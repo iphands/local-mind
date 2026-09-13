@@ -11,13 +11,26 @@
 # "PyTorch has CUDA version 13.2 whereas TorchAudio has CUDA version 13.0").
 # transformers imports torchaudio at module load, so that error kills `vllm`.
 #
-# Version notes (checked 2026-09-05; see README "Default version set"):
-#   - vLLM v0.28.0 pins torch 2.13.0 / flashinfer 0.6.16.post3. v0.29.0rc4 and
-#     main still pin torch 2.13.0 (flashinfer 0.6.18), so torch 2.14.0 (released
-#     2026-08-26) is not yet usable with any vLLM.
+# Version notes (checked 2026-09-11; see README "Default version set"):
+#   - vLLM v0.29.0 (tagged 2026-09-08) pins torch 2.13.0 / torchaudio 2.11.0 /
+#     torchvision 0.28.0 / flashinfer 0.6.18 -- only flashinfer moved from
+#     v0.28.0. main still pins torch 2.13.0 (flashinfer 0.6.18.post1), so torch
+#     2.14.0 (released 2026-08-26) is not yet usable with any vLLM.
 #   - CUDA 13.2.1 is the newest toolkit torch 2.13.0 officially builds against
 #     (its binary matrix is 12.6/12.9/13.0/13.2). 13.3.x exists and the host
 #     driver supports it, but no torch/flashinfer/vLLM release has CI on it.
+#   - FlashInfer 0.6.18 (both the v0.29.0 pin and main's 0.6.18.post1) added a
+#     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
+#     backend declares; flashinfer-build now installs whatever the tree
+#     declares. See the comment in that stage.
+#   - main snapshot (VLLM_REF=main in ./build, pinned at 1ee4be4, 2026-09-12):
+#     same torch 2.13.0 / torchaudio 2.11.0 / torchvision 0.28.0, flashinfer
+#     0.6.18.post1 (cubin wheel published at flashinfer.ai/whl), same
+#     requirements/build/cuda.txt, same vllm-flash-attention CMakeLists (the
+#     sm120 patch below still matches), same apache-tvm-ffi build range. The
+#     runtime resolve gains instanttensor, cutlass-dsl 4.7.1, quack 0.6.5,
+#     transformers>=5.10.4 -- checked to resolve against torch 2.13.0 with uv.
+#     Nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,
 # vllm=) by ./build, so the giant repos never enter the default build context.
@@ -147,9 +160,10 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 FROM torch-build AS flashinfer-build
 
 ARG TORCH_CUDA_ARCH_LIST=12.0
-# Must match FLASHINFER_REF in ./build (e.g. v0.6.16.post3 -> 0.6.16.post3); used to
-# pull the matching prebuilt flashinfer-cubin wheel instead of rebuilding it from source.
-ARG FLASHINFER_VERSION=0.6.16.post3
+ARG CUDA_VERSION
+# Must match FLASHINFER_REF in ./build (e.g. v0.6.18 -> 0.6.18); used to pull the
+# matching prebuilt flashinfer-cubin wheel instead of rebuilding it from source.
+ARG FLASHINFER_VERSION=0.6.18
 # 12.0f = sm120 family-conditional kernels (RTX PRO 6000 Blackwell). FlashInfer
 # 0.6.x has no setup.py; it builds via a PEP 517 backend (python -m build).
 ENV FLASHINFER_CUDA_ARCH_LIST="12.0f" \
@@ -170,12 +184,29 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     uv pip install build "setuptools>=77" "packaging>=24" wheel ninja numpy \
         tqdm requests filelock nvidia-ml-py \
         "apache-tvm-ffi>=0.1.6,!=0.1.8,!=0.1.8.post0,<0.2" && \
+    # flashinfer >= 0.6.18 declares extra "provider wheel" build deps in
+    # ci/cuda-versions.json (dependency_policy; today nvidia-cutlass-dsl[cu13]
+    # >=4.6.2a0), returned by build_utils.get_build_dependency_requirements()
+    # from the jit-cache backend's get_requires_for_build_wheel hook. Under
+    # --no-isolation `python -m build` only *checks* them, and aborts with
+    # "ERROR Unmet dependencies" (hit on the v0.29.0 bump, 2026-09-12). Ask the
+    # tree instead of hardcoding, so the next policy entry does not repeat this.
+    # CUDA_MAJOR selects the cu13 extra. Tags before 0.6.18 have no build_utils
+    # and declare nothing extra: the import fails and the list is empty, and if
+    # the helper ever breaks for another reason `python -m build` still stops
+    # the build with the same Unmet error. Whatever is installed here stays in
+    # this stage; vllm-openai starts from base and installs vLLM's own pin.
+    _fi_build_deps=$(CUDA_MAJOR="${CUDA_VERSION%%.*}" python -c 'import build_utils; print(" ".join(build_utils.get_build_dependency_requirements()))' 2>/dev/null || true) && \
+    echo "flashinfer provider build deps: ${_fi_build_deps:-<none declared>}" && \
+    { [ -z "$_fi_build_deps" ] || uv pip install $_fi_build_deps; } && \
     mkdir -p /wheels && \
     # core flashinfer-python (kernels still JIT-able at runtime as a fallback)
     python -m build --no-isolation --wheel --outdir /wheels . && \
     uv pip install --no-deps /wheels/flashinfer_python-*.whl && \
-    # prebuilt cubins (vLLM pins flashinfer-cubin); install before jit-cache so the
-    # AOT step can reuse them instead of refetching. The cubin package is a
+    # prebuilt cubins; install before jit-cache so the AOT step can reuse them
+    # instead of refetching. (vLLM's requirements/cuda.txt pins flashinfer-cubin
+    # but its setup.py drops the pin from the wheel, so vllm-openai installs the
+    # same wheel again for the runtime venv.) The cubin package is a
     # py3-none-any blob of kernels NVIDIA already compiled — nothing to build for
     # sm120 — so we pull the prebuilt wheel instead of rebuilding it. Building it
     # from source scrapes ~15.6k files off NVIDIA's flaky edge.urm.nvidia.com CDN
@@ -195,14 +226,15 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 FROM flashinfer-build AS vllm-build
 
 ARG TORCH_CUDA_ARCH_LIST=12.0
-ARG VLLM_VERSION=0.28.0
+ARG VLLM_VERSION=0.29.0
 # VLLM_VERSION_OVERRIDE, *not* SETUPTOOLS_SCM_PRETEND_VERSION_FOR_VLLM. The
 # scoped form does not work here: setup.py calls setuptools-scm's get_version()
-# with no dist_name (setup.py:1026), so there is nothing for the _FOR_VLLM suffix
-# to match and the lookup fails — verified directly against setuptools-scm 10.2.1
-# / vcs-versioning 2.2.4. It silently appeared to work only while .git was in the
-# build context, because setuptools-scm was reading the git tags instead.
-# VLLM_VERSION_OVERRIDE is vLLM's own hook (setup.py:1020) and sets the *unscoped*
+# with no dist_name (setup.py:1026 in v0.29.0), so there is nothing for the
+# _FOR_VLLM suffix to match and the lookup fails — verified directly against
+# setuptools-scm 10.2.1 / vcs-versioning 2.2.4. It silently appeared to work only
+# while .git was in the build context, because setuptools-scm was reading the
+# git tags instead. VLLM_VERSION_OVERRIDE is vLLM's own hook (setup.py:1020 in
+# v0.29.0, :1251 at main 1ee4be4 -- same code) and sets the *unscoped*
 # SETUPTOOLS_SCM_PRETEND_VERSION internally.
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     VLLM_USE_PRECOMPILED=0 \
@@ -212,9 +244,11 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
 # setuptools-scm derives the version from git tags — so VLLM_VERSION_OVERRIDE
 # above is load-bearing, not belt-and-braces: without it this build fails with
 # "setuptools-scm was unable to detect version for /src/vllm".
-# It also yields a clean 0.28.0 rather than the 0.28.0.dev0+g<sha>.d<date> that
+# It also yields a clean 0.29.0 rather than the 0.29.0.dev0+g<sha>.d<date> that
 # git derivation produced (use_existing_torch.py edits pyproject.toml before
-# setup.py runs, so the tree is always dirty by then).
+# setup.py runs, so the tree is always dirty by then). Snapshot builds pass
+# 0.30.0.dev<date>+g<sha7> here (./build derives it), which is the only place
+# the vLLM commit survives into the image besides the ai.vllmcustom.vllm.ref label.
 # Verify with `vllm.__version__` after changing either.
 COPY --from=vllm --exclude=.git --exclude=**/.git . /src/vllm
 WORKDIR /src/vllm
@@ -261,6 +295,11 @@ ARG TORCHVISION_VERSION=0.28.0
 # is why it is built from source in torchaudio-build instead.)
 ARG TORCHVISION_INDEX=cu132
 
+# Declared before the RUN because it is used in it (unlike the label-only ARGs
+# below). No cache cost: a flashinfer bump already changes the wheels this layer
+# installs, so the layer is rebuilt either way.
+ARG FLASHINFER_VERSION
+
 # All locally-built wheels (torch, flashinfer, vllm, torchaudio). Installing
 # them in one resolve lets vLLM's torch==/torchaudio== pins land on our wheels
 # instead of PyPI's cu130 builds.
@@ -269,15 +308,25 @@ COPY --from=torchaudio-build /wheels-torchaudio /wheels
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install /wheels/*.whl && \
+    # flashinfer-cubin: pinned in vLLM's requirements/cuda.txt, but setup.py
+    # strips it from the wheel's Requires-Dist (it left PyPI after 0.6.13), so
+    # the resolve above never installs it and flashinfer would instead download
+    # cubins into ~/.cache/flashinfer at first use, at serve time. Pull the same
+    # prebuilt wheel flashinfer-build uses, from the same index.
+    uv pip install --no-deps --extra-index-url https://flashinfer.ai/whl/ \
+        "flashinfer-cubin==${FLASHINFER_VERSION}" && \
     { uv pip install --no-deps --index-url https://download.pytorch.org/whl/${TORCHVISION_INDEX} \
         torchvision==${TORCHVISION_VERSION} || \
       echo "WARN: torchvision ${TORCHVISION_VERSION} ${TORCHVISION_INDEX} wheel unavailable; multimodal disabled"; } && \
     rm -rf /wheels && \
-    # Fail the build here, not at `vllm serve`, if any CUDA-minor check trips.
-    python -c "import torch, torchvision, torchaudio; \
+    # Fail the build here, not at `vllm serve`, if any CUDA-minor check trips,
+    # and confirm the cubin package is importable (flashinfer.jit.env checks
+    # for the flashinfer_cubin module, not the dist name).
+    python -c "import torch, torchvision, torchaudio, flashinfer_cubin; \
                print('torch', torch.__version__, torch.version.cuda, \
                      'torchvision', torchvision.__version__, \
-                     'torchaudio', torchaudio.__version__)"
+                     'torchaudio', torchaudio.__version__, \
+                     'flashinfer-cubin', flashinfer_cubin.__file__)"
 
 ENV VLLM_HOST_IP=0.0.0.0 \
     HF_HUB_ENABLE_HF_TRANSFER=1 \
@@ -293,12 +342,15 @@ ENV VLLM_HOST_IP=0.0.0.0 \
 ARG CUDA_VERSION
 ARG TORCH_VERSION
 ARG VLLM_VERSION
-ARG FLASHINFER_VERSION
+# The git ref vLLM was built from: a tag (v0.29.0) or, for a snapshot, the full
+# commit sha. The version label alone cannot say that for a release build.
+ARG VLLM_REF
 ARG TORCH_CUDA_ARCH_LIST
 LABEL org.opencontainers.image.title="vllm-blackwell" \
       org.opencontainers.image.description="Source-built sm120-optimized vLLM (RTX PRO 6000 Blackwell)" \
       org.opencontainers.image.version="${VLLM_VERSION}" \
       ai.vllmcustom.vllm.version="${VLLM_VERSION}" \
+      ai.vllmcustom.vllm.ref="${VLLM_REF}" \
       ai.vllmcustom.torch.version="${TORCH_VERSION}" \
       ai.vllmcustom.flashinfer.version="${FLASHINFER_VERSION}" \
       ai.vllmcustom.cuda.version="${CUDA_VERSION}" \
