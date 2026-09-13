@@ -81,7 +81,7 @@ NVCC_THREADS=${NVCC_THREADS:-1}
 # FLASHINFER_REF must be whatever that commit's requirements/cuda.txt pins
 # (preflight refuses otherwise). Snapshots get their own tag family (see TAG
 # below) and never move :latest, so ./qwen/run and friends keep the release
-# build while ./qwen3.8-flash-next/run-exp picks the snapshot up by tag.
+# build while ./qwen3.8-flash-next/run picks the snapshot up by tag.
 VLLM_MAIN_SHA=1ee4be4dbc576f2158913a89598ccfa9dec9391e   # main @ 2026-09-12: torch 2.13.0 / flashinfer 0.6.18.post1
 VLLM_MAIN_FLASHINFER_REF=v0.6.18.post1
 VLLM_REF=${VLLM_REF:-v0.29.0}

@@ -1,16 +1,20 @@
 # Daily check: can Qwen3.8-Flash-Next move off the upstream PR-branch image?
 
 You are a daily watcher. Every run, produce one short report answering a single question:
-**can the owner stop using `vllm/vllm-openai:qwen38-flash-next` and serve Qwen3.8-Flash-Next
-from their own vLLM image yet?** If not, say exactly what still has to merge or ship.
+**can the owner serve Qwen3.8-Flash-Next from their own vLLM image built from a *tagged
+release*, without workarounds, yet?** Since 2026-09-13 they already serve it from their own
+image built from a pinned `main` snapshot, with three workarounds (E3 below); the PR-branch image
+`vllm/vllm-openai:qwen38-flash-next` is only kept as `run-legacy`. If not, say exactly what
+still has to merge or ship.
 
 You have no local checkout. Everything must come from these three sources, fetched fresh each
 run. Do not answer from memory; cite a URL for every claim.
 
 - https://github.com/iphands/local-mind — the owner's repo. The image build lives in
   `server/vllmcustom/` (`container/Dockerfile`, `container/build`, `README.md`). The launcher in
-  question is `server/vllmcustom/qwen3.8-flash-next/run`; its header comment says why it does
-  not use the owner's image today.
+  question is `server/vllmcustom/qwen3.8-flash-next/run` (own image, `main` snapshot, three
+  workarounds; its header says which and why). `server/vllmcustom/qwen3.8-flash-next/run-legacy`
+  is the old PR-branch-image launcher, kept for A/B.
 - https://huggingface.co/primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8 — the checkpoint being
   served. Its README has a "Where upstream stands" section and a discussions tab with field
   reports.
@@ -89,16 +93,14 @@ The owner's build fails or degrades if these move; check them from the raw files
 
 ### E. The owner's repo
 1. Read the header of `server/vllmcustom/qwen3.8-flash-next/run` and the "Default version set"
-   section of `server/vllmcustom/README.md`. Report which vLLM version the owner's image is
-   currently built from, so the report is relative to what they actually run. If the launcher
-   no longer points at `vllm/vllm-openai`, the migration already happened: say so and stop.
-2. `server/vllmcustom/qwen3.8-flash-next/run-exp` is the *experimental* sibling: it already
-   serves from the owner's image built from a pinned `main` snapshot (`VLLM_MAIN_SHA` in
-   `server/vllmcustom/container/build`). Its existence does not answer the question; the
-   question is about `run` and a tagged release. Do report when `main` has moved past that
-   pinned sha in a way that matters (a new commit under `vllm/models/qwen4_exp/`, or a pin
-   change in C), so the owner knows whether to bump it.
-3. `run-exp` carries three workarounds that should disappear; check each run whether they can:
+   and "Snapshot builds" sections of `server/vllmcustom/README.md`. Report which vLLM commit
+   (`VLLM_MAIN_SHA` in `server/vllmcustom/container/build`) the owner's image is built from, so
+   the report is relative to what they actually run. If `run`'s default `IMAGE_TAG` no longer
+   contains `-main` (i.e. it runs a tagged-release image), the migration is complete: say so
+   and stop.
+2. Do report when `main` has moved past the pinned sha in a way that matters (a new commit
+   under `vllm/models/qwen4_exp/`, or a pin change in C), so the owner knows whether to bump it.
+3. `run` carries three workarounds that should disappear; check each run whether they can:
    - **Upstream, pinned allocation size:** `Qwen4ExpPLEPinnedHostEmbedding.allocate_embedding_weight`
      in the same file pins the whole table with one `torch.empty(..., pin_memory=True)`. torch's
      pinned caching allocator rounds requests up to the next power of two, so a 95.4 GiB table

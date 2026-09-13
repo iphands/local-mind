@@ -11,8 +11,8 @@ container/   build, push, Dockerfile, and the two build helpers (preflight, slic
 common/      the shared launcher mechanism every */run sources
 qwen/        run — Qwen3.5 / Qwen3.6
 laguna/      run — Laguna-S DFlash
-qwen3.8-flash-next/  run — Qwen3.8-Flash-Next 180B on one GPU (PR-branch image, n-gram table in host RAM)
-                     run-exp — same model from OUR image built from a vLLM main snapshot (VLLM_REF=main)
+qwen3.8-flash-next/  run — Qwen3.8-Flash-Next 180B on one GPU from OUR image built from a vLLM main snapshot (VLLM_REF=main)
+                     run-legacy — same model from the upstream PR-branch image (what the model card measured)
 muse/        run — Muse Glimmer, plus patches/ (the shims it mounts at /vllm-patches)
 bench/       the measurement harness: bench, the sweeps, lib/, and all run artifacts
 scripts/     one-off probes and per-model sweeps (mostly Muse)
@@ -51,8 +51,8 @@ resolved before doing anything slow:
 | `./qwen/run`  | serve a model with the local image (GPU 0 only), OpenAI API on `:8700`. Default `Qwen3.5-122B-A10B-NVFP4` |
 | `./muse/run`  | serve Muse Glimmer — same image, plus the shims in `muse/patches/` (see below). Default `RedHatAI/Muse-Glimmer-30B-NVFP4` |
 | `./laguna/run`| serve Laguna-S with its DFlash drafter. Default `Laguna-S-2.1-NVFP4` |
-| `./qwen3.8-flash-next/run`| serve Qwen3.8-Flash-Next (180B-A6B) single-GPU via the `vllm/vllm-openai:qwen38-flash-next` PR-branch image — the only *tagged-or-published* build with a PLE CPU-offload path (vllm#53899); NOT the local build. Default `primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8` |
-| `./qwen3.8-flash-next/run-exp`| **experimental**: the same model from the local **main snapshot** image (`iphands/vllm-blackwell:cu1321-sm120-main-vllm0.30.0.dev20260912-g1ee4be4`, built with `VLLM_REF=main ./container/build`), using main's merged single-GPU path (vllm#54371, `--engram-config '{"cpu_offload": true}'`) instead of the PR branch's offload worker. Carries three fixes the first boots needed (see its header): an `--hf-overrides` correcting the checkpoint's wrong `ple_embedding_dtype`, auto-detected from the shard; a one-branch overlay of `ngram_embedding.py` (`qwen3.8-flash-next/patches/ple-ct-ignore/`) so a compressed-tensors `ignore` match on the PLE means unquantized; and `PYTORCH_CUDA_ALLOC_CONF=pinned_max_round_threshold_mb:1024`, because the 95.4 GiB table is one pinned allocation and torch's pinned allocator otherwise rounds it up to 128 GiB (measured: fails in 0.2 s without, pins in 35 s with) |
+| `./qwen3.8-flash-next/run-legacy`| serve Qwen3.8-Flash-Next (180B-A6B) single-GPU via the `vllm/vllm-openai:qwen38-flash-next` PR-branch image — the only *published* build with a PLE CPU-offload path (vllm#53899); NOT the local build. The launcher the model card's numbers correspond to; kept for A/B. Default `primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8` |
+| `./qwen3.8-flash-next/run`| **the default since 2026-09-13**: the same model from the local **main snapshot** image (`iphands/vllm-blackwell:cu1321-sm120-main-vllm0.30.0.dev20260912-g1ee4be4`, built with `VLLM_REF=main ./container/build`), using main's merged single-GPU path (vllm#54371, `--engram-config '{"cpu_offload": true}'`) instead of the PR branch's offload worker. Carries three fixes the first boots needed (see its header): an `--hf-overrides` correcting the checkpoint's wrong `ple_embedding_dtype`, auto-detected from the shard; a one-branch overlay of `ngram_embedding.py` (`qwen3.8-flash-next/patches/ple-ct-ignore/`) so a compressed-tensors `ignore` match on the PLE means unquantized; and `PYTORCH_CUDA_ALLOC_CONF=pinned_max_round_threshold_mb:1024`, because the 95.4 GiB table is one pinned allocation and torch's pinned allocator otherwise rounds it up to 128 GiB (measured: fails in 0.2 s without, pins in 35 s with) |
 | `./bench/bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench/bench-results.md` |
 | `./bench/bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
 | `./bench/bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |
@@ -134,7 +134,7 @@ Two things worth knowing that did **not** need a change:
 The default set above is a tagged release, and stays that way. `VLLM_REF=main ./container/build`
 builds a **pinned** `main` commit instead — `VLLM_MAIN_SHA` in `container/build`, currently
 `1ee4be4` (2026-09-12), taken for vllm#54371 (single-GPU Qwen3.8-Flash-Next, see
-`./qwen3.8-flash-next/run-exp`). `main` is *not* the moving tip: bump the sha on purpose, and
+`./qwen3.8-flash-next/run`). `main` is *not* the moving tip: bump the sha on purpose, and
 re-check its `requirements/cuda.txt` when you do. What differs from the release set at that sha:
 
 | component | release (v0.29.0) | main @ `1ee4be4` |

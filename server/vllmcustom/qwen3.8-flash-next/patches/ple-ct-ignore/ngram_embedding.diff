@@ -1,5 +1,5 @@
 --- /tmp/claude-1000/-home-iphands-prog-ai-local-mind-server-vllmcustom/3911bf62-6594-4297-a5e1-7eb601fd18e3/scratchpad/ngram_embedding.orig.py	2026-09-12 18:11:07.516595675 -0700
-+++ qwen3.8-flash-next/patches/ple-ct-ignore/ngram_embedding.py	2026-09-12 18:12:22.305195020 -0700
++++ qwen3.8-flash-next/patches/ple-ct-ignore/ngram_embedding.py	2026-09-12 18:40:37.101579302 -0700
 @@ -1,3 +1,13 @@
 +# local-mind overlay of vllm/models/qwen4_exp/nvidia/ngram_embedding.py, taken
 +# verbatim from vLLM main @ 1ee4be4dbc576f2158913a89598ccfa9dec9391e (the commit
@@ -7,7 +7,7 @@
 +# built from) plus ONE change, marked "local-mind patch" below and shown in
 +# ngram_embedding.diff next to this file: from_quant_config() learns that a
 +# compressed-tensors checkpoint whose `ignore` list matches the PLE table means
-+# "unquantized". Mounted over the image's copy by ./qwen3.8-flash-next/run-exp
++# "unquantized". Mounted over the image's copy by ./qwen3.8-flash-next/run
 +# (PATCH_PLE=0 disables). Re-derive from the new upstream file after any bump of
 +# VLLM_MAIN_SHA; a mismatch is silent breakage, so the launcher refuses to mount
 +# this over an image built from a different commit.

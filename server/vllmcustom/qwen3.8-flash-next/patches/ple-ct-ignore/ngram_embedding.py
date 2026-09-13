@@ -4,7 +4,7 @@
 # built from) plus ONE change, marked "local-mind patch" below and shown in
 # ngram_embedding.diff next to this file: from_quant_config() learns that a
 # compressed-tensors checkpoint whose `ignore` list matches the PLE table means
-# "unquantized". Mounted over the image's copy by ./qwen3.8-flash-next/run-exp
+# "unquantized". Mounted over the image's copy by ./qwen3.8-flash-next/run
 # (PATCH_PLE=0 disables). Re-derive from the new upstream file after any bump of
 # VLLM_MAIN_SHA; a mismatch is silent breakage, so the launcher refuses to mount
 # this over an image built from a different commit.
