@@ -36,8 +36,9 @@ the `task` tool.
 
 1. `local-mind` drafts the change and shows it — without writing it
 2. It calls `task` twice **in one message**, `subagent_type="neckbeard"` and
-   `subagent_type="hoodie"`, both with `run_in_background=false`
-3. It waits for both, then states what each said and what it decided
+   `subagent_type="hoodie"`, both with `run_in_background=true`, then joins each review with
+   `background_output(task_id, block=true, timeout=600000)`
+3. It waits for both joins, then states what each said and what it decided
 4. Only then does it use Write/Edit
 
 ## Enforcement is prompt-based
@@ -47,12 +48,14 @@ prompts state it explicitly, the reviewers physically cannot write (tool restric
 review step is a tracked todo item.
 
 This is worth being honest about: prompt-based enforcement is only as reliable as the model
-following it, and it interacts with the rest of the stack. Two failure modes we have actually hit:
+following it, and it interacts with the rest of the stack. The failure modes we have actually hit:
 
-- **`run_in_background=true`** returns `Background task launched.` and a task ID — no review
-  content. The agent must call reviewers synchronously (`run_in_background=false`), or wait for
-  the completion notification and fetch with `background_output`. The agent prompts now mandate
-  the synchronous form.
+- **Synchronous reviews serialize.** With `run_in_background=false` each `task` call blocks until
+  its child session idles, so the two reviews rarely overlap and the review step costs roughly the
+  sum of both. `run_in_background=true` returns a launch receipt (`Background task launched.` and a
+  `bg_...` ID) immediately, so both reviewers run concurrently and the caller joins with
+  `background_output(task_id, block=true, timeout=600000)`. The receipt is not a review — the agent
+  prompts say that explicitly.
 - **The proxy's reprompt engine** used to fire on a reviewer's finished answer (`finish_reason:
   stop`, no tool calls looks identical to a premature stop) and could replace it with a
   follow-up tool call, leaving the caller with a session of tool calls and no text — the

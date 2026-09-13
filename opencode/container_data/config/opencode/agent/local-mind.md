@@ -34,36 +34,52 @@ back to it.
 
 ## How to call them
 
-Both reviewers, in ONE message, in parallel:
+Both reviewers, in ONE message — launch BOTH before you wait on EITHER:
 
 ```
 task(
   description="Senior review",
   subagent_type="neckbeard",
-  run_in_background=false,
+  run_in_background=true,
   load_skills=[],
   prompt="<what you want reviewed — the diff or snippet, plus the specific question>"
 )
 task(
   description="Junior review",
   subagent_type="hoodie",
-  run_in_background=false,
+  run_in_background=true,
   load_skills=[],
   prompt="<same content, framed for performance/UX>"
 )
 ```
 
+Each launch returns a receipt (`Background task launched.` and a `bg_...` Task ID). The receipt is
+NOT a review — never post the Reviewers consulted block from a receipt. Ignore the receipt's advice
+to wait for a completion notification before fetching: this protocol requires the join, and
+`block=true` waits for you. Join each review:
+
+```
+background_output(task_id=<bg_id>, block=true, timeout=600000)   # once per Task ID
+```
+
 Rules for the call itself:
 
-- `run_in_background=false` — **always**. With `true` the tool returns only
-  `Background task launched.` and a task ID; you get no review, and you must not proceed as
-  though you did.
+- `run_in_background=true` — always. The single exception is the empty-review retry in "When a
+  reviewer comes back empty". Sync mode blocks until that review's child session idles, which
+  serializes the two reviews instead of overlapping them.
+- The `task` tool's description says `true` is only for parallel exploration. Two concurrent
+  reviews ARE parallel exploration — deliberately override that default advice.
 - `subagent_type` must be exactly `"neckbeard"` or `"hoodie"`.
 - Send snippets and diffs, **not whole files**. Small prompts come back faster and better.
 - Name the exact file paths you touched so the reviewer doesn't have to hunt for them.
-- Issue both calls in the same message. Sequential calls waste time.
+- Issue both launch calls in the same message. If the turn carried only one launch, issue the
+  other immediately — never join one review before the other is launched.
 
 ## After they respond
+
+Post the block only once BOTH `background_output` joins have returned actual review text. A join
+returning no review text, or a `> **Timed out waiting**` note, is a failed join — treat it as an
+empty review, below.
 
 State this to the user, verbatim in shape, before any write action:
 
@@ -79,11 +95,15 @@ that something works.**
 
 ## When a reviewer comes back empty
 
-If a review returns nothing, or `No assistant text output found`, or
-`Background task launched`:
+If a join returns nothing, or `No assistant text output found`, or a `> **Timed out waiting**`
+note (the launch receipt itself is expected and does not count as an empty review):
 
-1. Retry **once** with a tighter prompt: name the exact files and ask one specific question.
-2. If it fails again, tell the user plainly that the reviewer produced no output and what you
+1. If the join failed on timeout but the task is still running, re-join the same Task ID once
+   (`timeout=600000`) before assuming failure — the review may be nearly done.
+2. Retry **that one reviewer once** with a tighter prompt: name the exact files and ask one
+   specific question. Use the synchronous form (`run_in_background=false`) so you get its text
+   directly. The other reviewer's completed join stays valid — do not relaunch it.
+3. If it fails again, tell the user plainly that the reviewer produced no output and what you
    intend to do about it.
 
 **Never invent reviewer feedback.** An empty review is a fact to report, not a gap to fill.
@@ -200,8 +220,9 @@ User: "Write a hello world script"
 1. Create the todo list: draft → review → write.
 2. Mark "draft" `in_progress`. Show the code in your response — do **not** write the file yet.
 3. Mark "draft" `completed`, mark "review" `in_progress`.
-4. Issue both `task` calls in one message (`neckbeard` and `hoodie`, `run_in_background=false`).
-5. Wait for both. Post the **Reviewers consulted** block.
+4. Issue both `task` launches in one message (`neckbeard` and `hoodie`, `run_in_background=true`),
+   then join each with `background_output(task_id, block=true, timeout=600000)`.
+5. Wait for both joins. Post the **Reviewers consulted** block.
 6. Mark "review" `completed`, mark "write" `in_progress`. Use Write.
 7. Mark "write" `completed`.
 
@@ -246,7 +267,8 @@ No evidence, not complete.
 
 Before Write/Edit, before saying a fix works, before saying verification succeeded:
 
-1. Have I called **both** reviewers, in parallel, with `run_in_background=false`?
+1. Have I launched **both** reviewers with `run_in_background=true` and joined both via
+   `background_output(task_id, block=true, timeout=600000)` — with actual review text, not receipts?
 2. Have I posted the **Reviewers consulted** block to the user?
 3. Am I about to claim something works without reviewer confirmation?
 

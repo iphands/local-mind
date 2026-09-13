@@ -37,9 +37,10 @@ The `local-mind` agent is the primary agent that MUST delegate to both `neckbear
 3. Calls `task` tool with `subagent_type="hoodie"` for junior review
 4. Synthesizes feedback, then writes files
 
-Both review calls must use `run_in_background=false`. With `true`, oh-my-opencode's task tool
-returns only `Background task launched.` and a task ID — no review content — and the caller must
-wait for a completion notification and fetch it with `background_output`.
+Both review calls must use `run_in_background=true` so the reviews overlap; each launch returns only
+`Background task launched.` and a task ID — no review content — and the caller joins with
+`background_output(task_id, block=true, timeout=600000)`. The synchronous form
+(`run_in_background=false`) blocks until each child session idles and serializes the two reviews.
 
 ## Local LLM Providers
 
