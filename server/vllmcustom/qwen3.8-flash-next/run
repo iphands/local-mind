@@ -13,11 +13,18 @@
 # path is vllm-project/vllm#53899 and, as of 2026-09-06, is still an open PR: the
 # architecture itself (Qwen4ExpForConditionalGeneration) merged into main on
 # 2026-08-31 (#53896), but only with the table on GPU, i.e. TP2+. Our own image is
-# vLLM v0.28.0 and has neither (checked 2026-09-08: no vllm.v1.ple_offload module,
-# arch absent from the registry). So this launcher runs the PR-branch image the
+# vLLM v0.29.0, which has the architecture but not the offload path (checked
+# 2026-09-11 against the v0.29.0 tag: no vllm.v1.ple_offload module, no
+# VLLM_PLE_OFFLOAD_* envs, #53899 not in its history). So this launcher runs the
+# PR-branch image the
 # model card was measured with, vllm/vllm-openai:qwen38-flash-next, NOT the
 # locally-built sm120 build every other launcher uses. Revisit once #53899 lands
 # in a tagged release: bump VLLM_REF in ./container/build and flip IMAGE back.
+#
+# UPDATE 2026-09-12: main gained a different single-GPU path on 2026-09-09
+# (vllm#54371, pinned host memory + UVA, --engram-config cpu_offload). It is not
+# in any tag yet, so this launcher is unchanged; ./qwen3.8-flash-next/run-exp
+# serves the same checkpoint from our own image built with VLLM_REF=main.
 #
 # Three things the model card calls load-bearing on one GPU, all set below:
 #   --distributed-executor-backend mp   the default executor never starts the

@@ -12,6 +12,7 @@ common/      the shared launcher mechanism every */run sources
 qwen/        run — Qwen3.5 / Qwen3.6
 laguna/      run — Laguna-S DFlash
 qwen3.8-flash-next/  run — Qwen3.8-Flash-Next 180B on one GPU (PR-branch image, n-gram table in host RAM)
+                     run-exp — same model from OUR image built from a vLLM main snapshot (VLLM_REF=main)
 muse/        run — Muse Glimmer, plus patches/ (the shims it mounts at /vllm-patches)
 bench/       the measurement harness: bench, the sweeps, lib/, and all run artifacts
 scripts/     one-off probes and per-model sweeps (mostly Muse)
@@ -50,7 +51,8 @@ resolved before doing anything slow:
 | `./qwen/run`  | serve a model with the local image (GPU 0 only), OpenAI API on `:8700`. Default `Qwen3.5-122B-A10B-NVFP4` |
 | `./muse/run`  | serve Muse Glimmer — same image, plus the shims in `muse/patches/` (see below). Default `RedHatAI/Muse-Glimmer-30B-NVFP4` |
 | `./laguna/run`| serve Laguna-S with its DFlash drafter. Default `Laguna-S-2.1-NVFP4` |
-| `./qwen3.8-flash-next/run`| serve Qwen3.8-Flash-Next (180B-A6B) single-GPU via the `vllm/vllm-openai:qwen38-flash-next` PR-branch image — the only one with the PLE CPU-offload path (vllm#53899); NOT the local build. Default `primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8` |
+| `./qwen3.8-flash-next/run`| serve Qwen3.8-Flash-Next (180B-A6B) single-GPU via the `vllm/vllm-openai:qwen38-flash-next` PR-branch image — the only *tagged-or-published* build with a PLE CPU-offload path (vllm#53899); NOT the local build. Default `primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8` |
+| `./qwen3.8-flash-next/run-exp`| **experimental**: the same model from the local **main snapshot** image (`iphands/vllm-blackwell:cu1321-sm120-main-vllm0.30.0.dev20260912-g1ee4be4`, built with `VLLM_REF=main ./container/build`), using main's merged single-GPU path (vllm#54371, `--engram-config '{"cpu_offload": true}'`) instead of the PR branch's offload worker. Carries three fixes the first boots needed (see its header): an `--hf-overrides` correcting the checkpoint's wrong `ple_embedding_dtype`, auto-detected from the shard; a one-branch overlay of `ngram_embedding.py` (`qwen3.8-flash-next/patches/ple-ct-ignore/`) so a compressed-tensors `ignore` match on the PLE means unquantized; and `PYTORCH_CUDA_ALLOC_CONF=pinned_max_round_threshold_mb:1024`, because the 95.4 GiB table is one pinned allocation and torch's pinned allocator otherwise rounds it up to 128 GiB (measured: fails in 0.2 s without, pins in 35 s with) |
 | `./bench/bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench/bench-results.md` |
 | `./bench/bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
 | `./bench/bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |
@@ -98,7 +100,61 @@ vllm-openai stage imports all three so a mismatch fails the build, not the first
 `flashinfer-cubin` stopped publishing to PyPI after 0.6.13, so the build pulls it from
 `--extra-index-url https://flashinfer.ai/whl/` (matching vLLM's `requirements/cuda.txt`).
 
-### Why not newer (as of 2026-09-05)
+### What the v0.29.0 bump changed (2026-09-11)
+
+vLLM v0.29.0 (tagged 2026-09-08) moved exactly one pin relative to v0.28.0:
+`flashinfer-python`/`flashinfer-cubin` 0.6.16.post3 → 0.6.18. torch, torchaudio and
+torchvision are unchanged, `requirements/build/cuda.txt` and `use_existing_torch.py` are
+unchanged, and the vllm-flash-attention commit it fetches (`06bdd47`) still contains the
+two lines `container/patches/vllm-flash-attn-arch.py` edits. FlashInfer 0.6.18 keeps the
+same PEP 517 backend, `FLASHINFER_CUDA_ARCH_LIST`, `flashinfer-jit-cache` layout and
+`apache-tvm-ffi` build range — but it is **not** a ref bump only: 0.6.18 added a build-time
+"dependency policy" (`ci/cuda-versions.json`, today `nvidia-cutlass-dsl[cu13]>=4.6.2a0`) that
+the jit-cache backend returns from its `get_requires_for_build_wheel` hook. With
+`--no-isolation`, `python -m build` only checks it and aborts (`ERROR Unmet dependencies`,
+first build on 2026-09-12, ~70 s into flashinfer-build). The flashinfer-build stage now asks
+`build_utils.get_build_dependency_requirements()` for the list and installs it; older tags have
+no helper and declare nothing. The package stays in the build stage — vllm-openai takes vLLM's own
+pin (`==4.6.2` at v0.29.0, `==4.7.1` on main).
+
+Two things worth knowing that did **not** need a change:
+
+- vLLM's `setup.py` (since v0.28.0) declares the Rust frontend (`vllm-rs`) and the
+  `vllm._rust_tool_parser` PyO3 module as *optional* setuptools-rust extensions. The image
+  has no cargo, so both are skipped, exactly as in the v0.28.0 image. The only bundled
+  parser that requires the Rust module is `minimax_m3`; `qwen3_coder`, `poolside_v1` and
+  the atem plugin are pure Python.
+- `flashinfer-cubin` is pinned in `requirements/cuda.txt` but `setup.py` strips it from the
+  wheel's `Requires-Dist` (it left PyPI after 0.6.13), so the final resolve never installed
+  it and the v0.28.0 image fetched cubins into `~/.cache/flashinfer` at serve time. The
+  vllm-openai stage now installs the same prebuilt wheel flashinfer-build already pulls.
+
+### Snapshot builds from `main` (experimental)
+
+The default set above is a tagged release, and stays that way. `VLLM_REF=main ./container/build`
+builds a **pinned** `main` commit instead — `VLLM_MAIN_SHA` in `container/build`, currently
+`1ee4be4` (2026-09-12), taken for vllm#54371 (single-GPU Qwen3.8-Flash-Next, see
+`./qwen3.8-flash-next/run-exp`). `main` is *not* the moving tip: bump the sha on purpose, and
+re-check its `requirements/cuda.txt` when you do. What differs from the release set at that sha:
+
+| component | release (v0.29.0) | main @ `1ee4be4` |
+|---|---|---|
+| FlashInfer | v0.6.18 | **v0.6.18.post1** (`VLLM_MAIN_FLASHINFER_REF`; cubin wheel is published) |
+| torch / torchaudio / torchvision | 2.13.0 / 2.11.0 / 0.28.0 | unchanged |
+| runtime deps (from PyPI) | — | + `instanttensor`, cutlass-dsl 4.7.1, quack 0.6.5, transformers ≥ 5.10.4; resolves against torch 2.13.0 (`uv pip compile`, 2026-09-12) |
+| vllm-flash-attention commit | `06bdd47` | `506341a` — `CMakeLists.txt` byte-identical, the sm120 patch applies |
+| wheel version | `0.29.0` | `0.30.0.dev<commit date>+g<sha7>` (`VLLM_VERSION_OVERRIDE`; `vllm --version` names the commit) |
+
+The snapshot is tagged `cu1321-sm120-main` and `cu1321-sm120-main-vllm0.30.0.dev20260912-g1ee4be4`
+(the `+` of the PEP 440 local segment is not tag-legal, so it becomes `-`) and **never** `:latest`,
+so `./qwen/run` and the other launchers keep the release build. The image records what it was built
+from in the `ai.vllmcustom.vllm.ref` label (full sha for a snapshot, tag for a release). Push it by
+name: `TAG=cu1321-sm120-main ./container/push` (which now pushes `:latest` only when `:latest` *is*
+the image being pushed). Any other untagged ref works the same way but has to bring its own
+flashinfer pin: `VLLM_REF=<sha> FLASHINFER_REF=<its requirements/cuda.txt pin> ./container/build`;
+preflight refuses a mismatch as usual.
+
+### Why not newer (as of 2026-09-11)
 
 | candidate | status | blocker |
 |---|---|---|
