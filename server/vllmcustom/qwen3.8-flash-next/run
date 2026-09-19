@@ -3,7 +3,7 @@
 # sm120 image built from a vLLM main snapshot. The default since 2026-09-13;
 # ./qwen3.8-flash-next/run-legacy is the upstream PR-branch image it replaced.
 #
-#   VLLM_REF=main ./container/build                # build the snapshot first -> iphands/vllm-blackwell:cu1321-sm120-main-vllm0.30.0.dev20260912-g1ee4be4
+#   VLLM_REF=main ./container/build                # build the snapshot first -> iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.dev20260918-g468663a
 #   ./qwen3.8-flash-next/run                       # primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8 (default)
 #   ./qwen3.8-flash-next/run <path-or-name>        # another Flash-Next checkpoint under models/vllm
 #
@@ -24,8 +24,9 @@
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Verified against main @ 1ee4be4 (2026-09-12, the commit ./container/build pins
-# for VLLM_REF=main): vllm/config/engram.py with cpu_offload, Qwen4ExpPLE-
+# Verified against main @ 468663a (2026-09-18, the commit ./container/build pins
+# for VLLM_REF=main; first verified at 1ee4be4, 2026-09-12, and re-checked on
+# the bump): vllm/config/engram.py with cpu_offload, Qwen4ExpPLE-
 # PinnedHostEmbedding selected when it is set, Qwen4ExpForConditionalGeneration +
 # Qwen4ExpMTP in the registry, VLLM_GDN_DECODE_KERNEL still an env, the qwen3
 # reasoning parser and qwen3_coder tool parser still registered.
@@ -122,8 +123,8 @@ NAME=vllm
 # Pinned to the exact vLLM commit rather than the moving cu1321-sm120-main tag,
 # so a later snapshot build cannot change what this launcher runs unnoticed.
 # Keep in step with VLLM_MAIN_SHA in ./container/build: bumping that produces a
-# new -vllm0.30.0.dev<date>-g<sha7> tag, and this default has to follow it.
-IMAGE_TAG=${IMAGE_TAG:-cu1321-sm120-main-vllm0.30.0.dev20260912-g1ee4be4}
+# new -vllm<next>.dev<date>-g<sha7> tag, and this default has to follow it.
+IMAGE_TAG=${IMAGE_TAG:-cu1321-sm120-main-vllm0.31.0.dev20260918-g468663a}
 vllm_image
 
 # shellcheck disable=SC2034  # read by resolve_model in common/_model-lib.sh
@@ -163,7 +164,7 @@ docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
 PATCH_ROOT="$HERE/patches/ple-ct-ignore"
 PATCH_SRC="$PATCH_ROOT/ngram_embedding.py"
 PATCH_DST=/opt/venv/lib/python3.12/site-packages/vllm/models/qwen4_exp/nvidia/ngram_embedding.py
-PATCH_FOR_REF=1ee4be4dbc576f2158913a89598ccfa9dec9391e   # the commit the overlay was derived from
+PATCH_FOR_REF=468663a5e56eba13367ce94f1b005bea4e183793   # the commit the overlay was derived from
 if [[ "$PATCH_PLE" != "0" ]]; then
   [[ -f "$PATCH_SRC" ]] || { echo "missing $PATCH_SRC"; exit 1; }
   _img_ref=$(docker image inspect -f '{{index .Config.Labels "ai.vllmcustom.vllm.ref"}}' "$CONTAINER")

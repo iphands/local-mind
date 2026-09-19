@@ -1,6 +1,6 @@
 # local-mind overlay of vllm/models/qwen4_exp/nvidia/ngram_embedding.py, taken
-# verbatim from vLLM main @ 1ee4be4dbc576f2158913a89598ccfa9dec9391e (the commit
-# iphands/vllm-blackwell:cu1321-sm120-main-vllm0.30.0.dev20260912-g1ee4be4 is
+# verbatim from vLLM main @ 468663a5e56eba13367ce94f1b005bea4e183793 (the commit
+# iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.dev20260918-g468663a is
 # built from) plus ONE change, marked "local-mind patch" below and shown in
 # ngram_embedding.diff next to this file: from_quant_config() learns that a
 # compressed-tensors checkpoint whose `ignore` list matches the PLE table means
@@ -902,7 +902,6 @@ class Qwen4ExpNGramEmbedding(nn.Module):
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         """Load hash buffers and checkpoint-split embedding rows."""
-
         persistent_buffers = {
             "layer_multipliers": self.layer_multipliers,
             "ngram_heads_offsets": self.ngram_heads_offsets,

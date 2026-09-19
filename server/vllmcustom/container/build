@@ -82,7 +82,7 @@ NVCC_THREADS=${NVCC_THREADS:-1}
 # (preflight refuses otherwise). Snapshots get their own tag family (see TAG
 # below) and never move :latest, so ./qwen/run and friends keep the release
 # build while ./qwen3.8-flash-next/run picks the snapshot up by tag.
-VLLM_MAIN_SHA=1ee4be4dbc576f2158913a89598ccfa9dec9391e   # main @ 2026-09-12: torch 2.13.0 / flashinfer 0.6.18.post1
+VLLM_MAIN_SHA=468663a5e56eba13367ce94f1b005bea4e183793   # main @ 2026-09-18: torch 2.13.0 / flashinfer 0.6.18.post1 (was 1ee4be4, 2026-09-12)
 VLLM_MAIN_FLASHINFER_REF=v0.6.18.post1
 VLLM_REF=${VLLM_REF:-v0.29.0}
 if [[ $VLLM_REF == main ]]; then
@@ -102,7 +102,10 @@ TORCH_VERSION=${TORCH_VERSION:-${TORCH_REF#v}}
 (( VLLM_SNAPSHOT )) || VLLM_VERSION=${VLLM_VERSION:-${VLLM_REF#v}}
 # The release a snapshot of main is heading for. Cosmetic: it only prefixes the
 # .dev version below and nothing compares it. Bump when a new vX.Y.0 is cut.
-VLLM_NEXT_VERSION=${VLLM_NEXT_VERSION:-0.30.0}
+# 0.31.0 since 2026-09-18: v0.30.0rc1/rc2 sit on a release branch cut from main
+# at f2aad6aa70 (2026-09-15), and VLLM_MAIN_SHA is 227 commits past that point,
+# so a 0.30.0.dev version would sort *below* a release it is ahead of.
+VLLM_NEXT_VERSION=${VLLM_NEXT_VERSION:-0.31.0}
 FLASHINFER_VERSION=${FLASHINFER_VERSION:-${FLASHINFER_REF#v}}   # prebuilt cubin wheel pin
 TORCHVISION_VERSION=${TORCHVISION_VERSION:-0.28.0}
 # torchaudio is built from source (pytorch/audio). 2.11.0 is upstream's pairing

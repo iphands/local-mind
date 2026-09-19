@@ -23,14 +23,21 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at 1ee4be4, 2026-09-12):
-#     same torch 2.13.0 / torchaudio 2.11.0 / torchvision 0.28.0, flashinfer
-#     0.6.18.post1 (cubin wheel published at flashinfer.ai/whl), same
-#     requirements/build/cuda.txt, same vllm-flash-attention CMakeLists (the
-#     sm120 patch below still matches), same apache-tvm-ffi build range. The
-#     runtime resolve gains instanttensor, cutlass-dsl 4.7.1, quack 0.6.5,
-#     transformers>=5.10.4 -- checked to resolve against torch 2.13.0 with uv.
-#     Nothing in this file is snapshot-specific; ./build passes the pins.
+#   - main snapshot (VLLM_REF=main in ./build, pinned at 468663a, 2026-09-18;
+#     was 1ee4be4, 2026-09-12): same torch 2.13.0 / torchaudio 2.11.0 /
+#     torchvision 0.28.0, flashinfer 0.6.18.post1 (cubin wheel published at
+#     flashinfer.ai/whl), same requirements/build/cuda.txt, same
+#     vllm-flash-attention CMakeLists (the sm120 patch below still matches),
+#     same apache-tvm-ffi build range. Versus the release the runtime resolve
+#     gains instanttensor, cutlass-dsl 4.7.1, quack 0.6.5, transformers>=5.10.4;
+#     1ee4be4 -> 468663a only moves xgrammar to ==0.2.7 -- both checked to
+#     resolve against torch 2.13.0 with uv. requirements/cuda.txt is byte-
+#     identical between the two, so torch/torchaudio/flashinfer layers are
+#     reused. What did change is a SYSTEM dep: vllm#56876 repinned DeepGEMM
+#     (built for 12.0) to the vllm-project fork, whose deep_jit submodule needs
+#     elfutils' libdw -- see vllm-build and vllm-openai. The new DeepSelect
+#     extension is 10.0f-only and configures to an empty target here.
+#     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,
 # vllm=) by ./build, so the giant repos never enter the default build context.
@@ -234,11 +241,26 @@ ARG VLLM_VERSION=0.29.0
 # setuptools-scm 10.2.1 / vcs-versioning 2.2.4. It silently appeared to work only
 # while .git was in the build context, because setuptools-scm was reading the
 # git tags instead. VLLM_VERSION_OVERRIDE is vLLM's own hook (setup.py:1020 in
-# v0.29.0, :1251 at main 1ee4be4 -- same code) and sets the *unscoped*
+# v0.29.0, :1261 at main 468663a -- same early return) and sets the *unscoped*
 # SETUPTOOLS_SCM_PRETEND_VERSION internally.
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     VLLM_USE_PRECOMPILED=0 \
     VLLM_VERSION_OVERRIDE=${VLLM_VERSION}
+
+# elfutils headers for DeepGEMM. Since vllm#56876 (2026-09-15) vLLM pins the
+# vllm-project/DeepGEMM fork, whose third-party/deep_jit submodule does
+# `#include <elfutils/libdwfl.h>` (deep_jit/utils/exception.hpp, pulled in by
+# csrc/python_api.cpp). DeepGEMM's arch list includes 12.0, and its _C target is
+# `ALL`, not optional -- without the header the vLLM build fails, late. Upstream
+# added `elfutils-devel` to its manylinux image in the same commit; libdw-dev is
+# the noble package that owns that header (and depends on libelf-dev).
+# Installed HERE rather than in base on purpose: base is the parent of every
+# compile stage, so touching its apt list would recompile torch and flashinfer
+# for a header only this stage reads. Harmless for v0.29.0, which never looks.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends libdw-dev && \
+    test -f /usr/include/elfutils/libdwfl.h
 
 # .git excluded (see torch-build). vLLM is the case where that matters most —
 # setuptools-scm derives the version from git tags — so VLLM_VERSION_OVERRIDE
@@ -247,7 +269,7 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
 # It also yields a clean 0.29.0 rather than the 0.29.0.dev0+g<sha>.d<date> that
 # git derivation produced (use_existing_torch.py edits pyproject.toml before
 # setup.py runs, so the tree is always dirty by then). Snapshot builds pass
-# 0.30.0.dev<date>+g<sha7> here (./build derives it), which is the only place
+# <next release>.dev<date>+g<sha7> here (./build derives it), which is the only place
 # the vLLM commit survives into the image besides the ai.vllmcustom.vllm.ref label.
 # Verify with `vllm.__version__` after changing either.
 COPY --from=vllm --exclude=.git --exclude=**/.git . /src/vllm
@@ -299,6 +321,17 @@ ARG TORCHVISION_INDEX=cu132
 # below). No cache cost: a flashinfer bump already changes the wheels this layer
 # installs, so the layer is rebuilt either way.
 ARG FLASHINFER_VERSION
+
+# Runtime half of the DeepGEMM/deep_jit elfutils dependency (see vllm-build):
+# deep_jit dlopen()s "libdw.so.1" to symbolize the stack trace it attaches to a
+# kernel/JIT exception. A failed dlopen is tolerated (frames print as ??:0), so
+# this is not needed to serve -- it is what makes a DeepGEMM failure readable.
+# This stage starts from base, not vllm-build, so the -dev install there does
+# not reach it. Before the wheel COPY so a vLLM bump does not redo it.
+RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
+    --mount=type=cache,target=/var/lib/apt,sharing=locked \
+    apt-get update && apt-get install -y --no-install-recommends libdw1 && \
+    python -c "import ctypes; ctypes.CDLL('libdw.so.1')"
 
 # All locally-built wheels (torch, flashinfer, vllm, torchaudio). Installing
 # them in one resolve lets vLLM's torch==/torchaudio== pins land on our wheels
