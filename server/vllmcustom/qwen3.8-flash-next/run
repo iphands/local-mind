@@ -136,9 +136,9 @@ ATTN_BACKEND=${ATTN_BACKEND-}                    # EMPTY = vLLM auto-select
 MOE_BACKEND=${MOE_BACKEND:-}                     # empty = auto (may already be marlin on main; see header)
 NVFP4_BACKEND=${NVFP4_BACKEND:-}                 # --linear-backend; the linear layers here are FP8, so leave it
 SPEC_TOKENS=${SPEC_TOKENS:-3}                    # MTP speculative tokens; 3 = card optimum on the PR image; 0 = off
-GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.92}               # card value; the Mamba-block budget was measured at it
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.925}              # card value; the Mamba-block budget was measured at it
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}           # native; the PR image needed <=135168 beside the MTP draft head
-MAX_NUM_SEQS=${MAX_NUM_SEQS:-16}                 # see ./qwen3.8-flash-next/run-legacy
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-6}                 # see ./qwen3.8-flash-next/run-legacy
 MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-8192}
 CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-}               # e.g. FULL_AND_PIECEWISE (A/B)
 FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-}     # 1 = FlashInfer autotuning during warmup (A/B)
@@ -252,7 +252,7 @@ VLLM_ARGS+=(
   # Qwen3.8-Flash-Next README, thinking mode (== the checkpoint's generation_config.json).
   # Instruct / non-thinking set, if ever served with enable_thinking false:
   #   {"temperature": 0.7, "top_p": 0.80, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0}
-  --override-generation-config '{ "temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
+  --override-generation-config '{ "temperature": 0.95, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
 
   --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true}'
 )
