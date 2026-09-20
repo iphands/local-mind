@@ -361,13 +361,18 @@ impl ProxyHandler {
             (&Method::GET, "/proxy/metrics") => {
                 let fallback_hits = self.state.backend_streaming_fallback_hits.load(Ordering::Relaxed);
                 let rejected = self.state.rejected_requests.load(Ordering::Relaxed);
+                let routed_stream = self.state.openai_stream_passthrough_total.load(Ordering::Relaxed);
+                let backend_no_stream = self.state.backend_nonsse_when_streamed_for.load(Ordering::Relaxed);
+                let anthropic_buffered = self.state.anthropic_buffered_responses_total.load(Ordering::Relaxed);
 
                 // This scrape is itself counted in concurrent_requests (incremented at the
                 // top of handle()), so discount it - otherwise an idle proxy reports 1.
                 let concurrent = self.state.concurrent_requests.load(Ordering::Relaxed).saturating_sub(1);
 
+                use crate::proxy::streaming as stream_stats;
+                let l = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
                 let body = format!(
-                    "# HELP llama_proxy_backend_streaming_fallback_total Times the backend streamed despite stream:false\n\
+                    "# HELP llama_proxy_backend_streaming_fallback_total Times the backend streamed although the proxy requested stream:false. The expected path in passthrough mode is NOT counted here.\n\
                      # TYPE llama_proxy_backend_streaming_fallback_total counter\n\
                      llama_proxy_backend_streaming_fallback_total {}\n\
                      # HELP llama_proxy_concurrent_requests Current in-flight requests\n\
@@ -375,8 +380,54 @@ impl ProxyHandler {
                      llama_proxy_concurrent_requests {}\n\
                      # HELP llama_proxy_rejected_requests_total Requests rejected at capacity\n\
                      # TYPE llama_proxy_rejected_requests_total counter\n\
-                     llama_proxy_rejected_requests_total {}\n",
-                    fallback_hits, concurrent, rejected
+                     llama_proxy_rejected_requests_total {}\n\
+                     # HELP llama_proxy_openai_stream_passthrough_total OpenAI requests routed onward with stream:true intact. Counted at the routing decision, so it moves even with stats.enabled: false - use this as the passthrough mode probe.\n\
+                     # TYPE llama_proxy_openai_stream_passthrough_total counter\n\
+                     llama_proxy_openai_stream_passthrough_total {}\n\
+                     # HELP llama_proxy_backend_nonsse_when_streamed_total Passthrough asked for stream:true and the backend answered 2xx with JSON instead of text/event-stream. The backend does not stream; the proxy is not at fault.\n\
+                     # TYPE llama_proxy_backend_nonsse_when_streamed_total counter\n\
+                     llama_proxy_backend_nonsse_when_streamed_total {}\n\
+                     # HELP llama_proxy_anthropic_buffered_responses_total /v1/messages responses served buffered with synthesized SSE under streaming: passthrough. The log notice fires once per process; this keeps counting.\n\
+                     # TYPE llama_proxy_anthropic_buffered_responses_total counter\n\
+                     llama_proxy_anthropic_buffered_responses_total {}\n\
+                     # HELP llama_proxy_passthrough_streams_total Pass-through SSE responses framed by the proxy; denominator for the ratios below. Requires accumulation (stats.enabled or dump), unlike openai_stream_passthrough_total. Excludes compressed responses.\n\
+                     # TYPE llama_proxy_passthrough_streams_total counter\n\
+                     llama_proxy_passthrough_streams_total {}\n\
+                     # HELP llama_proxy_passthrough_sse_events_total SSE events framed on those streams. Counted only while accumulation is on (stats.enabled or dump).\n\
+                     # TYPE llama_proxy_passthrough_sse_events_total counter\n\
+                     llama_proxy_passthrough_sse_events_total {}\n\
+                     # HELP llama_proxy_passthrough_sse_unparsed_events_total Framed SSE events whose data payload was not valid JSON, forwarded verbatim and unanalyzed. Denominator: passthrough_sse_events_total.\n\
+                     # TYPE llama_proxy_passthrough_sse_unparsed_events_total counter\n\
+                     llama_proxy_passthrough_sse_unparsed_events_total {}\n\
+                     # HELP llama_proxy_passthrough_stream_truncated_total Streams where the backend ended without [DONE]/message_stop. Denominator: passthrough_streams_total.\n\
+                     # TYPE llama_proxy_passthrough_stream_truncated_total counter\n\
+                     llama_proxy_passthrough_stream_truncated_total {}\n\
+                     # HELP llama_proxy_passthrough_stream_stalled_total Streams the stats observer gave up on after 90s without a chunk. The client transfer is not cut by this. Denominator: passthrough_streams_total.\n\
+                     # TYPE llama_proxy_passthrough_stream_stalled_total counter\n\
+                     llama_proxy_passthrough_stream_stalled_total {}\n\
+                     # HELP llama_proxy_passthrough_stream_client_gone_total Streams where the client disconnected before completion. Normal, not a defect; counted so truncation can be read against real traffic.\n\
+                     # TYPE llama_proxy_passthrough_stream_client_gone_total counter\n\
+                     llama_proxy_passthrough_stream_client_gone_total {}\n\
+                     # HELP llama_proxy_passthrough_fix_unrepaired_total Fix detections reported and NOT repaired. Detections, not responses - one response can add several. Denominator: passthrough_streams_total.\n\
+                     # TYPE llama_proxy_passthrough_fix_unrepaired_total counter\n\
+                     llama_proxy_passthrough_fix_unrepaired_total {}\n\
+                     # HELP llama_proxy_passthrough_compressed_responses_total Responses bypassed entirely because Content-Encoding was not identity. Not counted in any other passthrough_* metric.\n\
+                     # TYPE llama_proxy_passthrough_compressed_responses_total counter\n\
+                     llama_proxy_passthrough_compressed_responses_total {}\n",
+                    fallback_hits,
+                    concurrent,
+                    rejected,
+                    routed_stream,
+                    backend_no_stream,
+                    anthropic_buffered,
+                    l(&stream_stats::PASSTHROUGH_STREAMS_TOTAL),
+                    l(&stream_stats::SSE_EVENTS_TOTAL),
+                    l(&stream_stats::SSE_UNPARSED_EVENTS_TOTAL),
+                    l(&stream_stats::STREAM_TRUNCATED_TOTAL),
+                    l(&stream_stats::STREAM_STALLED_TOTAL),
+                    l(&stream_stats::STREAM_CLIENT_GONE_TOTAL),
+                    l(&stream_stats::FIX_UNREPAIRED_TOTAL),
+                    l(&stream_stats::STREAM_COMPRESSED_TOTAL),
                 );
 
                 return (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response();
@@ -533,10 +584,8 @@ impl ProxyHandler {
             .http_client
             .request(Method::from_bytes(method.as_str().as_bytes()).unwrap(), &backend_url);
 
-        // Copy headers (skip Content-Length, Host, and Authorization as we'll set those explicitly)
         for (name, value) in headers.iter() {
-            // Skip headers that will be set explicitly or handled by reqwest
-            if name == header::HOST || name == header::CONTENT_LENGTH || name == header::AUTHORIZATION {
+            if !Self::forwards_to_backend(name) {
                 continue;
             }
 
@@ -548,15 +597,40 @@ impl ProxyHandler {
             backend_req = backend_req.header(header::AUTHORIZATION, format!("Bearer {}", api_key));
         }
 
-        // ALWAYS force stream: false for backend request
-        // Use enriched_body_bytes if augmentation was injected, otherwise use original body
-        let final_body_bytes = if enriched_body_bytes != body_bytes.clone() {
-            Self::apply_backend_overrides_bytes(&enriched_body_bytes, &backend.node)
-        } else {
-            Self::apply_backend_overrides_bytes(&body_bytes, &backend.node)
-        };
+        // Passthrough leaves the client's stream:true on the wire, but only on the
+        // OpenAI path: a /v1/messages client needs a complete object before the proxy
+        // can emit Anthropic SSE, so that path stays buffered in every mode.
+        let streaming_mode = self.state.config.streaming;
+        let allow_stream = streaming_mode.is_passthrough() && !is_anthropic_api;
 
-        backend_req = backend_req.body(final_body_bytes);
+        if streaming_mode.is_passthrough() && is_anthropic_api {
+            self.state.anthropic_buffered_responses_total.fetch_add(1, Ordering::Relaxed);
+            // Startup logs scroll past in `just run`; this is the line that actually
+            // reaches someone whose Claude Code is still buffering. Once per process.
+            if !self.state.anthropic_buffered_notice_once.swap(true, Ordering::Relaxed) {
+                tracing::warn!(
+                    "Anthropic /v1/messages is served buffered with synthesized SSE even under \
+                     streaming: passthrough - there is no OpenAI->Anthropic SSE translator yet. \
+                     Passthrough applies to /v1/chat/completions with stream:true only."
+                );
+            }
+        }
+
+        // Use enriched_body_bytes if augmentation was injected, otherwise use original body
+        let (final_body_bytes, sent_stream_true) = if enriched_body_bytes != body_bytes {
+            Self::apply_backend_overrides_bytes(&enriched_body_bytes, &backend.node, allow_stream)
+        } else {
+            Self::apply_backend_overrides_bytes(&body_bytes, &backend.node, allow_stream)
+        };
+        // The router must dispatch on what was actually sent, not on what the client
+        // asked for - augmentation or a backend override could change it.
+        let expected_streaming = allow_stream && sent_stream_true;
+        if expected_streaming {
+            self.state.openai_stream_passthrough_total.fetch_add(1, Ordering::Relaxed);
+        }
+
+        backend_req = backend_req.body(final_body_bytes.clone());
+        let backend_request_for_dump = Some(final_body_bytes);
 
         let backend_response = match backend_req.send().await {
             Ok(resp) => resp,
@@ -583,24 +657,32 @@ impl ProxyHandler {
             .unwrap_or(false);
 
         if is_streaming_response {
-            // Unexpected! Backend ignored our stream:false request
-            let fallback_count = self.state.backend_streaming_fallback_hits.fetch_add(1, Ordering::Relaxed) + 1;
+            // Only a genuine contradiction is an anomaly. In passthrough mode streaming is
+            // what we asked for, so counting/warning here would fire on every request and
+            // read as a defect report on the mode the user just chose.
+            if !expected_streaming {
+                let fallback_count = self.state.backend_streaming_fallback_hits.fetch_add(1, Ordering::Relaxed) + 1;
 
-            tracing::warn!(
-                backend_url = %backend.node.base_url(),
-                fallback_count = fallback_count,
-                "Backend returned streaming response despite stream:false request"
-            );
-
-            if fallback_count == 10 || fallback_count % 100 == 0 {
-                tracing::error!(
+                tracing::warn!(
+                    backend_url = %backend.node.base_url(),
                     fallback_count = fallback_count,
-                    "Backend streaming fallback has triggered {} times - check backend configuration",
-                    fallback_count
+                    "Backend returned streaming response despite stream:false request"
+                );
+
+                if fallback_count == 10 || fallback_count.is_multiple_of(100) {
+                    tracing::error!(
+                        fallback_count = fallback_count,
+                        "Backend streaming fallback has triggered {} times - check backend configuration",
+                        fallback_count
+                    );
+                }
+            } else {
+                tracing::debug!(
+                    stream_mode = %streaming_mode,
+                    "Forwarding backend SSE verbatim"
                 );
             }
 
-            // Fall back to old streaming handler
             let concurrent_snapshot = self.state.concurrent_requests.load(Ordering::Relaxed);
             handle_streaming_response(
                 backend_response,
@@ -617,8 +699,11 @@ impl ProxyHandler {
                 self.state.dump_path.clone(),
                 Some(method.to_string()),
                 Some(uri.to_string()),
-                Some(body_bytes.clone().to_vec()),
+                // The bytes actually sent, so a dump cannot show a response (a usage
+                // chunk) whose cause is absent from the request beside it.
+                backend_request_for_dump,
                 concurrent_snapshot,
+                streaming_mode,
                 // Hand the permit to the stream. This response body is lazy, so returning
                 // from handle() only means the headers are ready - the generation itself
                 // runs while the body is polled. Dropping the permit here would let the
@@ -627,6 +712,21 @@ impl ProxyHandler {
             )
             .await
         } else {
+            // An error reply is JSON on every backend, streaming or not, so only a 2xx
+            // says anything about whether this backend streams.
+            if expected_streaming && backend_response.status().is_success() {
+                let n = self.state.backend_nonsse_when_streamed_for.fetch_add(1, Ordering::Relaxed) + 1;
+                if n == 1 || n.is_multiple_of(100) {
+                    tracing::warn!(
+                        count = n,
+                        backend_url = %backend.node.base_url(),
+                        "streaming: passthrough asked the backend for stream:true but got a JSON body, not \
+                         text/event-stream - serving synthesized SSE instead. This backend does not stream, \
+                         so passthrough behaves like fake for it."
+                    );
+                }
+            }
+
             // Handle non-streaming response (expected path)
             self.handle_non_streaming_response(
                 backend_response,
@@ -638,29 +738,91 @@ impl ProxyHandler {
                 backend.group_name.as_deref(),
                 method.clone(),
                 uri.clone(),
-                body_bytes.to_vec(),
             )
             .await
         }
     }
 
-    fn apply_backend_overrides_bytes(body: &[u8], backend: &BackendNode) -> Vec<u8> {
-        if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) {
+    /// Client headers that must not reach the backend. `Accept-Encoding` is the client's
+    /// preference addressed to *us*; forwarding it lets the backend answer with br/zstd,
+    /// which reqwest cannot decode here (it decodes gzip only), and the streaming path
+    /// would then forward an unsplit body and collect no stats for it.
+    fn forwards_to_backend(name: &header::HeaderName) -> bool {
+        name != header::HOST
+            && name != header::CONTENT_LENGTH
+            && name != header::AUTHORIZATION
+            && name != header::ACCEPT_ENCODING
+    }
+
+    /// Rewrites the outgoing backend body for the resolved streaming mode and returns
+    /// it together with the `stream` flag the backend will actually see.
+    ///
+    /// When `allow_stream` is set (passthrough, OpenAI path) the client's `stream:true`
+    /// is preserved so the backend's own SSE reaches the client. Otherwise `stream:false`
+    /// is forced and `stream_options` stripped, because the proxy answers with
+    /// synthesized SSE built from one complete JSON body.
+    fn apply_backend_overrides_bytes(body: &[u8], backend: &BackendNode, allow_stream: bool) -> (Vec<u8>, bool) {
+        let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) else {
+            return (body.to_vec(), false);
+        };
+
+        let client_wants_stream = json.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
+        let keep_stream = allow_stream && client_wants_stream;
+
+        if keep_stream {
+            Self::ensure_usage_on_stream(&mut json);
+        } else {
             json["stream"] = serde_json::Value::Bool(false);
             if let Some(obj) = json.as_object_mut() {
                 if obj.remove("stream_options").is_some() {
                     tracing::debug!("Stripped stream_options from backend request");
                 }
             }
-            if let Some(ref model) = backend.model {
-                json["model"] = serde_json::Value::String(model.clone());
+        }
+
+        if let Some(ref model) = backend.model {
+            json["model"] = serde_json::Value::String(model.clone());
+        }
+        if let Some(temp) = backend.temperature {
+            json["temperature"] = serde_json::Value::from(temp);
+        }
+
+        (serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec()), keep_stream)
+    }
+
+    /// A stream carries no `usage` block unless the backend is told to emit one, so
+    /// without this every token count on a passthrough response is silently zero.
+    /// An explicit client `stream_options` always wins, including `include_usage: false`
+    /// — losing the counts is then the client's own choice, and logged as such.
+    fn ensure_usage_on_stream(json: &mut serde_json::Value) {
+        use serde_json::map::Entry;
+        let Some(obj) = json.as_object_mut() else { return };
+
+        let injected = match obj.entry("stream_options") {
+            Entry::Vacant(e) => {
+                e.insert(serde_json::json!({ "include_usage": true }));
+                true
             }
-            if let Some(temp) = backend.temperature {
-                json["temperature"] = serde_json::Value::from(temp);
-            }
-            serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec())
-        } else {
-            body.to_vec()
+            Entry::Occupied(mut e) => match e.get_mut().as_object_mut() {
+                Some(opts) if !opts.contains_key("include_usage") => {
+                    opts.insert("include_usage".to_string(), serde_json::Value::Bool(true));
+                    true
+                }
+                Some(opts) => {
+                    if opts.get("include_usage").and_then(|v| v.as_bool()) == Some(false) {
+                        tracing::debug!("client set stream_options.include_usage=false; streaming token counts will be absent");
+                    }
+                    false
+                }
+                // A `stream_options` that is not an object is forwarded untouched.
+                // Rewriting a value we do not understand would be a guess, and the
+                // indexing sugar would silently destroy it.
+                None => false,
+            },
+        };
+
+        if injected {
+            tracing::debug!("injected stream_options.include_usage=true; streams carry no usage block without it");
         }
     }
 
@@ -676,7 +838,6 @@ impl ProxyHandler {
         group_name: Option<&str>,
         request_method: Method,
         request_uri: axum::http::Uri,
-        _request_body: Vec<u8>,
     ) -> Response {
         let status = backend_response.status();
         let headers = backend_response.headers().clone();
@@ -887,8 +1048,11 @@ impl ProxyHandler {
             });
         }
 
-        // If client wants streaming, synthesize it from complete JSON
-        if client_wants_streaming {
+        // If client wants streaming, synthesize it from complete JSON. Only a 2xx may
+        // become a stream: synthesize_* always answers 200 and discards the backend
+        // status, so an error body that parses as a completion would arrive as a
+        // successful empty turn.
+        if client_wants_streaming && status.is_success() {
             if let Some(ref json) = json_value {
                 if is_anthropic_api {
                     // Anthropic API: try parsing as Anthropic format first
@@ -1162,6 +1326,10 @@ mod tests {
             dump_path: None,
             concurrent_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             backend_streaming_fallback_hits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            openai_stream_passthrough_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            backend_nonsse_when_streamed_for: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            anthropic_buffered_responses_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            anthropic_buffered_notice_once: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             rejected_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             concurrent_semaphore: Some(std::sync::Arc::new(tokio::sync::Semaphore::new(100))),
         })
@@ -1199,5 +1367,108 @@ mod tests {
         assert!(!ProxyHandler::is_json_content_type("image/jpeg"));
         assert!(!ProxyHandler::is_json_content_type("text/css"));
         assert!(!ProxyHandler::is_json_content_type("application/octet-stream"));
+    }
+
+    fn bare_node(model: Option<&str>) -> BackendNode {
+        BackendNode {
+            url: "http://localhost:8080".to_string(),
+            model: model.map(|m| m.to_string()),
+            api_key: None,
+            timeout_seconds: 300,
+            http_client: reqwest::Client::new(),
+            active_requests: AtomicUsize::new(0),
+            strip_path_prefix: None,
+            temperature: None,
+        }
+    }
+
+    fn rewrite(body: serde_json::Value, allow_stream: bool) -> (serde_json::Value, bool) {
+        let (bytes, sent_stream) =
+            ProxyHandler::apply_backend_overrides_bytes(body.to_string().as_bytes(), &bare_node(None), allow_stream);
+        (
+            serde_json::from_slice(&bytes).expect("rewritten body must be valid JSON"),
+            sent_stream,
+        )
+    }
+
+    #[test]
+    fn passthrough_keeps_stream_true_and_asks_for_usage() {
+        let (out, sent_stream) = rewrite(serde_json::json!({"stream": true}), true);
+        assert!(sent_stream, "passthrough must hand stream:true onward");
+        assert_eq!(out["stream"], serde_json::json!(true));
+        assert_eq!(out["stream_options"]["include_usage"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn passthrough_still_buffers_when_client_never_asked_to_stream() {
+        let (out, sent_stream) = rewrite(serde_json::json!({}), true);
+        assert!(!sent_stream);
+        assert_eq!(out["stream"], serde_json::json!(false));
+        assert!(out.get("stream_options").is_none(), "no stream, no stream_options");
+    }
+
+    #[test]
+    fn fake_mode_is_unchanged_forces_false_and_strips_stream_options() {
+        let (out, sent_stream) = rewrite(
+            serde_json::json!({"stream": true, "stream_options": {"include_usage": true}}),
+            false,
+        );
+        assert!(!sent_stream);
+        assert_eq!(out["stream"], serde_json::json!(false));
+        assert!(out.get("stream_options").is_none());
+    }
+
+    #[test]
+    fn client_explicitly_declining_usage_is_respected() {
+        let (out, sent_stream) = rewrite(
+            serde_json::json!({"stream": true, "stream_options": {"include_usage": false}}),
+            true,
+        );
+        assert!(sent_stream, "declining usage is not declining the stream");
+        assert_eq!(
+            out["stream_options"]["include_usage"],
+            serde_json::json!(false),
+            "explicit client intent must not be overwritten"
+        );
+    }
+
+    #[test]
+    fn injection_preserves_other_stream_options_keys() {
+        let (out, _) = rewrite(serde_json::json!({"stream": true, "stream_options": {"observer": "x"}}), true);
+        assert_eq!(out["stream_options"]["observer"], serde_json::json!("x"));
+        assert_eq!(out["stream_options"]["include_usage"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn a_stream_options_that_is_not_an_object_is_neither_rewritten_nor_fatal() {
+        for junk in [serde_json::json!("yes"), serde_json::json!([]), serde_json::json!(7)] {
+            let (out, sent_stream) = rewrite(serde_json::json!({"stream": true, "stream_options": junk.clone()}), true);
+            assert!(sent_stream);
+            assert_eq!(out["stream_options"], junk, "a value we do not parse is forwarded untouched");
+        }
+    }
+
+    #[test]
+    fn non_json_body_passes_through_and_reports_no_stream() {
+        let raw = b"not json at all".to_vec();
+        let (bytes, sent_stream) = ProxyHandler::apply_backend_overrides_bytes(&raw, &bare_node(None), true);
+        assert_eq!(bytes, raw);
+        assert!(!sent_stream);
+    }
+
+    #[test]
+    fn backend_model_and_temperature_overrides_apply_in_both_modes() {
+        let node = BackendNode {
+            model: Some("renamed".to_string()),
+            temperature: Some(0.1),
+            ..bare_node(None)
+        };
+        for allow_stream in [true, false] {
+            let body = serde_json::json!({"model": "client-name", "stream": true, "temperature": 0.9});
+            let (bytes, _) = ProxyHandler::apply_backend_overrides_bytes(body.to_string().as_bytes(), &node, allow_stream);
+            let out: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(out["model"], serde_json::json!("renamed"));
+            assert_eq!(out["temperature"], serde_json::json!(0.1));
+        }
     }
 }

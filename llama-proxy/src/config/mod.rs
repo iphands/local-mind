@@ -303,25 +303,39 @@ impl Default for DetectionConfig {
 
 /// Streaming mode configuration
 ///
-/// Controls how the proxy handles streaming responses:
-/// - `Disabled`: Forces streaming off completely (both frontend and backend)
-/// - `Fake`: Current behavior - forces non-streaming to backend, synthesizes streaming to frontend
-/// - `Accumulator`: Not yet implemented - will error if used
+/// Controls how the proxy handles streaming responses on the OpenAI
+/// `/v1/chat/completions` route:
+/// - `Disabled`: accepted and treated exactly like `Fake`; not yet a distinct
+///   behavior (reserved for a future "refuse streaming entirely" mode).
+/// - `Fake`: forces `stream:false` to the backend, gets one JSON, synthesizes SSE
+///   to the client. Fixes run; reprompt runs.
+/// - `Passthrough`: leaves `stream:true` intact, forwards the backend's SSE verbatim
+///   (byte-faithful framing), stats computed from the accumulated bytes. Fixes DETECT
+///   but do NOT repair (patching partial deltas corrupts them); reprompt cannot run
+///   (it needs the complete body). `/v1/messages` stays buffered even here — there is
+///   no OpenAI→Anthropic SSE translator.
+///
+/// The request path reads this setting (handler.rs). Enforcement is decided AFTER the
+/// CLI/config precedence in `resolve()`, so the CLI switch can override the file.
 #[derive(Debug, Clone, Copy, Deserialize, Serialize, Default, PartialEq)]
 #[serde(rename_all = "lowercase")]
 pub enum StreamingMode {
     Disabled,
     #[default]
     Fake,
-    Accumulator,
+    /// Backend SSE copied verbatim, stats computed from accumulated raw bytes.
+    /// Accepts the legacy name `accumulator` as an alias.
+    #[serde(alias = "accumulator")]
+    Passthrough,
+}
+
+impl std::fmt::Display for StreamingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
 }
 
 impl StreamingMode {
-    /// Returns true if this mode is implemented
-    pub fn is_implemented(&self) -> bool {
-        matches!(self, StreamingMode::Disabled | StreamingMode::Fake)
-    }
-
     /// Returns true if streaming is completely disabled
     pub fn is_disabled(&self) -> bool {
         matches!(self, StreamingMode::Disabled)
@@ -330,6 +344,55 @@ impl StreamingMode {
     /// Returns true if using fake streaming mode
     pub fn is_fake(&self) -> bool {
         matches!(self, StreamingMode::Fake)
+    }
+
+    pub fn is_passthrough(&self) -> bool {
+        matches!(self, StreamingMode::Passthrough)
+    }
+
+    /// What the mode actually becomes. `disabled` says "synthesized" because that is
+    /// what it does today, even though its name promises something else.
+    pub fn effective_label(&self) -> &'static str {
+        match self {
+            StreamingMode::Fake => "backend JSON, synthesized SSE",
+            StreamingMode::Passthrough => "backend SSE, verbatim (OpenAI path only)",
+            StreamingMode::Disabled => "backend JSON, synthesized SSE (reserved: disabled)",
+        }
+    }
+
+    /// Lowercase spelling, as it appears in config files and the CLI.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            StreamingMode::Disabled => "disabled",
+            StreamingMode::Fake => "fake",
+            StreamingMode::Passthrough => "passthrough",
+        }
+    }
+
+    /// Parse a mode from a CLI string (case-insensitive).
+    /// Returns None for unknown values. `accumulator` is accepted as a
+    /// deprecated alias for `passthrough`.
+    pub fn from_str_mode(s: &str) -> Option<Self> {
+        match s.to_lowercase().as_str() {
+            "disabled" => Some(StreamingMode::Disabled),
+            "fake" => Some(StreamingMode::Fake),
+            "passthrough" | "accumulator" => Some(StreamingMode::Passthrough),
+            _ => None,
+        }
+    }
+
+    /// Resolve the effective streaming mode: CLI switch wins, then the loaded
+    /// config value, then the default (`fake`). `cli_override` is the raw
+    /// `--streaming-mode` value if present.
+    ///
+    /// Returns Err(unknown value) rather than exiting so callers (and tests)
+    /// control failure.
+    pub fn resolve(cli_override: Option<&str>, config_value: StreamingMode) -> Result<Self, String> {
+        match cli_override {
+            Some(raw) => Self::from_str_mode(raw)
+                .ok_or_else(|| format!("Invalid streaming mode: {}. Use 'disabled', 'fake', or 'passthrough'.", raw)),
+            None => Ok(config_value),
+        }
     }
 }
 
@@ -831,33 +894,43 @@ mod tests {
     fn test_streaming_mode_default() {
         let mode = StreamingMode::default();
         assert_eq!(mode, StreamingMode::Fake);
-        assert!(mode.is_implemented());
         assert!(mode.is_fake());
         assert!(!mode.is_disabled());
+        assert!(!mode.is_passthrough());
     }
 
     #[test]
     fn test_streaming_mode_disabled() {
         let mode = StreamingMode::Disabled;
-        assert!(mode.is_implemented());
         assert!(mode.is_disabled());
         assert!(!mode.is_fake());
+        assert!(!mode.is_passthrough());
+        // `disabled` has no distinct behavior yet; it must not claim one.
+        assert!(mode.effective_label().starts_with("backend JSON"));
     }
 
     #[test]
     fn test_streaming_mode_fake() {
         let mode = StreamingMode::Fake;
-        assert!(mode.is_implemented());
         assert!(mode.is_fake());
         assert!(!mode.is_disabled());
+        assert!(!mode.is_passthrough());
     }
 
     #[test]
-    fn test_streaming_mode_accumulator() {
-        let mode = StreamingMode::Accumulator;
-        assert!(!mode.is_implemented());
+    fn test_streaming_mode_passthrough() {
+        let mode = StreamingMode::Passthrough;
+        assert!(mode.is_passthrough());
         assert!(!mode.is_disabled());
         assert!(!mode.is_fake());
+    }
+
+    #[test]
+    fn test_effective_label_names_real_behavior() {
+        assert!(StreamingMode::Passthrough.effective_label().contains("verbatim"));
+        assert!(StreamingMode::Fake.effective_label().contains("synthesized"));
+        // The OpenAI-path-only caveat must be visible in the banner text.
+        assert!(StreamingMode::Passthrough.effective_label().contains("OpenAI"));
     }
 
     #[test]
@@ -865,20 +938,56 @@ mod tests {
         // Test serialization
         let disabled = StreamingMode::Disabled;
         let fake = StreamingMode::Fake;
-        let accumulator = StreamingMode::Accumulator;
+        let passthrough = StreamingMode::Passthrough;
 
         assert_eq!(serde_json::to_string(&disabled).unwrap(), "\"disabled\"");
         assert_eq!(serde_json::to_string(&fake).unwrap(), "\"fake\"");
-        assert_eq!(serde_json::to_string(&accumulator).unwrap(), "\"accumulator\"");
+        assert_eq!(serde_json::to_string(&passthrough).unwrap(), "\"passthrough\"");
 
         // Test deserialization
         let disabled: StreamingMode = serde_json::from_str("\"disabled\"").unwrap();
         let fake: StreamingMode = serde_json::from_str("\"fake\"").unwrap();
-        let accumulator: StreamingMode = serde_json::from_str("\"accumulator\"").unwrap();
+        let passthrough: StreamingMode = serde_json::from_str("\"passthrough\"").unwrap();
+        let legacy: StreamingMode = serde_json::from_str("\"accumulator\"").unwrap();
 
         assert_eq!(disabled, StreamingMode::Disabled);
         assert_eq!(fake, StreamingMode::Fake);
-        assert_eq!(accumulator, StreamingMode::Accumulator);
+        assert_eq!(passthrough, StreamingMode::Passthrough);
+        assert_eq!(legacy, StreamingMode::Passthrough);
+    }
+
+    #[test]
+    fn test_streaming_mode_from_str_mode() {
+        assert_eq!(StreamingMode::from_str_mode("disabled"), Some(StreamingMode::Disabled));
+        assert_eq!(StreamingMode::from_str_mode("FAKE"), Some(StreamingMode::Fake));
+        assert_eq!(StreamingMode::from_str_mode("Passthrough"), Some(StreamingMode::Passthrough));
+        assert_eq!(StreamingMode::from_str_mode("accumulator"), Some(StreamingMode::Passthrough));
+        assert_eq!(StreamingMode::from_str_mode("bogus"), None);
+    }
+
+    #[test]
+    fn test_streaming_mode_resolve_precedence() {
+        // CLI switch wins over config
+        assert_eq!(
+            StreamingMode::resolve(Some("disabled"), StreamingMode::Fake).unwrap(),
+            StreamingMode::Disabled
+        );
+        assert_eq!(
+            StreamingMode::resolve(Some("passthrough"), StreamingMode::Disabled).unwrap(),
+            StreamingMode::Passthrough
+        );
+        // Config wins over default when no switch
+        assert_eq!(
+            StreamingMode::resolve(None, StreamingMode::Disabled).unwrap(),
+            StreamingMode::Disabled
+        );
+        // Default when neither set (config already carries the serde default)
+        assert_eq!(
+            StreamingMode::resolve(None, StreamingMode::default()).unwrap(),
+            StreamingMode::Fake
+        );
+        // Unknown switch value is an error, never silent
+        assert!(StreamingMode::resolve(Some("bogus"), StreamingMode::Fake).is_err());
     }
 
     #[test]

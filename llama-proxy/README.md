@@ -135,9 +135,13 @@ fixes:
     toolcall_malformed_arguments:
       enabled: true
 
-# Streaming mode (default: fake)
-#   fake: request non-streaming from backend, synthesize SSE for client
-#   disabled: force streaming off completely
+# Streaming mode (default: fake).  CLI --streaming-mode overrides this file.
+#   fake        - one JSON from backend, synthesize SSE for client; fixes and reprompt run
+#   passthrough - backend SSE copied verbatim; /v1/chat/completions with stream:true only.
+#                 On that path fixes detect but do NOT repair and reprompt cannot run;
+#                 both still apply to buffered requests.  See streaming: in
+#                 config.yaml.default for the full trade-off.
+#   disabled    - reserved; behaves like fake until enforced
 # streaming: fake
 
 # Metrics logging
@@ -782,6 +786,21 @@ The proxy now warns at startup if a config key doesn't match any known fix.
 Both `toolcall_null_index` and `toolcall_null_index_fix` are accepted (the `_fix` suffix
 is normalized). A typo like `toolcall_badfilepath` (missing underscore) will trigger a
 warning listing all known fix names.
+
+### Is it really streaming?
+Watch deltas arrive. `-N` stops curl buffering; adjust the port to your `server.port`.
+```bash
+curl -N http://localhost:8066/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"any","messages":[{"role":"user","content":"Count slowly from 1 to 40"}],"stream":true}'
+```
+- `passthrough`: chunks trickle in over the whole generation, and the per-request log line
+  reads `stream=ok`.
+- `fake`: nothing, then every chunk at once after the backend finishes; the log line reads `sync`.
+
+`curl -s localhost:8066/proxy/metrics | grep openai_stream_passthrough_total` moves once per
+streamed OpenAI request in `passthrough` and never in `fake`. `/v1/messages` (Claude Code)
+is buffered in every mode, so it always looks like `fake` here.
 
 ### Metrics not appearing
 Check that `stats.enabled: true` in your config and verify the format setting.

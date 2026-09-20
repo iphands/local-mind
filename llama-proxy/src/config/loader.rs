@@ -16,9 +16,6 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
     // Validate server configuration
     validate_server_config(&config.server)?;
 
-    // Validate streaming configuration
-    validate_streaming_config(&config.streaming)?;
-
     // Validate reprompt config if present
     if let Some(ref r) = config.reprompt {
         if r.enabled && r.prompt_file.is_none() && r.prompt.is_none() {
@@ -109,23 +106,6 @@ fn validate_backend_config(config: &super::BackendConfig) -> Result<(), ConfigEr
         return Err(ConfigError::Validation(
             "Backend timeout_seconds must be greater than 0".to_string(),
         ));
-    }
-
-    Ok(())
-}
-
-/// Validate streaming configuration
-fn validate_streaming_config(config: &super::StreamingMode) -> Result<(), ConfigError> {
-    // Validate streaming mode is implemented
-    if !config.is_implemented() {
-        return Err(ConfigError::Validation(format!(
-            "Streaming mode '{}' is not yet implemented. Use 'disabled' or 'fake'",
-            match config {
-                super::StreamingMode::Disabled => "disabled",
-                super::StreamingMode::Fake => "fake",
-                super::StreamingMode::Accumulator => "accumulator",
-            }
-        )));
     }
 
     Ok(())
@@ -402,26 +382,6 @@ exporters:
     }
 
     #[test]
-    fn test_validate_streaming_config_valid_modes() {
-        // Test disabled mode
-        let config = super::super::StreamingMode::Disabled;
-        assert!(validate_streaming_config(&config).is_ok());
-
-        // Test fake mode
-        let config = super::super::StreamingMode::Fake;
-        assert!(validate_streaming_config(&config).is_ok());
-    }
-
-    #[test]
-    fn test_validate_streaming_config_unimplemented_mode() {
-        let config = super::super::StreamingMode::Accumulator;
-        let result = validate_streaming_config(&config);
-        assert!(result.is_err());
-        let err = result.unwrap_err();
-        assert!(matches!(err, ConfigError::Validation(_)));
-        assert!(err.to_string().contains("not yet implemented"));
-    }
-    #[test]
     fn test_invalid_timeout() {
         let temp_dir = std::env::temp_dir();
         let temp_file = temp_dir.join("test_invalid_timeout.yaml");
@@ -463,6 +423,63 @@ exporters:
         assert!(err.to_string().contains("timeout_seconds must be greater than 0"));
 
         // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    fn streaming_yaml(mode_line: &str) -> std::path::PathBuf {
+        let temp_file = std::env::temp_dir().join(format!("test_streaming_{}.yaml", mode_line.replace([':', ' '], "_")));
+        std::fs::write(
+            &temp_file,
+            format!(
+                r#"
+server:
+  port: 8066
+  host: "0.0.0.0"
+backend:
+  url: "http://localhost:8080"
+  timeout_seconds: 300
+fixes:
+  enabled: true
+  modules: {{}}
+stats:
+  enabled: true
+  format: "json"
+  log_interval: 1
+exporters:
+  influxdb:
+    enabled: false
+    url: ""
+    org: ""
+    bucket: ""
+    token: ""
+    batch_size: 0
+    flush_interval_seconds: 0
+streaming: {}
+"#,
+                mode_line
+            ),
+        )
+        .unwrap();
+        temp_file
+    }
+
+    #[test]
+    fn test_load_config_accepts_unimplemented_streaming_mode() {
+        // The loader validates SHAPE only. Rejecting a mode here would
+        // pre-empt the CLI switch, so `--streaming-mode fake` could not
+        // override `streaming: passthrough` in the file. run_proxy enforces
+        // startability AFTER resolve() applies the precedence.
+        let temp_file = streaming_yaml("passthrough");
+        let config = load_config(&temp_file).expect("passthrough must load");
+        assert_eq!(config.streaming, super::super::StreamingMode::Passthrough);
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_load_config_rejects_unknown_streaming_mode() {
+        let temp_file = streaming_yaml("teleport");
+        let err = load_config(&temp_file).expect_err("unknown mode must not load");
+        assert!(matches!(err, ConfigError::Parse(_)), "got {:?}", err);
         let _ = std::fs::remove_file(&temp_file);
     }
 

@@ -11,3 +11,7 @@ test-all:
 
 run:
   cargo run --features influxdb --release run --hide-requests
+
+# Run with passthrough streaming; the CLI switch outranks config.yaml.
+runstream:
+  cargo run --features influxdb --release run --hide-requests --streaming-mode passthrough

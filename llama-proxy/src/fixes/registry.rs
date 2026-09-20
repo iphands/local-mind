@@ -11,6 +11,17 @@ pub struct FixRegistry {
     enabled: HashMap<String, bool>,
 }
 
+/// Clip a snippet for a log field, marking that it was clipped. Char-safe:
+/// model output routinely contains multibyte sequences.
+fn truncate_snippet(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        s.to_string()
+    } else {
+        let kept: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+        format!("{}...", kept)
+    }
+}
+
 impl FixRegistry {
     /// Create a new empty registry
     pub fn new() -> Self {
@@ -142,6 +153,61 @@ impl FixRegistry {
         }
 
         result
+    }
+
+    /// Detect (but never repair) malformed content in a complete response.
+    ///
+    /// Used by the verbatim streaming path, where fixes must not run because
+    /// repairing partial deltas corrupts tool calls. Returns the names of
+    /// fixes that would have fired; logs them as "detected, NOT repaired" so
+    /// operators can see what the client received unmodified.
+    ///
+    /// `reason` states why repairs are skipped on *this* call path; it is
+    /// supplied by the caller so the log can never claim an attribution the
+    /// config doesn't actually select.
+    ///
+    /// Runs each fix's apply() on a throwaway clone and discards the result:
+    /// apply() embeds the precise malformed-content predicates, so this gives
+    /// fix-grade detection precision without any new per-fix code.
+    pub fn detect_fixes(&self, response: &Value, request: Option<&Value>, reason: &str) -> Vec<String> {
+        let mut detected = Vec::new();
+
+        for fix in &self.fixes {
+            if !self.is_enabled(fix.name()) {
+                continue;
+            }
+            // applies() borrows: no clone in the common (no-match) case
+            let applies = match request {
+                Some(req) => fix.applies_with_context(response, req),
+                None => fix.applies(response),
+            };
+            if !applies {
+                continue;
+            }
+            let candidate = response.clone();
+            let (_, action) = match request {
+                Some(req) => fix.apply_with_context(candidate, req),
+                None => fix.apply(candidate),
+            };
+            if action.detected() {
+                let snippet = match &action {
+                    FixAction::Fixed { original_snippet, .. } => original_snippet.clone(),
+                    FixAction::Failed { original_snippet, .. } => original_snippet.clone(),
+                    FixAction::NotApplicable => String::new(),
+                };
+                let snippet = truncate_snippet(&snippet, 200);
+                tracing::debug!(
+                    fix_name = fix.name(),
+                    reason = reason,
+                    original = %snippet,
+                    "streaming_pass_through: {} detected, NOT repaired - client received it as-is.",
+                    fix.name()
+                );
+                detected.push(fix.name().to_string());
+            }
+        }
+
+        detected
     }
 
     /// Centralized logging for fix actions

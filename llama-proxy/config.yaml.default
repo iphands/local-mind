@@ -127,11 +127,26 @@ backend:
 #   enabled: true
 #   log_level: "warn"
 
-# Streaming mode (default: fake)
-# Controls how the proxy handles streaming responses:
-#   disabled: Forces streaming off completely
-#   fake: Forces non-streaming to backend, synthesizes streaming to frontend
-#   accumulator: NOT IMPLEMENTED - will error if used
+# Streaming mode (default: fake).  CLI --streaming-mode overrides this file.
+#   fake        - ONE JSON from the backend, SSE synthesized to the client.  Fixes run,
+#                 reprompt runs.  Pick this when you want the proxy to repair output.
+#   passthrough - the backend's SSE is forwarded byte-for-byte.  Applies to OpenAI
+#                 /v1/chat/completions with stream:true; everything else (non-streaming,
+#                 /v1/messages) stays buffered (no OpenAI->Anthropic SSE translator yet).
+#                 On the streamed path fixes DETECT but do NOT repair - patching partial
+#                 deltas corrupts them - and reprompt cannot run, since it needs the
+#                 complete body.  Both still work on buffered requests.
+#                 The proxy sets stream_options.include_usage=true on the backend
+#                 request unless the client already set it, because streaming token
+#                 counts are otherwise absent.  Nothing else in the request changes.
+#                 Note: with max_concurrent_requests set, a passthrough request holds
+#                 its permit for the whole generation, not just until headers - so the
+#                 limit bites where fake mode never touched it.
+#                 backend timeout_seconds bounds the whole stream, exactly as it bounds
+#                 the buffered generation in fake mode: a stream still running at the
+#                 deadline is aborted mid-body.
+#   disabled    - reserved; behaves identically to fake until enforced in the request path.
+#   accumulator - deprecated alias for passthrough.
 # streaming: fake
 
 # Stats logging (default: enabled, pretty format, log every request)

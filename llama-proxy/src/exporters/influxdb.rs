@@ -76,7 +76,15 @@ impl MetricsExporter for InfluxDbExporter {
         let mut builder = DataPoint::builder("llama_request")
             .tag("model", &metrics.model)
             .tag("streaming", metrics.streaming.to_string())
-            .tag("finish_reason", &metrics.finish_reason);
+            .tag("finish_reason", &metrics.finish_reason)
+            .tag(
+                "stream_end",
+                match metrics.stream_end {
+                    Some(e) => e,
+                    None if !metrics.streaming => "sync",
+                    None => "unknown",
+                },
+            );
 
         if let Some(ref client_id) = metrics.client_id {
             builder = builder.tag("client_id", client_id.as_str());
@@ -101,6 +109,7 @@ impl MetricsExporter for InfluxDbExporter {
             .field("prompt_ms", metrics.prompt_ms)
             .field("generation_ms", metrics.generation_ms)
             .field("duration_ms", metrics.duration_ms)
+            .field("stream_incomplete", metrics.stream_incomplete)
             .field("input_len", metrics.input_len as f64)
             .field("output_len", metrics.output_len as f64);
 

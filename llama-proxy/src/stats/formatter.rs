@@ -51,6 +51,21 @@ fn format_pretty(m: &RequestMetrics) -> String {
         .map(|c| format!("│ Concurrent: {:52}│\n", c))
         .unwrap_or_default();
 
+    // A client that hung up is normal traffic, not a defect worth a box line;
+    // an incomplete answer always is, whatever caused it.
+    let stream_line = if !m.streaming {
+        String::new()
+    } else {
+        match m.stream_end {
+            Some("truncated") => Some("TRUNCATED (backend ended without a completion event)"),
+            Some("stalled") => Some("STALLED (stream timed out before completion)"),
+            Some("client_gone") => None,
+            _ => Some("ok"),
+        }
+        .map(|s| format!("│ Stream: {:55}│\n", s))
+        .unwrap_or_default()
+    };
+
     // A prefill/decode split is only real when the backend reported one. For
     // backends that do not (vLLM), show the throughput a single wall-clock
     // duration can actually support rather than inventing a split.
@@ -82,7 +97,7 @@ fn format_pretty(m: &RequestMetrics) -> String {
 {}├──────────────────────────────────────────────────────────────────┤
 │ Context: {:54}│
 │ Finish: {:56}│
-│ Duration: {:54.1}ms│
+{}│ Duration: {:54.1}ms│
 {}└──────────────────────────────────────────────────────────────────┘
 "#,
         truncate(&m.model, 56),
@@ -95,6 +110,7 @@ fn format_pretty(m: &RequestMetrics) -> String {
         reasoning_line,
         context_str,
         m.finish_reason,
+        stream_line,
         m.duration_ms,
         concurrent_line,
     )
@@ -148,7 +164,20 @@ fn format_compact(m: &RequestMetrics) -> String {
         m.completion_tokens,
         tps_str,
         context_str,
-        if m.streaming { "stream" } else { "sync" },
+        if m.streaming {
+            match m.stream_end {
+                Some("truncated") => "stream=trunc",
+                Some("stalled") => "stream=stalled",
+                Some("client_gone") => "stream=gone",
+                Some("ok") => "stream=ok",
+                // Requests whose stream end was never observed (legacy/other
+                // paths) keep the historical bare marker.
+                _ if m.stream_incomplete => "stream=trunc",
+                _ => "stream=ok",
+            }
+        } else {
+            "sync"
+        },
         m.finish_reason,
         m.duration_ms,
         queue_str,
@@ -158,10 +187,11 @@ fn format_compact(m: &RequestMetrics) -> String {
 
 /// Truncate a string to max length with ellipsis
 fn truncate(s: &str, max_len: usize) -> String {
-    if s.len() <= max_len {
+    if s.chars().count() <= max_len {
         s.to_string()
     } else {
-        format!("{}...", &s[..max_len.saturating_sub(3)])
+        let kept: String = s.chars().take(max_len.saturating_sub(3)).collect();
+        format!("{}...", kept)
     }
 }
 
@@ -243,6 +273,37 @@ mod tests {
 
         let output = format_compact(&m);
         assert!(output.contains("sync"));
+    }
+
+    #[test]
+    fn test_stream_end_badges_are_key_value() {
+        let cases = [
+            (Some("ok"), "stream=ok"),
+            (Some("truncated"), "stream=trunc"),
+            (Some("stalled"), "stream=stalled"),
+            (Some("client_gone"), "stream=gone"),
+        ];
+        for (end, expected) in cases {
+            let mut m = create_test_metrics();
+            m.stream_end = end;
+            let output = format_compact(&m);
+            assert!(output.contains(expected), "{end:?} -> {output}");
+            assert!(!output.contains("stream "), "must stay one field: {output}");
+        }
+    }
+
+    #[test]
+    fn test_pretty_reports_truncation() {
+        let mut m = create_test_metrics();
+        m.stream_end = Some("truncated");
+        m.stream_incomplete = true;
+        let output = format_pretty(&m);
+        assert!(output.contains("TRUNCATED"), "got: {output}");
+
+        let mut m = create_test_metrics();
+        m.stream_end = Some("client_gone");
+        let output = format_pretty(&m);
+        assert!(!output.contains("Stream:"), "a client hangup is not a defect line: {output}");
     }
 
     #[test]
@@ -402,6 +463,34 @@ mod tests {
     fn test_truncate_empty() {
         let result = truncate("", 10);
         assert_eq!(result, "");
+    }
+
+    /// A model name with multibyte characters used to be sliced on a byte index,
+    /// which panicked the whole formatter when the cut landed mid-character.
+    /// Sweeping every width is stronger than one hand-picked index: it covers
+    /// whatever width a caller (or a future box redesign) picks.
+    #[test]
+    fn test_truncate_multibyte_never_panics() {
+        for name in [
+            "模型-🌍-very-long-model-name-that-exceeds-the-limit-by-a-lot",
+            "aaaaaaaaaaaa模型bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb模型-very-long-model-name",
+        ] {
+            for width in 1..=name.chars().count() + 5 {
+                let out = truncate(name, width);
+                // "..." is the floor: below width 3 the ellipsis cannot shrink.
+                assert!(
+                    out.chars().count() <= width.max(3),
+                    "width {width} produced {} chars: {out:?}",
+                    out.chars().count()
+                );
+            }
+        }
+
+        // The path that actually shipped the panic: format_pretty truncates the
+        // model name at a fixed width.
+        let mut m = create_test_metrics();
+        m.model = "aaaaaaaaaaaa模型bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb模型-very-long-model-name".to_string();
+        let _ = format_pretty(&m);
     }
 
     #[test]

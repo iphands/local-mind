@@ -6,7 +6,7 @@ use axum::{
     Router,
 };
 use std::net::SocketAddr;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -37,6 +37,23 @@ pub struct ProxyState {
 
     /// Counter for when backend returns streaming despite stream:false
     pub backend_streaming_fallback_hits: Arc<AtomicUsize>,
+
+    /// Requests routed to the backend with stream:true intact (passthrough decision).
+    /// Counted at the routing decision so it moves even with stats.enabled: false -
+    /// unlike the passthrough_* ratios, which need accumulation to be computed.
+    pub openai_stream_passthrough_total: Arc<AtomicU64>,
+
+    /// Passthrough asked the backend for stream:true and got a JSON body back instead
+    /// of text/event-stream. Names the backend as the limiter, not the proxy.
+    pub backend_nonsse_when_streamed_for: Arc<AtomicU64>,
+
+    /// Anthropic /v1/messages responses served buffered + synthesized while the mode is
+    /// passthrough. The per-request notice fires once per process, so this is the only
+    /// signal left after the first one.
+    pub anthropic_buffered_responses_total: Arc<AtomicU64>,
+
+    /// Fires the "passthrough does not apply here" notice on the first /v1/messages only.
+    pub anthropic_buffered_notice_once: Arc<AtomicBool>,
 
     /// Counter for rejected requests at capacity
     pub rejected_requests: Arc<AtomicUsize>,
@@ -168,6 +185,10 @@ pub async fn run_server(
         },
         concurrent_requests: Arc::new(AtomicUsize::new(0)),
         backend_streaming_fallback_hits: Arc::new(AtomicUsize::new(0)),
+        openai_stream_passthrough_total: Arc::new(AtomicU64::new(0)),
+        backend_nonsse_when_streamed_for: Arc::new(AtomicU64::new(0)),
+        anthropic_buffered_responses_total: Arc::new(AtomicU64::new(0)),
+        anthropic_buffered_notice_once: Arc::new(AtomicBool::new(false)),
         rejected_requests: Arc::new(AtomicUsize::new(0)),
         concurrent_semaphore: if config.server.max_concurrent_requests > 0 {
             Some(Arc::new(Semaphore::new(config.server.max_concurrent_requests)))

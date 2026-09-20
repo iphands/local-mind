@@ -67,6 +67,13 @@ pub struct RequestMetrics {
     pub output_len: usize,
     /// Whether this was a streaming request
     pub streaming: bool,
+    /// Stream ended without the client receiving a whole answer (truncated,
+    /// stalled, or backend error). Client disconnects are excluded.
+    #[serde(default)]
+    pub stream_incomplete: bool,
+    /// Why the stream ended: "ok" | "truncated" | "stalled" | "client_gone"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stream_end: Option<&'static str>,
     /// Finish reason
     pub finish_reason: String,
     /// Request duration in ms
@@ -113,6 +120,8 @@ impl RequestMetrics {
             input_len: 0,
             output_len: 0,
             streaming: false,
+            stream_incomplete: false,
+            stream_end: None,
             finish_reason: "unknown".to_string(),
             duration_ms: 0.0,
             reasoning_tokens: None,

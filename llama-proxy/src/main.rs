@@ -76,7 +76,7 @@ enum Commands {
         /// Override backend URL (e.g., "https://example.com:4234")
         #[arg(long)]
         backend_url: Option<String>,
-        /// Override streaming mode (disabled, fake, accumulator)
+        /// Override streaming mode (disabled, fake, passthrough). Takes precedence over the config file.
         #[arg(long, value_name = "MODE")]
         streaming_mode: Option<String>,
         /// Hide request log lines (only show response stats)
@@ -178,31 +178,14 @@ async fn run_proxy(
             config.backend.url = url;
         }
     }
-    if let Some(mode_str) = streaming_mode_override {
-        use llama_proxy::config::StreamingMode;
-        config.streaming = match mode_str.to_lowercase().as_str() {
-            "disabled" => StreamingMode::Disabled,
-            "fake" => StreamingMode::Fake,
-            "accumulator" => StreamingMode::Accumulator,
-            _ => {
-                eprintln!(
-                    "Invalid streaming mode: {}. Use 'disabled', 'fake', or 'accumulator'.",
-                    mode_str
-                );
-                std::process::exit(1);
-            }
-        };
-    }
-
-    // Validate streaming mode is implemented
-    if !config.streaming.is_implemented() {
-        eprintln!("Error: Streaming mode '{:?}' is not yet implemented.", config.streaming);
-        eprintln!("Available modes:");
-        eprintln!("  - disabled: Forces streaming off completely");
-        eprintln!("  - fake: Forces non-streaming to backend, synthesizes streaming to frontend (default)");
-        eprintln!("  - accumulator: NOT IMPLEMENTED");
-        std::process::exit(1);
-    }
+    // Streaming mode precedence: CLI switch > config file > default (fake)
+    config.streaming = match llama_proxy::config::StreamingMode::resolve(streaming_mode_override.as_deref(), config.streaming) {
+        Ok(mode) => mode,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
 
     tracing::info!("Loading configuration from {:?}", config_path);
 
@@ -341,9 +324,46 @@ fn log_config_settings(config: &AppConfig) {
 
     // Streaming
     tracing::info!(
-        mode = ?config.streaming,
+        mode = %config.streaming,
+        effective = config.streaming.effective_label(),
+        honored_on = if config.streaming.is_passthrough() { "/v1/chat/completions with stream:true" } else { "all streaming clients" },
         "Streaming"
     );
+
+    // A mode can quietly switch off features the config explicitly asked for. Say it
+    // once, loudly, naming them - otherwise the user debugs "why didn't reprompt fire"
+    // with no idea the mode they chose is why.
+    if config.streaming.is_passthrough() {
+        let reprompt_asked = config.reprompt.as_ref().map(|r| r.enabled).unwrap_or(false);
+        let degraded = config.fixes.enabled || reprompt_asked;
+
+        let mut gives_up = Vec::new();
+        if config.fixes.enabled {
+            gives_up.push("on that path fixes DETECT but do NOT repair (passthrough_fix_unrepaired_total)");
+        }
+        if reprompt_asked {
+            gives_up.push("on that path reprompt cannot run - it needs the complete JSON body. Non-streaming and /v1/messages requests still reprompt");
+        }
+
+        let msg = format!(
+            "streaming: passthrough forwards backend SSE verbatim for /v1/chat/completions with stream:true. \
+             Everything else (non-streaming, /v1/messages) stays buffered + synthesized. {}",
+            if gives_up.is_empty() {
+                "Nothing configured is bypassed by this mode.".to_string()
+            } else {
+                format!(
+                    "This mode gives up on the streamed path: {}. Want repair + premature-stop recovery there? use: streaming: fake",
+                    gives_up.join("; ")
+                )
+            }
+        );
+
+        if degraded {
+            tracing::warn!("{}", msg);
+        } else {
+            tracing::info!("{}", msg);
+        }
+    }
 
     // Stats
     tracing::info!(
@@ -442,7 +462,29 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
             println!("  Enabled: {}", config.stats.enabled);
             println!("  Format: {:?}", config.stats.format);
             println!("\nStreaming:");
-            println!("  Mode: {:?}", config.streaming);
+            println!("  Mode: {}", config.streaming);
+            println!("  Effective: {}", config.streaming.effective_label());
+            if config.streaming.is_passthrough() {
+                println!("  Honored on: /v1/chat/completions with stream:true");
+                println!("  Anthropic /v1/messages: buffered + synthesized (no OpenAI->Anthropic SSE translator yet)");
+                println!(
+                    "  Fixes on this path: {} - DETECT ONLY, not repaired (passthrough_fix_unrepaired_total)",
+                    if config.fixes.enabled {
+                        "enabled"
+                    } else {
+                        "disabled in config"
+                    }
+                );
+                let reprompt_asked = config.reprompt.as_ref().map(|r| r.enabled).unwrap_or(false);
+                println!(
+                    "  Reprompt on the streamed path: cannot run{}",
+                    if reprompt_asked {
+                        " - config asks for enabled: true; it still runs on non-streaming and /v1/messages"
+                    } else {
+                        ""
+                    }
+                );
+            }
             println!("\nExporters:");
             println!("  InfluxDB: {}", config.exporters.influxdb.enabled);
             Ok(())
