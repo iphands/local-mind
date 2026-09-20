@@ -804,3 +804,30 @@ is buffered in every mode, so it always looks like `fake` here.
 
 ### Metrics not appearing
 Check that `stats.enabled: true` in your config and verify the format setting.
+
+Samples with **no throughput signal** — no token count and no backend-reported
+rate — are excluded from every exporter, including InfluxDB. That is the absence of
+a measurement rather than a slow request: a stream the client abandoned before
+llama.cpp sent its final chunk (the only chunk carrying `usage`/`timings`), or a
+backend error body. Writing those would post a run of literal zeros into every
+throughput aggregate.
+
+They are counted exactly — each one increments
+`llama_proxy_metrics_export_skipped_total` on `/proxy/metrics` — and 1 in 100 is also
+logged at WARN (the first drop always logs) with `model`, `stream_end`,
+`finish_reason`, `prompt_tokens` and `duration_ms`, the only fields of such a sample
+that are not zero. Sampling is deliberate: a client that interrupts streams would
+otherwise bury every other warning. So **do not hunt the log for a specific dropped
+request** — 99 times in 100 no line exists for it; the counter is the reconciliation
+number, not the log. A surviving line reads `stream_end=client_gone` for an abandoned
+stream and `stream_end=sync finish_reason=unknown` for a backend error body.
+
+Two things that will otherwise send you down a dead end: the counter only moves when
+`stats.enabled: true` (the filter sits in the stats path, so an empty dashboard *and*
+a counter at 0 means stats are off, not that the filter is hungry), and it is a
+process-global counter that **resets on restart**, so a before/after diff spanning a
+deploy will show it go down. The counter also spans both the buffered and
+pass-through paths, which is why it does not match
+`llama_proxy_passthrough_stream_client_gone_total`. And note the corollary of the
+filter itself: load the proxy never observed no longer reaches InfluxDB, so remote
+token totals under-count actual backend work by roughly the skipped count.

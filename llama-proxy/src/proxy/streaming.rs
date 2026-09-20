@@ -13,7 +13,7 @@ use crate::config::StatsFormat;
 use crate::exporters::ExporterManager;
 use crate::fixes::FixRegistry;
 use crate::proxy::fetch_context_total;
-use crate::stats::{format_metrics, RequestMetrics};
+use crate::stats::RequestMetrics;
 use axum::http::header;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::task::Poll;
@@ -839,29 +839,29 @@ pub async fn handle_streaming_response(
                             return;
                         };
 
-                        // Fetch and set context_total
-                        match fetch_context_total(&client, &backend_url, strip_path_prefix.as_deref()).await {
-                            Some(ctx_total) => {
-                                metrics.context_total = Some(ctx_total);
-                                metrics.calculate_context_percent();
-                            }
-                            None => {
-                                // Warn once per backend URL, not per request
-                                crate::proxy::warn_context_fetch_failed_once(&backend_url, &metrics.model).await;
-                                // Continue without context metrics - the request still succeeds
+                        // A sample with no throughput signal has no token count
+                        // either, so nothing can be done with context_percent -
+                        // skip the /slots round-trip it would be wasted on.
+                        if metrics.has_throughput_signal() {
+                            match fetch_context_total(&client, &backend_url, strip_path_prefix.as_deref()).await {
+                                Some(ctx_total) => {
+                                    metrics.context_total = Some(ctx_total);
+                                    metrics.calculate_context_percent();
+                                }
+                                None => {
+                                    // Warn once per backend URL, not per request
+                                    crate::proxy::warn_context_fetch_failed_once(&backend_url, &metrics.model).await;
+                                    // Continue without context metrics - the request still succeeds
+                                }
                             }
                         }
 
-                        // Format and log stats
-                        let formatted = format_metrics(&metrics, stats_format);
-                        if stats_format == StatsFormat::Compact {
-                            tracing::info!("{}", formatted);
-                        } else {
-                            tracing::info!("\n{}", formatted);
+                        // The gate logs the sample and decides whether it is fit
+                        // to export.
+                        if crate::exporters::log_sample_and_should_export(&metrics, stats_format) {
+                            // Export to remote systems
+                            exporter_manager.export_all(&metrics).await;
                         }
-
-                        // Export to remote systems
-                        exporter_manager.export_all(&metrics).await;
                     }
                 } else {
                     tracing::trace!(

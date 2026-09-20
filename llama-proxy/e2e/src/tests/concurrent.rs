@@ -240,6 +240,7 @@ pub async fn test_proxy_metrics_endpoint(ctx: TestContext) -> anyhow::Result<()>
         "llama_proxy_backend_streaming_fallback_total",
         "llama_proxy_concurrent_requests",
         "llama_proxy_rejected_requests_total",
+        "llama_proxy_metrics_export_skipped_total",
     ] {
         assert_true(
             body.contains(&format!("# TYPE {metric} ")),

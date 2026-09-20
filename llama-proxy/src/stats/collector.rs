@@ -356,6 +356,41 @@ impl RequestMetrics {
             }
         }
     }
+
+    /// True when the backend told us anything at all about throughput: a token
+    /// count or a rate.
+    ///
+    /// The negative case is a stream the client abandoned before the backend's
+    /// final chunk (llama.cpp carries `usage` and `timings` only there) or a
+    /// backend error body. Such a sample still has a real `duration_ms`, but
+    /// every token and tokens/sec field in it is zero: that is the *absence of a
+    /// measurement*, not a slow request. Handing it to an exporter writes a wall
+    /// of zeros that drags every aggregate toward the floor, so callers drop it
+    /// and log it instead - see
+    /// [`crate::exporters::log_sample_and_should_export`].
+    ///
+    /// Deliberately not a check on `stream_end`: a client-gone stream that *did*
+    /// receive the final chunk carries a genuine measurement and is exported.
+    /// The cost of the filter is that aborted load the proxy never observed stops
+    /// appearing in InfluxDB, so `sum(total_tokens)` there under-counts real
+    /// backend work. [`crate::exporters::EXPORTS_SKIPPED_TOTAL`] is the number to
+    /// reconcile that gap with.
+    pub fn has_throughput_signal(&self) -> bool {
+        // `total_tokens` is not redundant with `total_tps`: the latter is only
+        // computed when duration_ms > 0 (see above), so a request finishing
+        // inside the timer's resolution would otherwise read as "no signal".
+        self.total_tokens > 0 || self.total_tps > 0.0 || self.prompt_tps > 0.0 || self.generation_tps > 0.0
+    }
+
+    /// How the request ended, as a label. Shared by the log line and the InfluxDB
+    /// `stream_end` tag so the two cannot drift apart.
+    pub fn stream_end_label(&self) -> &'static str {
+        match self.stream_end {
+            Some(end) => end,
+            None if !self.streaming => "sync",
+            None => "unknown",
+        }
+    }
 }
 
 impl Default for RequestMetrics {
@@ -599,6 +634,79 @@ mod tests {
         metrics.calculate_context_percent();
 
         assert_eq!(metrics.context_percent, None);
+    }
+
+    #[test]
+    fn test_has_throughput_signal_needs_a_token_count_or_a_rate() {
+        let mut m = RequestMetrics::new();
+        assert!(!m.has_throughput_signal(), "an all-zero sample is not a measurement");
+
+        m.total_tokens = 1;
+        assert!(m.has_throughput_signal());
+
+        // total_tps is only computed when duration_ms > 0, so tokens alone must
+        // count - otherwise a request faster than the timer's resolution reads as
+        // having no signal.
+        let mut m = RequestMetrics::new();
+        m.total_tokens = 100;
+        assert!(m.has_throughput_signal(), "total_tokens must not be redundant");
+
+        for rate in ["total_tps", "prompt_tps", "generation_tps"] {
+            let mut m = RequestMetrics::new();
+            match rate {
+                "total_tps" => m.total_tps = 12.5,
+                "prompt_tps" => m.prompt_tps = 12.5,
+                _ => m.generation_tps = 12.5,
+            }
+            assert!(m.has_throughput_signal(), "{rate} alone should be a signal");
+        }
+    }
+
+    /// The operator's line: 24.8s of wall clock, `stream=gone finish=unknown`,
+    /// because llama.cpp carries `usage`/`timings` only in the chunk that never
+    /// arrived. Duration is real; throughput is absent.
+    #[test]
+    fn test_aborted_stream_without_usage_has_no_signal() {
+        let response = serde_json::json!({
+            "model": "cosmo-6000",
+            "choices": [{"index": 0, "delta": {"content": "partial"}, "finish_reason": null}]
+        });
+        let request = serde_json::json!({"messages": [{"role": "user", "content": "hi"}]});
+
+        let m = RequestMetrics::from_response(&response, &request, true, 24811.0);
+
+        assert_eq!(m.total_tokens, 0);
+        assert_eq!(m.total_tps, 0.0);
+        assert!(!m.has_throughput_signal());
+        assert_eq!(m.duration_ms, 24811.0, "the wall clock is still measured");
+    }
+
+    /// A refusal / zero-completion answer is a genuine measurement: the prompt
+    /// tokens were really processed. It must survive the filter.
+    #[test]
+    fn test_zero_completion_with_usage_keeps_signal() {
+        let response = serde_json::json!({
+            "model": "cosmo-6000",
+            "usage": {"prompt_tokens": 1200, "completion_tokens": 0, "total_tokens": 1200},
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        });
+        let request = serde_json::json!({"messages": []});
+
+        let m = RequestMetrics::from_response(&response, &request, false, 340.0);
+
+        assert!(m.has_throughput_signal());
+    }
+
+    #[test]
+    fn test_stream_end_label() {
+        let mut m = RequestMetrics::new();
+        assert_eq!(m.stream_end_label(), "sync", "buffered request, no stream observed");
+
+        m.streaming = true;
+        assert_eq!(m.stream_end_label(), "unknown", "streaming but the end was never seen");
+
+        m.stream_end = Some("client_gone");
+        assert_eq!(m.stream_end_label(), "client_gone", "an observed end always wins");
     }
 
     #[test]

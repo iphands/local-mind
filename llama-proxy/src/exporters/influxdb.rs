@@ -77,14 +77,7 @@ impl MetricsExporter for InfluxDbExporter {
             .tag("model", &metrics.model)
             .tag("streaming", metrics.streaming.to_string())
             .tag("finish_reason", &metrics.finish_reason)
-            .tag(
-                "stream_end",
-                match metrics.stream_end {
-                    Some(e) => e,
-                    None if !metrics.streaming => "sync",
-                    None => "unknown",
-                },
-            );
+            .tag("stream_end", metrics.stream_end_label());
 
         if let Some(ref client_id) = metrics.client_id {
             builder = builder.tag("client_id", client_id.as_str());

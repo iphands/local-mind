@@ -18,9 +18,8 @@ use super::{synthesize_anthropic_streaming_response, synthesize_streaming_respon
 use crate::api::{AnthropicMessage, ChatCompletionRequest, ChatCompletionResponse};
 use crate::augment::{extract_user_content_from_json, inject_augmentation};
 use crate::backends::BackendNode;
-use crate::config::StatsFormat;
 use crate::proxy::fetch_context_total;
-use crate::stats::{format_metrics, format_request_log, RequestMetrics};
+use crate::stats::{format_request_log, RequestMetrics};
 
 /// Response when server is at capacity
 fn at_capacity_response(max: usize) -> Response {
@@ -413,7 +412,10 @@ impl ProxyHandler {
                      llama_proxy_passthrough_fix_unrepaired_total {}\n\
                      # HELP llama_proxy_passthrough_compressed_responses_total Responses bypassed entirely because Content-Encoding was not identity. Not counted in any other passthrough_* metric.\n\
                      # TYPE llama_proxy_passthrough_compressed_responses_total counter\n\
-                     llama_proxy_passthrough_compressed_responses_total {}\n",
+                     llama_proxy_passthrough_compressed_responses_total {}\n\
+                     # HELP llama_proxy_metrics_export_skipped_total Metric samples excluded from every exporter because the backend reported no token count and no rate: a stream the client abandoned before usage/timings arrived, or a backend error body. They are logged at WARN instead. Spans the buffered and pass-through paths, and is NOT the same as passthrough_stream_client_gone_total - a client-gone stream that did carry usage is exported and is not counted here. Remote token totals under-count backend work by this amount.\n\
+                     # TYPE llama_proxy_metrics_export_skipped_total counter\n\
+                     llama_proxy_metrics_export_skipped_total {}\n",
                     fallback_hits,
                     concurrent,
                     rejected,
@@ -428,6 +430,7 @@ impl ProxyHandler {
                     l(&stream_stats::STREAM_CLIENT_GONE_TOTAL),
                     l(&stream_stats::FIX_UNREPAIRED_TOTAL),
                     l(&stream_stats::STREAM_COMPRESSED_TOTAL),
+                    l(&crate::exporters::EXPORTS_SKIPPED_TOTAL),
                 );
 
                 return (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response();
@@ -931,8 +934,11 @@ impl ProxyHandler {
                     None
                 };
 
-                // Fetch and set context_total for stats
-                if let Some(ref mut m) = metrics {
+                // Fetch and set context_total, gated on the same
+                // has_throughput_signal the export gate uses: with no token count
+                // there is nothing for context_percent to divide. This also skips
+                // warn_context_fetch_failed_once for those samples.
+                if let Some(m) = metrics.as_mut().filter(|m| m.has_throughput_signal()) {
                     match fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref())
                         .await
                     {
@@ -980,22 +986,17 @@ impl ProxyHandler {
             json_value
         };
 
-        // Log stats
+        // The gate logs the sample and decides whether it is fit to export.
         if let Some(ref mut m) = metrics {
             m.concurrent_requests = Some(self.state.concurrent_requests.load(Ordering::Relaxed));
-            let formatted = format_metrics(m, self.state.config.stats.format);
-            if self.state.config.stats.format == StatsFormat::Compact {
-                tracing::info!("{}", formatted);
-            } else {
-                tracing::info!("\n{}", formatted);
+            if crate::exporters::log_sample_and_should_export(m, self.state.config.stats.format) {
+                // Export to remote systems
+                let exporters = self.state.exporter_manager.clone();
+                let metrics_clone = m.clone();
+                tokio::spawn(async move {
+                    exporters.export_all(&metrics_clone).await;
+                });
             }
-
-            // Export to remote systems
-            let exporters = self.state.exporter_manager.clone();
-            let metrics_clone = m.clone();
-            tokio::spawn(async move {
-                exporters.export_all(&metrics_clone).await;
-            });
         } else {
             // Debug: Log why stats weren't collected
             tracing::debug!(
