@@ -14,7 +14,7 @@ use axum::response::{
     IntoResponse, Response,
 };
 use futures::stream::{self, StreamExt};
-use serde_json::json;
+use serde_json::{json, Value};
 use std::convert::Infallible;
 
 use crate::api::{AnthropicContentBlock, AnthropicMessage, ChatCompletionResponse, Timings, ToolCall, Usage};
@@ -79,6 +79,40 @@ pub async fn synthesize_streaming_response(
     Ok(Sse::new(stream).into_response())
 }
 
+/// Metadata shared by every synthesized OpenAI SSE chunk of one response
+struct StreamMeta {
+    id: String,
+    created: i64,
+    model: String,
+}
+
+/// The delta kind whose payload lands in `finish_reason` instead of `delta`
+const FINISH_EVENT: &str = "finish_reason";
+
+/// Build the one OpenAI chunk envelope shape used by every synthesized chunk.
+///
+/// `event` names the delta key (`role`, `tool_calls`, `reasoning_text`,
+/// `reasoning_opaque`, `content`); the reserved `finish_reason` kind emits an
+/// empty delta and carries `data` as the choice's `finish_reason`.
+fn sse_envelope(meta: &StreamMeta, event: &str, data: Value, idx: u64) -> Value {
+    let (delta, finish_reason) = if event == FINISH_EVENT {
+        (json!({}), data)
+    } else {
+        (json!({ (event): data }), Value::Null)
+    };
+    json!({
+        "id": meta.id,
+        "object": "chat.completion.chunk",
+        "created": meta.created,
+        "model": meta.model,
+        "choices": [{
+            "index": idx,
+            "delta": delta,
+            "finish_reason": finish_reason
+        }]
+    })
+}
+
 /// Generate the sequence of SSE chunks from complete response data
 ///
 /// Returns Vec<Result<Event, Infallible>> which is compatible with Sse::new()
@@ -94,107 +128,53 @@ fn synthesize_chunks(
     usage: Option<Usage>,
     timings: Option<Timings>,
 ) -> Vec<Result<Event, Infallible>> {
+    let meta = StreamMeta { id, created, model };
     let mut chunks = Vec::new();
 
     // First chunk: role only (standard OpenAI streaming pattern)
-    chunks.push(Ok(create_sse_event(&json!({
-        "id": id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {
-                "role": "assistant"
-            },
-            "finish_reason": null
-        }]
-    }))));
+    chunks.push(Ok(create_sse_event(&sse_envelope(&meta, "role", json!("assistant"), 0))));
 
     // If tool calls exist, send them as a SINGLE complete chunk
     // This is key to avoiding delta calculation - send complete tool_calls array at once
     if let Some(tools) = tool_calls {
-        chunks.push(Ok(create_sse_event(&json!({
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {
-                    "tool_calls": tools  // ENTIRE array, not incremental
-                },
-                "finish_reason": null
-            }]
-        }))));
+        chunks.push(Ok(create_sse_event(&sse_envelope(
+            &meta,
+            "tool_calls",
+            serde_json::to_value(&tools).unwrap(),
+            0,
+        ))));
     }
 
     // Stream reasoning_text if present (Opencode extension)
     // Send as single chunk since it's usually not huge
     if let Some(reasoning) = reasoning_text {
-        chunks.push(Ok(create_sse_event(&json!({
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {
-                    "reasoning_text": reasoning
-                },
-                "finish_reason": null
-            }]
-        }))));
+        chunks.push(Ok(create_sse_event(&sse_envelope(
+            &meta,
+            "reasoning_text",
+            json!(reasoning),
+            0,
+        ))));
     }
 
     // Stream reasoning_opaque if present (replace, not concat)
     if let Some(opaque) = reasoning_opaque {
-        chunks.push(Ok(create_sse_event(&json!({
-            "id": id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model,
-            "choices": [{
-                "index": 0,
-                "delta": {
-                    "reasoning_opaque": opaque
-                },
-                "finish_reason": null
-            }]
-        }))));
+        chunks.push(Ok(create_sse_event(&sse_envelope(
+            &meta,
+            "reasoning_opaque",
+            json!(opaque),
+            0,
+        ))));
     }
 
     // Stream text content in chunks (if present)
     if let Some(text_chunks) = content_chunks {
         for text_chunk in text_chunks {
-            chunks.push(Ok(create_sse_event(&json!({
-                "id": id,
-                "object": "chat.completion.chunk",
-                "created": created,
-                "model": model,
-                "choices": [{
-                    "index": 0,
-                    "delta": {
-                        "content": text_chunk
-                    },
-                    "finish_reason": null
-                }]
-            }))));
+            chunks.push(Ok(create_sse_event(&sse_envelope(&meta, "content", json!(text_chunk), 0))));
         }
     }
 
     // Final chunk with finish_reason, usage, and timings
-    let mut final_chunk = json!({
-        "id": id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model,
-        "choices": [{
-            "index": 0,
-            "delta": {},
-            "finish_reason": finish_reason
-        }]
-    });
+    let mut final_chunk = sse_envelope(&meta, FINISH_EVENT, json!(finish_reason), 0);
 
     // Add usage if present
     if let Some(u) = usage {
@@ -1276,5 +1256,66 @@ mod chunk_timing_tests {
             delta < std::time::Duration::from_millis(5),
             "anthropic delta {delta:?} must be < 5 ms at delay 0"
         );
+    }
+}
+
+#[cfg(test)]
+mod envelope_factory_tests {
+    use super::*;
+
+    fn meta() -> StreamMeta {
+        StreamMeta {
+            id: "cmpl-env".to_string(),
+            created: 42,
+            model: "qwen3".to_string(),
+        }
+    }
+
+    #[test]
+    fn envelope_wraps_delta_key_and_nulls_finish_reason() {
+        // Given a StreamMeta and a delta kind
+        // When sse_envelope builds the chunk
+        // Then the OpenAI chunk skeleton matches the hand-built baseline shape exactly
+        let v = sse_envelope(&meta(), "content", json!("hi"), 0);
+        assert_eq!(
+            v,
+            json!({
+                "id": "cmpl-env",
+                "object": "chat.completion.chunk",
+                "created": 42,
+                "model": "qwen3",
+                "choices": [{ "index": 0, "delta": { "content": "hi" }, "finish_reason": null }]
+            })
+        );
+    }
+
+    #[test]
+    fn envelope_finish_carries_finish_reason_with_empty_delta() {
+        let v = sse_envelope(&meta(), "finish_reason", json!("tool_calls"), 1);
+        assert_eq!(v["choices"][0]["delta"], json!({}));
+        assert_eq!(v["choices"][0]["finish_reason"], "tool_calls");
+        assert_eq!(v["choices"][0]["index"], 1);
+    }
+
+    #[tokio::test]
+    async fn refactor_preserves_exact_sse_bytes() {
+        // Golden bytes captured VERBATIM from the pre-refactor (21f0548) response for
+        // this exact fixture (red_probe capture, task58 evidence). Any envelope drift fails.
+        const BASELINE_BYTES: &str = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\",\"name\":\"lookup\"},\"id\":\"call_1\",\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_text\":\"Hmm, let me think.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Answer here.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":7,\"prompt_tokens\":5,\"total_tokens\":12}}\n\ndata: [DONE]\n\n";
+        let raw = serde_json::json!({
+            "id": "cmpl-probe", "object": "chat.completion", "created": 171, "model": "qwen3",
+            "system_fingerprint": "fp_999",
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "Answer here.", "reasoning_text": "Hmm, let me think.", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{\"q\":\"x\"}"}}]}},
+                {"index": 1, "message": {"role": "assistant", "content": "SECOND CHOICE"}}
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12, "llama_extra": {"k": 1}},
+            "x_top_unknown": {"alpha": true}
+        });
+        let typed: ChatCompletionResponse = serde_json::from_value(raw).unwrap();
+        let cfg = SynthesisConfig::default();
+        let resp = synthesize_streaming_response(typed, &cfg).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 10_000_000).await.unwrap();
+        assert_eq!(String::from_utf8(body.to_vec()).unwrap(), BASELINE_BYTES);
     }
 }
