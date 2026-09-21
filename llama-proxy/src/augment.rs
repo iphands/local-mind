@@ -1150,6 +1150,26 @@ mod tests {
         }
     }
 
+    /// Install a DEBUG-level capture subscriber on THIS thread.
+    ///
+    /// tracing-core computes each callsite's cached Interest from the current
+    /// dispatcher at FIRST hit (rebuild_callsite_interest: get_default under
+    /// JustOne, Interest::never when that dispatcher is the NoSubscriber) and
+    /// only rebuilds when a GLOBAL subscriber is set - never in this process.
+    /// So every test that can first-hit get_augmentation's debug! callsites
+    /// must run under a DEBUG-or-better thread subscriber on the SAME thread
+    /// (hence flavor = "current_thread" on all of them), or the callsites die
+    /// process-wide for all later tests, capture included.
+    fn debug_capture_guard() -> (std::sync::Arc<std::sync::Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(CaptureWriter(buf.clone()))
+            .finish();
+        (buf, tracing::subscriber::set_default(subscriber))
+    }
+
     async fn spawn_status_augment_backend(status: u16, body: &'static str) -> String {
         use tokio::io::AsyncWriteExt;
         use tokio::net::TcpListener;
@@ -1181,8 +1201,9 @@ mod tests {
         }
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn task48_error_carries_status_and_first_300_chars_with_truncation_marker() {
+        let _capture = debug_capture_guard();
         let body: &'static str = Box::leak(format!("{}{}", "X".repeat(300), "TAILMARK".repeat(50)).into_boxed_str());
         let backend = backend_at(spawn_status_augment_backend(500, body).await);
 
@@ -1198,8 +1219,9 @@ mod tests {
         );
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "current_thread")]
     async fn task48_cjk_error_clip_counts_chars_not_bytes() {
+        let _capture = debug_capture_guard();
         let cjk_body: &'static str = Box::leak(format!("{}{}", "中".repeat(300), "禁".repeat(10)).into_boxed_str());
         let backend = backend_at(spawn_status_augment_backend(400, cjk_body).await);
 
@@ -1219,13 +1241,7 @@ mod tests {
         let body: &'static str = Box::leak(format!("{}{}", "D".repeat(300), "FULLBODYMARKER-π-🚀").into_boxed_str());
         let backend = backend_at(spawn_status_augment_backend(503, body).await);
 
-        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let subscriber = tracing_subscriber::fmt()
-            .with_ansi(false)
-            .with_max_level(tracing::Level::DEBUG)
-            .with_writer(CaptureWriter(buf.clone()))
-            .finish();
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let (buf, _guard) = debug_capture_guard();
 
         let err = backend.get_augmentation("q").await.expect_err("503 must surface an error");
 
