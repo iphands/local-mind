@@ -67,6 +67,47 @@ impl FixAction {
         }
     }
 
+    /// Fold the per-call `Fixed` actions collected while walking one response
+    /// into the SINGLE action the registry logs per fix [B-M3]. The historical
+    /// `overall_action` variable was overwritten by every repair, so a response
+    /// with several repaired tool calls reported only the LAST call's
+    /// snippets — the other repairs ran but were invisible in the log.
+    ///
+    /// One repair passes through untouched (snippets byte-identical to the
+    /// single-call shape); several concatenate in traversal order behind a
+    /// `"<N> repairs: "` count prefix; none yields `NotApplicable`.
+    /// Callers push only completed repairs, so the other variants can
+    /// contribute nothing — the fold stays a total function anyway.
+    pub(crate) fn aggregate_repairs(actions: &[FixAction]) -> FixAction {
+        match actions {
+            [] => FixAction::NotApplicable,
+            [single] => single.clone(),
+            many => {
+                let mut originals = String::new();
+                let mut fixeds = String::new();
+                for action in many {
+                    let (original, fixed) = match action {
+                        FixAction::Fixed {
+                            original_snippet,
+                            fixed_snippet,
+                        } => (original_snippet, fixed_snippet),
+                        FixAction::NotApplicable | FixAction::Failed { .. } => continue,
+                    };
+                    if !originals.is_empty() {
+                        originals.push_str(" ;; ");
+                        fixeds.push_str(" ;; ");
+                    }
+                    originals.push_str(original);
+                    fixeds.push_str(fixed);
+                }
+                FixAction::Fixed {
+                    original_snippet: format!("{} repairs: {originals}", many.len()),
+                    fixed_snippet: format!("{} repairs: {fixeds}", many.len()),
+                }
+            }
+        }
+    }
+
     /// Returns true if malformed content was detected (Fixed or Failed)
     pub fn detected(&self) -> bool {
         matches!(self, Self::Fixed { .. } | Self::Failed { .. })
@@ -102,11 +143,12 @@ impl std::fmt::Display for FixError {
 
 /// Coarse outcome a fixer reports for a response.
 ///
-/// Forward-declared interface for the tasks 29/30 logging consolidation;
-/// no consumer selects on it yet, so the registry still discriminates on the
-/// full [`FixAction`] payload.
+/// Forward-declared for the logging consolidation that B-M3 closed: the
+/// consolidation landed on the full [`FixAction`] payload
+/// ([`FixAction::aggregate_repairs`]), so this enum was never needed and has
+/// no consumer. Pub API kept; removal belongs to the dead-code sweep task.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // consumed by tasks 29/30; pub API kept intentionally
+#[allow(dead_code)] // unconsumed pub API (B-M3 closed on FixAction itself)
 pub enum FixOutcome {
     /// Content was fine or the fixer does not handle it.
     NotApplicable,
@@ -176,7 +218,7 @@ pub fn create_default_registry() -> FixRegistry {
     let mut registry = FixRegistry::new();
     // Register null index fix FIRST - it's foundational
     // Other fixes may assume valid indices exist
-    registry.register(Arc::new(ToolCallNullIndexFix::new(true)));
+    registry.register(Arc::new(ToolCallNullIndexFix::new()));
     // Register malformed arguments fix - it handles the more specific {}":" pattern
     // This ensures it runs before the broader filepath fix
     registry.register(Arc::new(ToolcallMalformedArgumentsFix::new()));
@@ -220,7 +262,7 @@ pub fn create_registry_from_config(fixes: &crate::config::FixesConfig) -> FixReg
     // Same load-bearing order as create_default_registry (pinned by test).
     let specs: [fn() -> Arc<dyn ResponseFix>; 3] = [
         // FIRST: foundational - other fixes may assume valid indices exist
-        || Arc::new(ToolCallNullIndexFix::new(true)),
+        || Arc::new(ToolCallNullIndexFix::new()),
         // before the broader filepath fix: the specific {}":" pattern
         || Arc::new(ToolcallMalformedArgumentsFix::new()),
         // last: general duplicate filePath removal
@@ -290,6 +332,38 @@ mod tests {
 
         assert_eq!(snippet, short_text);
         assert!(!snippet.ends_with("..."));
+    }
+
+    // TASK 30 (B-M3): fold contract of the aggregation that replaced the
+    // overwritten `overall_action` variable (fixer-level end-to-end coverage:
+    // task30_two_repaired_calls_* in both fix modules).
+    #[test]
+    fn task30_aggregate_repairs_fold_contract() {
+        assert!(matches!(FixAction::aggregate_repairs(&[]), FixAction::NotApplicable));
+
+        let one = FixAction::fixed("o1", "f1");
+        match FixAction::aggregate_repairs(std::slice::from_ref(&one)) {
+            FixAction::Fixed {
+                original_snippet,
+                fixed_snippet,
+            } => {
+                assert_eq!(original_snippet, "o1", "single repair passes through verbatim");
+                assert_eq!(fixed_snippet, "f1");
+            }
+            other => panic!("single repair must stay Fixed, got {other:?}"),
+        }
+
+        let many = vec![FixAction::fixed("o1", "f1"), FixAction::fixed("o2 日本", "f2 🔧")];
+        match FixAction::aggregate_repairs(&many) {
+            FixAction::Fixed {
+                original_snippet,
+                fixed_snippet,
+            } => {
+                assert_eq!(original_snippet, "2 repairs: o1 ;; o2 日本");
+                assert_eq!(fixed_snippet, "2 repairs: f1 ;; f2 🔧");
+            }
+            other => panic!("multi repair must fold into Fixed, got {other:?}"),
+        }
     }
 
     // --- task 32: config-aware registry construction ---

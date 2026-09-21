@@ -21,6 +21,23 @@
 //! 4. Close with `}`
 //!
 //! This is simpler and more robust than previous multi-stage fallback approaches.
+//!
+//! ## Schema coupling is by-design config domain
+//!
+//! The truncation above is only sound because of a fact about the CLIENT's
+//! tool configuration, not about models: the Write tool schemas published by
+//! Opencode/Claude Code declare exactly two fields — `content` and `filePath`
+//! — with `additionalProperties: false`. A schema-valid Write call therefore
+//! cannot carry any key after `filePath`, which is what makes "everything after
+//! the first complete filePath is garbage" a repair rule rather than a guess.
+//!
+//! This coupling to the `filePath`-shaped schema is deliberate and is config
+//! domain, not a bug to generalize away: an operator whose deployed tool
+//! schemas differ (extra fields, a different path key) opts this fix out with
+//! `fixes.modules.toolcall_bad_filepath.enabled: false` rather than the fix
+//! growing schema-awareness of its own. Triggering is still gated on the
+//! structural duplicate/malformed predicates, so a well-formed Write call of
+//! ANY shape passes through untouched.
 
 use super::json_scan::{top_level_key_count, top_level_key_spans};
 use super::registry::{truncate_snippet, SnippetLimit};
@@ -176,7 +193,7 @@ impl ToolcallBadFilepathFix {
     ///
     /// [`Self::apply`]: ToolcallBadFilepathFix::apply
     fn apply_checked(&self, mut response: Value) -> Result<(Value, FixAction), FixError> {
-        let mut overall_action = FixAction::NotApplicable;
+        let mut repairs: Vec<FixAction> = Vec::new();
 
         if let Some(choices) = response.get_mut("choices").and_then(|c| c.as_array_mut()) {
             for choice in choices {
@@ -192,7 +209,7 @@ impl ToolcallBadFilepathFix {
                                     let original = args.to_string();
                                     let fixed = self.fix_arguments(args)?;
                                     function["arguments"] = Value::String(fixed.clone());
-                                    overall_action = FixAction::fixed(&original, &fixed);
+                                    repairs.push(FixAction::fixed(&original, &fixed));
                                 }
                             }
                         }
@@ -200,7 +217,7 @@ impl ToolcallBadFilepathFix {
                 }
             }
         }
-        Ok((response, overall_action))
+        Ok((response, FixAction::aggregate_repairs(&repairs)))
     }
 }
 
@@ -1266,6 +1283,78 @@ mod tests {
                 serde_json::to_string(&serde_json::from_str::<Value>(args).unwrap()).unwrap(),
                 "non-dup path must stay the plain serde round-trip for: {args}"
             );
+        }
+    }
+
+    // ============================================================
+    // TASK 30 (B-M3): multi-call repairs aggregate into ONE action
+    // ============================================================
+    // The historical single `overall_action` variable was overwritten by every
+    // repair, so a response with two repaired calls reported ONLY the last
+    // call's snippets — the earlier repair happened invisibly in the log. The
+    // fixer now collects the per-call `FixAction`s into a Vec and folds them
+    // into the single action the registry logs once per fix.
+
+    #[test]
+    fn task30_two_repaired_calls_aggregate_both_snippets() {
+        let fix = ToolcallBadFilepathFix::new();
+        let response = serde_json::json!({
+            "choices": [{
+                "message": { "tool_calls": [
+                    { "index": 0, "function": { "name": "write", "arguments": r#"{"filePath":"/first","filePath":"/dup-a"}"# } },
+                    { "index": 1, "function": { "name": "write", "arguments": r#"{"filePath":"/second","filePath":"/dup-b"}"# } }
+                ] }
+            }]
+        });
+
+        let (result, action) = fix.apply(response);
+
+        // Both calls are really repaired (per-call FIRST-wins, task 25).
+        for (idx, winner) in [(0, "/first"), (1, "/second")] {
+            let args_out = result["choices"][0]["message"]["tool_calls"][idx]["function"]["arguments"]
+                .as_str()
+                .unwrap();
+            let parsed: Value = serde_json::from_str(args_out).expect("every repaired call must be valid JSON");
+            assert_eq!(parsed["filePath"].as_str(), Some(winner), "call {idx} keeps FIRST winner");
+        }
+
+        match action {
+            FixAction::Fixed {
+                original_snippet,
+                fixed_snippet,
+            } => {
+                assert!(
+                    original_snippet.contains("/dup-a") && original_snippet.contains("/dup-b"),
+                    "the aggregated action must carry EVERY repaired call's original, got: {original_snippet}"
+                );
+                assert!(
+                    fixed_snippet.contains("/first") && fixed_snippet.contains("/second"),
+                    "the aggregated fixed snippet must carry every winner, got: {fixed_snippet}"
+                );
+            }
+            other => panic!("aggregated action must be Fixed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn task30_single_repair_snippets_pass_through_unchanged() {
+        // One repair => the aggregated action is that very action, snippets
+        // byte-identical to the pre-task-30 shape (no "1 repairs:" wrapper).
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"filePath":"/first","filePath":"/dup"}"#;
+        let response = fuzz_response(Some(args));
+
+        let (_, action) = fix.apply(response);
+
+        match action {
+            FixAction::Fixed {
+                original_snippet,
+                fixed_snippet,
+            } => {
+                assert_eq!(original_snippet, args);
+                assert_eq!(fixed_snippet, r#"{"filePath":"/first"}"#);
+            }
+            other => panic!("expected Fixed, got {other:?}"),
         }
     }
 }

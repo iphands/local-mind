@@ -197,17 +197,18 @@ impl ToolcallMalformedArgumentsFix {
         })
     }
 
-    /// Run `fix_arguments` over one choice side's `tool_calls` array, folding
-    /// each repair into `overall_action`. The FIRST irreparable-but-triggering
-    /// call aborts the whole response with `Err` — the pre-existing convention
-    /// of this fix (`Err(e) => return Err(e)`, task-22 all-or-nothing
-    /// per-response), not a new one: the registry fail-safe then forwards the
-    /// ORIGINAL response untouched.
+    /// Run `fix_arguments` over one choice side's `tool_calls` array, collecting
+    /// each repair into `repairs` for the caller's single aggregated action
+    /// [B-M3]. The FIRST irreparable-but-triggering call aborts the whole
+    /// response with `Err` — the pre-existing convention of this fix
+    /// (`Err(e) => return Err(e)`, task-22 all-or-nothing per-response), not a
+    /// new one: the registry fail-safe then forwards the ORIGINAL response
+    /// untouched.
     fn fix_tool_calls(
         &self,
         tool_calls: &mut [Value],
         schemas: &HashMap<String, Vec<String>>,
-        overall_action: &mut FixAction,
+        repairs: &mut Vec<FixAction>,
     ) -> Result<(), FixError> {
         for tool_call in tool_calls {
             let Some(function) = tool_call.get_mut("function") else {
@@ -222,7 +223,7 @@ impl ToolcallMalformedArgumentsFix {
                 Err(error) => return Err(error),
                 Ok(Some(fixed_args)) => {
                     function["arguments"] = Value::String(fixed_args.clone());
-                    *overall_action = FixAction::fixed(&args, &fixed_args);
+                    repairs.push(FixAction::fixed(&args, &fixed_args));
                 }
                 Ok(None) => {}
             }
@@ -246,24 +247,24 @@ impl ToolcallMalformedArgumentsFix {
             return Ok((response, FixAction::NotApplicable));
         }
 
-        let mut overall_action = FixAction::NotApplicable;
+        let mut repairs: Vec<FixAction> = Vec::new();
 
         if let Some(choices) = response.get_mut("choices").and_then(|c| c.as_array_mut()) {
             for choice in choices {
                 if let Some(message) = choice.get_mut("message") {
                     if let Some(tool_calls) = message.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
-                        self.fix_tool_calls(tool_calls, &schemas, &mut overall_action)?;
+                        self.fix_tool_calls(tool_calls, &schemas, &mut repairs)?;
                     }
                 }
                 if let Some(delta) = choice.get_mut("delta") {
                     if let Some(tool_calls) = delta.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
-                        self.fix_tool_calls(tool_calls, &schemas, &mut overall_action)?;
+                        self.fix_tool_calls(tool_calls, &schemas, &mut repairs)?;
                     }
                 }
             }
         }
 
-        Ok((response, overall_action))
+        Ok((response, FixAction::aggregate_repairs(&repairs)))
     }
 }
 
@@ -1186,5 +1187,51 @@ mod tests {
         assert!(deltas[0].get("function").is_none(), "function-less entry stays as sent");
         let args = deltas[1]["function"]["arguments"].as_str().unwrap();
         assert!(args.contains(r#""file_path":"#));
+    }
+
+    // TASK 30 (B-M3): the single `overall_action` was overwritten by every
+    // repair, so with one repaired call per choice ONLY the last choice's
+    // snippets reached the log. Per-call actions are now collected and folded
+    // into the ONE action the registry logs per fix.
+    #[test]
+    fn task30_two_repaired_calls_across_choices_aggregate_both_snippets() {
+        let request = write_request(&["file_path", "content"]);
+        let response = json!({
+            "choices": [
+                { "message": { "tool_calls": [{ "function": { "name": "write", "arguments": r#"{"content":"AAA",{}":"/tmp/a.txt"}"# } }] } },
+                { "message": { "tool_calls": [{ "function": { "name": "write", "arguments": r#"{"content":"BBB",{}":"/tmp/b.txt"}"# } }] } }
+            ]
+        });
+
+        let (result, action) = ToolcallMalformedArgumentsFix::new()
+            .apply_with_context(response, &request)
+            .expect("one candidate for one slot per call — bijective, both repairable");
+
+        for (choice, marker) in [(0, "AAA"), (1, "BBB")] {
+            let args = result["choices"][choice]["message"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap();
+            assert!(
+                args.contains(r#""file_path""#) && args.contains(marker),
+                "choice {choice} repaired"
+            );
+        }
+
+        match action {
+            FixAction::Fixed {
+                original_snippet,
+                fixed_snippet,
+            } => {
+                assert!(
+                    original_snippet.contains("AAA") && original_snippet.contains("BBB"),
+                    "aggregated originals must cover every repaired call, got: {original_snippet}"
+                );
+                assert!(
+                    fixed_snippet.contains("/tmp/a.txt") && fixed_snippet.contains("/tmp/b.txt"),
+                    "aggregated fixed snippets must cover every repaired call, got: {fixed_snippet}"
+                );
+            }
+            other => panic!("aggregated action must be Fixed, got {other:?}"),
+        }
     }
 }

@@ -1,20 +1,42 @@
 //! Fix for null or missing index fields in tool calls
 //!
-//! llama.cpp sometimes sends tool calls with index=null or missing index field.
-//! This causes validation errors in clients expecting numeric indices.
+//! llama.cpp sometimes sends tool calls with index=null or a missing index
+//! field. This causes validation errors in clients expecting numeric indices.
 //!
-//! This fix assigns sequential indices (0, 1, 2, ...) to tool calls that lack them.
+//! ## Index-repair semantics
+//!
+//! Repair is **positional** and **minimal**:
+//!
+//! - An entry whose `index` is missing, `null`, or not a number is assigned
+//!   the index of its 0-based position within the `tool_calls` array.
+//! - An entry with a numeric `index` keeps it untouched, even when that number
+//!   disagrees with the entry's position. This fix never renumbers valid data,
+//!   so a repaired array can still contain gaps or duplicate indices if the
+//!   model emitted them: repair fixes "absent/invalid", not "inconsistent".
+//! - Non-object array entries are skipped — there is nothing to insert into.
+//!
+//! The fix walks both response shapes, `message.tool_calls` (complete
+//! responses) and `delta.tool_calls` (chunk shapes), and the registry
+//! registers it FIRST because the other fixes may assume indices exist.
+//!
+//! ## Enabled state
+//!
+//! Owned exclusively by the registry ([`crate::fixes::FixRegistry::set_enabled`]
+//! and the `fixes:` config, where a disabled module is not even constructed).
+//! The struct carries no flag of its own [B-L3]: two sources of truth for one
+//! switch is how a "disabled" fix keeps running.
 
 use crate::fixes::{FixAction, FixLogLevel, ResponseFix};
 use serde_json::Value;
 
-pub struct ToolCallNullIndexFix {
-    enabled: bool,
-}
+/// Fixes null/missing/non-numeric `index` fields by assigning positional
+/// indices (see the module docs for the exact repair semantics).
+#[derive(Default)]
+pub struct ToolCallNullIndexFix;
 
 impl ToolCallNullIndexFix {
-    pub fn new(enabled: bool) -> Self {
-        Self { enabled }
+    pub fn new() -> Self {
+        Self
     }
 
     /// Check if a tool call has null or missing index
@@ -28,7 +50,7 @@ impl ToolCallNullIndexFix {
     }
 
     /// Fix tool calls in a choices array (works for both message and delta)
-    fn fix_tool_calls_in_choices(choices: &mut Vec<Value>) -> bool {
+    fn fix_tool_calls_in_choices(choices: &mut [Value]) -> bool {
         let mut fixed_any = false;
 
         for choice in choices.iter_mut() {
@@ -50,8 +72,10 @@ impl ToolCallNullIndexFix {
         fixed_any
     }
 
-    /// Assign sequential indices to tool calls
-    fn assign_sequential_indices(tool_calls: &mut Vec<Value>) -> bool {
+    /// Assign positional indices to entries whose `index` needs repair.
+    /// Entries that are not objects are skipped, valid numeric indices pass
+    /// through untouched (module docs pin the semantics).
+    fn assign_sequential_indices(tool_calls: &mut [Value]) -> bool {
         let mut fixed_any = false;
 
         for (idx, tool_call) in tool_calls.iter_mut().enumerate() {
@@ -83,10 +107,6 @@ impl ResponseFix for ToolCallNullIndexFix {
     }
 
     fn applies(&self, response: &Value) -> bool {
-        if !self.enabled {
-            return false;
-        }
-
         // Check if response has tool calls with null/missing indices
         if let Some(choices) = response.get("choices").and_then(|c| c.as_array()) {
             for choice in choices {
@@ -118,19 +138,14 @@ impl ResponseFix for ToolCallNullIndexFix {
     }
 
     fn apply(&self, mut response: Value) -> (Value, FixAction) {
-        if !self.enabled {
-            return (response, FixAction::NotApplicable);
-        }
-
-        let mut choices = match response.get_mut("choices").and_then(|c| c.as_array_mut()) {
-            Some(c) => c.clone(),
+        // In-place mutation through the borrow: no clone of the choices array,
+        // no reassign of `response["choices"]` [B-L2].
+        let fixed_any = match response.get_mut("choices").and_then(|c| c.as_array_mut()) {
+            Some(choices) => Self::fix_tool_calls_in_choices(choices),
             None => return (response, FixAction::NotApplicable),
         };
 
-        let fixed_any = Self::fix_tool_calls_in_choices(&mut choices);
-
         if fixed_any {
-            response["choices"] = Value::Array(choices);
             (
                 response,
                 FixAction::Fixed {
@@ -148,6 +163,7 @@ impl ResponseFix for ToolCallNullIndexFix {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::sync::Arc;
 
     #[test]
     fn test_needs_index_fix_null() {
@@ -168,8 +184,19 @@ mod tests {
     }
 
     #[test]
+    fn test_needs_index_fix_wrong_type() {
+        for bad in [json!("0"), json!(true), json!([0]), json!({"i": 0})] {
+            let tool_call = json!({"id": "call-1", "index": bad});
+            assert!(
+                ToolCallNullIndexFix::needs_index_fix(&tool_call),
+                "non-number index must need repair: {tool_call}"
+            );
+        }
+    }
+
+    #[test]
     fn test_fix_message_tool_calls() {
-        let fix = ToolCallNullIndexFix::new(true);
+        let fix = ToolCallNullIndexFix::new();
         let response = json!({
             "choices": [{
                 "message": {
@@ -190,7 +217,7 @@ mod tests {
 
     #[test]
     fn test_fix_delta_tool_calls() {
-        let fix = ToolCallNullIndexFix::new(true);
+        let fix = ToolCallNullIndexFix::new();
         let response = json!({
             "choices": [{
                 "delta": {
@@ -209,7 +236,7 @@ mod tests {
 
     #[test]
     fn test_no_fix_needed() {
-        let fix = ToolCallNullIndexFix::new(true);
+        let fix = ToolCallNullIndexFix::new();
         let response = json!({
             "choices": [{
                 "message": {
@@ -226,7 +253,7 @@ mod tests {
 
     #[test]
     fn test_applies_detection() {
-        let fix = ToolCallNullIndexFix::new(true);
+        let fix = ToolCallNullIndexFix::new();
 
         let response_needs_fix = json!({
             "choices": [{
@@ -249,7 +276,7 @@ mod tests {
 
     #[test]
     fn test_multiple_tool_calls_sequential_indices() {
-        let fix = ToolCallNullIndexFix::new(true);
+        let fix = ToolCallNullIndexFix::new();
         let response = json!({
             "choices": [{
                 "message": {
@@ -272,7 +299,7 @@ mod tests {
 
     #[test]
     fn test_mixed_indices() {
-        let fix = ToolCallNullIndexFix::new(true);
+        let fix = ToolCallNullIndexFix::new();
         let response = json!({
             "choices": [{
                 "message": {
@@ -297,25 +324,139 @@ mod tests {
     }
 
     #[test]
-    fn test_disabled() {
-        let fix = ToolCallNullIndexFix::new(false);
+    fn test_enabled_state_is_registry_owned() {
+        // [B-L3] The fix struct carries no enabled flag: the registry's map is
+        // the single switch, driven by FixRegistry::set_enabled / config.
+        let mut registry = crate::fixes::FixRegistry::new();
+        registry.register(Arc::new(ToolCallNullIndexFix::new()));
+
+        let response = json!({
+            "choices": [{
+                "message": { "tool_calls": [{"id": "call-1", "index": null}] }
+            }]
+        });
+
+        let repaired = registry.apply_fixes(response.clone());
+        assert_eq!(repaired["choices"][0]["message"]["tool_calls"][0]["index"], 0);
+
+        registry.set_enabled("toolcall_null_index_fix", false);
+        let untouched = registry.apply_fixes(response.clone());
+        assert_eq!(
+            serde_json::to_string(&untouched).unwrap(),
+            serde_json::to_string(&response).unwrap(),
+            "a registry-disabled fix must not touch the response"
+        );
+    }
+
+    #[test]
+    fn test_repairs_wrong_typed_index_positionally() {
+        let fix = ToolCallNullIndexFix::new();
         let response = json!({
             "choices": [{
                 "message": {
-                    "tool_calls": [{"id": "call-1", "index": null}]
+                    "tool_calls": [
+                        {"id": "call-1", "index": "0"},
+                        {"id": "call-2", "index": true}
+                    ]
                 }
             }]
         });
 
-        assert!(!fix.applies(&response));
-        let (_, action) = fix.apply(response);
+        let (fixed, action) = fix.apply(response);
+
+        assert!(matches!(action, FixAction::Fixed { .. }));
+        assert_eq!(fixed["choices"][0]["message"]["tool_calls"][0]["index"], 0);
+        assert_eq!(fixed["choices"][0]["message"]["tool_calls"][1]["index"], 1);
+    }
+
+    #[test]
+    fn test_valid_numeric_index_kept_when_position_disagrees() {
+        // Documented semantics: repair never renumbers valid data, even when
+        // the surviving number and the assigned position collide or gap.
+        let fix = ToolCallNullIndexFix::new();
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [
+                        {"id": "call-1", "index": 5},
+                        {"id": "call-2", "index": null}
+                    ]
+                }
+            }]
+        });
+
+        let (fixed, action) = fix.apply(response);
+
+        assert!(matches!(action, FixAction::Fixed { .. }));
+        assert_eq!(
+            fixed["choices"][0]["message"]["tool_calls"][0]["index"], 5,
+            "valid index passes through"
+        );
+        assert_eq!(
+            fixed["choices"][0]["message"]["tool_calls"][1]["index"], 1,
+            "repair is positional, not sequential-after-valid"
+        );
+    }
+
+    #[test]
+    fn test_non_object_tool_call_entry_skipped_others_repaired() {
+        let fix = ToolCallNullIndexFix::new();
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [
+                        {"id": "call-1"},
+                        42,
+                        {"id": "call-3", "index": null}
+                    ]
+                }
+            }]
+        });
+
+        let (fixed, action) = fix.apply(response);
+
+        assert!(matches!(action, FixAction::Fixed { .. }));
+        assert_eq!(fixed["choices"][0]["message"]["tool_calls"][0]["index"], 0);
+        assert_eq!(
+            fixed["choices"][0]["message"]["tool_calls"][1],
+            json!(42),
+            "non-object entry must survive as sent"
+        );
+        assert_eq!(fixed["choices"][0]["message"]["tool_calls"][2]["index"], 2);
+    }
+
+    #[test]
+    fn test_non_array_tool_calls_untouched() {
+        let fix = ToolCallNullIndexFix::new();
+        let response = json!({
+            "choices": [{ "message": { "tool_calls": "not-an-array" } }]
+        });
+
+        let (fixed, action) = fix.apply(response.clone());
         assert!(matches!(action, FixAction::NotApplicable));
+        assert_eq!(
+            serde_json::to_string(&fixed).unwrap(),
+            serde_json::to_string(&response).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_missing_choices_untouched() {
+        let fix = ToolCallNullIndexFix::new();
+        let response = json!({ "id": "chatcmpl-1" });
+
+        let (fixed, action) = fix.apply(response.clone());
+        assert!(matches!(action, FixAction::NotApplicable));
+        assert_eq!(
+            serde_json::to_string(&fixed).unwrap(),
+            serde_json::to_string(&response).unwrap()
+        );
     }
 
     #[test]
     fn test_log_level_is_debug() {
         use crate::fixes::{FixLogLevel, ResponseFix};
-        let fix = ToolCallNullIndexFix::new(true);
+        let fix = ToolCallNullIndexFix::new();
 
         // Verify this fix uses DEBUG log level (not INFO)
         assert_eq!(fix.log_level(), FixLogLevel::Debug);
