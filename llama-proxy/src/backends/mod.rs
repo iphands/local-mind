@@ -9,7 +9,7 @@ mod round_robin;
 
 pub use balancer::{BackendGuard, LoadBalancer};
 pub use grouped::GroupedLoadBalancer;
-pub(crate) use node::with_auth;
+pub(crate) use node::{node_url, with_auth};
 pub use node::BackendNode;
 pub use priority_free::PriorityFreeBalancer;
 pub use round_robin::RoundRobinBalancer;

@@ -116,6 +116,20 @@ pub(crate) fn with_auth(req: reqwest::RequestBuilder, api_key: Option<&str>) -> 
     }
 }
 
+/// Build a request URL for `path` against a trailing-slash-stripped node `base`,
+/// applying the node's `strip_path_prefix` exactly once (big-fix E-L6).
+///
+/// ONE implementation behind every out-bound URL site (preflight's /v1/models
+/// probes AND the context monitor's native `/props` + `/v1/models` fetches —
+/// the monitor passes `prefix: None` because monitoring is backend-native,
+/// task 15). A prefix that is not a true prefix of `path` leaves `path`
+/// untouched, matching the per-site `strip_prefix().unwrap_or(path)` behavior
+/// this replaces.
+pub(crate) fn node_url(base: &str, path: &str, prefix: Option<&str>) -> String {
+    let native = prefix.and_then(|p| path.strip_prefix(p)).unwrap_or(path);
+    format!("{base}{native}")
+}
+
 /// The node whose failure cooldown expires earliest; ties go to the lowest index
 /// (`min_by_key` keeps the first minimum). Callers pass a node set where every node
 /// is cooled; balancers reject empty node lists at construction, so the non-empty
@@ -175,6 +189,16 @@ mod tests {
     #[test]
     fn connect_timeout_is_five_seconds() {
         assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(5));
+    }
+
+    #[test]
+    fn node_url_applies_the_prefix_exactly_once() {
+        assert_eq!(node_url("http://h:1", "/v1/models", Some("/v1")), "http://h:1/models");
+        assert_eq!(node_url("http://h:1", "/v1/models", None), "http://h:1/v1/models");
+        assert_eq!(node_url("http://h:1", "/v1/models", Some("/日本")), "http://h:1/v1/models", "non-prefix leaves the path untouched");
+        assert_eq!(node_url("http://h:1", "/v1/models", Some("/v1/models")), "http://h:1", "degenerate prefix==path strips to root");
+        assert_eq!(node_url("http://h:1", "/props", Some("/v1")), "http://h:1/props", "true prefix of a native path is NOT stripped away by accident");
+        assert_eq!(node_url("http://h:1", "/v1/日本語", Some("/v1")), "http://h:1/日本語", "multibyte tail survives");
     }
 
     fn cooldown_node() -> BackendNode {

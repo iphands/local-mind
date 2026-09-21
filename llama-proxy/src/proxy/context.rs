@@ -8,6 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
+use crate::backends::node_url;
 use crate::backends::preflight::ContextProbe;
 use crate::backends::with_auth;
 
@@ -108,7 +109,9 @@ pub async fn cache_context_from_preflight(client: &reqwest::Client, probe: &Cont
 /// Fetch context size from llama.cpp `/props` endpoint.
 /// `api_key` is presented when the caller's backend requires auth (E-M3).
 async fn fetch_from_props(client: &reqwest::Client, backend_url: &str, api_key: Option<&str>) -> Option<u64> {
-    let props_url = format!("{}/props", backend_url);
+    // prefix: None on purpose — monitoring targets backend-native paths (task 15);
+    // the shared builder is used so no site can re-invent the strip (E-L6).
+    let props_url = node_url(backend_url, "/props", None);
     match with_auth(client.get(&props_url), api_key).send().await {
         Ok(resp) => {
             if let Ok(props) = resp.json::<serde_json::Value>().await {
@@ -133,7 +136,7 @@ async fn fetch_from_props(client: &reqwest::Client, backend_url: &str, api_key: 
 
 /// Fetch context size from vLLM/OpenAI-compatible `/v1/models` endpoint
 async fn fetch_from_models(client: &reqwest::Client, backend_url: &str) -> Option<u64> {
-    let models_url = format!("{}/v1/models", backend_url);
+    let models_url = node_url(backend_url, "/v1/models", None);
     match client.get(&models_url).send().await {
         Ok(resp) => {
             if let Ok(models) = resp.json::<serde_json::Value>().await {
