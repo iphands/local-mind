@@ -21,6 +21,16 @@ use crate::backends::BackendNode;
 use crate::proxy::fetch_context_total;
 use crate::stats::{format_request_log, RequestMetrics};
 
+/// JSON error envelope for proxy-generated failures: `{"error":{"type":kind,"message":msg}}`.
+fn err_envelope(kind: &str, msg: impl Into<String>) -> serde_json::Value {
+    serde_json::json!({
+        "error": {
+            "type": kind,
+            "message": msg.into(),
+        }
+    })
+}
+
 /// Response when server is at capacity
 fn at_capacity_response(max: usize) -> Response {
     tracing::warn!(max = max, "Server at capacity, rejecting request");
@@ -323,13 +333,14 @@ impl ProxyHandler {
                     requested_model = ?requested_model,
                     "No backend configured for model"
                 );
-                return Json(serde_json::json!({
-                    "error": {
-                        "type": "no_backend_configured",
-                        "message": format!("No backend for model: {:?}", requested_model)
-                    }
-                }))
-                .into_response();
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(err_envelope(
+                        "no_backend",
+                        format!("No backend for model: {:?}", requested_model),
+                    )),
+                )
+                    .into_response();
             }
         };
 
@@ -497,13 +508,11 @@ impl ProxyHandler {
                         Ok(_) => None,
                         Err(e) => {
                             tracing::error!(error = %e, "Augment backend failed, returning error");
-                            return Json(serde_json::json!({
-                                "error": {
-                                    "type": "augment_backend_error",
-                                    "message": format!("Augment backend error: {}", e)
-                                }
-                            }))
-                            .into_response();
+                            return (
+                                StatusCode::BAD_GATEWAY,
+                                Json(err_envelope("augment_backend_error", format!("Augment backend error: {}", e))),
+                            )
+                                .into_response();
                         }
                     }
                 } else {
@@ -1257,7 +1266,8 @@ impl ProxyHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backends::{BackendNode, RoundRobinBalancer};
+    use crate::augment::AugmentBackend;
+    use crate::backends::{BackendNode, GroupedLoadBalancer, LoadBalancer, RoundRobinBalancer};
     use crate::config::{AppConfig, BackendConfig, StreamingConfig};
     use crate::exporters::ExporterManager;
     use crate::fixes::FixRegistry;
@@ -1471,5 +1481,162 @@ mod tests {
             assert_eq!(out["model"], serde_json::json!("renamed"));
             assert_eq!(out["temperature"], serde_json::json!(0.1));
         }
+    }
+
+    /// Build a handler with an arbitrary balancer and augment backend, everything else
+    /// at the same inert settings as `create_test_handler_with_streaming` (no fixes, no
+    /// stats, no exporters). Nothing talks to a real backend in these tests.
+    fn handler_with_balancer(
+        load_balancer: Arc<dyn LoadBalancer>,
+        augment_backend: Option<Arc<AugmentBackend>>,
+    ) -> ProxyHandler {
+        let config = AppConfig {
+            server: crate::config::ServerConfig {
+                port: 8066,
+                host: "0.0.0.0".to_string(),
+                max_concurrent_requests: crate::config::default_max_concurrent(),
+            },
+            backend: BackendConfig::default(),
+            backends: None,
+            fixes: crate::config::FixesConfig {
+                enabled: false,
+                modules: HashMap::new(),
+            },
+            stats: crate::config::StatsConfig {
+                enabled: false,
+                format: crate::config::StatsFormat::Pretty,
+                log_interval: 1,
+            },
+            exporters: crate::config::ExportersConfig {
+                influxdb: crate::config::InfluxDbConfig {
+                    enabled: false,
+                    url: "http://localhost:8086".to_string(),
+                    org: "test".to_string(),
+                    bucket: "test".to_string(),
+                    token: "test".to_string(),
+                    batch_size: 1,
+                    flush_interval_seconds: 1,
+                },
+            },
+            detection: crate::config::DetectionConfig::default(),
+            streaming: StreamingConfig::default(),
+            augment_backend: None,
+            reprompt: None,
+            dump: crate::config::DumpConfig::default(),
+        };
+
+        ProxyHandler::new(ProxyState {
+            config: Arc::new(config),
+            load_balancer,
+            fix_registry: Arc::new(FixRegistry::new()),
+            exporter_manager: Arc::new(ExporterManager::new()),
+            augment_backend,
+            reprompt_engine: None,
+            hide_requests: false,
+            log_augmented_request_text: false,
+            dump_path: None,
+            concurrent_requests: Arc::new(AtomicUsize::new(0)),
+            backend_streaming_fallback_hits: Arc::new(AtomicUsize::new(0)),
+            openai_stream_passthrough_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            backend_nonsse_when_streamed_for: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            anthropic_buffered_responses_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            anthropic_buffered_notice_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rejected_requests: Arc::new(AtomicUsize::new(0)),
+            concurrent_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(100))),
+        })
+    }
+
+    fn completion_request() -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "model": "ghost-model",
+                    "messages": [{"role": "user", "content": "hello"}]
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    async fn json_error_body(res: Response) -> serde_json::Value {
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.expect("body must be readable");
+        serde_json::from_slice(&bytes).expect("error body must be valid JSON")
+    }
+
+    #[tokio::test]
+    async fn no_backend_configured_answers_503_with_error_envelope() {
+        // GroupedLoadBalancer with zero groups: every model selection fails with
+        // NoMatchingBackend, the exact state of a proxy started without a backend.
+        let empty_groups: HashMap<String, crate::config::BackendGroupConfig> = HashMap::new();
+        let balancer = Arc::new(GroupedLoadBalancer::new(empty_groups).expect("empty group map must build"));
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_eq!(
+            res.status(),
+            StatusCode::SERVICE_UNAVAILABLE,
+            "no-backend must be a real 503, not a 200 with an error body"
+        );
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+            "error body must be served as JSON"
+        );
+        let body = json_error_body(res).await;
+        assert_eq!(body["error"]["type"], serde_json::json!("no_backend"));
+        assert!(
+            body["error"]["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "envelope must carry a non-empty message, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn augment_backend_failure_answers_502_with_error_envelope() {
+        // Dead augment URL: connect to 127.0.0.1:1 is refused instantly, no listener needed.
+        // The main-backend node is never contacted - augmentation fails before forwarding.
+        let dead_augment = AugmentBackend {
+            url: "http://127.0.0.1:1".to_string(),
+            model: "augment-model".to_string(),
+            prompt_file: "nonexistent-augment-prompt.md".to_string(),
+            request_prompt_file: "nonexistent-request-prompt.md".to_string(),
+            http_client: reqwest::Client::new(),
+        };
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(bare_node(None))]).unwrap());
+        let handler = handler_with_balancer(balancer, Some(Arc::new(dead_augment)));
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_GATEWAY,
+            "augment failure must be a real 502, not a 200 with an error body"
+        );
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+            "error body must be served as JSON"
+        );
+        let body = json_error_body(res).await;
+        assert_eq!(body["error"]["type"], serde_json::json!("augment_backend_error"));
+        assert!(
+            body["error"]["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "envelope must carry a non-empty message, got: {body}"
+        );
+    }
+
+    #[test]
+    fn err_envelope_carries_kind_and_untrusted_text_verbatim() {
+        // CJK + backend-controlled text must survive Into<String> untouched, no panic.
+        let v = err_envelope("augment_backend_error", "后端错误: 拒绝连接 🤷");
+        assert_eq!(v["error"]["type"], serde_json::json!("augment_backend_error"));
+        assert_eq!(
+            v["error"]["message"],
+            serde_json::json!("后端错误: 拒绝连接 🤷"),
+            "message must round-trip through the envelope unchanged"
+        );
     }
 }
