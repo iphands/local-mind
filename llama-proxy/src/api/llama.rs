@@ -5,13 +5,22 @@ use serde::{Deserialize, Serialize};
 /// Slot information from /slots endpoint
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SlotInfo {
+    #[serde(default)]
     pub id: u32,
+    #[serde(default = "default_slot_state")]
+    pub state: String,
+    #[serde(default)]
+    pub priority: u32,
     pub model: Option<String>,
     pub n_ctx: u64,
     pub n_tokens: u64,
     pub is_processing: bool,
     #[serde(default)]
     pub params: Option<SlotParams>,
+}
+
+fn default_slot_state() -> String {
+    "unknown".to_string()
 }
 
 /// Slot parameters
@@ -28,6 +37,7 @@ pub struct SlotParams {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerProps {
     pub model_path: Option<String>,
+    #[serde(default)]
     pub n_ctx: Option<u64>,
     pub n_batch: Option<u32>,
     pub n_ubatch: Option<u32>,
@@ -40,6 +50,10 @@ pub struct ServerProps {
     pub chat_template: Option<String>,
     pub default_generation_settings: Option<GenerationSettings>,
     pub build_info: Option<BuildInfo>,
+    /// llama.cpp grows /props faster than this struct models it; unmodeled keys
+    /// are preserved through a parse + re-serialize instead of being dropped.
+    #[serde(flatten)]
+    pub extra: std::collections::HashMap<String, serde_json::Value>,
 }
 
 /// Generation settings
@@ -85,7 +99,8 @@ pub struct ModelsResponse {
 pub struct ModelInfo {
     pub id: String,
     pub object: String,
-    pub created: Option<i64>,
+    #[serde(default)]
+    pub created: i64,
     pub owned_by: Option<String>,
 }
 
@@ -238,13 +253,14 @@ mod tests {
         let model = ModelInfo {
             id: "test-model".to_string(),
             object: "model".to_string(),
-            created: Some(1234567890),
+            created: 1234567890,
             owned_by: Some("test".to_string()),
         };
 
         let json = serde_json::to_string(&model).unwrap();
         let parsed: ModelInfo = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.id, "test-model");
+        assert_eq!(parsed.created, 1234567890);
         assert_eq!(parsed.owned_by, Some("test".to_string()));
     }
 
@@ -276,5 +292,64 @@ mod tests {
         assert_eq!(slot.id, 1);
         assert!(slot.model.is_none());
         assert!(!slot.is_processing);
+    }
+
+    // ============================================================================
+    // Task 41: /slots + /props + /models parse leniency (report A-L4/A-L5)
+    // RED baseline (raw probe @92ab176):
+    //   {"n_ctx":4096,"n_tokens":5,"is_processing":true} -> Err("missing field `id` ...")
+    //   ServerProps unknown fields silently LOST on round-trip
+    //   model created absent -> None (target: 0)
+    //   (context.rs at 92ab176 does NOT parse /slots into SlotInfo - acceptance
+    //    line-ref drifted; only lenient unwrap_or("") at context.rs:248 exists)
+    // ============================================================================
+
+    #[test]
+    fn test_slot_info_missing_state_parses_with_unknown_default() {
+        let slot: SlotInfo = serde_json::from_str(r#"{"id":2,"n_ctx":4096,"n_tokens":10,"is_processing":false}"#).unwrap();
+        assert_eq!(slot.state, "unknown");
+        assert_eq!(slot.priority, 0);
+        assert_eq!(slot.id, 2);
+    }
+
+    #[test]
+    fn test_slot_info_full_shape_keeps_state_priority_and_defaults_missing_id() {
+        let slot: SlotInfo = serde_json::from_str(
+            r#"{"state":"processing","model":"llama-3","n_ctx":4096,"n_tokens":5,"is_processing":true,"priority":7}"#,
+        )
+        .unwrap();
+        assert_eq!(slot.id, 0);
+        assert_eq!(slot.state, "processing");
+        assert_eq!(slot.priority, 7);
+    }
+
+    #[test]
+    fn test_server_props_unknown_fields_survive_round_trip() {
+        let props: ServerProps =
+            serde_json::from_str(r#"{"model_path":"/m.gguf","n_ctx":2048,"radix_prefix":true,"new_thing":{"a":[1,2]}}"#)
+                .unwrap();
+        assert_eq!(props.n_ctx, Some(2048));
+        assert_eq!(props.extra["radix_prefix"], serde_json::json!(true));
+        assert_eq!(props.extra["new_thing"]["a"], serde_json::json!([1, 2]));
+
+        let out: serde_json::Value = serde_json::from_str(&serde_json::to_string(&props).unwrap()).unwrap();
+        assert_eq!(out["radix_prefix"], serde_json::json!(true));
+        assert_eq!(out["n_ctx"], 2048);
+    }
+
+    #[test]
+    fn test_server_props_absent_n_ctx_parses_none() {
+        // Honest composition note: n_ctx is a NAMED field, so a top-level n_ctx
+        // can never also land in the flattened map - the map catches every other
+        // unmodeled key (pinned in the round-trip test). Absent n_ctx parses with
+        // the explicit #[serde(default)] and reads None.
+        let props: ServerProps = serde_json::from_str(r#"{"model_path":"/m.gguf","n_batch":512}"#).unwrap();
+        assert_eq!(props.n_ctx, None);
+    }
+
+    #[test]
+    fn test_model_info_created_absent_defaults_zero() {
+        let models: ModelsResponse = serde_json::from_str(r#"{"data":[{"id":"m","object":"model"}]}"#).unwrap();
+        assert_eq!(models.data[0].created, 0);
     }
 }

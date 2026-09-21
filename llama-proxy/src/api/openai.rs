@@ -219,7 +219,7 @@ pub struct FunctionCall {
 }
 
 /// Streaming delta
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Delta {
     #[serde(default)]
     pub role: Option<String>,
@@ -300,6 +300,7 @@ pub struct StreamChunk {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct StreamChoice {
     pub index: u32,
+    #[serde(default)]
     pub delta: Delta,
     pub finish_reason: Option<String>,
 }
@@ -2058,5 +2059,26 @@ mod tests {
         }]);
         let resp: ChatCompletionResponse = msg.into();
         assert_eq!(resp.choices[0].message.as_ref().unwrap().content, None);
+    }
+
+    // ============================================================================
+    // Task 41 (A-L4, openai.rs half): chunks without delta parse
+    // RED baseline (raw probe @92ab176):
+    //   Err("missing field `delta` at line 1 column 112")
+    // ============================================================================
+
+    #[test]
+    fn test_stream_choice_without_delta_parses_with_empty_default() {
+        let chunk: StreamChunk = serde_json::from_str(
+            r#"{"id":"x","object":"chat.completion.chunk","created":0,"model":"m","choices":[{"index":0,"finish_reason":"stop"}]}"#,
+        )
+        .unwrap();
+        let delta = &chunk.choices[0].delta;
+        assert!(delta.content.is_none());
+        assert!(delta.role.is_none());
+        assert!(delta.tool_calls.is_none());
+        assert!(delta.reasoning_text.is_none());
+        assert!(delta.reasoning_opaque.is_none());
+        assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
     }
 }
