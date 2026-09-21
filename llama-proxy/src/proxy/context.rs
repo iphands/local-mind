@@ -5,6 +5,7 @@
 //! - vLLM/OpenAI-compatible: Uses `/v1/models` endpoint with `data[0].max_model_len`
 
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
@@ -24,6 +25,21 @@ static CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, (u64, BackendType)>>> = On
 // Track which backends we've already warned about to avoid log spam
 static WARNED_BACKENDS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
 
+/// Number of context-cache refresh writes that were skipped because the write lock was
+/// held when a fresh value arrived (see the staleness policy on `cache_result`).
+/// A successful refresh decrements nothing - this counts skips, not the stale window.
+static CONTEXT_CACHE_STALE_SKIPS: AtomicU64 = AtomicU64::new(0);
+
+/// Read-only view of the skipped-refresh counter, for the stats line / metrics surface.
+///
+/// `mod context` is private to `proxy`, so `crate::proxy::context::context_cache_stale_skips()`
+/// already resolves from `handler.rs`; rendering it in `/proxy/metrics` and the per-request
+/// stats line is the recorded CARRY for the handler/stats owners (files fenced for this task).
+#[allow(dead_code)] // consumer wiring is the CARRY above; repo allow+reason convention (json_scan, SnippetLimit::Bytes)
+pub fn context_cache_stale_skips() -> u64 {
+    CONTEXT_CACHE_STALE_SKIPS.load(Ordering::Relaxed)
+}
+
 /// Fetch context total from backend with caching
 ///
 /// Tries multiple endpoints to support different backend types:
@@ -31,7 +47,9 @@ static WARNED_BACKENDS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
 /// 2. `/v1/models` (vLLM, OpenAI-compatible) - extracts `data[0].max_model_len`
 ///
 /// The cache is permanent for the lifetime of the application since context
-/// size is a static server configuration.
+/// size is a static server configuration. When a refresh is attempted and the
+/// write lock is held, the accepted staleness window runs until one successful
+/// refresh lands - see the policy documented on `cache_result` (big-fix 94).
 ///
 /// Monitoring always targets the backend-native `/props` and `/v1/models`
 /// paths; a configured request-path prefix must not alter these endpoints.
@@ -160,10 +178,32 @@ async fn fetch_from_models(client: &reqwest::Client, backend_url: &str) -> Optio
     None
 }
 
-/// Cache the result for future requests
+/// Cache the result for future requests.
+///
+/// # Staleness policy (big-fix 94, C-M9)
+/// The write uses `try_write` on purpose: a stats-path refresh must never queue behind
+/// cache readers or make the request path wait for the lock. On contention we **serve
+/// stale**: the fresh value is dropped and the cache keeps its previous entry, while the
+/// fetching caller still returns its own freshly fetched value (both callers hand the
+/// caller the fetch result, not the cache). Every dropped write increments
+/// `CONTEXT_CACHE_STALE_SKIPS` and logs at debug, so a skipped refresh is observable,
+/// never a silent discard.
+///
+/// **Accepted staleness window: until one successful refresh.** The skipped write is not
+/// lost policy-wise - the next cache-miss fetch re-attempts it, and the first `try_write`
+/// that lands (lock free, as in the common case) installs the fresh value and closes the
+/// window.
 fn cache_result(cache: &RwLock<HashMap<String, (u64, BackendType)>>, backend_url: &str, value: u64, backend_type: BackendType) {
     if let Ok(mut write_guard) = cache.try_write() {
         write_guard.insert(backend_url.to_string(), (value, backend_type));
+    } else {
+        let stale_skips_total = CONTEXT_CACHE_STALE_SKIPS.fetch_add(1, Ordering::Relaxed) + 1;
+        tracing::debug!(
+            backend_url = %backend_url,
+            dropped_context = value,
+            stale_skips_total,
+            "Context-cache refresh skipped under write-lock contention; serving the cached value until one successful refresh"
+        );
     }
 }
 
@@ -207,10 +247,12 @@ pub async fn warn_context_fetch_failed_once(backend_url: &str, model: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
     use std::time::Duration;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio::sync::mpsc;
+    use tracing_subscriber::fmt::MakeWriter;
 
     const PROPS_BODY: &str = r#"{"default_generation_settings":{"n_ctx":4096}}"#;
     const MODELS_BODY: &str = r#"{"data":[{"max_model_len":8192}]}"#;
@@ -286,6 +328,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_monitoring_fetch_uses_backend_native_props_with_path_prefix() {
+        let _serial = policy_lock().lock().await;
+        // (module lock: see POLICY_TEST_SERIAL - queued write().await waiters here
+        // dirty tokio's RwLock drop-handoff state and WouldBlock sibling try_write calls)
         let (base, mut rx, server) = spawn_monitor_listener(true).await;
         let client = reqwest::Client::new();
 
@@ -309,6 +354,9 @@ mod tests {
 
     #[tokio::test]
     async fn test_monitoring_fetch_uses_backend_native_v1_models_with_v1_prefix() {
+        let _serial = policy_lock().lock().await;
+        // (module lock: see POLICY_TEST_SERIAL - queued write().await waiters here
+        // dirty tokio's RwLock drop-handoff state and WouldBlock sibling try_write calls)
         let (base, mut rx, server) = spawn_monitor_listener(false).await;
         let client = reqwest::Client::new();
 
@@ -386,6 +434,9 @@ mod tests {
 
     #[tokio::test]
     async fn preflight_props_fetch_presents_the_nodes_api_key() {
+        let _serial = policy_lock().lock().await;
+        // (module lock: see POLICY_TEST_SERIAL - queued write().await waiters here
+        // dirty tokio's RwLock drop-handoff state and WouldBlock sibling try_write calls)
         let (base, mut rx, server) = spawn_auth_props_listener().await;
         let client = reqwest::Client::new();
         let probe = ContextProbe {
@@ -406,6 +457,9 @@ mod tests {
 
     #[tokio::test]
     async fn auth_required_props_without_a_key_is_a_clean_miss() {
+        let _serial = policy_lock().lock().await;
+        // (module lock: see POLICY_TEST_SERIAL - queued write().await waiters here
+        // dirty tokio's RwLock drop-handoff state and WouldBlock sibling try_write calls)
         let (base, mut rx, server) = spawn_auth_props_listener().await;
         let client = reqwest::Client::new();
         let probe = ContextProbe {
@@ -427,8 +481,330 @@ mod tests {
         server.abort();
     }
 
+    // ---- big-fix 94: context_total staleness policy ----
+
+    /// Capture writer (repo convention, 3rd instance: fixes/registry.rs, augment.rs):
+    /// thread-local `set_default` + `flavor = "current_thread"` per the task-48 lesson.
+    #[derive(Clone)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> MakeWriter<'a> for CaptureWriter {
+        type Writer = Self;
+        fn make_writer(&self) -> Self {
+            self.clone()
+        }
+    }
+
+    /// The five staleness-policy tests share the process-global CONTEXT_CACHE. T1 holds a
+    /// read guard ACROSS an HTTP fetch (the only macroscopic lock hold in the suite), so
+    /// a sibling test's try_write would be skipped by it (observed in red runs). Serializing
+    /// the five makes every cache-state and log assertion race-free against THIS module.
+    /// The residual cross-module actor (backends/preflight.rs tests reach cache_result via
+    /// cache_context_from_preflight and cannot take this module-private lock) is handled at
+    /// the assertion level: a refresh either LANDS or its skip is COUNTED - both branches
+    /// assert the C-M9 policy; only silent loss fails the test.
+    static POLICY_TEST_SERIAL: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+
+    fn policy_lock() -> &'static tokio::sync::Mutex<()> {
+        POLICY_TEST_SERIAL.get_or_init(|| tokio::sync::Mutex::const_new(()))
+    }
+
+    fn install_debug_capture() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(CaptureWriter(buf.clone()))
+                .finish(),
+        );
+        (buf, guard)
+    }
+
+    /// `/props` answers 200 with `props_body`; every other URI answers 200 with
+    /// `models_body`. Both bodies can be malformed to drive the parse-failure paths.
+    async fn spawn_two_endpoint_listener(
+        props_body: &'static str,
+        models_body: &'static str,
+    ) -> (String, mpsc::Receiver<String>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let (tx, rx) = mpsc::channel::<String>(16);
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let mut head: Vec<u8> = Vec::new();
+                let mut tmp = [0u8; 512];
+                loop {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            head.extend_from_slice(&tmp[..n]);
+                            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).to_string();
+                let uri = text
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split(' ').nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                if tx.send(uri.clone()).await.is_err() {
+                    break;
+                }
+                let body = if uri == "/props" { props_body } else { models_body };
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), rx, handle)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn write_skipped_under_contention_is_counted_and_logged() {
+        let _serial = policy_lock().lock().await;
+        // Deterministic contention (no timing races): the test holds ONE read guard, so
+        // the request-path refresh must fail its try_write.
+        let (base, mut rx, server) = spawn_monitor_listener(true).await;
+        let client = reqwest::Client::new();
+        let (buf, _sub) = install_debug_capture();
+        let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+
+        // Prewarm the skip callsite UNDER the capture subscriber: tracing Interest is
+        // cached process-wide at first hit (task-48 lesson), so the first else-branch hit
+        // must happen here, on this thread, with a live DEBUG subscriber. The read guard
+        // below is dropped before the real window, so only this test's guard can ever
+        // create contention for this callsite in the whole suite.
+        {
+            let _warm_reader = cache.read().await;
+            cache_result(cache, "http://prewarm.contention.test", 1, BackendType::LlamaCpp);
+        }
+        let before = context_cache_stale_skips();
+
+        {
+            let _reader = cache.read().await;
+            let served = fetch_context_total(&client, &base, None).await;
+            assert_eq!(served, Some(4096), "the fetching caller still receives the fresh value");
+            assert!(!cache.read().await.contains_key(&base), "the contended write must not land");
+            assert!(
+                context_cache_stale_skips() > before,
+                "the skip must be counted (>= one; the global counter may also see rare foreign collisions with this guard window)"
+            );
+            assert_eq!(
+                next_uri(&mut rx).await,
+                "/props",
+                "the refresh fetch really ran before the write was dropped"
+            );
+        }
+
+        // Exact attribution, read BEFORE the phase-2 fetch: the thread-local capture sees
+        // only this thread's events - the prewarm skip + exactly one skip naming this url.
+        let log = String::from_utf8_lossy(&buf.lock().expect("capture lock").clone()).to_string();
+        let skip_lines: Vec<&str> = log
+            .lines()
+            .filter(|line| line.contains("Context-cache refresh skipped"))
+            .collect();
+        assert_eq!(
+            skip_lines.iter().filter(|line| line.contains(&base)).count(),
+            1,
+            "the skip must be logged at debug exactly once for the contended backend, never silent. Captured:\n{log}"
+        );
+        assert_eq!(
+            skip_lines.len(),
+            2,
+            "exactly prewarm + this test's skip on this thread:\n{log}"
+        );
+        assert!(
+            skip_lines.iter().any(|line| line.contains("dropped_context=4096")),
+            "the log must name the dropped value:\n{log}"
+        );
+        assert!(
+            skip_lines.iter().any(|line| line.contains("http://prewarm.contention.test")),
+            "prewarm line must anchor the callsite in this capture:\n{log}"
+        );
+
+        // Accepted window ends at ONE successful refresh: the next cache-miss fetch either
+        // LANDS the fresh value, or its try_write contends (the C-M9 class - possibly with
+        // a cross-module refresh this module lock cannot fence) and that skip is COUNTED,
+        // after which a further in-window fetch lands it. Silent loss is the only outcome
+        // this branch rejects.
+        let before2 = context_cache_stale_skips();
+        let served = fetch_context_total(&client, &base, None).await;
+        assert_eq!(served, Some(4096));
+        if cache.read().await.get(&base).is_none() {
+            assert!(
+                context_cache_stale_skips() > before2,
+                "a refresh that does not land must be counted, never silently lost"
+            );
+            let served2 = fetch_context_total(&client, &base, None).await;
+            assert_eq!(served2, Some(4096), "the retried in-window fetch must serve the fresh value");
+        }
+        assert_eq!(
+            cache.read().await.get(&base),
+            Some(&(4096, BackendType::LlamaCpp)),
+            "one successful refresh within the window must end it"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn cached_context_is_served_within_the_accepted_window_then_refreshes_on_miss() {
+        let _serial = policy_lock().lock().await;
+        // Given a cache entry older than the backend's live value (llama-server restarted
+        // with a different -c): the accepted-window policy serves the cached value and
+        // does NOT refetch on the hit path.
+        let (base, mut rx, server) = spawn_monitor_listener(false).await; // live backend: 8192 via /v1/models
+        let client = reqwest::Client::new();
+        let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+        cache.write().await.insert(base.clone(), (4096, BackendType::LlamaCpp));
+
+        let served = fetch_context_total(&client, &base, None).await;
+        assert_eq!(
+            served,
+            Some(4096),
+            "within the window the cached value is served, not refetched"
+        );
+        assert!(rx.try_recv().is_err(), "a cache hit must not touch the backend");
+
+        // The window ends at one successful refresh: once the entry is gone (the miss
+        // state the policy relies on), the next fetch reads the LIVE backend. Its write
+        // lands, or (C-M9 contention class, e.g. a cross-module preflight refresh) the
+        // skip is counted and a further in-window fetch lands it - never silent.
+        cache.write().await.remove(&base);
+        let before_b = context_cache_stale_skips();
+        let served = fetch_context_total(&client, &base, None).await;
+        assert_eq!(served, Some(8192), "post-window refresh must serve the fresh value");
+        assert_eq!(next_uri(&mut rx).await, "/props", "props is tried first on the miss");
+        assert_eq!(next_uri(&mut rx).await, "/v1/models");
+        if cache.read().await.get(&base).is_none() {
+            assert!(
+                context_cache_stale_skips() > before_b,
+                "a refresh that does not land must be counted, never silently lost"
+            );
+            let served2 = fetch_context_total(&client, &base, None).await;
+            assert_eq!(served2, Some(8192), "the retried in-window fetch must serve the fresh value");
+        }
+        assert_eq!(cache.read().await.get(&base), Some(&(8192, BackendType::Vllm)));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn stalled_backend_fetch_is_bounded_by_the_injected_client_timeout() {
+        let _serial = policy_lock().lock().await;
+        // A stalled backend must not hang the fetch forever: the budget is the
+        // caller-injected reqwest client timeout (context.rs holds no lock across awaits).
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let stall = tokio::spawn(async move {
+            let mut held: Vec<tokio::net::TcpStream> = Vec::new();
+            loop {
+                let Ok((sock, _)) = listener.accept().await else { break };
+                held.push(sock); // accept, never respond, never drop: every request stalls
+            }
+        });
+        let base = format!("http://127.0.0.1:{port}");
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_millis(300))
+            .build()
+            .expect("timeout client");
+
+        let started = std::time::Instant::now();
+        let ctx = tokio::time::timeout(Duration::from_secs(10), fetch_context_total(&client, &base, None))
+            .await
+            .expect("fetch must return within 10s, never hang");
+        let elapsed = started.elapsed();
+
+        assert_eq!(ctx, None, "a stalled backend must degrade to None");
+        assert!(
+            elapsed >= Duration::from_millis(550),
+            "both endpoints must consume their 300ms budgets: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "must finish far inside the hang bound: {elapsed:?}"
+        );
+
+        let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+        assert!(
+            !cache.read().await.contains_key(&base),
+            "a failed fetch must not poison the cache"
+        );
+        stall.abort();
+    }
+
+    #[tokio::test]
+    async fn malformed_props_body_falls_back_to_models_without_poisoning() {
+        let (base, mut rx, server) =
+            spawn_two_endpoint_listener(r#"{"default_generation_settings":{"n_ctx":"four-k"}}"#, MODELS_BODY).await;
+        let _serial = policy_lock().lock().await;
+        let client = reqwest::Client::new();
+        let before_a = context_cache_stale_skips();
+
+        let ctx = fetch_context_total(&client, &base, None).await;
+
+        assert_eq!(
+            ctx,
+            Some(8192),
+            "a type-malformed n_ctx must fall through to /v1/models, honestly"
+        );
+        assert_eq!(next_uri(&mut rx).await, "/props");
+        assert_eq!(next_uri(&mut rx).await, "/v1/models");
+        let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+        if cache.read().await.get(&base).is_none() {
+            assert!(
+                context_cache_stale_skips() > before_a,
+                "a fallback refresh that does not land must be counted, never silently lost"
+            );
+            let served2 = fetch_context_total(&client, &base, None).await;
+            assert_eq!(served2, Some(8192), "the retried in-window fetch must serve the fresh value");
+        }
+        assert_eq!(
+            cache.read().await.get(&base),
+            Some(&(8192, BackendType::Vllm)),
+            "only the parsed value is cached - never a zero or the malformed shape"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn garbage_on_both_endpoints_yields_none_without_poisoning() {
+        let (base, mut rx, server) = spawn_two_endpoint_listener("not json at all", "also not json").await;
+        let _serial = policy_lock().lock().await;
+        let client = reqwest::Client::new();
+
+        let ctx = fetch_context_total(&client, &base, None).await;
+
+        assert_eq!(ctx, None, "both endpoints garbage -> honest None, no fabricated context size");
+        assert_eq!(next_uri(&mut rx).await, "/props");
+        assert_eq!(next_uri(&mut rx).await, "/v1/models");
+        let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+        assert!(!cache.read().await.contains_key(&base), "nothing is cached on total failure");
+        server.abort();
+    }
+
     #[tokio::test]
     async fn test_fetch_context_total_caching() {
+        let _serial = policy_lock().lock().await;
+        // (module lock: see POLICY_TEST_SERIAL - queued write().await waiters here
+        // dirty tokio's RwLock drop-handoff state and WouldBlock sibling try_write calls)
         // This test verifies the cache works, but can't test actual fetching
         // without a mock server. In real use, the function will be tested
         // through integration tests.
