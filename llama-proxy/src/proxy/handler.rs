@@ -14,8 +14,10 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use super::server::ProxyState;
 use super::streaming::handle_streaming_response;
-use super::{synthesize_anthropic_streaming_response, synthesize_streaming_response};
-use crate::api::{AnthropicMessage, ChatCompletionRequest, ChatCompletionResponse};
+use super::{
+    synthesize_anthropic_openai_format_response, synthesize_anthropic_streaming_response, synthesize_streaming_response,
+};
+use crate::api::{AnthropicMessage, ChatCompletionRequest};
 use crate::augment::{extract_user_content_from_json, inject_augmentation};
 use crate::backends::BackendNode;
 use crate::proxy::fetch_context_total;
@@ -1419,32 +1421,17 @@ impl ProxyHandler {
                             }
                         }
                         Err(_) => {
-                            // Backend returned OpenAI format - convert to Anthropic and synthesize
+                            // Backend returned OpenAI format - convert from the RAW buffered
+                            // Value (no typed round-trip): every choice is streamed and
+                            // unknown fields survive by construction. Malformed OpenAI
+                            // bodies keep the task-11 contract: SSE error frame.
                             tracing::debug!("Backend returned OpenAI format, converting to Anthropic for streaming synthesis");
-                            match serde_json::from_value::<ChatCompletionResponse>(json.clone()) {
-                                Ok(openai_response) => {
-                                    // Convert OpenAI → Anthropic format
-                                    let anthropic_msg = AnthropicMessage::from(openai_response);
-                                    tracing::debug!(
-                                        converted_tokens = anthropic_msg.usage.input_tokens + anthropic_msg.usage.output_tokens,
-                                        content_blocks = anthropic_msg.content.len(),
-                                        "Converted OpenAI response to Anthropic format"
-                                    );
-                                    match synthesize_anthropic_streaming_response(anthropic_msg, &self.state.config.synthesis)
-                                        .await
-                                    {
-                                        Ok(response) => return response,
-                                        Err(e) => {
-                                            tracing::error!(error = %e, "Failed to synthesize after OpenAI→Anthropic conversion, ending the stream with an SSE error frame");
-                                            return anthropic_sse_error_response();
-                                        }
-                                    }
-                                }
-                                Err(e) => {
+                            match synthesize_anthropic_openai_format_response(json, &self.state.config.synthesis) {
+                                Some(response) => return response,
+                                None => {
                                     tracing::error!(
-                                        error = %e,
                                         response_json = %json_preview(json),
-                                        "Failed to parse backend response as either Anthropic or OpenAI format, ending the stream with an SSE error frame"
+                                        "Backend response is neither Anthropic format nor a well-formed OpenAI completion, ending the stream with an SSE error frame"
                                     );
                                     return anthropic_sse_error_response();
                                 }
@@ -1452,26 +1439,20 @@ impl ProxyHandler {
                         }
                     }
                 } else {
-                    // OpenAI API: synthesize in OpenAI SSE format
-                    match serde_json::from_value::<ChatCompletionResponse>(json.clone()) {
+                    // OpenAI API: synthesize in OpenAI SSE format from the RAW buffered
+                    // Value - every choice streamed, unknown fields survive by construction.
+                    match synthesize_streaming_response(json, &self.state.config.synthesis).await {
                         Ok(response) => {
-                            tracing::debug!("Synthesizing OpenAI streaming response from complete JSON");
-                            match synthesize_streaming_response(response, &self.state.config.synthesis).await {
-                                Ok(response) => return response,
-                                Err(e) => {
-                                    tracing::error!(error = %e, "Failed to synthesize OpenAI streaming response");
-                                    // Fall through to return JSON
-                                }
-                            }
+                            tracing::debug!("Synthesized OpenAI streaming response from complete JSON");
+                            return response;
                         }
                         Err(e) => {
-                            // Log full response JSON for diagnosis
-                            let json_preview = serde_json::to_string_pretty(&json).unwrap_or_else(|_| format!("{:?}", json));
                             tracing::warn!(
                                 error = %e,
-                                response_json = %json_preview,
-                                "Cannot parse as ChatCompletionResponse for synthesis - dumping full response"
+                                response_json = %json_preview(json),
+                                "Backend body is not a well-formed completion for synthesis - returning complete JSON"
                             );
+                            // Fall through to return JSON
                         }
                     }
                 }

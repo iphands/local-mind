@@ -16,75 +16,92 @@ use axum::response::{
 use futures::stream::{self, StreamExt};
 use serde_json::{json, Value};
 use std::convert::Infallible;
+use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::api::{AnthropicContentBlock, AnthropicMessage, ChatCompletionResponse, Timings, ToolCall, Usage};
+use crate::api::{AnthropicContentBlock, AnthropicMessage};
 use crate::config::SynthesisConfig;
 
-/// Synthesize a streaming SSE response from a complete ChatCompletionResponse
+/// Synthesize an OpenAI-format streaming SSE response from the RAW buffered backend value.
 ///
-/// This is the main entry point that mimics llama-stream's _simulate_streaming().
-/// Takes a complete JSON response and creates an SSE stream that looks like real streaming.
-///
-/// Tool calls are sent as a single complete chunk (not incrementally).
-/// Text content is chunked into pieces of at most `config.chunk_size_chars`
-/// characters, paced by `config.chunk_delay_ms` (0 = no artificial delay).
-pub async fn synthesize_streaming_response(
-    response: ChatCompletionResponse,
-    config: &SynthesisConfig,
-) -> Result<Response, String> {
-    // Extract data from the complete response
-    let model = response.model.clone();
-    let id = response.id.clone();
-    let created = response.created;
+/// Consumes the `Value` the fake pipeline holds before any typed parse: the
+/// envelope is built by reading `Value` pointers directly, so unknown
+/// top-level fields and unknown `usage` keys survive by construction and ALL
+/// `choices` entries are streamed (not just `choices[0]`). Malformed known
+/// fields (non-array choices, `index: null`, missing message) return Err and
+/// the caller falls through - never a fabricated stream.
+pub async fn synthesize_streaming_response(raw: &Value, config: &SynthesisConfig) -> Result<Response, String> {
+    let parsed = parse_raw_completion(raw)?;
+    Ok(stream_response(synthesize_openai_chunks(&parsed, config), config))
+}
 
-    // Get the first choice (standard for chat completions)
-    let choice = response.choices.get(0).ok_or_else(|| "Response has no choices".to_string())?;
+/// Validated pointer view of the RAW buffered backend completion.
+struct RawCompletion<'a> {
+    meta: StreamMeta,
+    choices: Vec<&'a Value>,
+    usage: Option<&'a Value>,
+    timings: Option<&'a Value>,
+}
 
-    let message = choice.message.as_ref().ok_or_else(|| "Choice has no message".to_string())?;
-
-    let content_chunks = message.content.clone().map(|text| chunk_text(&text, config.chunk_size_chars));
-    let tool_calls = message.tool_calls.clone();
-    let reasoning_text = message.reasoning_text.clone();
-    let reasoning_opaque = message.reasoning_opaque.clone();
-    // Honest derivation only when the backend omitted finish_reason: tool calls
-    // present -> tool_calls, else stop. An explicit value is never overridden.
-    let finish_reason = choice.finish_reason.clone().unwrap_or_else(|| {
-        if message.tool_calls.as_ref().is_some_and(|t| !t.is_empty()) {
-            "tool_calls".to_string()
-        } else {
-            "stop".to_string()
-        }
+/// Parse-and-validate the KNOWN fields a synthesized stream needs. Known
+/// fields must keep their wire types (`choices` a non-empty array of message
+/// objects, `index` a u64 when present, `finish_reason` a string or null);
+/// anything unrecognized is collected as `extras` and merged into every chunk
+/// envelope, so unknown fields survive by construction.
+fn parse_raw_completion(raw: &Value) -> Result<RawCompletion<'_>, String> {
+    let obj = raw.as_object().ok_or_else(|| "response is not a JSON object".to_string())?;
+    let id = obj
+        .get("id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "response has no string id".to_string())?;
+    let model = obj
+        .get("model")
+        .and_then(Value::as_str)
+        .ok_or_else(|| "response has no string model".to_string())?;
+    let created = obj.get("created").and_then(Value::as_i64).unwrap_or_else(|| {
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0)
     });
-
-    // Get usage for final chunk
-    let usage = response.usage.clone();
-    let timings = response.timings.clone();
-
-    // Pre-compute all chunks
-    let chunks = synthesize_chunks(
-        id,
-        model,
-        created,
-        content_chunks,
-        tool_calls,
-        reasoning_text,
-        reasoning_opaque,
-        finish_reason,
-        usage,
-        timings,
-    );
-
-    // Wrap in async stream with delays between chunks
-    let chunk_delay_ms = config.chunk_delay_ms;
-    let stream = stream::iter(chunks).then(move |chunk| async move {
-        if chunk_delay_ms > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(chunk_delay_ms)).await;
+    let choices = obj
+        .get("choices")
+        .and_then(Value::as_array)
+        .ok_or_else(|| "response has no choices array".to_string())?;
+    if choices.is_empty() {
+        return Err("response has an empty choices array".to_string());
+    }
+    for c in choices {
+        let co = c.as_object().ok_or_else(|| "choices[] entry is not an object".to_string())?;
+        co.get("message")
+            .and_then(Value::as_object)
+            .ok_or_else(|| "choices[] entry has no message object".to_string())?;
+        if co.get("index").is_some_and(|i| !i.is_u64()) {
+            return Err("choices[].index is present but not a non-negative integer".to_string());
         }
-        chunk
-    });
-
-    // Build SSE response
-    Ok(Sse::new(stream).into_response())
+        if co.get("finish_reason").is_some_and(|f| !f.is_null() && !f.is_string()) {
+            return Err("choices[].finish_reason is present but not a string or null".to_string());
+        }
+    }
+    let mut extras = serde_json::Map::new();
+    for (k, v) in obj {
+        if !matches!(
+            k.as_str(),
+            "id" | "object" | "created" | "model" | "choices" | "usage" | "timings"
+        ) {
+            extras.insert(k.clone(), v.clone());
+        }
+    }
+    Ok(RawCompletion {
+        meta: StreamMeta {
+            id: id.to_string(),
+            created,
+            model: model.to_string(),
+            extras: Value::Object(extras),
+        },
+        choices: choices.iter().collect(),
+        usage: obj.get("usage").filter(|u| u.is_object()),
+        timings: obj.get("timings").filter(|t| t.is_object()),
+    })
 }
 
 /// Metadata shared by every synthesized OpenAI SSE chunk of one response
@@ -92,6 +109,8 @@ struct StreamMeta {
     id: String,
     created: i64,
     model: String,
+    /// Unknown top-level backend fields, merged into every chunk envelope.
+    extras: Value,
 }
 
 /// The delta kind whose payload lands in `finish_reason` instead of `delta`
@@ -108,7 +127,7 @@ fn sse_envelope(meta: &StreamMeta, event: &str, data: Value, idx: u64) -> Value 
     } else {
         (json!({ (event): data }), Value::Null)
     };
-    json!({
+    let mut env = json!({
         "id": meta.id,
         "object": "chat.completion.chunk",
         "created": meta.created,
@@ -118,88 +137,321 @@ fn sse_envelope(meta: &StreamMeta, event: &str, data: Value, idx: u64) -> Value 
             "delta": delta,
             "finish_reason": finish_reason
         }]
-    })
+    });
+    // Unknown top-level backend fields ride every chunk exactly as they arrived.
+    if let Some(extras) = meta.extras.as_object() {
+        for (k, v) in extras {
+            env[k] = v.clone();
+        }
+    }
+    env
 }
 
-/// Generate the sequence of SSE chunks from complete response data
-///
-/// Returns Vec<Result<Event, Infallible>> which is compatible with Sse::new()
-fn synthesize_chunks(
-    id: String,
-    model: String,
-    created: i64,
-    content_chunks: Option<Vec<String>>,
-    tool_calls: Option<Vec<ToolCall>>,
-    reasoning_text: Option<String>,
-    reasoning_opaque: Option<String>,
-    finish_reason: String,
-    usage: Option<Usage>,
-    timings: Option<Timings>,
+/// One choice's chunk set: role -> reasoning -> text -> tool-call args -> finish.
+/// Ordering per task 59; `usage`/`timings` ride the finish frame when the
+/// caller marks this the last choice. Every read is a `Value` pointer read on
+/// the RAW backend body - no typed round-trip.
+fn synthesize_choice_chunks(
+    meta: &StreamMeta,
+    choice: &Value,
+    idx: u64,
+    usage: Option<&Value>,
+    timings: Option<&Value>,
+    chunk_size_chars: usize,
 ) -> Vec<Result<Event, Infallible>> {
-    let meta = StreamMeta { id, created, model };
     let mut chunks = Vec::new();
+    let message = match choice.get("message").and_then(Value::as_object) {
+        Some(m) => m,
+        // parse_raw_completion validated this; belt-and-braces, emit nothing.
+        None => return chunks,
+    };
 
-    // First chunk: role only (standard OpenAI streaming pattern)
-    chunks.push(Ok(create_sse_event(&sse_envelope(&meta, "role", json!("assistant"), 0))));
-
-    // Stream reasoning_text if present (Opencode extension)
-    // Send as single chunk since it's usually not huge
-    if let Some(reasoning) = reasoning_text {
-        chunks.push(Ok(create_sse_event(&sse_envelope(
-            &meta,
-            "reasoning_text",
-            json!(reasoning),
-            0,
-        ))));
+    if let Some(role) = message.get("role").and_then(Value::as_str) {
+        chunks.push(Ok(create_sse_event(&sse_envelope(meta, "role", json!(role), idx))));
     }
-
-    // Stream reasoning_opaque if present (replace, not concat)
-    if let Some(opaque) = reasoning_opaque {
-        chunks.push(Ok(create_sse_event(&sse_envelope(
-            &meta,
-            "reasoning_opaque",
-            json!(opaque),
-            0,
-        ))));
+    if let Some(r) = message.get("reasoning_text").and_then(Value::as_str) {
+        chunks.push(Ok(create_sse_event(&sse_envelope(meta, "reasoning_text", json!(r), idx))));
     }
-
-    // Stream text content in chunks (if present)
-    if let Some(text_chunks) = content_chunks {
-        for text_chunk in text_chunks {
-            chunks.push(Ok(create_sse_event(&sse_envelope(&meta, "content", json!(text_chunk), 0))));
+    if let Some(r) = message.get("reasoning_opaque").and_then(Value::as_str) {
+        chunks.push(Ok(create_sse_event(&sse_envelope(meta, "reasoning_opaque", json!(r), idx))));
+    }
+    match message.get("content") {
+        Some(Value::String(text)) if !text.is_empty() => {
+            for text_chunk in chunk_text(text, chunk_size_chars) {
+                chunks.push(Ok(create_sse_event(&sse_envelope(meta, "content", json!(text_chunk), idx))));
+            }
+        }
+        // Non-string content has no OpenAI-delta shape to fake - the raw JSON
+        // value rides one content frame verbatim.
+        Some(other) if !other.is_null() && !other.is_string() => {
+            chunks.push(Ok(create_sse_event(&sse_envelope(meta, "content", other.clone(), idx))));
+        }
+        _ => {}
+    }
+    let tool_calls = message.get("tool_calls").and_then(Value::as_array);
+    if let Some(tools) = tool_calls {
+        if !tools.is_empty() {
+            // Tool calls ride LAST as a SINGLE complete chunk - the key to
+            // avoiding client-side delta calculation (task 59 ordering).
+            chunks.push(Ok(create_sse_event(&sse_envelope(
+                meta,
+                "tool_calls",
+                Value::Array(tools.clone()),
+                idx,
+            ))));
         }
     }
 
-    // Tool calls ride LAST (role -> reasoning -> text -> tool-call args), as a
-    // SINGLE complete chunk - this is the key to avoiding delta calculation.
-    if let Some(tools) = tool_calls {
-        chunks.push(Ok(create_sse_event(&sse_envelope(
-            &meta,
-            "tool_calls",
-            serde_json::to_value(&tools).unwrap(),
-            0,
-        ))));
-    }
-
-    // Final chunk with finish_reason, usage, and timings
-    let mut final_chunk = sse_envelope(&meta, FINISH_EVENT, json!(finish_reason), 0);
-
-    // Add usage if present
+    // Honest derivation only when the backend omitted finish_reason (task 59).
+    let finish_reason = choice
+        .get("finish_reason")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| {
+            if tool_calls.is_some_and(|t| !t.is_empty()) {
+                "tool_calls".to_string()
+            } else {
+                "stop".to_string()
+            }
+        });
+    let mut final_chunk = sse_envelope(meta, FINISH_EVENT, json!(finish_reason), idx);
     if let Some(u) = usage {
-        final_chunk["usage"] = serde_json::to_value(u).unwrap();
+        final_chunk["usage"] = u.clone();
     }
-
-    // Add timings if present (llama.cpp extension)
     if let Some(t) = timings {
-        final_chunk["timings"] = serde_json::to_value(t).unwrap();
+        final_chunk["timings"] = t.clone();
     }
-
     chunks.push(Ok(create_sse_event(&final_chunk)));
+    chunks
+}
 
+/// Stream EVERY choice (gap-free per-choice indices from `index` or array
+/// position), then the OpenAI `[DONE]` terminator.
+fn synthesize_openai_chunks(parsed: &RawCompletion<'_>, config: &SynthesisConfig) -> Vec<Result<Event, Infallible>> {
+    let mut chunks = Vec::new();
+    let last = parsed.choices.len() - 1;
+    for (pos, choice) in parsed.choices.iter().enumerate() {
+        let idx = choice.get("index").and_then(Value::as_u64).unwrap_or(pos as u64);
+        let is_last = pos == last;
+        chunks.extend(synthesize_choice_chunks(
+            &parsed.meta,
+            choice,
+            idx,
+            if is_last { parsed.usage } else { None },
+            if is_last { parsed.timings } else { None },
+            config.chunk_size_chars,
+        ));
+    }
     // OpenAI streaming terminator
     chunks.push(Ok(Event::default().data("[DONE]")));
-
     chunks
+}
+
+/// Paced SSE response over pre-computed chunks - shared by every entry point.
+fn stream_response(chunks: Vec<Result<Event, Infallible>>, config: &SynthesisConfig) -> Response {
+    let chunk_delay_ms = config.chunk_delay_ms;
+    let stream = stream::iter(chunks).then(move |chunk| async move {
+        if chunk_delay_ms > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(chunk_delay_ms)).await;
+        }
+        chunk
+    });
+    Sse::new(stream).into_response()
+}
+
+/// Map an OpenAI finish_reason onto the Anthropic stop_reason vocabulary.
+fn map_openai_finish_to_stop(finish: &str) -> String {
+    match finish {
+        "stop" => "end_turn".to_string(),
+        "length" => "max_tokens".to_string(),
+        "tool_calls" => "tool_use".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// Convert a RAW OpenAI completion into the full Anthropic SSE event set.
+///
+/// `None` means the body is not a well-formed OpenAI completion (malformed
+/// KNOWN fields) - the /v1/messages caller then answers with the SSE error
+/// frame. Unknown top-level fields merge into `message_start.message` and
+/// unknown usage keys stay in the usage object, so they survive BY
+/// CONSTRUCTION - the typed `ChatCompletionResponse` round-trip is bypassed.
+/// Every choice is emitted with gap-free global block indices.
+pub fn convert_openai_to_claude_sse(raw: &Value, config: &SynthesisConfig) -> Option<Vec<Result<Event, Infallible>>> {
+    let parsed = parse_raw_completion(raw).ok()?;
+    let usage = match parsed.usage {
+        Some(u) => {
+            // Read first, then write - the mapped keys are known fields.
+            let mut u = u.clone();
+            let prompt = u.get("prompt_tokens").cloned();
+            let completion = u.get("completion_tokens").cloned();
+            if let Some(pt) = prompt {
+                u["input_tokens"] = pt;
+            }
+            if let Some(ct) = completion {
+                u["output_tokens"] = ct;
+            }
+            u
+        }
+        None => json!({"input_tokens": 0, "output_tokens": 0}),
+    };
+    let first_msg = parsed.choices.first().and_then(|c| c.get("message"))?;
+    let role = first_msg.get("role").and_then(Value::as_str).unwrap_or("assistant");
+    let mut message = json!({
+        "id": parsed.meta.id, "type": "message", "role": role, "model": parsed.meta.model,
+        "content": [], "stop_reason": null, "stop_sequence": null, "usage": usage,
+    });
+    if let Some(extras) = parsed.meta.extras.as_object() {
+        for (k, v) in extras {
+            message[k] = v.clone();
+        }
+    }
+    let mut chunks: Vec<Result<Event, Infallible>> = vec![Ok(create_anthropic_sse_event(
+        "message_start",
+        &json!({"type": "message_start", "message": message}),
+    ))];
+
+    let mut idx = 0usize;
+    let mut has_tool_use = false;
+    for choice in &parsed.choices {
+        let message = choice.get("message").and_then(Value::as_object)?;
+        let mut emitted = false;
+        if let Some(reasoning) = message.get("reasoning_text").and_then(Value::as_str) {
+            if !reasoning.is_empty() {
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_start",
+                    &build_thinking_block_start_event(idx, None),
+                )));
+                for part in chunk_text(reasoning, config.chunk_size_chars) {
+                    chunks.push(Ok(create_anthropic_sse_event(
+                        "content_block_delta",
+                        &build_thinking_block_delta_event(idx, &part),
+                    )));
+                }
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_stop",
+                    &build_content_block_stop_event(idx),
+                )));
+                idx += 1;
+                emitted = true;
+            }
+        }
+        match message.get("content") {
+            Some(Value::String(text)) if !text.is_empty() => {
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_start",
+                    &build_content_block_start_event(idx, "text"),
+                )));
+                for part in chunk_text(text, config.chunk_size_chars) {
+                    chunks.push(Ok(create_anthropic_sse_event(
+                        "content_block_delta",
+                        &build_content_block_delta_event(idx, "text_delta", part.as_str()),
+                    )));
+                }
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_stop",
+                    &build_content_block_stop_event(idx),
+                )));
+                idx += 1;
+                emitted = true;
+            }
+            // Non-string, non-null content: verbatim pass-through block.
+            Some(other) if !other.is_null() && !other.is_string() => {
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_start",
+                    &json!({
+                        "type": "content_block_start", "index": idx, "content_block": other,
+                    }),
+                )));
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_stop",
+                    &build_content_block_stop_event(idx),
+                )));
+                idx += 1;
+                emitted = true;
+            }
+            _ => {}
+        }
+        if let Some(tools) = message.get("tool_calls").and_then(Value::as_array) {
+            for tc in tools {
+                let id = tc
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| format!("toolu_{}", uuid::Uuid::new_v4().to_string().replace('-', "")));
+                let name = tc
+                    .get("function")
+                    .and_then(|f| f.get("name"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                let args = tc
+                    .get("function")
+                    .and_then(|f| f.get("arguments"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_start",
+                    &build_tool_use_block_start_event(idx, &id, name),
+                )));
+                // The RAW arguments string rides partial_json verbatim - even
+                // if it is not valid JSON, rewriting it would lie.
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_delta",
+                    &build_tool_use_block_delta_event(idx, args),
+                )));
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_stop",
+                    &build_content_block_stop_event(idx),
+                )));
+                idx += 1;
+                has_tool_use = true;
+                emitted = true;
+            }
+        }
+        if !emitted {
+            // Anthropic requires at least one block; mirrors the From fallback.
+            chunks.push(Ok(create_anthropic_sse_event(
+                "content_block_start",
+                &build_content_block_start_event(idx, "text"),
+            )));
+            chunks.push(Ok(create_anthropic_sse_event(
+                "content_block_stop",
+                &build_content_block_stop_event(idx),
+            )));
+            idx += 1;
+        }
+    }
+
+    // Last choice's finish_reason decides; absent -> honest derivation (59 rule).
+    let stop_reason = parsed
+        .choices
+        .last()
+        .and_then(|c| c.get("finish_reason"))
+        .and_then(Value::as_str)
+        .map(map_openai_finish_to_stop)
+        .unwrap_or_else(|| {
+            if has_tool_use {
+                "tool_use".to_string()
+            } else {
+                "end_turn".to_string()
+            }
+        });
+    chunks.push(Ok(create_anthropic_sse_event(
+        "message_delta",
+        &json!({
+                "type": "message_delta",
+            "delta": { "stop_reason": stop_reason, "stop_sequence": null },
+            "usage": usage,
+        }),
+    )));
+    chunks.push(Ok(create_anthropic_sse_event("message_stop", &build_message_stop_event())));
+    Some(chunks)
+}
+
+/// Streaming-response entry for the /v1/messages OpenAI-format branch.
+/// `None` = malformed OpenAI body; the caller serves the SSE error frame.
+pub fn synthesize_anthropic_openai_format_response(raw: &Value, config: &SynthesisConfig) -> Option<Response> {
+    Some(stream_response(convert_openai_to_claude_sse(raw, config)?, config))
 }
 
 /// Split text into chunks of approximately max_size characters
@@ -283,20 +535,11 @@ pub async fn synthesize_anthropic_streaming_response(
     msg: AnthropicMessage,
     config: &SynthesisConfig,
 ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
-    // Pre-compute all chunks
-    let chunks = synthesize_anthropic_chunks(msg, config.chunk_size_chars);
-
-    // Wrap in async stream with delays between chunks
-    let chunk_delay_ms = config.chunk_delay_ms;
-    let stream = stream::iter(chunks).then(move |chunk| async move {
-        if chunk_delay_ms > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(chunk_delay_ms)).await;
-        }
-        chunk
-    });
-
-    // Build SSE response
-    Ok(Sse::new(stream).into_response())
+    // Pre-compute all chunks, then pace the SSE response
+    Ok(stream_response(
+        synthesize_anthropic_chunks(msg, config.chunk_size_chars),
+        config,
+    ))
 }
 
 /// Generate the sequence of Anthropic SSE events from complete message
@@ -604,7 +847,6 @@ fn build_tool_use_block_delta_event(index: usize, partial_json: &str) -> serde_j
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api::{FunctionCall, Timings, ToolCall, Usage};
     use crate::config::SynthesisConfig;
 
     #[test]
@@ -673,27 +915,14 @@ mod tests {
 
     #[test]
     fn test_synthesize_chunks_tool_calls() {
-        let tool_calls = vec![ToolCall {
-            id: Some("call-123".to_string()),
-            call_type: Some("function".to_string()),
-            index: Some(0),
-            function: FunctionCall {
-                name: "test_func".to_string(),
-                arguments: r#"{"arg":"value"}"#.to_string(),
-            },
-        }];
-
-        let chunks = synthesize_chunks(
-            "test-id".to_string(),
-            "test-model".to_string(),
-            1234567890,
-            None, // no content
-            Some(tool_calls),
-            None, // no reasoning
-            None, // no opaque
-            "tool_calls".to_string(),
-            None,
-            None,
+        let chunks = synthesize_openai_chunks(
+            &parse_raw_completion(&json!({
+                "id": "test-id", "created": 1234567890, "model": "test-model",
+                "choices": [{"index": 0, "finish_reason": "tool_calls", "message": {"role": "assistant",
+                    "tool_calls": [{"id": "call-123", "type": "function", "function": {"name": "test_func", "arguments": "{\"arg\":\"value\"}"}}]}}]
+            }))
+            .expect("fixture"),
+            &SynthesisConfig::default(),
         );
 
         // Should have: role chunk, tool_calls chunk, final chunk, [DONE]
@@ -707,17 +936,13 @@ mod tests {
 
     #[test]
     fn test_synthesize_chunks_text_content() {
-        let chunks = synthesize_chunks(
-            "test-id".to_string(),
-            "test-model".to_string(),
-            1234567890,
-            Some(vec!["Hello world".to_string()]),
-            None,
-            None,
-            None,
-            "stop".to_string(),
-            None,
-            None,
+        let chunks = synthesize_openai_chunks(
+            &parse_raw_completion(&json!({
+                "id": "test-id", "created": 1234567890, "model": "test-model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Hello world"}}]
+            }))
+            .expect("fixture"),
+            &SynthesisConfig::default(),
         );
 
         // Should have: role chunk, content chunk, final chunk, [DONE]
@@ -731,17 +956,14 @@ mod tests {
 
     #[test]
     fn test_synthesize_chunks_reasoning_fields() {
-        let chunks = synthesize_chunks(
-            "test-id".to_string(),
-            "test-model".to_string(),
-            1234567890,
-            Some(vec!["Answer".to_string()]),
-            None,
-            Some("Thinking steps".to_string()),
-            Some("state_blob".to_string()),
-            "stop".to_string(),
-            None,
-            None,
+        let chunks = synthesize_openai_chunks(
+            &parse_raw_completion(&json!({
+                "id": "test-id", "created": 1234567890, "model": "test-model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Answer",
+                    "reasoning_text": "Thinking steps", "reasoning_opaque": "state_blob"}}]
+            }))
+            .expect("fixture"),
+            &SynthesisConfig::default(),
         );
 
         // Should have: role, reasoning_text, reasoning_opaque, content, final, [DONE]
@@ -755,36 +977,15 @@ mod tests {
 
     #[test]
     fn test_synthesize_chunks_usage_and_timings() {
-        let usage = Usage {
-            prompt_tokens: 10,
-            completion_tokens: 20,
-            total_tokens: 30,
-            completion_tokens_details: None,
-        };
-
-        let timings = Timings {
-            prompt_n: Some(10),
-            prompt_ms: Some(5.0),
-            prompt_per_token_ms: Some(0.5),
-            prompt_per_second: Some(2000.0),
-            predicted_n: Some(20),
-            predicted_ms: Some(10.0),
-            predicted_per_token_ms: Some(0.5),
-            predicted_per_second: Some(2000.0),
-            cache_n: Some(0),
-        };
-
-        let chunks = synthesize_chunks(
-            "test-id".to_string(),
-            "test-model".to_string(),
-            1234567890,
-            Some(vec!["Test".to_string()]),
-            None,
-            None,
-            None,
-            "stop".to_string(),
-            Some(usage),
-            Some(timings),
+        let chunks = synthesize_openai_chunks(
+            &parse_raw_completion(&json!({
+                "id": "test-id", "created": 1234567890, "model": "test-model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Test"}}],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 20, "total_tokens": 30},
+                "timings": {"prompt_n": 10, "predicted_n": 20, "predicted_per_second": 2000.0}
+            }))
+            .expect("fixture"),
+            &SynthesisConfig::default(),
         );
 
         // Should have chunks including usage and timings in final chunk
@@ -798,17 +999,13 @@ mod tests {
 
     #[test]
     fn test_synthesize_chunks_ends_with_done() {
-        let chunks = synthesize_chunks(
-            "test-id".to_string(),
-            "test-model".to_string(),
-            1234567890,
-            Some(vec!["Test".to_string()]),
-            None,
-            None,
-            None,
-            "stop".to_string(),
-            None,
-            None,
+        let chunks = synthesize_openai_chunks(
+            &parse_raw_completion(&json!({
+                "id": "test-id", "created": 1234567890, "model": "test-model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Test"}}]
+            }))
+            .expect("fixture"),
+            &SynthesisConfig::default(),
         );
 
         // Last chunk should be [DONE] - verify it exists
@@ -1206,12 +1403,11 @@ mod chunk_timing_tests {
         out
     }
 
-    fn resp_with_text(text: &str) -> ChatCompletionResponse {
-        let raw = serde_json::json!({
+    fn resp_with_text(text: &str) -> Value {
+        serde_json::json!({
             "id": "cmpl-t57", "created": 1, "model": "m",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": text}}]
-        });
-        serde_json::from_value(raw).unwrap()
+        })
     }
 
     #[tokio::test]
@@ -1224,7 +1420,7 @@ mod chunk_timing_tests {
         assert_eq!(cfg.chunk_delay_ms, 0);
         assert_eq!(cfg.chunk_size_chars, 2000);
         let text = "x".repeat(3000);
-        let resp = synthesize_streaming_response(resp_with_text(&text), &cfg).await.unwrap();
+        let resp = synthesize_streaming_response(&resp_with_text(&text), &cfg).await.unwrap();
         let marks = timed_body(resp, 2).await;
         assert!(marks.len() >= 2, "expected at least two body chunks");
         let delta = marks[1].0 - marks[0].0;
@@ -1245,7 +1441,7 @@ mod chunk_timing_tests {
             chunk_size_chars: 2000,
         };
         let text = "x".repeat(3000);
-        let resp = synthesize_streaming_response(resp_with_text(&text), &cfg).await.unwrap();
+        let resp = synthesize_streaming_response(&resp_with_text(&text), &cfg).await.unwrap();
         let marks = timed_body(resp, 2).await;
         assert!(marks.len() >= 2);
         let delta = marks[1].0 - marks[0].0;
@@ -1263,7 +1459,7 @@ mod chunk_timing_tests {
         //       (baseline: hard-coded 50 => 60 chunks => RED)
         let cfg = SynthesisConfig::default();
         let text = "x".repeat(3000);
-        let resp = synthesize_streaming_response(resp_with_text(&text), &cfg).await.unwrap();
+        let resp = synthesize_streaming_response(&resp_with_text(&text), &cfg).await.unwrap();
         let body = axum::body::to_bytes(resp.into_body(), 10_000_000).await.unwrap();
         let body = String::from_utf8(body.to_vec()).unwrap();
         let content_chunks: Vec<&str> = body
@@ -1317,6 +1513,7 @@ mod envelope_factory_tests {
 
     fn meta() -> StreamMeta {
         StreamMeta {
+            extras: Value::Null,
             id: "cmpl-env".to_string(),
             created: 42,
             model: "qwen3".to_string(),
@@ -1353,9 +1550,12 @@ mod envelope_factory_tests {
     async fn refactor_preserves_exact_sse_bytes() {
         // Golden bytes captured VERBATIM from the REAL response for this exact fixture.
         // Pre-58 capture proved the sse_envelope refactor was byte-identical (task58
-        // evidence); retargeted in task 59 to the post-order/derivation stream
-        // (tool-call args last, finish_reason derived to "tool_calls").
-        const BASELINE_BYTES: &str = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_text\":\"Hmm, let me think.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Answer here.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\",\"name\":\"lookup\"},\"id\":\"call_1\",\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\",\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":7,\"prompt_tokens\":5,\"total_tokens\":12}}\n\ndata: [DONE]\n\n";
+        // evidence); retargeted in task 59 (order/derivation) and again in task 61 for
+        // the RAW-Value path: extras (system_fingerprint, x_top_unknown) ride every
+        // chunk, choices[1] now streams at index 1, and usage carries llama_extra
+        // verbatim. Disclosed behavior change - baseline drops these (task61 capture).
+        const BASELINE_BYTES: &str = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_text\":\"Hmm, let me think.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Answer here.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\",\"name\":\"lookup\"},\"id\":\"call_1\",\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\",\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null,\"index\":1}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"SECOND CHOICE\"},\"finish_reason\":null,\"index\":1}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":1}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"usage\":{\"completion_tokens\":7,\"llama_extra\":{\"k\":1},\"prompt_tokens\":5,\"total_tokens\":12},\"x_top_unknown\":{\"alpha\":true}}\n\ndata: [DONE]\n\n";
+
 
         let raw = serde_json::json!({
             "id": "cmpl-probe", "object": "chat.completion", "created": 171, "model": "qwen3",
@@ -1367,9 +1567,8 @@ mod envelope_factory_tests {
             "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12, "llama_extra": {"k": 1}},
             "x_top_unknown": {"alpha": true}
         });
-        let typed: ChatCompletionResponse = serde_json::from_value(raw).unwrap();
         let cfg = SynthesisConfig::default();
-        let resp = synthesize_streaming_response(typed, &cfg).await.unwrap();
+        let resp = synthesize_streaming_response(&raw, &cfg).await.unwrap();
         let body = axum::body::to_bytes(resp.into_body(), 10_000_000).await.unwrap();
         assert_eq!(String::from_utf8(body.to_vec()).unwrap(), BASELINE_BYTES);
     }
@@ -1385,13 +1584,13 @@ mod order_finish_reason_tests {
         String::from_utf8(b.to_vec()).unwrap()
     }
 
-    fn mixed_no_finish() -> ChatCompletionResponse {
+    fn mixed_no_finish() -> Value {
         let raw = serde_json::json!({
             "id": "c59", "created": 9, "model": "m",
             "choices": [{"index": 0, "message": {"role": "assistant", "content": "TEXT-BODY", "reasoning_text": "REASON-BODY",
                 "tool_calls": [{"id": "call_9", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}}]
         });
-        serde_json::from_value(raw).unwrap()
+        raw
     }
 
     #[tokio::test]
@@ -1401,7 +1600,7 @@ mod order_finish_reason_tests {
         // Then: order is role -> reasoning -> content -> tool_calls (baseline emitted
         //       tool_calls SECOND, before reasoning/text)
         let cfg = SynthesisConfig::default();
-        let b = body(synthesize_streaming_response(mixed_no_finish(), &cfg).await.unwrap()).await;
+        let b = body(synthesize_streaming_response(&mixed_no_finish(), &cfg).await.unwrap()).await;
         let i_reason = b.find("REASON-BODY").expect("reasoning delta");
         let i_text = b.find("TEXT-BODY").expect("content delta");
         let i_tool = b.find("call_9").expect("tool_calls delta");
@@ -1413,7 +1612,7 @@ mod order_finish_reason_tests {
     async fn finish_reason_derives_tool_calls_when_absent() {
         // Then: final chunk finish_reason == "tool_calls", not the fabricated "stop"
         let cfg = SynthesisConfig::default();
-        let b = body(synthesize_streaming_response(mixed_no_finish(), &cfg).await.unwrap()).await;
+        let b = body(synthesize_streaming_response(&mixed_no_finish(), &cfg).await.unwrap()).await;
         assert!(
             b.contains("\"finish_reason\":\"tool_calls\""),
             "finish_reason must be derived, got:\n{b}"
@@ -1426,18 +1625,16 @@ mod order_finish_reason_tests {
     async fn finish_reason_still_derives_stop_when_nothing_else() {
         // Given: content-only message without finish_reason -> honest default stays "stop"
         let raw = serde_json::json!({"id":"c","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"x"}}]});
-        let typed: ChatCompletionResponse = serde_json::from_value(raw).unwrap();
         let cfg = SynthesisConfig::default();
-        let b = body(synthesize_streaming_response(typed, &cfg).await.unwrap()).await;
+        let b = body(synthesize_streaming_response(&raw, &cfg).await.unwrap()).await;
         assert!(b.contains("\"finish_reason\":\"stop\""));
     }
 
     #[tokio::test]
     async fn explicit_finish_reason_is_never_overridden() {
         let raw = serde_json::json!({"id":"c","created":1,"model":"m","choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"x","tool_calls":[{"id":"t","type":"function","function":{"name":"f","arguments":"{}"}}]}}]});
-        let typed: ChatCompletionResponse = serde_json::from_value(raw).unwrap();
         let cfg = SynthesisConfig::default();
-        let b = body(synthesize_streaming_response(typed, &cfg).await.unwrap()).await;
+        let b = body(synthesize_streaming_response(&raw, &cfg).await.unwrap()).await;
         assert!(b.contains("\"finish_reason\":\"length\""));
     }
 
@@ -1695,5 +1892,119 @@ mod tool_result_signature_tests {
     fn rfind_index(b: &str, idx: usize) -> usize {
         let pat = format!("\"index\":{idx},\"type\":\"content_block_stop\"");
         b.rfind(&pat).expect("stop frame present")
+    }
+}
+
+#[cfg(test)]
+mod raw_choice_unknown_preservation_tests {
+    use super::*;
+
+    async fn body(resp: Response) -> String {
+        let b = axum::body::to_bytes(resp.into_body(), 10_000_000).await.unwrap();
+        String::from_utf8(b.to_vec()).unwrap()
+    }
+
+    fn two_choice_raw() -> Value {
+        json!({
+            "id": "cmpl-probe", "object": "chat.completion", "created": 171, "model": "qwen3",
+            "system_fingerprint": "fp_999",
+            "choices": [
+                {"index": 0, "message": {"role": "assistant", "content": "Answer here.", "reasoning_text": "Hmm.",
+                    "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{\"q\":\"x\"}"}}]}},
+                {"index": 1, "message": {"role": "assistant", "content": "SECOND CHOICE"}}
+            ],
+            "usage": {"prompt_tokens": 5, "completion_tokens": 7, "total_tokens": 12, "llama_extra": {"k": 1}},
+            "x_top_unknown": {"alpha": true}
+        })
+    }
+
+    #[tokio::test]
+    async fn native_streams_all_choices_and_unknown_fields() {
+        // Baseline DROPPED all of this (typed round-trip, choices[0] only - see
+        // task61 baseline capture bytes).
+        let b = body(
+            synthesize_streaming_response(&two_choice_raw(), &SynthesisConfig::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(b.contains("SECOND CHOICE"), "choices[1] must stream:\n{b}");
+        assert!(b.contains("\"index\":1"), "choice-1 frames carry index 1");
+        assert!(b.contains("fp_999"), "system_fingerprint must survive");
+        assert!(
+            b.contains("\"x_top_unknown\":{\"alpha\":true}"),
+            "unknown top-level must survive"
+        );
+        assert!(b.contains("\"llama_extra\""), "unknown usage key must survive");
+    }
+
+    #[tokio::test]
+    async fn convert_keeps_unknowns_and_maps_usage_in_message_start() {
+        let resp = synthesize_anthropic_openai_format_response(&two_choice_raw(), &SynthesisConfig::default()).expect("valid");
+        let b = body(resp).await;
+        let first_block = b.find("content_block_start").expect("blocks follow message_start");
+        let start = &b[..first_block];
+        assert!(
+            start.contains("fp_999") && start.contains("\"x_top_unknown\""),
+            "unknowns merge into message"
+        );
+        assert!(
+            start.contains("\"input_tokens\":5") && start.contains("\"output_tokens\":7"),
+            "usage maps"
+        );
+        assert!(start.contains("\"llama_extra\""), "unknown usage keys survive");
+    }
+
+    #[tokio::test]
+    async fn convert_streams_every_choice_gap_free() {
+        let b =
+            body(synthesize_anthropic_openai_format_response(&two_choice_raw(), &SynthesisConfig::default()).unwrap()).await;
+        assert!(b.contains("SECOND CHOICE"), "choices[1] must become blocks");
+        // thinking@0, text@1, tool_use@2, choice-1 text@3 - gap-free globals
+        assert!(b.contains("\"index\":3"), "fourth block index must exist:\n{b}");
+        // no finish_reason anywhere -> derivation: tool_use was emitted -> tool_use
+        assert!(b.contains("\"stop_reason\":\"tool_use\""));
+    }
+
+    #[tokio::test]
+    async fn convert_maps_finish_reason_vocabulary() {
+        let cfg = SynthesisConfig::default();
+        let raw = json!({"id":"i","model":"m","choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"x"}}]});
+        let b = body(synthesize_anthropic_openai_format_response(&raw, &cfg).unwrap()).await;
+        assert!(b.contains("\"stop_reason\":\"max_tokens\""), "length -> max_tokens:\n{b}");
+        let raw = json!({"id":"i","model":"m","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"x"}}]});
+        let b = body(synthesize_anthropic_openai_format_response(&raw, &cfg).unwrap()).await;
+        assert!(b.contains("\"stop_reason\":\"end_turn\""), "stop -> end_turn");
+    }
+
+    #[test]
+    fn malformed_known_fields_are_rejected_by_both_paths() {
+        // The task-11 null-index class stays a REJECTION (index is a known field
+        // with a broken wire type) - the /v1/messages error-frame contract holds.
+        let cfg = SynthesisConfig::default();
+        let bad: Vec<Value> = vec![
+            json!([]),
+            json!({"choices": null}),
+            json!({"id": "i", "model": "m", "choices": []}),
+            json!({"id": "i", "model": "m", "choices": [{"index": null, "message": {"role": "assistant", "content": "leaky"}}]}),
+            json!({"id": "i", "model": "m", "choices": [{"message": "not an object"}]}),
+            json!({"id": "i", "model": "m", "choices": [{"index": 0}]}),
+            json!({"id": "i", "model": "m", "choices": [{"index": 0, "finish_reason": 7, "message": {"role": "assistant", "content": "x"}}]}),
+        ];
+        for b in bad {
+            assert!(convert_openai_to_claude_sse(&b, &cfg).is_none(), "convert must reject {b}");
+            assert!(parse_raw_completion(&b).is_err(), "parse must reject {b}");
+        }
+    }
+
+    #[test]
+    fn extras_exclude_envelope_owned_keys() {
+        let raw = two_choice_raw();
+        let parsed = parse_raw_completion(&raw).expect("valid");
+        let extras = parsed.meta.extras.as_object().unwrap();
+        assert!(extras.contains_key("system_fingerprint") && extras.contains_key("x_top_unknown"));
+        for owned in ["id", "object", "created", "model", "choices", "usage", "timings"] {
+            assert!(!extras.contains_key(owned), "{owned} is envelope-owned, not an extra");
+        }
     }
 }
