@@ -1,6 +1,6 @@
 //! Fix module registry
 
-use super::{FixAction, FixLogLevel, ResponseFix, ToolCallAccumulator};
+use super::{FixAction, FixError, FixLogLevel, ResponseFix, ToolCallAccumulator};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -124,9 +124,21 @@ impl FixRegistry {
 
         for fix in &self.fixes {
             if self.is_enabled(fix.name()) && fix.applies_with_context(&result, request) {
-                let (new_result, action) = fix.apply_with_context(result, request);
-                Self::log_fix_action(fix.name(), &action, fix.log_level());
-                result = new_result;
+                // Fail-safe: `FixError` carries no response, so an original is
+                // kept to forward when the fixer errors. The clone costs one
+                // deep-copy only once a fix actually applies, never on the
+                // no-op path.
+                let original = result.clone();
+                match fix.apply_with_context(original, request) {
+                    Ok((new_result, action)) => {
+                        Self::log_fix_action(fix.name(), &action, fix.log_level());
+                        result = new_result;
+                    }
+                    Err(error) => {
+                        let action = Self::fixer_error_action(&result, &error);
+                        Self::log_fix_action(fix.name(), &action, fix.log_level());
+                    }
+                }
             }
         }
 
@@ -213,9 +225,12 @@ impl FixRegistry {
                 continue;
             }
             let candidate = response.clone();
-            let (_, action) = match request {
-                Some(req) => fix.apply_with_context(candidate, req),
-                None => fix.apply(candidate),
+            let action = match request {
+                Some(req) => match fix.apply_with_context(candidate, req) {
+                    Ok((_, action)) => action,
+                    Err(error) => Self::fixer_error_action(response, &error),
+                },
+                None => fix.apply(candidate).1,
             };
             if action.detected() {
                 let snippet = match &action {
@@ -236,6 +251,16 @@ impl FixRegistry {
         }
 
         detected
+    }
+
+    /// The `Failed` action recorded when a fixer returns `Err`: the error
+    /// message rides in `attempted_fix`; the response — which the registry
+    /// forwards untouched — is clipped into `original_snippet`.
+    fn fixer_error_action(response: &Value, error: &FixError) -> FixAction {
+        FixAction::Failed {
+            original_snippet: truncate_snippet(&response.to_string(), 200, SnippetLimit::Chars),
+            attempted_fix: format!("fixer error: {error}"),
+        }
     }
 
     /// Centralized logging for fix actions
@@ -793,5 +818,204 @@ mod tests {
         let clipped = truncate_snippet(&s, 10, SnippetLimit::Chars);
         assert!(clipped.ends_with("..."));
         assert_eq!(clipped.chars().count(), 10);
+    }
+
+    // --- task 31: Result-typed fail-safe apply_with_context ---
+
+    /// Fixer whose `apply_with_context` always fails structurally, exercising
+    /// the registry's Err path.
+    struct FailingFix;
+
+    impl ResponseFix for FailingFix {
+        fn name(&self) -> &str {
+            "failing_fix"
+        }
+
+        fn description(&self) -> &str {
+            "test fixer that always returns Err from apply_with_context"
+        }
+
+        fn applies(&self, _response: &Value) -> bool {
+            true
+        }
+
+        fn apply(&self, response: Value) -> (Value, FixAction) {
+            (response, FixAction::NotApplicable)
+        }
+
+        fn apply_with_context(&self, _response: Value, _request: &Value) -> Result<(Value, FixAction), crate::fixes::FixError> {
+            Err(crate::fixes::FixError::Parse("boom".to_string()))
+        }
+    }
+
+    /// Fixer whose `apply_with_context` returns Ok with a Fixed action and a
+    /// visibly-marked response.
+    struct OkFixedFix;
+
+    impl ResponseFix for OkFixedFix {
+        fn name(&self) -> &str {
+            "ok_fixed_fix"
+        }
+
+        fn description(&self) -> &str {
+            "test fixer that always returns Ok(Fixed) from apply_with_context"
+        }
+
+        fn applies(&self, _response: &Value) -> bool {
+            true
+        }
+
+        fn apply(&self, response: Value) -> (Value, FixAction) {
+            (response, FixAction::NotApplicable)
+        }
+
+        fn apply_with_context(&self, _response: Value, _request: &Value) -> Result<(Value, FixAction), crate::fixes::FixError> {
+            Ok((serde_json::json!({"marked": true}), FixAction::fixed("original", "marked")))
+        }
+    }
+
+    /// Minimal fixer: implements ONLY the required trait methods. Its
+    /// `apply_with_context` therefore comes from the trait default.
+    struct BareFix;
+
+    impl ResponseFix for BareFix {
+        fn name(&self) -> &str {
+            "bare_fix"
+        }
+
+        fn description(&self) -> &str {
+            "minimal test fixer relying on the trait default apply_with_context"
+        }
+
+        fn applies(&self, _response: &Value) -> bool {
+            false
+        }
+
+        fn apply(&self, response: Value) -> (Value, FixAction) {
+            (response, FixAction::NotApplicable)
+        }
+    }
+
+    #[test]
+    fn test_apply_fixes_with_context_fixer_error_keeps_response_byte_identical() {
+        // Given: a registry whose only fixer always returns Err
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(FailingFix));
+
+        let request = serde_json::json!({"model": "test"});
+        let response = serde_json::json!({"choices": [{"message": {"content": "hello"}}]});
+
+        // When: fixes run with request context
+        let result = registry.apply_fixes_with_context(response.clone(), &request);
+
+        // Then: the response flows out untouched — byte-identical, not merely
+        // structurally equal (Value equality would forgive key reordering).
+        assert_eq!(
+            serde_json::to_string(&result).unwrap(),
+            serde_json::to_string(&response).unwrap()
+        );
+    }
+
+    #[test]
+    fn test_apply_fixes_with_context_fixer_error_does_not_swallow_later_fix() {
+        // CRITICAL fail-safe property: after a fixer errors, the ORIGINAL
+        // response must keep flowing to the remaining fixes.
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(FailingFix));
+        registry.register(Arc::new(crate::fixes::ToolcallMalformedArgumentsFix::new()));
+
+        let request = serde_json::json!({
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "write",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": {"type": "string"},
+                            "content": {"type": "string"}
+                        }
+                    }
+                }
+            }]
+        });
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "function": {
+                            "name": "write",
+                            "arguments": r#"{"content":"data",{}":"/tmp/file.txt"}"#
+                        }
+                    }]
+                }
+            }]
+        });
+
+        let result = registry.apply_fixes_with_context(response, &request);
+
+        let args = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert!(args.contains(r#""file_path":"#));
+        assert!(!args.contains(r#"{}":"#));
+    }
+
+    #[test]
+    fn test_apply_fixes_with_context_ok_fixed_still_applies() {
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(OkFixedFix));
+
+        let request = serde_json::json!({"model": "test"});
+        let response = serde_json::json!({"choices": []});
+
+        let result = registry.apply_fixes_with_context(response, &request);
+
+        assert_eq!(result["marked"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn test_fixer_error_action_records_reason_and_clips_snippet() {
+        let response = serde_json::json!({"choices": [{"message": {"content": "x".repeat(500)}}]});
+
+        let action = FixRegistry::fixer_error_action(&response, &crate::fixes::FixError::Parse("boom".to_string()));
+
+        match action {
+            FixAction::Failed {
+                original_snippet,
+                attempted_fix,
+            } => {
+                assert_eq!(attempted_fix, "fixer error: parse error: boom");
+                assert_eq!(original_snippet.chars().count(), 200);
+                assert!(original_snippet.ends_with("..."));
+            }
+            other => panic!("expected Failed action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_fixer_error_action_attempted_fix_round_trips_cjk() {
+        let action = FixRegistry::fixer_error_action(
+            &serde_json::json!({}),
+            &crate::fixes::FixError::Rebuild("再構築に失敗しました 🔧".to_string()),
+        );
+
+        match action {
+            FixAction::Failed { attempted_fix, .. } => {
+                assert_eq!(attempted_fix, "fixer error: rebuild error: 再構築に失敗しました 🔧");
+            }
+            other => panic!("expected Failed action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_apply_with_context_trait_default_returns_ok_not_applicable() {
+        let fix = BareFix;
+        let response = serde_json::json!({"a": 1});
+
+        let (out, action) = fix.apply_with_context(response.clone(), &serde_json::json!({})).unwrap();
+
+        assert_eq!(out, response);
+        assert!(matches!(action, FixAction::NotApplicable));
     }
 }

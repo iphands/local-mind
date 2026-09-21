@@ -18,7 +18,7 @@
 //! 2. Uses tool schemas from the request to determine the correct parameter name
 //! 3. Replaces each malformed property name with the next missing schema name, in order
 
-use super::{FixAction, ResponseFix};
+use super::{FixAction, FixError, ResponseFix};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -327,8 +327,8 @@ impl ResponseFix for ToolcallMalformedArgumentsFix {
         has_tool_calls && has_tools
     }
 
-    fn apply_with_context(&self, response: Value, request: &Value) -> (Value, FixAction) {
-        self.fix_response_with_context(response, request)
+    fn apply_with_context(&self, response: Value, request: &Value) -> Result<(Value, FixAction), FixError> {
+        Ok(self.fix_response_with_context(response, request))
     }
 
     fn apply_stream_with_context(&self, chunk: Value, request: &Value) -> (Value, FixAction) {
@@ -702,7 +702,7 @@ mod tests {
         });
 
         // Apply the fix
-        let (fixed, action) = fix.apply_with_context(response, &request);
+        let (fixed, action) = fix.apply_with_context(response, &request).unwrap();
 
         // Verify the fix was applied
         let args_str = fixed["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]

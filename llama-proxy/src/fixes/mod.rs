@@ -76,6 +76,41 @@ impl Default for FixAction {
     }
 }
 
+/// Structural failure of a fixer that had already decided the response needs
+/// repair (task 31 fail-safe interface). It never carries a response: on Err
+/// the registry logs a `FixAction::Failed` and forwards the ORIGINAL response,
+/// so a broken fixer can never corrupt or swallow client data.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FixError {
+    /// The fixer could not parse the content it was asked to repair.
+    Parse(String),
+    /// The fixer parsed the content but could not rebuild a valid response.
+    Rebuild(String),
+}
+
+impl std::fmt::Display for FixError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FixError::Parse(message) => write!(f, "parse error: {message}"),
+            FixError::Rebuild(message) => write!(f, "rebuild error: {message}"),
+        }
+    }
+}
+
+/// Coarse outcome a fixer reports for a response.
+///
+/// Forward-declared interface for the tasks 29/30 logging consolidation;
+/// no consumer selects on it yet, so the registry still discriminates on the
+/// full [`FixAction`] payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // consumed by tasks 29/30; pub API kept intentionally
+pub enum FixOutcome {
+    /// Content was fine or the fixer does not handle it.
+    NotApplicable,
+    /// Malformed content was detected and successfully fixed.
+    Fixed,
+}
+
 /// Accumulates tool call arguments across streaming chunks for fixing
 #[derive(Default)]
 pub struct ToolCallAccumulator {
@@ -211,8 +246,16 @@ pub trait ResponseFix: Send + Sync {
     }
 
     /// Apply the fix to the response with request context
-    fn apply_with_context(&self, response: Value, _request: &Value) -> (Value, FixAction) {
-        self.apply(response)
+    ///
+    /// Returns `Err([FixError])` when the fixer fails structurally; the
+    /// registry then records a `FixAction::Failed` and forwards the ORIGINAL
+    /// response untouched. [`ResponseFix::apply`] stays the simple
+    /// (infallible-by-contract) primary method that fixes implement; this
+    /// default mirrors it by lifting its result into `Ok`.
+    ///
+    /// [`FixError`]: FixError
+    fn apply_with_context(&self, response: Value, _request: &Value) -> Result<(Value, FixAction), FixError> {
+        Ok(self.apply(response))
     }
 
     /// **LEGACY**: Apply fix to streaming chunk with request context
