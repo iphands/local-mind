@@ -1,4 +1,5 @@
 mod loader;
+mod validate;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

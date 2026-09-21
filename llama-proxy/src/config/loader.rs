@@ -1,8 +1,14 @@
+use std::collections::HashMap;
 use std::path::Path;
 
+use super::validate::{require_nonempty, validate_bind_host, validate_http_url, validate_temperature};
 use super::{AppConfig, ConfigError};
 
-/// Load configuration from a YAML file
+/// Load configuration from a YAML file.
+///
+/// This loader is the SINGLE validation home: everything a YAML file can
+/// express is checked here once, and consumers downstream trust the result.
+/// Task 72's `validate_final` covers only what CLI overrides can change.
 pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
     let path = path.as_ref();
 
@@ -13,92 +19,116 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
     let content = std::fs::read_to_string(path)?;
     let config: AppConfig = serde_yaml::from_str(&content)?;
 
-    // Validate server configuration
     validate_server_config(&config.server)?;
-
-    // Validate reprompt config if present
-    if let Some(ref r) = config.reprompt {
-        if r.enabled && r.prompt_file.is_none() && r.prompt.is_none() {
-            return Err(ConfigError::Validation(
-                "reprompt: enabled but neither 'prompt_file' nor 'prompt' is set".to_string(),
-            ));
-        }
+    validate_reprompt(config.reprompt.as_ref())?;
+    validate_backends(&config)?;
+    if let Some(ref augment) = config.augment_backend {
+        validate_http_url(&augment.url, "Augment backend")?;
+        require_nonempty(&augment.model, "augment-backend model")?;
     }
-
-    // Validate backend configuration (single or multi-backend)
-    if let Some(ref backends) = config.backends {
-        // Multi-backend mode: validate all groups and their nodes
-        if backends.is_empty() {
-            return Err(ConfigError::Validation("No backend groups configured".to_string()));
-        }
-        for (name, group) in backends {
-            if group.nodes.is_empty() {
-                return Err(ConfigError::Validation(format!(
-                    "Backend group '{}' has no nodes configured",
-                    name
-                )));
-            }
-            // Validate strategy
-            if group.strategy != "round_robin" && group.strategy != "priority_free" {
-                return Err(ConfigError::Validation(format!(
-                    "Backend group '{}' has invalid strategy '{}'. Use 'round_robin' or 'priority_free'",
-                    name, group.strategy
-                )));
-            }
-            // Validate all node URLs
-            for node in &group.nodes {
-                validate_backend_url(&node.url)?;
-                if node.timeout_seconds == 0 {
-                    return Err(ConfigError::Validation(format!(
-                        "Node in group '{}' has timeout_seconds of 0",
-                        name
-                    )));
-                }
-            }
-        }
-    } else if let Some(ref backend) = config.backend {
-        // Single backend mode
-        validate_backend_config(backend)?;
-        validate_backend_url(&backend.url)?;
+    if config.dump.enabled {
+        require_nonempty(config.dump.path.trim(), "dump path while dump is enabled")?;
     }
-    // backend: None + backends: None is loadable by design (F-H1): the proxy
-    // starts and every completion request answers the task-4 503 path.
 
     Ok(config)
 }
 
+fn validate_reprompt(rep: Option<&super::RepromptConfig>) -> Result<(), ConfigError> {
+    let Some(r) = rep else {
+        return Ok(());
+    };
+    if r.enabled && r.prompt_file.is_none() && r.prompt.is_none() {
+        return Err(ConfigError::Validation(
+            "reprompt: enabled but neither 'prompt_file' nor 'prompt' is set".to_string(),
+        ));
+    }
+    if let Some(file) = r.prompt_file.as_deref() {
+        require_nonempty(file, "reprompt prompt_file")?;
+        if !Path::new(file).exists() {
+            return Err(ConfigError::Validation(format!(
+                "reprompt: prompt_file '{file}' does not exist"
+            )));
+        }
+    }
+    for sentinel in &r.done_sentinels {
+        require_nonempty(sentinel, "reprompt done_sentinels entry")?;
+    }
+    Ok(())
+}
+
+fn validate_backends(config: &AppConfig) -> Result<(), ConfigError> {
+    let Some(backends) = config.backends.as_ref() else {
+        if let Some(ref backend) = config.backend {
+            validate_backend_config(backend)?;
+            validate_backend_url(&backend.url)?;
+        }
+        return Ok(());
+    };
+
+    if backends.is_empty() {
+        return Err(ConfigError::Validation("No backend groups configured".to_string()));
+    }
+
+    let mut catch_alls = 0;
+    let mut model_owner: HashMap<&str, &str> = HashMap::new();
+    for (name, group) in backends {
+        require_nonempty(name, "backend group name")?;
+        if group.mappings.is_empty() {
+            catch_alls += 1;
+            if catch_alls > 1 {
+                return Err(ConfigError::Validation(
+                    "Only one catch-all group (empty 'mappings: []') may be configured".to_string(),
+                ));
+            }
+        }
+        for model in &group.mappings {
+            require_nonempty(model, "backend group mapping entry")?;
+            if let Some(prev) = model_owner.insert(model.as_str(), name.as_str()) {
+                return Err(ConfigError::Validation(format!(
+                    "Model '{model}' is mapped in both group '{prev}' and group '{name}'"
+                )));
+            }
+        }
+        if group.nodes.is_empty() {
+            return Err(ConfigError::Validation(format!(
+                "Backend group '{name}' has no nodes configured"
+            )));
+        }
+        if group.strategy != "round_robin" && group.strategy != "priority_free" {
+            return Err(ConfigError::Validation(format!(
+                "Backend group '{name}' has invalid strategy '{}'. Use 'round_robin' or 'priority_free'",
+                group.strategy
+            )));
+        }
+        for node in &group.nodes {
+            validate_backend_url(&node.url)?;
+            if node.timeout_seconds == 0 {
+                return Err(ConfigError::Validation(format!(
+                    "Node in group '{name}' has timeout_seconds of 0"
+                )));
+            }
+            if let Some(t) = node.temperature {
+                validate_temperature(t, &format!("Node in group '{name}'"))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Validate that the backend URL is properly formatted
 fn validate_backend_url(url: &str) -> Result<(), ConfigError> {
-    let parsed = url::Url::parse(url).map_err(|e| ConfigError::Validation(format!("Invalid backend URL '{}': {}", url, e)))?;
-
-    // Ensure scheme is http or https
-    let scheme = parsed.scheme();
-    if scheme != "http" && scheme != "https" {
-        return Err(ConfigError::Validation(format!(
-            "Backend URL must use http:// or https://, got '{}'",
-            scheme
-        )));
-    }
-
-    // Ensure there's a host
-    if parsed.host_str().is_none() {
-        return Err(ConfigError::Validation(format!("Backend URL must include a host: '{}'", url)));
-    }
-
-    Ok(())
+    validate_http_url(url, "Backend")
 }
 
 /// Validate server configuration
 fn validate_server_config(config: &super::ServerConfig) -> Result<(), ConfigError> {
-    // Validate port range (1-65535)
     if config.port == 0 {
         return Err(ConfigError::Validation(format!(
             "Server port must be between 1-65535, got {}",
             config.port
         )));
     }
-
-    Ok(())
+    validate_bind_host(&config.host)
 }
 
 /// Validate backend configuration
@@ -701,5 +731,135 @@ augment-backend:
         );
 
         let _ = std::fs::remove_file(&temp_file);
+    }
+
+    fn loaded(yaml: &str, tag: &str) -> Result<super::super::AppConfig, ConfigError> {
+        let f = std::env::temp_dir().join(format!("test_t71_{tag}.yaml"));
+        std::fs::write(&f, yaml).unwrap();
+        let r = load_config(&f);
+        let _ = std::fs::remove_file(&f);
+        r
+    }
+
+    const BASE: &str = "server:\n  port: 8066\n  host: \"0.0.0.0\"\nbackend:\n  url: \"http://localhost:8080\"\n";
+
+    #[test]
+    fn t71_rejects_junk_server_host_and_accepts_ip_forms() {
+        let err = loaded(&BASE.replace("host: \"0.0.0.0\"", "host: \"not a host!!\""), "junk_host")
+            .expect_err("junk host must be rejected");
+        assert!(err.to_string().contains("RFC-1123"), "got {err}");
+        for host in ["\"0.0.0.0\"", "\"::1\"", "\"[::1]\"", "\"localhost\"", "\"cosmo.lan\""] {
+            let yaml = BASE.replace("host: \"0.0.0.0\"", &format!("host: {host}"));
+            assert!(loaded(&yaml, "host_ok").is_ok(), "{host} must load");
+        }
+    }
+
+    #[test]
+    fn t71_rejects_reprompt_prompt_file_that_does_not_exist() {
+        let yaml = format!("{BASE}reprompt:\n  enabled: true\n  prompt_file: \"/nonexistent/does-not-exist.md\"\n");
+        let err = loaded(&yaml, "reprompt_missing").expect_err("missing prompt_file must be rejected");
+        assert!(err.to_string().contains("does not exist"), "got {err}");
+
+        let prompt = std::env::temp_dir().join("test_t71_prompt_exists.md");
+        std::fs::write(&prompt, "continue please").unwrap();
+        let yaml = format!("{BASE}reprompt:\n  enabled: true\n  prompt_file: \"{}\"\n", prompt.display());
+        assert!(loaded(&yaml, "reprompt_present").is_ok());
+        let _ = std::fs::remove_file(&prompt);
+    }
+
+    #[test]
+    fn t71_rejects_dump_enabled_with_empty_path() {
+        let err = loaded(&format!("{BASE}dump:\n  enabled: true\n  path: \"\"\n"), "dump_empty")
+            .expect_err("dump enabled with empty path must be rejected");
+        assert!(err.to_string().contains("dump path"), "got {err}");
+        assert!(loaded(
+            &format!("{BASE}dump:\n  enabled: true\n  path: \"/tmp/t71-dumps\"\n"),
+            "dump_ok"
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn t71_rejects_non_https_augment_url_and_empty_model() {
+        let err = loaded(
+            &format!("{BASE}augment-backend:\n  enabled: true\n  url: \"ftp://nope\"\n  model: \"fast\"\n"),
+            "aug_ftp",
+        )
+        .expect_err("ftp augment url must be rejected");
+        assert!(err.to_string().contains("http"), "got {err}");
+
+        let err = loaded(
+            &format!("{BASE}augment-backend:\n  enabled: true\n  url: \"http://x.test:1\"\n  model: \"\"\n"),
+            "aug_empty_model",
+        )
+        .expect_err("empty augment model must be rejected");
+        assert!(err.to_string().contains("model"), "got {err}");
+
+        assert!(loaded(
+            &format!("{BASE}augment-backend:\n  enabled: true\n  url: \"https://x.test:1\"\n  model: \"fast\"\n"),
+            "aug_ok",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn t71_node_temperature_pin_table() {
+        for (lit, ok) in [
+            ("0.0", true),
+            ("2.0", true),
+            ("1.5", true),
+            ("-0.1", false),
+            ("2.5", false),
+            (".inf", false),
+            ("-.inf", false),
+            (".nan", false),
+        ] {
+            let yaml = format!(
+                "server:\n  port: 8066\n  host: \"0.0.0.0\"\nbackends:\n  g:\n    mappings: []\n    nodes:\n      - url: \"http://localhost:8080\"\n        temperature: {lit}\n"
+            );
+            let got = loaded(&yaml, "temp");
+            assert_eq!(
+                got.is_ok(),
+                ok,
+                "temperature {lit} ok={ok}, got {:?}",
+                got.err().map(|e| e.to_string())
+            );
+        }
+    }
+
+    #[test]
+    fn t71_rejects_duplicate_model_mapping_across_groups() {
+        let yaml = "server:\n  port: 8066\n  host: \"0.0.0.0\"\nbackends:\n  g1:\n    mappings: [\"qwen3\"]\n    nodes:\n      - url: \"http://localhost:8080\"\n  g2:\n    mappings: [\"qwen3\", \"llama\"]\n    nodes:\n      - url: \"http://localhost:8081\"\n";
+        let err = loaded(yaml, "dup_map").expect_err("duplicate mapping must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("qwen3") && msg.contains("g1") && msg.contains("g2"), "got {msg}");
+    }
+
+    #[test]
+    fn t71_rejects_second_catch_all_group() {
+        let yaml = "server:\n  port: 8066\n  host: \"0.0.0.0\"\nbackends:\n  g1:\n    mappings: []\n    nodes:\n      - url: \"http://localhost:8080\"\n  g2:\n    mappings: []\n    nodes:\n      - url: \"http://localhost:8081\"\n";
+        let err = loaded(yaml, "two_ca").expect_err("two catch-alls must be rejected");
+        assert!(err.to_string().contains("catch-all"), "got {err}");
+    }
+
+    #[test]
+    fn t71_rejects_empty_backends_map_and_empty_group_name() {
+        let err = loaded("server:\n  port: 8066\n  host: \"0.0.0.0\"\nbackends: {}\n", "empty_groups")
+            .expect_err("empty groups must be rejected");
+        assert!(err.to_string().contains("No backend groups"), "got {err}");
+
+        let err = loaded(
+            "server:\n  port: 8066\n  host: \"0.0.0.0\"\nbackends:\n  \"\":\n    mappings: [\"m\"]\n    nodes:\n      - url: \"http://localhost:8080\"\n",
+            "empty_name",
+        )
+        .expect_err("empty group name must be rejected");
+        assert!(err.to_string().contains("group name"), "got {err}");
+    }
+
+    #[test]
+    fn t71_rejects_empty_done_sentinel_entry() {
+        let yaml = format!("{BASE}reprompt:\n  enabled: true\n  prompt: \"go\"\n  done_sentinels: [\"DONE\", \"\"]\n");
+        let err = loaded(&yaml, "empty_sentinel").expect_err("empty sentinel must be rejected");
+        assert!(err.to_string().contains("done_sentinels"), "got {err}");
     }
 }
