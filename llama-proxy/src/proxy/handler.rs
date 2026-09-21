@@ -313,7 +313,14 @@ impl ProxyHandler {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to read request body");
-                return (StatusCode::BAD_REQUEST, format!("Failed to read request body: {}", e)).into_response();
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(err_envelope(
+                        "invalid_request_json",
+                        format!("Failed to read request body: {}", e),
+                    )),
+                )
+                    .into_response();
             }
         };
 
@@ -648,7 +655,14 @@ impl ProxyHandler {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to connect to backend");
-                return (StatusCode::BAD_GATEWAY, format!("Failed to connect to backend: {}", e)).into_response();
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(err_envelope(
+                        "backend_connect_error",
+                        format!("Failed to connect to backend: {}", e),
+                    )),
+                )
+                    .into_response();
             }
         };
 
@@ -859,7 +873,14 @@ impl ProxyHandler {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to read backend response");
-                return (StatusCode::BAD_GATEWAY, format!("Failed to read backend response: {}", e)).into_response();
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(err_envelope(
+                        "backend_read_error",
+                        format!("Failed to read backend response: {}", e),
+                    )),
+                )
+                    .into_response();
             }
         };
 
@@ -874,7 +895,14 @@ impl ProxyHandler {
                     content_encoding = ?content_encoding,
                     "Failed to decompress response body"
                 );
-                return (StatusCode::BAD_GATEWAY, format!("Failed to decompress response: {}", e)).into_response();
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(err_envelope(
+                        "backend_decompress_error",
+                        format!("Failed to decompress response: {}", e),
+                    )),
+                )
+                    .into_response();
             }
         };
 
@@ -1138,21 +1166,15 @@ impl ProxyHandler {
         // Return complete JSON response (either client wants non-streaming, or synthesis failed)
         let mut response = Response::builder().status(status);
 
-        // Only set JSON content-type if we successfully parsed/modified as JSON
-        // Otherwise preserve backend's content-type
-        if json_value.is_some() {
-            response = response.header(header::CONTENT_TYPE, "application/json");
-        }
-
+        // The backend's Content-Type is copied verbatim, including when we parsed (and
+        // possibly fixed) the body as JSON: a charset parameter is part of the media
+        // type, and re-emitting a bare "application/json" would silently drop it.
+        // json_value can only be Some when the original Content-Type already said JSON,
+        // so the verbatim value stays truthful for the fixed body too.
         for (name, value) in headers {
             if let Some(name) = name {
                 // Skip headers that Axum will handle
                 if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING {
-                    continue;
-                }
-                // Skip content-type ONLY if we already set it (json_value.is_some())
-                // Otherwise preserve backend's content-type
-                if name == header::CONTENT_TYPE && json_value.is_some() {
                     continue;
                 }
                 response = response.header(name, value);
@@ -1177,7 +1199,11 @@ impl ProxyHandler {
         let body_bytes = match to_bytes(req.into_body(), 1024 * 1024 * 10).await {
             Ok(bytes) => bytes,
             Err(e) => {
-                return (StatusCode::BAD_REQUEST, format!("Failed to read body: {}", e)).into_response();
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(err_envelope("invalid_request_json", format!("Failed to read body: {}", e))),
+                )
+                    .into_response();
             }
         };
 
@@ -1219,7 +1245,11 @@ impl ProxyHandler {
         let backend_response = match backend_req.send().await {
             Ok(resp) => resp,
             Err(e) => {
-                return (StatusCode::BAD_GATEWAY, format!("Backend error: {}", e)).into_response();
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(err_envelope("backend_connect_error", format!("Backend error: {}", e))),
+                )
+                    .into_response();
             }
         };
 
@@ -1229,7 +1259,11 @@ impl ProxyHandler {
         let raw_body = match backend_response.bytes().await {
             Ok(b) => b,
             Err(e) => {
-                return (StatusCode::BAD_GATEWAY, format!("Failed to read response: {}", e)).into_response();
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(err_envelope("backend_read_error", format!("Failed to read response: {}", e))),
+                )
+                    .into_response();
             }
         };
 
@@ -1244,7 +1278,14 @@ impl ProxyHandler {
                     content_encoding = ?content_encoding,
                     "Failed to decompress pass-through response"
                 );
-                return (StatusCode::BAD_GATEWAY, format!("Failed to decompress response: {}", e)).into_response();
+                return (
+                    StatusCode::BAD_GATEWAY,
+                    Json(err_envelope(
+                        "backend_decompress_error",
+                        format!("Failed to decompress response: {}", e),
+                    )),
+                )
+                    .into_response();
             }
         };
 
@@ -1637,6 +1678,257 @@ mod tests {
             v["error"]["message"],
             serde_json::json!("后端错误: 拒绝连接 🤷"),
             "message must round-trip through the envelope unchanged"
+        );
+    }
+
+    // ---- big-fix task 5: plain-text error bodies must become JSON envelopes ----
+    //
+    // Each test below drives a real error site in handle()/proxy_passthrough().
+    // Pre-conversion these sites return (StatusCode, String), which Axum serves as
+    // `text/plain; charset=utf-8` with a bare human sentence — so the JSON
+    // content-type and error.type assertions are exactly what fails before the fix.
+
+    /// Body that fails on its first frame with a CJK+emoji message: exercises the
+    /// 400 body-read sites and untrusted-text survival through the envelope at once.
+    fn exploding_body() -> Body {
+        Body::from_stream(futures::stream::once(async {
+            Err::<bytes::Bytes, std::io::Error>(std::io::Error::other("后端管道炸了 🤷"))
+        }))
+    }
+
+    /// Frame a raw HTTP/1.1 response (always `connection: close`) for the fake backends.
+    fn raw_http_response(status: &str, headers: &[(&str, &str)], body: &[u8]) -> Vec<u8> {
+        let mut out = format!("HTTP/1.1 {status}\r\n").into_bytes();
+        for (name, value) in headers {
+            out.extend_from_slice(format!("{name}: {value}\r\n").as_bytes());
+        }
+        out.extend_from_slice(b"connection: close\r\n\r\n");
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// One-shot backend: answers the first connection with `response` bytes verbatim,
+    /// then drops the socket (so a promised-but-unwritten body stays truncated).
+    async fn one_shot_backend(response: Vec<u8>) -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("fake backend must bind");
+        let port = listener.local_addr().expect("fake backend addr").port();
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("one connection");
+            {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut req = [0u8; 8192];
+                let _ = sock.read(&mut req).await;
+                let _ = sock.write_all(&response).await;
+                let _ = sock.flush().await;
+            }
+        });
+        port
+    }
+
+    fn node_at_port(port: u16) -> Arc<BackendNode> {
+        Arc::new(BackendNode {
+            url: format!("http://127.0.0.1:{port}"),
+            ..bare_node(None)
+        })
+    }
+
+    fn request_with_body(method: Method, uri: &str, body: Body) -> Request<Body> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(body)
+            .unwrap()
+    }
+
+    /// The one envelope shape asserted at every converted site: original status kept,
+    /// JSON content-type, {"error":{"type":kind,"message":non-empty}}. Returns the
+    /// parsed body so callers can probe the message further.
+    async fn assert_error_envelope(res: Response, status: StatusCode, kind: &str) -> serde_json::Value {
+        assert_eq!(res.status(), status, "status code must not change");
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+            "error body must be served as JSON, not plain text"
+        );
+        let body = json_error_body(res).await;
+        assert_eq!(body["error"]["type"], serde_json::json!(kind), "envelope kind, got: {body}");
+        assert!(
+            body["error"]["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "envelope must carry the human message, got: {body}"
+        );
+        body
+    }
+
+    #[tokio::test]
+    async fn unreadable_request_body_answers_400_with_error_envelope() {
+        // Body read fails before the balancer hands out a node; node url is never contacted.
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler
+            .handle(request_with_body(Method::POST, "/v1/chat/completions", exploding_body()))
+            .await;
+
+        // Adversarial probe: untrusted CJK+emoji error text must reach `message` verbatim.
+        let body = assert_error_envelope(res, StatusCode::BAD_REQUEST, "invalid_request_json").await;
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("后端管道炸了 🤷")),
+            "untrusted text must survive into the envelope, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn passthrough_unreadable_body_answers_400_with_error_envelope() {
+        // proxy_passthrough re-reads its own request body. Reached directly because
+        // handle() pre-buffers the body before rebuilding monitoring passthroughs,
+        // so this site is only exercisable at the method boundary.
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+        let node = node_at_port(1);
+
+        let res = handler
+            .proxy_passthrough(request_with_body(Method::GET, "/health", exploding_body()), &node)
+            .await;
+
+        assert_error_envelope(res, StatusCode::BAD_REQUEST, "invalid_request_json").await;
+    }
+
+    #[tokio::test]
+    async fn backend_connect_failure_answers_502_with_error_envelope() {
+        // Port 1: connect is refused instantly, deterministic without any listener.
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_error_envelope(res, StatusCode::BAD_GATEWAY, "backend_connect_error").await;
+    }
+
+    #[tokio::test]
+    async fn backend_body_read_failure_answers_502_with_error_envelope() {
+        // content-length promises 100 bytes; only 8 arrive before the socket closes.
+        let response = raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json"), ("content-length", "100")],
+            b"{\"id\":1",
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_error_envelope(res, StatusCode::BAD_GATEWAY, "backend_read_error").await;
+    }
+
+    #[tokio::test]
+    async fn backend_decompress_failure_answers_502_with_error_envelope() {
+        // zstd is NOT a compiled reqwest feature, so reqwest forwards the body and
+        // header untouched and the proxy's own decompress_body zstd branch fails.
+        let response = raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json"), ("content-encoding", "zstd")],
+            b"not-a-zstd-frame",
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_error_envelope(res, StatusCode::BAD_GATEWAY, "backend_decompress_error").await;
+    }
+
+    #[tokio::test]
+    async fn passthrough_connect_failure_answers_502_with_error_envelope() {
+        // GET /health takes the monitoring pass-through arm inside handle().
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+
+        assert_error_envelope(res, StatusCode::BAD_GATEWAY, "backend_connect_error").await;
+    }
+
+    #[tokio::test]
+    async fn passthrough_body_read_failure_answers_502_with_error_envelope() {
+        let response = raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json"), ("content-length", "100")],
+            b"xx",
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+
+        assert_error_envelope(res, StatusCode::BAD_GATEWAY, "backend_read_error").await;
+    }
+
+    #[tokio::test]
+    async fn passthrough_decompress_failure_answers_502_with_error_envelope() {
+        let response = raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json"), ("content-encoding", "zstd")],
+            b"not-a-zstd-frame",
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+
+        assert_error_envelope(res, StatusCode::BAD_GATEWAY, "backend_decompress_error").await;
+    }
+
+    #[tokio::test]
+    async fn json_backend_content_type_is_forwarded_verbatim_including_charset() {
+        // [C-L6] A backend answering `application/json; charset=utf-8` must have that
+        // exact value reach the client. The old code re-emitted a bare
+        // "application/json" whenever it had parsed the body as JSON, silently
+        // dropping the charset parameter.
+        let backend_body = serde_json::json!({
+            "id": "cmpl-1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "ghost-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hi"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })
+        .to_string();
+        let len = backend_body.len().to_string();
+        let response = raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json; charset=utf-8"),
+                ("content-length", len.as_str()),
+            ],
+            backend_body.as_bytes(),
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(header::CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("<missing>"),
+            "application/json; charset=utf-8",
+            "backend JSON content-type must pass through verbatim, charset included"
         );
     }
 }
