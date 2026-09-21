@@ -168,9 +168,73 @@ impl ToolcallMalformedArgumentsFix {
         out
     }
 
-    /// Fix tool calls in response using request context. The first tool call whose
-    /// candidate set is not exactly one aborts the whole repair with `Err`: the
-    /// registry fail-safe (task 31) then forwards the ORIGINAL response.
+    /// True when one choice side — its `message` or its `delta` object — carries
+    /// a tool call whose string `arguments` matches the malformed slot pattern.
+    /// Non-string/absent arguments and structurally odd entries never trigger.
+    fn side_has_trigger(&self, side: Option<&Value>) -> bool {
+        side.and_then(|o| o.get("tool_calls"))
+            .and_then(|tc| tc.as_array())
+            .is_some_and(|tool_calls| {
+                tool_calls.iter().any(|tool_call| {
+                    tool_call
+                        .get("function")
+                        .and_then(|f| f.get("arguments"))
+                        .and_then(|a| a.as_str())
+                        .is_some_and(|args| self.malformed_pattern.is_match(args))
+                })
+            })
+    }
+
+    /// Every choice of BOTH response shapes (`message.tool_calls` and
+    /// `delta.tool_calls`) gets the same trigger check — traversal shape
+    /// mirrored from [`ToolCallNullIndexFix`](super::ToolCallNullIndexFix),
+    /// predicate kept as this fix's own slot pattern.
+    fn any_choice_triggers(&self, response: &Value) -> bool {
+        response.get("choices").and_then(|c| c.as_array()).is_some_and(|choices| {
+            choices
+                .iter()
+                .any(|choice| self.side_has_trigger(choice.get("message")) || self.side_has_trigger(choice.get("delta")))
+        })
+    }
+
+    /// Run `fix_arguments` over one choice side's `tool_calls` array, folding
+    /// each repair into `overall_action`. The FIRST irreparable-but-triggering
+    /// call aborts the whole response with `Err` — the pre-existing convention
+    /// of this fix (`Err(e) => return Err(e)`, task-22 all-or-nothing
+    /// per-response), not a new one: the registry fail-safe then forwards the
+    /// ORIGINAL response untouched.
+    fn fix_tool_calls(
+        &self,
+        tool_calls: &mut [Value],
+        schemas: &HashMap<String, Vec<String>>,
+        overall_action: &mut FixAction,
+    ) -> Result<(), FixError> {
+        for tool_call in tool_calls {
+            let Some(function) = tool_call.get_mut("function") else {
+                continue;
+            };
+            let tool_name = function.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
+            let Some(args) = function.get("arguments").and_then(|a| a.as_str()) else {
+                continue;
+            };
+            let args = args.to_string();
+            match self.fix_arguments(&args, &tool_name, schemas) {
+                Err(error) => return Err(error),
+                Ok(Some(fixed_args)) => {
+                    function["arguments"] = Value::String(fixed_args.clone());
+                    *overall_action = FixAction::fixed(&args, &fixed_args);
+                }
+                Ok(None) => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Fix tool calls in response using request context. EVERY choice of BOTH
+    /// shapes (message and delta) gets the same `fix_arguments` attempt; the
+    /// first irreparable-but-triggering call aborts the whole repair with
+    /// `Err` (per-response all-or-nothing, see [`Self::fix_tool_calls`]) so the
+    /// registry fail-safe forwards the ORIGINAL response.
     fn fix_response_with_context(&self, mut response: Value, request: &Value) -> Result<(Value, FixAction), FixError> {
         let schemas = Self::extract_tool_schemas(request);
 
@@ -184,28 +248,16 @@ impl ToolcallMalformedArgumentsFix {
 
         let mut overall_action = FixAction::NotApplicable;
 
-        // Navigate to tool_calls in response
         if let Some(choices) = response.get_mut("choices").and_then(|c| c.as_array_mut()) {
             for choice in choices {
                 if let Some(message) = choice.get_mut("message") {
                     if let Some(tool_calls) = message.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
-                        for tool_call in tool_calls {
-                            if let Some(function) = tool_call.get_mut("function") {
-                                let tool_name = function.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-
-                                if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
-                                    let args = args.to_string();
-                                    match self.fix_arguments(&args, &tool_name, &schemas) {
-                                        Err(error) => return Err(error),
-                                        Ok(Some(fixed_args)) => {
-                                            function["arguments"] = Value::String(fixed_args.clone());
-                                            overall_action = FixAction::fixed(&args, &fixed_args);
-                                        }
-                                        Ok(None) => {}
-                                    }
-                                }
-                            }
-                        }
+                        self.fix_tool_calls(tool_calls, &schemas, &mut overall_action)?;
+                    }
+                }
+                if let Some(delta) = choice.get_mut("delta") {
+                    if let Some(tool_calls) = delta.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
+                        self.fix_tool_calls(tool_calls, &schemas, &mut overall_action)?;
                     }
                 }
             }
@@ -276,13 +328,7 @@ impl ResponseFix for ToolcallMalformedArgumentsFix {
     }
 
     fn applies(&self, response: &Value) -> bool {
-        // Check if response has tool_calls
-        response
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|choice| choice.get("message"))
-            .and_then(|msg| msg.get("tool_calls"))
-            .is_some()
+        self.any_choice_triggers(response)
     }
 
     fn apply(&self, response: Value) -> (Value, FixAction) {
@@ -296,17 +342,10 @@ impl ResponseFix for ToolcallMalformedArgumentsFix {
     }
 
     fn applies_with_context(&self, response: &Value, request: &Value) -> bool {
-        // Check if response has tool_calls AND request has tools
-        let has_tool_calls = response
-            .get("choices")
-            .and_then(|c| c.get(0))
-            .and_then(|choice| choice.get("message"))
-            .and_then(|msg| msg.get("tool_calls"))
-            .is_some();
-
-        let has_tools = request.get("tools").is_some();
-
-        has_tool_calls && has_tools
+        // Same all-choices gate as applies(), plus the schema precondition:
+        // without `tools` in the request there is no candidate, so the fixer
+        // could only warn-and-pass.
+        self.any_choice_triggers(response) && request.get("tools").is_some()
     }
 
     fn apply_with_context(&self, response: Value, request: &Value) -> Result<(Value, FixAction), FixError> {
@@ -470,13 +509,17 @@ mod tests {
             "tools": [{"type": "function", "function": {"name": "write"}}]
         });
 
+        // Retargeted by task 28 [B-M6]: the gate is trigger-based now, so this
+        // fixture carries a real empty-key slot (the old `"{}"` payload had no
+        // slot and no longer claims a detection - see
+        // task28_clean_tool_calls_do_not_trigger_gate for that pin).
         let response_with_tools = json!({
             "choices": [{
                 "message": {
                     "tool_calls": [{
                         "function": {
                             "name": "write",
-                            "arguments": "{}"
+                            "arguments": r#"{"content":"data",{}":"/tmp/file.txt"}"#
                         }
                     }]
                 }
@@ -1028,5 +1071,224 @@ mod tests {
                 }
             }]
         })
+    }
+
+    // ---- task 28 (B-M6): applies()/apply() traverse EVERY choice, message AND delta ----
+    //
+    // Mirrored from ToolCallNullIndexFix: its applies() checks message.tool_calls
+    // AND delta.tool_calls of every choice, and fix_tool_calls_in_choices mutates
+    // both shapes for every choice. Only the TRAVERSAL SHAPE is mirrored — the
+    // repair stays this fix's bijection-gated fix_arguments. The Err convention
+    // is likewise mirrored, not invented: fix_response_with_context already did
+    // `Err(e) => return Err(e)` on the first irreparable-but-triggering call
+    // (task-22 all-or-nothing per-response), so a failure in ANY choice aborts
+    // the whole response repair and the registry fail-safe forwards the ORIGINAL.
+
+    /// Registry carrying only this fix — exercises the buffered context path's
+    /// public sequence (applies_with_context gate -> apply_with_context) exactly
+    /// as FixRegistry::apply_fixes_with_context runs it.
+    fn registry_with_malformed_fix() -> crate::fixes::FixRegistry {
+        let mut registry = crate::fixes::FixRegistry::new();
+        registry.register(std::sync::Arc::new(ToolcallMalformedArgumentsFix::new()));
+        registry
+    }
+
+    // Acceptance [B-M6]: a malformed call in choices[1] triggers the fix.
+    // choices[0] is a clean final message (content, no tool_calls), so the
+    // baseline choices[0]-only gate stays silent and the payload reaches the
+    // client unmodified.
+    #[test]
+    fn task28_malformed_in_choices_one_message_triggers_fix() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let request = write_request(&["file_path", "content"]);
+        let response = json!({
+            "choices": [
+                { "index": 0, "message": { "role": "assistant", "content": "done" }, "finish_reason": "stop" },
+                { "index": 1, "message": { "role": "assistant", "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": { "name": "write", "arguments": r#"{"content":"data",{}":"/tmp/file.txt"}"# }
+                }] }, "finish_reason": "tool_calls" }
+            ]
+        });
+
+        assert!(
+            fix.applies(&response),
+            "applies() must trigger on a choices[1] message tool call"
+        );
+        assert!(fix.applies_with_context(&response, &request));
+
+        let result = registry_with_malformed_fix().apply_fixes_with_context(response, &request);
+        let args = result["choices"][1]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert!(args.contains(r#""file_path":"#));
+        assert!(!args.contains(r#"{}":"#));
+        serde_json::from_str::<Value>(args).expect("fixed arguments are valid JSON");
+    }
+
+    // Delta-shape variant of the acceptance: choices[1].delta.tool_calls carries
+    // the malformed slot. Baseline is doubly narrow — the gate never looks at a
+    // delta, and fix_response_with_context only traverses `message`.
+    #[test]
+    fn task28_malformed_in_choices_one_delta_triggers_fix() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let request = write_request(&["file_path", "content"]);
+        let response = json!({
+            "choices": [
+                { "index": 0, "message": { "role": "assistant", "content": "done" }, "finish_reason": "stop" },
+                { "index": 1, "delta": { "tool_calls": [{
+                    "index": 0,
+                    "function": { "name": "write", "arguments": r#"{"content":"data",{}":"/tmp/file.txt"}"# }
+                }] } }
+            ]
+        });
+
+        assert!(
+            fix.applies(&response),
+            "applies() must trigger on a choices[1] delta tool call"
+        );
+        assert!(fix.applies_with_context(&response, &request));
+
+        let result = registry_with_malformed_fix().apply_fixes_with_context(response, &request);
+        let args = result["choices"][1]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert!(args.contains(r#""file_path":"#));
+        assert!(!args.contains(r#"{}":"#));
+        serde_json::from_str::<Value>(args).expect("fixed delta arguments are valid JSON");
+    }
+
+    // Green-on-baseline guard by construction (baseline already looped every
+    // choice's message once the choices[0] gate passed): pins that extending the
+    // traversal did not regress multi-call repair — both malformed choices come
+    // back fixed in one apply pass.
+    #[test]
+    fn task28_two_malformed_choices_both_fixed() {
+        let request = write_request(&["file_path", "content"]);
+        let response = json!({
+            "choices": [
+                { "message": { "tool_calls": [{ "function": { "name": "write", "arguments": r#"{"content":"a",{}":"/tmp/0"}"# } }] } },
+                { "message": { "tool_calls": [{ "function": { "name": "write", "arguments": r#"{"content":"b",{}":"/tmp/1"}"# } }] } }
+            ]
+        });
+
+        let result = registry_with_malformed_fix().apply_fixes_with_context(response, &request);
+        for i in 0..2 {
+            let args = result["choices"][i]["message"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap();
+            assert!(args.contains(r#""file_path":"#), "choice[{i}] must be fixed");
+            assert!(!args.contains(r#"{}":"#), "choice[{i}] slot must be gone");
+        }
+    }
+
+    // Mirrored error semantics (NOT invented): the first irreparable-but-
+    // triggering call Errs out of apply_with_context — task-22 all-or-nothing
+    // per-response, the same shape fix_response_with_context already had for
+    // choice[0]-shaped inputs. choice[0] WOULD have been repaired; on Err the
+    // registry fail-safe forwards the ORIGINAL bytes. Also green-on-baseline:
+    // this pins the convention the extension preserves, not the traversal bug.
+    #[test]
+    fn task28_irreparable_later_choice_aborts_whole_response() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let request = write_request(&["path", "mode", "content"]);
+        let response = json!({
+            "choices": [
+                { "message": { "tool_calls": [{ "function": { "name": "write", "arguments": r#"{"content":"a","mode":"0644",{}":"/tmp/0"}"# } }] } },
+                { "message": { "tool_calls": [{ "function": { "name": "write", "arguments": r#"{"content":"b",{}":"/tmp/1"}"# } }] } }
+            ]
+        });
+        let input_bytes = response.to_string();
+
+        let err = fix
+            .apply_with_context(response.clone(), &request)
+            .expect_err("choice[1] ambiguity aborts the whole response repair");
+        assert!(matches!(err, FixError::Rebuild(_)));
+        assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates for 1 slots");
+        assert_eq!(
+            response.to_string(),
+            input_bytes,
+            "the fixer took a clone; caller's copy untouched"
+        );
+
+        let result = registry_with_malformed_fix().apply_fixes_with_context(response, &request);
+        assert_eq!(result.to_string(), input_bytes, "fail-safe forwards the ORIGINAL bytes");
+    }
+
+    // Gate semantics pin [B-M6]: the predicate is now trigger-based — well-formed
+    // arguments are NOT a triggering arguments string (message OR delta), and
+    // odd-but-legal entries (null arguments, missing arguments, missing
+    // function, null tool-call entry) neither trigger nor panic.
+    #[test]
+    fn task28_clean_tool_calls_do_not_trigger_gate() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let clean = json!({
+            "choices": [
+                { "message": { "tool_calls": [{ "function": { "name": "write", "arguments": r#"{"content":"d","file_path":"/tmp/f"}"# } }] } },
+                { "delta": { "tool_calls": [{ "function": { "name": "write", "arguments": r#"{"content":"d"}"# } }] } }
+            ]
+        });
+        assert!(!fix.applies(&clean), "valid arguments must not claim a detection");
+        assert!(!fix.applies_with_context(&clean, &write_request(&["file_path", "content"])));
+
+        let odd = json!({
+            "choices": [{
+                "delta": { "tool_calls": [
+                    { "function": { "name": "write", "arguments": null } },
+                    { "function": { "name": "write" } },
+                    {},
+                    null
+                ] }
+            }]
+        });
+        assert!(!fix.applies(&odd));
+    }
+
+    // New-input pin: a null entry between valid choices must not mask the later
+    // trigger and must not panic the traversal.
+    #[test]
+    fn task28_null_choice_between_valid_choices_is_skipped() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let request = write_request(&["file_path", "content"]);
+        let response = json!({
+            "choices": [
+                { "message": { "content": "done" } },
+                Value::Null,
+                { "message": { "tool_calls": [{ "function": { "name": "write", "arguments": r#"{"content":"x",{}":"/tmp/n"}"# } }] } }
+            ]
+        });
+
+        assert!(fix.applies(&response), "null entry must not mask the choices[2] trigger");
+        let result = registry_with_malformed_fix().apply_fixes_with_context(response, &request);
+        assert!(result["choices"][1].is_null(), "null choice survives untouched");
+        let args = result["choices"][2]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert!(args.contains(r#""file_path":"#));
+    }
+
+    // New-input pin: a delta tool_calls entry missing the `function` key is the
+    // real streaming shape (first chunk carries only {"index","id","type"}).
+    // No panic, traversal continues, the next entry still fixes.
+    #[test]
+    fn task28_delta_tool_call_without_function_key_no_panic() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let request = write_request(&["file_path", "content"]);
+        let response = json!({
+            "choices": [
+                { "delta": { "content": "" } },
+                { "delta": { "tool_calls": [
+                    { "index": 0, "id": "call_1", "type": "function" },
+                    { "index": 0, "function": { "name": "write", "arguments": r#"{"content":"x",{}":"/tmp/f"}"# } }
+                ] } }
+            ]
+        });
+
+        assert!(fix.applies(&response));
+        let result = registry_with_malformed_fix().apply_fixes_with_context(response, &request);
+        let deltas = result["choices"][1]["delta"]["tool_calls"].as_array().unwrap();
+        assert!(deltas[0].get("function").is_none(), "function-less entry stays as sent");
+        let args = deltas[1]["function"]["arguments"].as_str().unwrap();
+        assert!(args.contains(r#""file_path":"#));
     }
 }
