@@ -190,11 +190,20 @@ fn json_preview(value: &serde_json::Value) -> String {
     }
 }
 
+/// Outcome of `decompress_body`: whether the forwarded body still carries the
+/// backend's Content-Encoding transform. Only `Decoded` bodies may have the
+/// header stripped; anything handed on unchanged must keep its header, or the
+/// client is told to expect a transform that has already been applied [C-H2].
+enum Decompressed {
+    Passthrough(Vec<u8>),
+    Decoded(Vec<u8>),
+}
+
 /// Decompress response body based on Content-Encoding header
-fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<Vec<u8>, String> {
+fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<Decompressed, String> {
     let encoding = match content_encoding {
         Some(enc) => enc,
-        None => return Ok(body_bytes.to_vec()), // No compression
+        None => return Ok(Decompressed::Passthrough(body_bytes.to_vec())), // No compression
     };
 
     match encoding.to_lowercase().as_str() {
@@ -210,7 +219,7 @@ fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<
                 decompressed_size = decompressed.len(),
                 "Decompressed gzip response"
             );
-            Ok(decompressed)
+            Ok(Decompressed::Decoded(decompressed))
         }
         "deflate" => {
             use flate2::read::DeflateDecoder;
@@ -224,7 +233,7 @@ fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<
                 decompressed_size = decompressed.len(),
                 "Decompressed deflate response"
             );
-            Ok(decompressed)
+            Ok(Decompressed::Decoded(decompressed))
         }
         "br" => {
             let mut decompressed = Vec::new();
@@ -235,7 +244,7 @@ fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<
                 decompressed_size = decompressed.len(),
                 "Decompressed brotli response"
             );
-            Ok(decompressed)
+            Ok(Decompressed::Decoded(decompressed))
         }
         "zstd" => {
             let decompressed = zstd::decode_all(body_bytes).map_err(|e| format!("zstd decompression failed: {}", e))?;
@@ -244,11 +253,11 @@ fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<
                 decompressed_size = decompressed.len(),
                 "Decompressed zstd response"
             );
-            Ok(decompressed)
+            Ok(Decompressed::Decoded(decompressed))
         }
         other => {
             tracing::warn!(encoding = other, "Unsupported Content-Encoding, returning original body");
-            Ok(body_bytes.to_vec())
+            Ok(Decompressed::Passthrough(body_bytes.to_vec()))
         }
     }
 }
@@ -997,8 +1006,9 @@ impl ProxyHandler {
         // Check for Content-Encoding and decompress if needed
         let content_encoding = headers.get(header::CONTENT_ENCODING).and_then(|ce| ce.to_str().ok());
 
-        let body_bytes = match decompress_body(&raw_body_bytes, content_encoding) {
-            Ok(decompressed) => decompressed,
+        let (body_bytes, body_decoded) = match decompress_body(&raw_body_bytes, content_encoding) {
+            Ok(Decompressed::Decoded(decompressed)) => (decompressed, true),
+            Ok(Decompressed::Passthrough(body)) => (body, false),
             Err(e) => {
                 tracing::error!(
                     error = %e,
@@ -1287,6 +1297,11 @@ impl ProxyHandler {
                 if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING {
                     continue;
                 }
+                // A body we actually decoded no longer carries its encoding; one we
+                // passed through unchanged must keep the header [C-H2].
+                if body_decoded && name == header::CONTENT_ENCODING {
+                    continue;
+                }
                 response = response.header(name, value);
             }
         }
@@ -1376,8 +1391,9 @@ impl ProxyHandler {
         // Check for Content-Encoding and decompress if needed
         let content_encoding = headers.get(header::CONTENT_ENCODING).and_then(|ce| ce.to_str().ok());
 
-        let body = match decompress_body(&raw_body, content_encoding) {
-            Ok(decompressed) => decompressed,
+        let (body, body_decoded) = match decompress_body(&raw_body, content_encoding) {
+            Ok(Decompressed::Decoded(decompressed)) => (decompressed, true),
+            Ok(Decompressed::Passthrough(unchanged)) => (unchanged, false),
             Err(e) => {
                 tracing::error!(
                     error = %e,
@@ -1401,6 +1417,9 @@ impl ProxyHandler {
                 // Skip Content-Length and Transfer-Encoding - Axum will handle these
                 // This ensures consistent behavior with handle_non_streaming_response
                 if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING {
+                    continue;
+                }
+                if body_decoded && name == header::CONTENT_ENCODING {
                     continue;
                 }
                 response = response.header(name, value);
@@ -2893,5 +2912,226 @@ mod tests {
             serde_json::json!("renamed"),
             "routed chat path keeps injections"
         );
+    }
+
+    // ---- big-fix task 7: Content-Encoding stripped only from bodies the proxy decoded [C-H2] ----
+    //
+    // reqwest carries the gzip feature (Cargo.toml), so a gzip-encoded backend answer is
+    // decoded by reqwest itself and its header stripped upstream of the proxy - that
+    // scenario does NOT exercise this fix (verified: it passed at baseline, see
+    // .omo/evidence/big-fix/task7.txt). The proxy's OWN decoders run for br/zstd/deflate
+    // answers, and THAT is where the baseline leaked `content-encoding: br` next to an
+    // already-decoded body.
+
+    fn brotli_bytes(data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        brotli::CompressorReader::new(data, 4096, 5, 22)
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+
+    #[tokio::test]
+    async fn decoded_body_arrives_without_content_encoding_header() {
+        let compressed = brotli_bytes(&completion_json_body());
+        let len = compressed.len().to_string();
+        let response = raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json"),
+                ("content-encoding", "br"),
+                ("content-length", len.as_str()),
+            ],
+            &compressed,
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(completion_request()).await;
+
+        let dump = res
+            .headers()
+            .iter()
+            .map(|(k, v)| format!("{k}: {}", v.to_str().unwrap_or("<binary>")))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            res.headers().get(header::CONTENT_ENCODING).is_none(),
+            "proxy decoded the body, so Content-Encoding must not reach the client.\nDUMP:\n{dump}"
+        );
+        let text = body_text(res).await;
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("decoded body must parse");
+        assert_eq!(parsed["id"], serde_json::json!("cmpl-1"));
+    }
+
+    #[tokio::test]
+    async fn passthrough_endpoint_decoded_body_loses_content_encoding_header() {
+        // The monitoring pass-through arm decodes with the same helper and had the same
+        // leak at its own header-copy site.
+        let plain = br#"{"total_slots":1}"#;
+        let compressed = brotli_bytes(plain);
+        let len = compressed.len().to_string();
+        let response = raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json"),
+                ("content-encoding", "br"),
+                ("content-length", len.as_str()),
+            ],
+            &compressed,
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            res.headers().get(header::CONTENT_ENCODING).is_none(),
+            "decoded passthrough body must not keep Content-Encoding"
+        );
+        assert_eq!(body_text(res).await, String::from_utf8_lossy(plain));
+    }
+
+    #[tokio::test]
+    async fn gzip_answered_backend_reaches_client_decoded_without_content_encoding() {
+        // Spec acceptance: gzip fake -> no content-encoding header out, body parses.
+        // reqwest's own gzip decoding already satisfies this at baseline; pinned so a
+        // future reqwest-feature change that hands gzip to decompress_body still lands
+        // on the client-visible outcome.
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+        let mut enc = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(&completion_json_body()).unwrap();
+        let gz = enc.finish().unwrap();
+        let len = gz.len().to_string();
+        let response = raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json"),
+                ("content-encoding", "gzip"),
+                ("content-length", len.as_str()),
+            ],
+            &gz,
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            res.headers().get(header::CONTENT_ENCODING).is_none(),
+            "decoded body must not be answered with a stale Content-Encoding"
+        );
+        let text = body_text(res).await;
+        let parsed: serde_json::Value = serde_json::from_str(&text).expect("body must parse");
+        assert_eq!(parsed["id"], serde_json::json!("cmpl-1"));
+    }
+
+    #[tokio::test]
+    async fn zero_byte_decoded_body_still_counts_as_decoded() {
+        // An encoded stream that decodes to ZERO bytes is a body the proxy decoded,
+        // not a passthrough: the header must go even though the body is empty.
+        let compressed = brotli_bytes(b"");
+        let len = compressed.len().to_string();
+        let response = raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json"),
+                ("content-encoding", "br"),
+                ("content-length", len.as_str()),
+            ],
+            &compressed,
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+
+        assert!(
+            res.headers().get(header::CONTENT_ENCODING).is_none(),
+            "Decoded(empty) must drop the header, not Passthrough it"
+        );
+        assert_eq!(body_text(res).await, "");
+    }
+
+    #[test]
+    fn empty_gzip_stream_decodes_to_empty_decoded_not_passthrough() {
+        use flate2::write::GzEncoder;
+        let empty_gz = GzEncoder::new(Vec::new(), flate2::Compression::default())
+            .finish()
+            .expect("empty gzip stream must build");
+        match decompress_body(&empty_gz, Some("gzip")) {
+            Ok(Decompressed::Decoded(b)) => assert!(b.is_empty(), "decoded bytes must be exactly empty"),
+            Ok(Decompressed::Passthrough(b)) => {
+                panic!(
+                    "empty gzip stream must decode to Decoded(empty), got Passthrough({} bytes)",
+                    b.len()
+                )
+            }
+            Err(e) => panic!("empty gzip stream is valid gzip, got Err({e})"),
+        }
+    }
+
+    #[tokio::test]
+    async fn unknown_content_encoding_token_is_forwarded_with_header_and_body() {
+        // Pinned CURRENT behavior: an encoding token the proxy cannot decode is handed
+        // on unchanged WITH its header (Passthrough). The client decides what to do
+        // with it; the proxy never silently rewrites what it did not transform.
+        let plain = br#"[{"token":0}]"#;
+        let response = raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json"), ("content-encoding", "banana")],
+            plain,
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+
+        assert_eq!(
+            res.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
+            Some("banana"),
+            "an untransformed body must keep its declared encoding"
+        );
+        assert_eq!(body_text(res).await, String::from_utf8_lossy(plain));
+    }
+
+    #[tokio::test]
+    async fn identity_content_encoding_is_forwarded_unchanged() {
+        let plain = br#"[{"token":1}]"#;
+        let response = raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json"), ("content-encoding", "identity")],
+            plain,
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+
+        assert_eq!(
+            res.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
+            Some("identity"),
+            "identity declares an untouched body - keep the header"
+        );
+        assert_eq!(body_text(res).await, String::from_utf8_lossy(plain));
+    }
+
+    #[test]
+    fn no_encoding_header_yields_passthrough_of_identical_bytes() {
+        let raw = b"unchanged body bytes";
+        match decompress_body(raw, None) {
+            Ok(Decompressed::Passthrough(b)) => assert_eq!(b, raw),
+            Ok(Decompressed::Decoded(_)) => panic!("no encoding means nothing was decoded"),
+            Err(e) => panic!("no encoding cannot fail, got Err({e})"),
+        }
     }
 }
