@@ -349,7 +349,7 @@ src/
 ├── proxy/               # HTTP proxy server
 │   ├── server.rs        # Axum server setup, ProxyState
 │   ├── handler.rs       # Request routing and response handling
-│   ├── streaming.rs     # SSE stream processing (legacy fallback path)
+│   ├── streaming.rs     # SSE pass-through stream forwarding (passthrough mode)
 │   ├── synthesis.rs     # SSE synthesis from complete JSON (fake streaming)
 │   └── context.rs       # Context fetching from /slots endpoint
 ├── backends/            # Multi-backend load balancing
@@ -361,7 +361,7 @@ src/
 │   ├── priority_free.rs # PriorityFree strategy (least-busy node)
 │   └── preflight.rs     # Backend preflight/health checks
 ├── fixes/               # Pluggable response fix system
-│   ├── mod.rs           # ResponseFix trait, ToolCallAccumulator
+│   ├── mod.rs           # ResponseFix trait
 │   ├── registry.rs      # Fix registration and management
 │   ├── toolcall_null_index_fix.rs        # Fix null tool call indices
 │   ├── toolcall_bad_filepath_fix.rs      # Fix duplicate filePath keys
@@ -387,29 +387,23 @@ Response fixes implement the `ResponseFix` trait and are managed by the `FixRegi
 Create `src/fixes/my_custom_fix.rs`:
 
 ```rust
-use super::ResponseFix;
-use async_trait::async_trait;
+use crate::fixes::{FixAction, ResponseFix};
 use serde_json::Value;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Fix for [describe what your fix does]
-pub struct MyCustomFix {
-    enabled: AtomicBool,
-}
+///
+/// The enabled/disabled switch is owned by the registry and the `fixes:`
+/// config (a disabled module is not even constructed) - the struct carries
+/// no flag of its own.
+#[derive(Default)]
+pub struct MyCustomFix;
 
 impl MyCustomFix {
-    pub fn new(enabled: bool) -> Self {
-        Self {
-            enabled: AtomicBool::new(enabled),
-        }
-    }
-
-    pub fn set_enabled(&self, enabled: bool) {
-        self.enabled.store(enabled, Ordering::Relaxed);
+    pub fn new() -> Self {
+        Self
     }
 }
 
-#[async_trait]
 impl ResponseFix for MyCustomFix {
     fn name(&self) -> &str {
         "my_custom_fix"
@@ -428,8 +422,9 @@ impl ResponseFix for MyCustomFix {
     }
 
     fn apply(&self, mut response: Value) -> (Value, FixAction) {
-        // Apply fix to complete response (primary method)
-        // Return (modified_response, FixAction) for standardized logging
+        // Apply fix to the COMPLETE response (the primary method; see the
+        // "Streaming Fixes" section in CLAUDE.md).
+        // Return (modified_response, FixAction) for standardized logging.
 
         tracing::debug!("Applying my_custom_fix");
 
@@ -443,6 +438,10 @@ impl ResponseFix for MyCustomFix {
 }
 ```
 
+The context-aware pair (`applies_with_context` / `apply_with_context`, the latter
+Result-typed) has trait defaults that delegate to `applies` / `apply`; override them
+only when the fix needs the request body or can fail structurally.
+
 #### 2. Register Your Fix
 
 Add to `src/fixes/mod.rs`:
@@ -453,11 +452,17 @@ pub use my_custom_fix::MyCustomFix;
 
 pub fn create_default_registry() -> FixRegistry {
     let mut registry = FixRegistry::new();
-    registry.register(Arc::new(ToolcallBadFilepathFix::new()));
-    registry.register(Arc::new(MyCustomFix::new(true)));  // Add your fix
+    registry.register(Arc::new(ToolCallNullIndexFix::new()));          // FIRST
+    registry.register(Arc::new(ToolcallMalformedArgumentsFix::new())); // before filepath
+    registry.register(Arc::new(MyCustomFix::new()));                   // insert at the
+    registry.register(Arc::new(ToolcallBadFilepathFix::new()));        // order you need
     registry
 }
 ```
+
+Also add the constructor to the `specs` array in `create_registry_from_config()` in the
+same file - that is the builder the `run` command actually uses, and it keeps the same
+load-bearing order.
 
 **Important: Fix Registration Order**
 
@@ -483,37 +488,14 @@ fixes:
   modules:
     my_custom_fix:
       enabled: true
-      # Add any custom options your fix needs
-      option1: value1
 ```
 
-Update the `configure()` method in `src/fixes/registry.rs` to handle your fix's options:
-
-```rust
-pub fn configure(&mut self, config: &HashMap<String, FixModuleConfig>) {
-    for (name, module_config) in config {
-        if let Some(fix) = self.fixes.iter().find(|f| f.name() == name) {
-            self.enabled.insert(name.clone(), module_config.enabled);
-
-            // Apply fix-specific options
-            if name == "my_custom_fix" {
-                if let Some(casted) = Arc::clone(fix)
-                    .as_any()
-                    .downcast_ref::<MyCustomFix>()
-                {
-                    if let Some(opt) = module_config
-                        .options
-                        .get("option1")
-                        .and_then(|v| v.as_bool())
-                    {
-                        casted.set_option1(opt);
-                    }
-                }
-            }
-        }
-    }
-}
-```
+No `registry.rs` edit is needed for the toggle: `FixRegistry::configure()` already
+normalizes the config key (`_fix` suffix optional) and records `modules.<name>.enabled`
+for every registered fix, and `create_registry_from_config()` does not even construct a
+module the config disables. Fix-specific options have no consumer today; if a fix needs
+one, add the typed field to its config path rather than reading the generic
+`FixModuleConfig.options` map.
 
 #### 4. Test Your Fix
 
@@ -738,7 +720,12 @@ cargo test test_request_metrics_from_response
 The `FixRegistry` stores `Arc<dyn ResponseFix>` allowing dynamic enable/disable without recompilation. Fixes are checked with `applies()` before calling `apply()`.
 
 #### Streaming vs Non-Streaming
-The handler detects streaming via `Content-Type: text/event-stream` and routes to specialized streaming handler that applies fixes per SSE chunk.
+Streaming mode is a config/CLI choice (`streaming:`, default `fake`), not a response header sniff.
+In `fake` mode the proxy fetches ONE complete JSON from the backend, runs the fix layer on
+that buffered body, then synthesizes the SSE stream from the fixed body (`src/proxy/synthesis.rs`)
+— so fixes never touch partial deltas. In `passthrough` mode the backend's SSE bytes are
+forwarded verbatim (`/v1/chat/completions` with `stream: true` only), and fixes DETECT but do
+NOT repair on that path. Both modes run fixes on buffered requests.
 
 #### Async Architecture
 - Uses tokio runtime for async I/O

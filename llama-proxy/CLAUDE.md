@@ -57,7 +57,10 @@ See `../context/opencode_claude_llama_notes.md` for comprehensive details on:
 **Architecture Insight:**
 The proxy is designed as a **transparent interceptor** that:
 - Routes all requests to llama.cpp backend unchanged
-- Applies fixes during response streaming (per-chunk processing)
+- Applies fixes to complete responses (the fix layer runs on the buffered body;
+  `fake` mode - the default - fetches ONE complete JSON from the backend, runs the
+  fix layer, then synthesizes the SSE stream from the fixed body; `passthrough`
+  forwards the backend's SSE bytes verbatim, where fixes DETECT but do NOT repair)
 - Collects metrics from llama.cpp-specific extensions
 - Maintains full OpenAI API compatibility for maximum client support
 
@@ -103,7 +106,8 @@ cp config.yaml.default config.yaml
 - `registry.rs`: Registry pattern for managing multiple fixes, enable/disable per fix
 - Individual fix modules (e.g., `toolcall_bad_filepath_fix.rs`)
 - Each fix implements: name, description, applies check, and apply logic
-- Fixes work on both streaming chunks (`apply_stream()`) and complete responses (`apply()`)
+- Fixes run on complete responses (`apply()`); there is no streaming fix API —
+  the per-chunk `apply_stream()` machinery was deleted (21f0548)
 
 **stats/** - Metrics collection
 - `collector.rs`: `RequestMetrics` struct, calculates tokens/sec, context usage, extended token details
@@ -133,7 +137,11 @@ cp config.yaml.default config.yaml
 
 **Registry Pattern for Fixes**: `FixRegistry` stores `Arc<dyn ResponseFix>` allowing dynamic enable/disable without recompilation. Fixes are checked with `applies()` before calling `apply()`.
 
-**Streaming vs Non-Streaming**: Handler detects streaming via `Content-Type: text/event-stream` header and routes to specialized streaming handler that applies fixes per SSE chunk.
+**Streaming vs Non-Streaming**: In `fake` mode (default) the proxy fetches ONE complete
+JSON from the backend, runs the fix layer on that buffered body, then synthesizes the SSE
+stream from the fixed body (`src/proxy/synthesis.rs`). In `passthrough` mode the backend's
+SSE bytes are forwarded verbatim (OpenAI `/v1/chat/completions` with `stream: true` only);
+fixes DETECT but do NOT repair on that path. Both modes run fixes on buffered requests.
 
 **Stats Collection Flow**:
 1. Parse request JSON to extract prompt tokens
