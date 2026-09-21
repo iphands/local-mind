@@ -482,6 +482,28 @@ impl Drop for ConcurrentGuard {
     }
 }
 
+/// Body-read + JSON-classification result of `prepare_request` (big-fix 95 [C-L11]).
+struct PreparedRequest {
+    body_bytes: bytes::Bytes,
+    request_json: Option<serde_json::Value>,
+}
+
+/// Outcome of `prepare_request` (big-fix 95 [C-L11]). Enum, not Result: the error arm
+/// carries a full `Response` and trips clippy::result_large_err against the small Ok
+/// payload - and the sibling `RouteDecision` seam already uses this shape.
+enum Prepared {
+    Ready(PreparedRequest),
+    Failed(Response),
+}
+
+/// Outcome of `ProxyHandler::route` (big-fix 95 [C-L11]): either a monitoring/local
+/// endpoint answered fully, or it is a forward and the body moves back out untouched -
+/// zero clones on the completion path.
+enum RouteDecision {
+    Handled(Response),
+    Forward { body_bytes: bytes::Bytes },
+}
+
 /// Proxy request handler
 pub struct ProxyHandler {
     state: ProxyState,
@@ -604,32 +626,12 @@ impl ProxyHandler {
         // Save headers before consuming the request
         let headers = req.headers().clone();
 
-        // Read request body FIRST (needed for model-based routing)
-        let body_bytes = match to_bytes(req.into_body(), 1024 * 1024 * 100).await {
-            Ok(bytes) => bytes,
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to read request body");
-                return body_read_error(e, "100 MiB");
-            }
+        // Body-read + JSON parse moved verbatim into prepare_request [C-L11]
+        let prepared = match self.prepare_request(req.into_body()).await {
+            Prepared::Ready(prepared) => prepared,
+            Prepared::Failed(resp) => return resp,
         };
-
-        // Parse request for model extraction and stats (if JSON). A malformed body is a
-        // legitimate class (GETs, opaque payloads), but when bytes were present and
-        // unparseable the downstream consequences (no model routing signal, no stats,
-        // augmentation silently skipped) must be attributable [C-L9].
-        let request_json: Option<serde_json::Value> = match serde_json::from_slice(&body_bytes) {
-            Ok(json) => Some(json),
-            Err(e) => {
-                if !body_bytes.is_empty() {
-                    tracing::debug!(
-                        error = %e,
-                        body_size = body_bytes.len(),
-                        "Request body is not valid JSON: model routing, stats and augmentation run without a parsed body"
-                    );
-                }
-                None
-            }
-        };
+        let PreparedRequest { body_bytes, request_json } = prepared;
 
         // Extract model for routing BEFORE selecting backend
         let requested_model = request_json.as_ref().and_then(|j| j.get("model")).and_then(|m| m.as_str());
@@ -673,119 +675,15 @@ impl ProxyHandler {
             "Detected API format"
         );
 
-        // Route specific endpoints to simple pass-through
-        match (&method, routed) {
-            // llama.cpp monitoring/status endpoints (simple pass-through)
-            (&Method::GET, "/props")
-            | (&Method::GET, "/slots")
-            | (&Method::GET, "/v1/health")
-            | (&Method::GET, "/v1/models")
-            | (&Method::GET, "/metrics") => {
-                // Reconstruct request for passthrough
-                let req = Request::builder()
-                    .method(method)
-                    .uri(uri)
-                    .body(Body::from(body_bytes))
-                    // method/uri were accepted by the router from this same parsed
-                    // request, and Body::from accepts Bytes unconditionally [C-L7].
-                    .expect("method+uri of the request being handled are valid by construction");
-                // Add headers back
-                let mut req = req;
-                for (name, value) in headers.iter() {
-                    req.headers_mut().insert(name.clone(), value.clone());
-                }
-                return self
-                    .proxy_passthrough(req, &backend.node, backend.group_name.as_deref())
-                    .await;
-            }
-
-            // Proxy-local metrics endpoint (distinct from backend's /metrics pass-through)
-            (&Method::GET, "/proxy/metrics") => {
-                let fallback_hits = self.state.backend_streaming_fallback_hits.load(Ordering::Relaxed);
-                let rejected = self.state.rejected_requests.load(Ordering::Relaxed);
-                let routed_stream = self.state.openai_stream_passthrough_total.load(Ordering::Relaxed);
-                let backend_no_stream = self.state.backend_nonsse_when_streamed_for.load(Ordering::Relaxed);
-                let anthropic_buffered = self.state.anthropic_buffered_responses_total.load(Ordering::Relaxed);
-
-                // This scrape is itself counted in concurrent_requests (incremented at the
-                // top of handle()), so discount it - otherwise an idle proxy reports 1.
-                let concurrent = self.state.concurrent_requests.load(Ordering::Relaxed).saturating_sub(1);
-
-                use crate::proxy::streaming as stream_stats;
-                let l = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
-                let body = format!(
-                    "# HELP llama_proxy_backend_streaming_fallback_total Times the backend streamed although the proxy requested stream:false. The expected path in passthrough mode is NOT counted here.\n\
-                     # TYPE llama_proxy_backend_streaming_fallback_total counter\n\
-                     llama_proxy_backend_streaming_fallback_total {}\n\
-                     # HELP llama_proxy_concurrent_requests Current in-flight requests\n\
-                     # TYPE llama_proxy_concurrent_requests gauge\n\
-                     llama_proxy_concurrent_requests {}\n\
-                     # HELP llama_proxy_rejected_requests_total Requests rejected at capacity\n\
-                     # TYPE llama_proxy_rejected_requests_total counter\n\
-                     llama_proxy_rejected_requests_total {}\n\
-                     # HELP llama_proxy_openai_stream_passthrough_total OpenAI requests routed onward with stream:true intact. Counted at the routing decision, so it moves even with stats.enabled: false - use this as the passthrough mode probe.\n\
-                     # TYPE llama_proxy_openai_stream_passthrough_total counter\n\
-                     llama_proxy_openai_stream_passthrough_total {}\n\
-                     # HELP llama_proxy_backend_nonsse_when_streamed_total Passthrough asked for stream:true and the backend answered 2xx with JSON instead of text/event-stream. The backend does not stream; the proxy is not at fault.\n\
-                     # TYPE llama_proxy_backend_nonsse_when_streamed_total counter\n\
-                     llama_proxy_backend_nonsse_when_streamed_total {}\n\
-                     # HELP llama_proxy_anthropic_buffered_responses_total /v1/messages responses served buffered with synthesized SSE under streaming: passthrough. The log notice fires once per process; this keeps counting.\n\
-                     # TYPE llama_proxy_anthropic_buffered_responses_total counter\n\
-                     llama_proxy_anthropic_buffered_responses_total {}\n\
-                     # HELP llama_proxy_passthrough_streams_total Pass-through SSE responses framed by the proxy; denominator for the ratios below. Requires accumulation (stats.enabled or dump), unlike openai_stream_passthrough_total. Excludes compressed responses.\n\
-                     # TYPE llama_proxy_passthrough_streams_total counter\n\
-                     llama_proxy_passthrough_streams_total {}\n\
-                     # HELP llama_proxy_passthrough_sse_events_total SSE events framed on those streams. Counted only while accumulation is on (stats.enabled or dump).\n\
-                     # TYPE llama_proxy_passthrough_sse_events_total counter\n\
-                     llama_proxy_passthrough_sse_events_total {}\n\
-                     # HELP llama_proxy_passthrough_sse_unparsed_events_total Framed SSE events whose data payload was not valid JSON, forwarded verbatim and unanalyzed. Denominator: passthrough_sse_events_total.\n\
-                     # TYPE llama_proxy_passthrough_sse_unparsed_events_total counter\n\
-                     llama_proxy_passthrough_sse_unparsed_events_total {}\n\
-                     # HELP llama_proxy_passthrough_stream_truncated_total Streams where the backend ended without [DONE]/message_stop. Denominator: passthrough_streams_total.\n\
-                     # TYPE llama_proxy_passthrough_stream_truncated_total counter\n\
-                     llama_proxy_passthrough_stream_truncated_total {}\n\
-                     # HELP llama_proxy_passthrough_stream_stalled_total Streams the stats observer gave up on after 90s without a chunk. The client transfer is not cut by this. Denominator: passthrough_streams_total.\n\
-                     # TYPE llama_proxy_passthrough_stream_stalled_total counter\n\
-                     llama_proxy_passthrough_stream_stalled_total {}\n\
-                     # HELP llama_proxy_passthrough_stream_client_gone_total Streams where the client disconnected before completion. Normal, not a defect; counted so truncation can be read against real traffic.\n\
-                     # TYPE llama_proxy_passthrough_stream_client_gone_total counter\n\
-                     llama_proxy_passthrough_stream_client_gone_total {}\n\
-                     # HELP llama_proxy_passthrough_fix_unrepaired_total Fix detections reported and NOT repaired. Detections, not responses - one response can add several. Denominator: passthrough_streams_total.\n\
-                     # TYPE llama_proxy_passthrough_fix_unrepaired_total counter\n\
-                     llama_proxy_passthrough_fix_unrepaired_total {}\n\
-                     # HELP llama_proxy_passthrough_compressed_responses_total Responses bypassed entirely because Content-Encoding was not identity. Not counted in any other passthrough_* metric.\n\
-                     # TYPE llama_proxy_passthrough_compressed_responses_total counter\n\
-                     llama_proxy_passthrough_compressed_responses_total {}\n\
-                     # HELP llama_proxy_metrics_export_skipped_total Metric samples excluded from every exporter because the backend reported no token count and no rate: a stream the client abandoned before usage/timings arrived, or a backend error body. They are logged at WARN instead. Spans the buffered and pass-through paths, and is NOT the same as passthrough_stream_client_gone_total - a client-gone stream that did carry usage is exported and is not counted here. Remote token totals under-count backend work by this amount.\n\
-                      # TYPE llama_proxy_metrics_export_skipped_total counter\n\
-                      llama_proxy_metrics_export_skipped_total {}\n\
-                      # HELP llama_proxy_context_cache_stale_skips_total Context-cache refreshes skipped because the write lock was held when a fresh value arrived; the cache keeps its previous value, so context_total can read stale. Not a defect signal on its own - it explains context_percent jumps. Spans the buffered and pass-through paths.\n\
-                      # TYPE llama_proxy_context_cache_stale_skips_total counter\n\
-                      llama_proxy_context_cache_stale_skips_total {}\n",
-                     fallback_hits,
-                     concurrent,
-                     rejected,
-                     routed_stream,
-                     backend_no_stream,
-                     anthropic_buffered,
-                     l(&stream_stats::PASSTHROUGH_STREAMS_TOTAL),
-                     l(&stream_stats::SSE_EVENTS_TOTAL),
-                     l(&stream_stats::SSE_UNPARSED_EVENTS_TOTAL),
-                     l(&stream_stats::STREAM_TRUNCATED_TOTAL),
-                     l(&stream_stats::STREAM_STALLED_TOTAL),
-                     l(&stream_stats::STREAM_CLIENT_GONE_TOTAL),
-                     l(&stream_stats::FIX_UNREPAIRED_TOTAL),
-                     l(&stream_stats::STREAM_COMPRESSED_TOTAL),
-                     l(&crate::exporters::EXPORTS_SKIPPED_TOTAL),
-                     crate::proxy::context::context_cache_stale_skips(),
-                 );
-
-                return (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response();
-            }
-
-            // All other routes continue with existing logic
-            _ => {}
-        }
+        // Route specific endpoints to simple pass-through [C-L11]: the match moved
+        // verbatim into route(); the forward arm moves the body back out untouched.
+        let body_bytes = match self
+            .route(&method, &uri, &headers, body_bytes, &backend.node, backend.group_name.as_deref())
+            .await
+        {
+            RouteDecision::Handled(resp) => return resp,
+            RouteDecision::Forward { body_bytes } => body_bytes,
+        };
 
         // Check concurrent request limit for completion routes only (not monitoring endpoints).
         // This must be AFTER the pass-through match so health/status routes are never rejected.
@@ -1134,6 +1032,165 @@ impl ProxyHandler {
             .await
         }
     }
+    /// Monitoring/local endpoints answered here, everything else forwarded. Moved
+    /// verbatim out of `handle` (big-fix 95 [C-L11]); `routed` is re-derived because the
+    /// predicate is pure and it keeps the seam under clippy's too_many_arguments budget.
+    async fn route(
+        &self,
+        method: &Method,
+        uri: &axum::http::Uri,
+        headers: &HeaderMap,
+        body_bytes: bytes::Bytes,
+        backend: &Arc<BackendNode>,
+        group_name: Option<&str>,
+    ) -> RouteDecision {
+        let routed = backend.effective_path(uri.path());
+        match (method, routed) {
+            // llama.cpp monitoring/status endpoints (simple pass-through)
+            (&Method::GET, "/props")
+            | (&Method::GET, "/slots")
+            | (&Method::GET, "/v1/health")
+            | (&Method::GET, "/v1/models")
+            | (&Method::GET, "/metrics") => {
+                // Reconstruct request for passthrough
+                let req = Request::builder()
+                    .method(method.clone())
+                    .uri(uri.clone())
+                    .body(Body::from(body_bytes))
+                    // method/uri were accepted by the router from this same parsed
+                    // request, and Body::from accepts Bytes unconditionally [C-L7].
+                    .expect("method+uri of the request being handled are valid by construction");
+                // Add headers back
+                let mut req = req;
+                for (name, value) in headers.iter() {
+                    req.headers_mut().insert(name.clone(), value.clone());
+                }
+                RouteDecision::Handled(self.proxy_passthrough(req, backend, group_name).await)
+            }
+
+            // Proxy-local metrics endpoint (distinct from backend's /metrics pass-through)
+            (&Method::GET, "/proxy/metrics") => {
+                let fallback_hits = self.state.backend_streaming_fallback_hits.load(Ordering::Relaxed);
+                let rejected = self.state.rejected_requests.load(Ordering::Relaxed);
+                let routed_stream = self.state.openai_stream_passthrough_total.load(Ordering::Relaxed);
+                let backend_no_stream = self.state.backend_nonsse_when_streamed_for.load(Ordering::Relaxed);
+                let anthropic_buffered = self.state.anthropic_buffered_responses_total.load(Ordering::Relaxed);
+
+                // This scrape is itself counted in concurrent_requests (incremented at the
+                // top of handle()), so discount it - otherwise an idle proxy reports 1.
+                let concurrent = self.state.concurrent_requests.load(Ordering::Relaxed).saturating_sub(1);
+
+                use crate::proxy::streaming as stream_stats;
+                let l = |c: &std::sync::atomic::AtomicU64| c.load(Ordering::Relaxed);
+                let body = format!(
+                    "# HELP llama_proxy_backend_streaming_fallback_total Times the backend streamed although the proxy requested stream:false. The expected path in passthrough mode is NOT counted here.\n\
+                     # TYPE llama_proxy_backend_streaming_fallback_total counter\n\
+                     llama_proxy_backend_streaming_fallback_total {}\n\
+                     # HELP llama_proxy_concurrent_requests Current in-flight requests\n\
+                     # TYPE llama_proxy_concurrent_requests gauge\n\
+                     llama_proxy_concurrent_requests {}\n\
+                     # HELP llama_proxy_rejected_requests_total Requests rejected at capacity\n\
+                     # TYPE llama_proxy_rejected_requests_total counter\n\
+                     llama_proxy_rejected_requests_total {}\n\
+                     # HELP llama_proxy_openai_stream_passthrough_total OpenAI requests routed onward with stream:true intact. Counted at the routing decision, so it moves even with stats.enabled: false - use this as the passthrough mode probe.\n\
+                     # TYPE llama_proxy_openai_stream_passthrough_total counter\n\
+                     llama_proxy_openai_stream_passthrough_total {}\n\
+                     # HELP llama_proxy_backend_nonsse_when_streamed_total Passthrough asked for stream:true and the backend answered 2xx with JSON instead of text/event-stream. The backend does not stream; the proxy is not at fault.\n\
+                     # TYPE llama_proxy_backend_nonsse_when_streamed_total counter\n\
+                     llama_proxy_backend_nonsse_when_streamed_total {}\n\
+                     # HELP llama_proxy_anthropic_buffered_responses_total /v1/messages responses served buffered with synthesized SSE under streaming: passthrough. The log notice fires once per process; this keeps counting.\n\
+                     # TYPE llama_proxy_anthropic_buffered_responses_total counter\n\
+                     llama_proxy_anthropic_buffered_responses_total {}\n\
+                     # HELP llama_proxy_passthrough_streams_total Pass-through SSE responses framed by the proxy; denominator for the ratios below. Requires accumulation (stats.enabled or dump), unlike openai_stream_passthrough_total. Excludes compressed responses.\n\
+                     # TYPE llama_proxy_passthrough_streams_total counter\n\
+                     llama_proxy_passthrough_streams_total {}\n\
+                     # HELP llama_proxy_passthrough_sse_events_total SSE events framed on those streams. Counted only while accumulation is on (stats.enabled or dump).\n\
+                     # TYPE llama_proxy_passthrough_sse_events_total counter\n\
+                     llama_proxy_passthrough_sse_events_total {}\n\
+                     # HELP llama_proxy_passthrough_sse_unparsed_events_total Framed SSE events whose data payload was not valid JSON, forwarded verbatim and unanalyzed. Denominator: passthrough_sse_events_total.\n\
+                     # TYPE llama_proxy_passthrough_sse_unparsed_events_total counter\n\
+                     llama_proxy_passthrough_sse_unparsed_events_total {}\n\
+                     # HELP llama_proxy_passthrough_stream_truncated_total Streams where the backend ended without [DONE]/message_stop. Denominator: passthrough_streams_total.\n\
+                     # TYPE llama_proxy_passthrough_stream_truncated_total counter\n\
+                     llama_proxy_passthrough_stream_truncated_total {}\n\
+                     # HELP llama_proxy_passthrough_stream_stalled_total Streams the stats observer gave up on after 90s without a chunk. The client transfer is not cut by this. Denominator: passthrough_streams_total.\n\
+                     # TYPE llama_proxy_passthrough_stream_stalled_total counter\n\
+                     llama_proxy_passthrough_stream_stalled_total {}\n\
+                     # HELP llama_proxy_passthrough_stream_client_gone_total Streams where the client disconnected before completion. Normal, not a defect; counted so truncation can be read against real traffic.\n\
+                     # TYPE llama_proxy_passthrough_stream_client_gone_total counter\n\
+                     llama_proxy_passthrough_stream_client_gone_total {}\n\
+                     # HELP llama_proxy_passthrough_fix_unrepaired_total Fix detections reported and NOT repaired. Detections, not responses - one response can add several. Denominator: passthrough_streams_total.\n\
+                     # TYPE llama_proxy_passthrough_fix_unrepaired_total counter\n\
+                     llama_proxy_passthrough_fix_unrepaired_total {}\n\
+                     # HELP llama_proxy_passthrough_compressed_responses_total Responses bypassed entirely because Content-Encoding was not identity. Not counted in any other passthrough_* metric.\n\
+                     # TYPE llama_proxy_passthrough_compressed_responses_total counter\n\
+                     llama_proxy_passthrough_compressed_responses_total {}\n\
+                     # HELP llama_proxy_metrics_export_skipped_total Metric samples excluded from every exporter because the backend reported no token count and no rate: a stream the client abandoned before usage/timings arrived, or a backend error body. They are logged at WARN instead. Spans the buffered and pass-through paths, and is NOT the same as passthrough_stream_client_gone_total - a client-gone stream that did carry usage is exported and is not counted here. Remote token totals under-count backend work by this amount.\n\
+                      # TYPE llama_proxy_metrics_export_skipped_total counter\n\
+                      llama_proxy_metrics_export_skipped_total {}\n\
+                      # HELP llama_proxy_context_cache_stale_skips_total Context-cache refreshes skipped because the write lock was held when a fresh value arrived; the cache keeps its previous value, so context_total can read stale. Not a defect signal on its own - it explains context_percent jumps. Spans the buffered and pass-through paths.\n\
+                      # TYPE llama_proxy_context_cache_stale_skips_total counter\n\
+                      llama_proxy_context_cache_stale_skips_total {}\n",
+                     fallback_hits,
+                     concurrent,
+                     rejected,
+                     routed_stream,
+                     backend_no_stream,
+                     anthropic_buffered,
+                     l(&stream_stats::PASSTHROUGH_STREAMS_TOTAL),
+                     l(&stream_stats::SSE_EVENTS_TOTAL),
+                     l(&stream_stats::SSE_UNPARSED_EVENTS_TOTAL),
+                     l(&stream_stats::STREAM_TRUNCATED_TOTAL),
+                     l(&stream_stats::STREAM_STALLED_TOTAL),
+                     l(&stream_stats::STREAM_CLIENT_GONE_TOTAL),
+                     l(&stream_stats::FIX_UNREPAIRED_TOTAL),
+                     l(&stream_stats::STREAM_COMPRESSED_TOTAL),
+                     l(&crate::exporters::EXPORTS_SKIPPED_TOTAL),
+                     crate::proxy::context::context_cache_stale_skips(),
+                 );
+
+                RouteDecision::Handled((StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response())
+            }
+
+            // All other routes continue with existing logic
+            _ => RouteDecision::Forward { body_bytes },
+        }
+    }
+
+
+    /// Body-read + JSON classification, moved verbatim out of `handle` (big-fix 95
+    /// [C-L11]). The 100 MiB cap and the [C-L9] unparseable-attribution debug keep their
+    /// exact behavior; the error path hands back a ready-made response.
+    async fn prepare_request(&self, body: Body) -> Prepared {
+        // Read request body FIRST (needed for model-based routing)
+        let body_bytes = match to_bytes(body, 1024 * 1024 * 100).await {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                tracing::error!(error = %e, "Failed to read request body");
+                return Prepared::Failed(body_read_error(e, "100 MiB"));
+            }
+        };
+
+        // Parse request for model extraction and stats (if JSON). A malformed body is a
+        // legitimate class (GETs, opaque payloads), but when bytes were present and
+        // unparseable the downstream consequences (no model routing signal, no stats,
+        // augmentation silently skipped) must be attributable [C-L9].
+        let request_json: Option<serde_json::Value> = match serde_json::from_slice(&body_bytes) {
+            Ok(json) => Some(json),
+            Err(e) => {
+                if !body_bytes.is_empty() {
+                    tracing::debug!(
+                        error = %e,
+                        body_size = body_bytes.len(),
+                        "Request body is not valid JSON: model routing, stats and augmentation run without a parsed body"
+                    );
+                }
+                None
+            }
+        };
+
+        Prepared::Ready(PreparedRequest { body_bytes, request_json })
+    }
 
     /// Client headers that must not reach the backend. `Accept-Encoding` is the client's
     /// preference addressed to *us*; forwarding it lets the backend answer with br/zstd,
@@ -1381,8 +1438,9 @@ impl ProxyHandler {
 
         // Fixes, then metrics, both on the final (possibly merged) body: the ONE log/export
         // line below carries merged token totals, and its duration spans the reprompt rounds
-        // because the start instant comes from handle().
-        let (json_value, mut metrics) = if let Some(json) = json_value {
+        // because the start instant comes from handle(). The emission itself moved verbatim
+        // into emit_metrics [C-L11].
+        let json_value = if let Some(json) = json_value {
             // Apply fixes with request context if available
             let original_json = json.clone();
             let json = if let Some(ref req_json) = request_json {
@@ -1395,69 +1453,12 @@ impl ProxyHandler {
             } else {
                 tracing::debug!("No fixes applied to response");
             }
-
-            // Collect stats if enabled
-            let mut metrics = if self.state.config.stats.enabled {
-                if let Some(ref req_json) = request_json {
-                    let mut m = RequestMetrics::from_response(
-                        &json,
-                        req_json,
-                        false, // We forced non-streaming
-                        start.elapsed().as_millis() as f64,
-                    );
-                    // Set group name if we're in multi-backend mode
-                    m.group_name = group_name.map(|s| s.to_string());
-                    Some(m)
-                } else {
-                    None
-                }
-            } else {
-                None
-            };
-
-            // Fetch and set context_total, gated on the same
-            // has_throughput_signal the export gate uses: with no token count
-            // there is nothing for context_percent to divide. This also skips
-            // warn_context_fetch_failed_once for those samples.
-            if let Some(m) = metrics.as_mut().filter(|m| m.has_throughput_signal()) {
-                match fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref()).await
-                {
-                    Some(ctx_total) => {
-                        m.context_total = Some(ctx_total);
-                        m.calculate_context_percent();
-                    }
-                    None => {
-                        // Warn once per backend URL, not per request
-                        crate::proxy::warn_context_fetch_failed_once(backend.base_url(), &m.model).await;
-                        // Continue without context metrics - the request still succeeds
-                    }
-                }
-            }
-
-            (Some(json), metrics)
+            self.emit_metrics(Some(&json), &request_json, start, backend, group_name).await;
+            Some(json)
         } else {
-            (None, None)
+            self.emit_metrics(None, &request_json, start, backend, group_name).await;
+            None
         };
-
-        // The gate logs the sample and decides whether it is fit to export.
-        if let Some(ref mut m) = metrics {
-            m.concurrent_requests = Some(self.state.concurrent_requests.load(Ordering::Relaxed));
-            if crate::exporters::log_sample_and_should_export(m, self.state.config.stats.format) {
-                // Export to remote systems
-                let exporters = self.state.exporter_manager.clone();
-                let metrics_clone = m.clone();
-                tokio::spawn(async move {
-                    exporters.export_all(&metrics_clone).await;
-                });
-            }
-        } else {
-            // Debug: Log why stats weren't collected
-            tracing::debug!(
-                stats_enabled = self.state.config.stats.enabled,
-                has_request_json = request_json.is_some(),
-                "No metrics collected for non-streaming response"
-            );
-        }
 
         // Compute final body (used for dump and non-streaming return)
         let final_body = if let Some(ref json) = json_value {
@@ -1576,6 +1577,83 @@ impl ProxyHandler {
         // json_value can only be Some when the original Content-Type already said JSON,
         // so the copied value stays truthful even for a fixed body.
         forward_response(status, &headers, final_body, body_decoded)
+    }
+
+    /// Stats collection, context_total enrichment, and the log/export gate - moved
+    /// verbatim out of `handle_non_streaming_response` (big-fix 95 [C-L11]). `json` is
+    /// the final fixed body; `None` (or missing stats/request) keeps the [C-L9]
+    /// else-branch attribution. Emission stays inside the buffered path's sequencing:
+    /// it must see the post-fix, post-reprompt body exactly as before the move.
+    async fn emit_metrics(
+        &self,
+        json: Option<&serde_json::Value>,
+        request_json: &Option<serde_json::Value>,
+        start: Instant,
+        backend: &Arc<BackendNode>,
+        group_name: Option<&str>,
+    ) {
+        let mut metrics = if let Some(json) = json {
+            // Collect stats if enabled
+            let mut metrics = if self.state.config.stats.enabled {
+                if let Some(ref req_json) = request_json {
+                    let mut m = RequestMetrics::from_response(
+                        json,
+                        req_json,
+                        false, // We forced non-streaming
+                        start.elapsed().as_millis() as f64,
+                    );
+                    // Set group name if we're in multi-backend mode
+                    m.group_name = group_name.map(|s| s.to_string());
+                    Some(m)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Fetch and set context_total, gated on the same
+            // has_throughput_signal the export gate uses: with no token count
+            // there is nothing for context_percent to divide. This also skips
+            // warn_context_fetch_failed_once for those samples.
+            if let Some(m) = metrics.as_mut().filter(|m| m.has_throughput_signal()) {
+                match fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref()).await
+                {
+                    Some(ctx_total) => {
+                        m.context_total = Some(ctx_total);
+                        m.calculate_context_percent();
+                    }
+                    None => {
+                        // Warn once per backend URL, not per request
+                        crate::proxy::warn_context_fetch_failed_once(backend.base_url(), &m.model).await;
+                        // Continue without context metrics - the request still succeeds
+                    }
+                }
+            }
+            metrics
+        } else {
+            None
+        };
+
+        // The gate logs the sample and decides whether it is fit to export.
+        if let Some(ref mut m) = metrics {
+            m.concurrent_requests = Some(self.state.concurrent_requests.load(Ordering::Relaxed));
+            if crate::exporters::log_sample_and_should_export(m, self.state.config.stats.format) {
+                // Export to remote systems
+                let exporters = self.state.exporter_manager.clone();
+                let metrics_clone = m.clone();
+                tokio::spawn(async move {
+                    exporters.export_all(&metrics_clone).await;
+                });
+            }
+        } else {
+            // Debug: Log why stats weren't collected
+            tracing::debug!(
+                stats_enabled = self.state.config.stats.enabled,
+                has_request_json = request_json.is_some(),
+                "No metrics collected for non-streaming response"
+            );
+        }
     }
 
     /// Simple pass-through with no fix application or stats collection
@@ -2183,6 +2261,170 @@ mod tests {
             "the typed-parse bypass must be named at debug level, captured:\n{log}"
         );
         assert!(log.contains("ChatCompletionRequest"), "the log must name what failed to parse:\n{log}");
+    }
+
+    /// big-fix 95 [C-L11] PIN (pre-split): backend selection happens BEFORE the
+    /// monitoring route match, so even a monitoring GET consumes a round-robin slot.
+    /// Extracting the monitoring match into `route` must not move it above the select;
+    /// this pin fails the moment that observable order changes.
+    #[tokio::test]
+    async fn monitoring_get_consumes_a_round_robin_slot_before_answering() {
+        let (port_a, rx_a) = recording_backend(completion_response_bytes()).await;
+        let (port_b, rx_b) = recording_backend(completion_response_bytes()).await;
+        let balancer =
+            Arc::new(RoundRobinBalancer::new(vec![node_at_port(port_a), node_at_port(port_b)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
+
+        let res = handler
+            .handle(request_with_body(Method::GET, "/props", Body::empty()))
+            .await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(body_text(res).await.contains("cmpl-1"), "passthrough body must arrive verbatim");
+        let a_raw = recorded_raw(rx_a).await;
+        assert!(a_raw.contains("GET /props"), "node A must have served the monitoring GET:\n{a_raw}");
+
+        let res = handler.handle(completion_request()).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        let b_raw = recorded_raw(rx_b).await;
+        assert!(
+            b_raw.contains("POST /v1/chat/completions"),
+            "the completion must land on node B - the GET already consumed A's slot:\n{b_raw}"
+        );
+    }
+
+    /// big-fix 95 [C-L11] PIN (pre-split): an opaque body on the completion route is
+    /// forwarded byte-identical AND names the parse miss at debug - the body-read/parse
+    /// classification being extracted into `prepare_request` must carry this out unchanged.
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_json_completion_body_forwards_verbatim_and_names_the_parse_miss() {
+        crate::fixes::pin_interest_cache_for_tests();
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _sub = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(HandlerCaptureWriter(buf.clone()))
+                .finish(),
+        );
+        let (port, rx) = recording_backend(completion_response_bytes()).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
+
+        let res = handler
+            .handle(request_with_body(
+                Method::POST,
+                "/v1/chat/completions",
+                Body::from("opaque non-json payload"),
+            ))
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "an opaque body is still a served request");
+
+        let wire = recorded_raw(rx).await;
+        assert!(
+            wire.contains("opaque non-json payload"),
+            "the unparseable body must reach the backend untouched:\n{wire}"
+        );
+        let log = String::from_utf8_lossy(&buf.lock().expect("capture lock").clone()).to_string();
+        assert!(
+            log.contains("Request body is not valid JSON"),
+            "the parse miss must stay attributable through the extraction:\n{log}"
+        );
+    }
+
+    /// ProxyState twin of `handler_with_balancer` with stats ENABLED (augment/reprompt
+    /// stay off): the emission-gate pins need the real log/export path.
+    fn stats_enabled_handler(load_balancer: Arc<dyn LoadBalancer>) -> ProxyHandler {
+        let config = AppConfig {
+            server: crate::config::ServerConfig {
+                port: 8066,
+                host: "0.0.0.0".to_string(),
+                max_concurrent_requests: crate::config::default_max_concurrent(),
+                allowed_origins: None,
+            },
+            backend: Some(BackendConfig::default()),
+            backends: None,
+            fixes: crate::config::FixesConfig {
+                enabled: false,
+                modules: HashMap::new(),
+            },
+            stats: crate::config::StatsConfig {
+                enabled: true,
+                format: crate::config::StatsFormat::Compact,
+            },
+            exporters: crate::config::ExportersConfig {
+                influxdb: crate::config::InfluxDbConfig {
+                    enabled: false,
+                    url: "http://localhost:8086".to_string(),
+                    org: "test".to_string(),
+                    bucket: "test".to_string(),
+                    token: "test".to_string(),
+                    batch_size: 1,
+                    flush_interval_seconds: 1,
+                },
+            },
+            streaming: StreamingMode::default(),
+            synthesis: crate::config::SynthesisConfig::default(),
+            augment_backend: None,
+            reprompt: None,
+            dump: crate::config::DumpConfig::default(),
+        };
+        ProxyHandler::new(ProxyState {
+            config: Arc::new(config),
+            load_balancer,
+            fix_registry: Arc::new(FixRegistry::new()),
+            exporter_manager: Arc::new(ExporterManager::new()),
+            augment_backend: None,
+            reprompt_engine: None,
+            hide_requests: false,
+            log_augmented_request_text: false,
+            dump_path: None,
+            concurrent_requests: Arc::new(AtomicUsize::new(0)),
+            backend_streaming_fallback_hits: Arc::new(AtomicUsize::new(0)),
+            openai_stream_passthrough_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            backend_nonsse_when_streamed_for: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            anthropic_buffered_responses_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            anthropic_buffered_notice_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rejected_requests: Arc::new(AtomicUsize::new(0)),
+            concurrent_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(100))),
+        })
+    }
+
+    /// big-fix 95 [C-L11] PIN (pre-split): stats ENABLED + a non-JSON backend body: the
+    /// emission gate must still name why nothing was collected, including that the
+    /// REQUEST parsed. This is the else-branch contract of the block being extracted
+    /// into `emit_metrics`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn non_json_backend_response_names_the_metrics_miss() {
+        crate::fixes::pin_interest_cache_for_tests();
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _sub = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(HandlerCaptureWriter(buf.clone()))
+                .finish(),
+        );
+        let plain = raw_http_response("200 OK", &[("content-type", "text/plain")], b"plain prose answer");
+        let (port, _rx) = recording_backend(plain).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = stats_enabled_handler(balancer);
+
+        let res = handler.handle(completion_request()).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(
+            body_text(res).await.contains("plain prose answer"),
+            "a non-JSON backend body forwards verbatim"
+        );
+
+        let log = String::from_utf8_lossy(&buf.lock().expect("capture lock").clone()).to_string();
+        assert!(
+            log.contains("No metrics collected"),
+            "the emission gate must still explain the miss:\n{log}"
+        );
+        assert!(
+            log.contains("has_request_json=true"),
+            "the request DID parse - the miss is the response shape:\n{log}"
+        );
     }
 
     #[test]
