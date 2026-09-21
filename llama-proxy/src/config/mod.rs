@@ -8,6 +8,7 @@ pub use loader::load_config;
 
 /// Main application configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AppConfig {
     pub server: ServerConfig,
     /// Optional single backend. Absent + `backends:` present → group routing.
@@ -39,6 +40,7 @@ pub struct AppConfig {
 
 /// Debug dump configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct DumpConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -57,6 +59,7 @@ impl Default for DumpConfig {
 
 /// Proxy server configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ServerConfig {
     pub port: u16,
     pub host: String,
@@ -84,6 +87,7 @@ pub fn default_max_concurrent() -> usize {
 
 /// Backend llama-server configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackendConfig {
     /// Full backend URL (e.g., "https://example.com:4234" or "http://localhost:8080")
     pub url: String,
@@ -106,6 +110,7 @@ pub struct BackendConfig {
 
 /// TLS configuration for backend connections
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct TlsConfig {
     /// Accept invalid certificates (self-signed, expired)
     #[serde(default)]
@@ -149,6 +154,7 @@ impl BackendConfig {
 
 /// Per-node configuration for multi-backend mode
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackendNodeConfig {
     /// Full backend URL (e.g., "http://localhost:8080")
     pub url: String,
@@ -174,6 +180,7 @@ pub struct BackendNodeConfig {
 
 /// Configuration for a single backend group
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct BackendGroupConfig {
     /// Model names this group handles (empty = catch-all)
     pub mappings: Vec<String>,
@@ -248,6 +255,7 @@ pub struct FixModuleConfig {
 
 /// Stats logging configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct StatsConfig {
     #[serde(default = "default_stats_enabled")]
     pub enabled: bool,
@@ -419,6 +427,7 @@ pub type StreamingConfig = StreamingMode;
 /// stream. The `streaming:` key remains a plain mode string; this section is
 /// purely additive to [`AppConfig`].
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+#[serde(deny_unknown_fields)]
 pub struct SynthesisConfig {
     /// Delay inserted between synthesized SSE chunks, in milliseconds.
     /// 0 (default) emits every chunk without an artificial sleep.
@@ -445,6 +454,7 @@ impl Default for SynthesisConfig {
 
 /// Augment backend configuration - experimental feature for enriching requests
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct AugmentBackendConfig {
     /// Enable augment-backend feature (opt-in: absent key defaults to false)
     #[serde(default = "default_augment_enabled")]
@@ -509,6 +519,7 @@ impl std::error::Error for AugmentBackendError {}
 
 /// Reprompt engine configuration — silently re-prompts on premature stop
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct RepromptConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -617,6 +628,7 @@ impl Default for ExportersConfig {
 
 /// InfluxDB exporter configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct InfluxDbConfig {
     #[serde(default)]
     pub enabled: bool,
@@ -1272,5 +1284,99 @@ mod synthesis_section_tests {
         let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.synthesis.chunk_delay_ms, 10);
         assert_eq!(cfg.synthesis.chunk_size_chars, 2000);
+    }
+}
+
+#[cfg(test)]
+mod deny_unknown_fields_tests {
+    use super::*;
+
+    fn rejected<T: std::fmt::Debug + serde::de::DeserializeOwned>(yaml: &str, bogus_key: &str) {
+        let err = serde_yaml::from_str::<T>(yaml).expect_err("typo key must be rejected");
+        assert!(
+            err.to_string().contains(bogus_key),
+            "error must name the bogus key {bogus_key}, got: {err}"
+        );
+    }
+
+    #[test]
+    fn appconfig_rejects_bogus_app_key() {
+        rejected::<AppConfig>(
+            "server:\n  port: 8066\n  host: \"0.0.0.0\"\nbogus_app_key: 1\n",
+            "bogus_app_key",
+        );
+    }
+
+    #[test]
+    fn serverconfig_rejects_bogus_server_key() {
+        rejected::<ServerConfig>("port: 8066\nhost: \"0.0.0.0\"\nbogus_server_key: 1\n", "bogus_server_key");
+    }
+
+    #[test]
+    fn backendconfig_rejects_bogus_backend_key() {
+        rejected::<BackendConfig>("url: \"http://localhost:8080\"\nbogus_backend_key: 1\n", "bogus_backend_key");
+    }
+
+    #[test]
+    fn backendnodeconfig_rejects_bogus_node_key() {
+        rejected::<BackendNodeConfig>("url: \"http://localhost:8080\"\nbogus_node_key: 1\n", "bogus_node_key");
+    }
+
+    #[test]
+    fn backendgroupconfig_rejects_bogus_group_key() {
+        rejected::<BackendGroupConfig>("mappings: []\nnodes: []\nbogus_group_key: 1\n", "bogus_group_key");
+    }
+
+    #[test]
+    fn statsconfig_rejects_bogus_stats_key() {
+        rejected::<StatsConfig>("enabled: true\nbogus_stats_key: 1\n", "bogus_stats_key");
+    }
+
+    #[test]
+    fn dumpconfig_rejects_bogus_dump_key() {
+        rejected::<DumpConfig>("enabled: false\nbogus_dump_key: 1\n", "bogus_dump_key");
+    }
+
+    #[test]
+    fn synthesisconfig_rejects_bogus_synthesis_key() {
+        rejected::<SynthesisConfig>("chunk_delay_ms: 0\nbogus_synthesis_key: 1\n", "bogus_synthesis_key");
+    }
+
+    #[test]
+    fn influxdbconfig_rejects_bogus_influx_key() {
+        rejected::<InfluxDbConfig>("enabled: false\nbogus_influx_key: 1\n", "bogus_influx_key");
+    }
+
+    #[test]
+    fn repromptconfig_rejects_bogus_reprompt_key() {
+        rejected::<RepromptConfig>("enabled: false\nbogus_reprompt_key: 1\n", "bogus_reprompt_key");
+    }
+
+    #[test]
+    fn augmentbackendconfig_rejects_bogus_augment_key() {
+        rejected::<AugmentBackendConfig>(
+            "url: \"http://localhost:8701\"\nmodel: \"fast\"\nbogus_augment_key: 1\n",
+            "bogus_augment_key",
+        );
+    }
+
+    #[test]
+    fn tlsconfig_rejects_bogus_tls_key() {
+        rejected::<TlsConfig>("accept_invalid_certs: false\nbogus_tls_key: 1\n", "bogus_tls_key");
+    }
+
+    #[test]
+    fn shipped_config_yaml_default_still_parses_after_deny_sweep() {
+        let _: AppConfig = serde_yaml::from_str(include_str!("../../config.yaml.default"))
+            .expect("config.yaml.default must parse under deny_unknown_fields");
+    }
+
+    #[test]
+    fn alias_key_still_accepted_under_deny() {
+        // deny_unknown_fields must not kill serde aliases: reprompt's legacy
+        // done_sentinel key is an alias, not an unknown field.
+        let cfg: RepromptConfig =
+            serde_yaml::from_str("enabled: true\nprompt: \"x\"\ndone_sentinel: \"FINISH\"\n").expect("alias key must load");
+        assert_eq!(cfg.done_sentinels, vec!["FINISH".to_string()]);
     }
 }
