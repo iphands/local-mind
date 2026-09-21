@@ -150,10 +150,15 @@ pub struct FunctionRef {
 /// Chat completion response
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ChatCompletionResponse {
+    #[serde(default)]
     pub id: String,
+    #[serde(default = "default_chat_completion_object")]
     pub object: String,
+    #[serde(default)]
     pub created: i64,
+    #[serde(default)]
     pub model: String,
+    #[serde(default)]
     pub choices: Vec<Choice>,
     #[serde(default)]
     pub usage: Option<Usage>,
@@ -161,12 +166,19 @@ pub struct ChatCompletionResponse {
     pub timings: Option<Timings>,
 }
 
+fn default_chat_completion_object() -> String {
+    "chat.completion".to_string()
+}
+
 /// Response choice
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Choice {
     pub index: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<ResponseMessage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub delta: Option<Delta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish_reason: Option<String>,
 }
 
@@ -1682,5 +1694,159 @@ mod tests {
             );
         }
         assert!(out.contains(r#""arguments":"{}""#), "{out}");
+    }
+
+    // ============================================================================
+    // Task 37: response leniency (report A M3/M4) - minimal {} parses,
+    // Choice null-key hygiene on serialization
+    // ============================================================================
+
+    #[test]
+    fn test_chat_completion_response_minimal_empty_object_parses() {
+        // Given: a bare {} body (A-M4: every currently-required field must be defaulted)
+        // When: parsed as ChatCompletionResponse
+        // Then: it parses with zeroed strings/numbers, empty choices, and the
+        //       "chat.completion" object default
+        let resp: ChatCompletionResponse = serde_json::from_str("{}").unwrap();
+        assert_eq!(resp.id, "");
+        assert_eq!(resp.created, 0);
+        assert_eq!(resp.model, "");
+        assert!(resp.choices.is_empty());
+        assert_eq!(resp.object, "chat.completion");
+        assert!(resp.usage.is_none());
+        assert!(resp.timings.is_none());
+
+        // And re-serializing carries the defaulted object tag and no null leak
+        let out = serde_json::to_string(&resp).unwrap();
+        assert!(out.contains(r#""object":"chat.completion""#), "{out}");
+    }
+
+    #[test]
+    fn test_chat_completion_response_object_default_when_fields_absent() {
+        // Given: a response missing every field except object (object is the
+        // ONLY field provided, so every other default must be exercised)
+        // Then: all-required-fields-default path parses; id/created/model/choices defaulted
+        let resp: ChatCompletionResponse = serde_json::from_str(r#"{"object":"chat.completion"}"#).unwrap();
+        assert_eq!(resp.id, "");
+        assert_eq!(resp.created, 0);
+        assert_eq!(resp.model, "");
+        assert!(resp.choices.is_empty());
+        assert_eq!(resp.object, "chat.completion");
+    }
+
+    #[test]
+    fn test_choice_absent_fields_serialize_no_null_keys() {
+        // Given: a choice carrying neither message, delta, nor finish_reason
+        // When: the whole response is serialized
+        // Then: NO message/delta/finish_reason key appears at all (A-M3:
+        // skip_serializing_if on all three Options, not "key":null)
+        let json = r#"{"id":"x","object":"chat.completion","created":0,"model":"m","choices":[{"index":0}]}"#;
+        let resp: ChatCompletionResponse = serde_json::from_str(json).unwrap();
+        let choice = &resp.choices[0];
+        assert!(choice.message.is_none());
+        assert!(choice.delta.is_none());
+        assert!(choice.finish_reason.is_none());
+
+        let out = serde_json::to_string(&resp).unwrap();
+        for key in ["message", "delta", "finish_reason"] {
+            assert!(
+                !out.contains(&format!("\"{key}\"")),
+                "Choice serialization leaked key {key}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_choice_explicit_nulls_stay_none_and_stay_unserialized() {
+        // Given: explicit JSON nulls for message/delta/finish_reason
+        // Then (deser): default + Option must agree - fields land as None
+        // Then (ser): the defaulted None must NOT resurrect as a serialized null
+        let json = r#"{"index":0,"message":null,"delta":null,"finish_reason":null}"#;
+        let choice: Choice = serde_json::from_str(json).unwrap();
+        assert!(choice.message.is_none());
+        assert!(choice.delta.is_none());
+        assert!(choice.finish_reason.is_none());
+
+        let out = serde_json::to_string(&choice).unwrap();
+        for key in ["message", "delta", "finish_reason"] {
+            assert!(
+                !out.contains(&format!("\"{key}\"")),
+                "null-defaulted Choice key {key} resurrected in serialization: {out}"
+            );
+        }
+        assert!(out.contains(r#""index":0"#), "{out}");
+    }
+
+    #[test]
+    fn test_realistic_response_round_trips_losslessly() {
+        // Given: a realistic llama.cpp-style response (message + finish_reason +
+        // usage + timings, CJK model name and content)
+        // When: parse -> serialize -> parse again
+        // Then: semantic equality - no field lost, CJK survives
+        let raw = serde_json::json!({
+            "id": "chatcmpl-abc123",
+            "object": "chat.completion",
+            "created": 1712345678,
+            "model": "qwen3-coder-30b-中文",
+            "choices": [{
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": "你好, world",
+                    "reasoning_text": "thinking…"
+                },
+                "finish_reason": "stop"
+            }],
+            "usage": {
+                "prompt_tokens": 10,
+                "completion_tokens": 5,
+                "total_tokens": 15,
+                "completion_tokens_details": { "reasoning_tokens": 2 }
+            },
+            "timings": { "predicted_per_second": 33.13 }
+        });
+
+        let first: ChatCompletionResponse = serde_json::from_value(raw.clone()).unwrap();
+        let wire = serde_json::to_string(&first).unwrap();
+        let second: ChatCompletionResponse = serde_json::from_str(&wire).unwrap();
+
+        assert_eq!(second.model, "qwen3-coder-30b-中文");
+        assert_eq!(
+            second.choices[0].message.as_ref().unwrap().content,
+            Some("你好, world".to_string())
+        );
+        assert_eq!(second.choices[0].finish_reason, Some("stop".to_string()));
+        assert_eq!(second.usage.as_ref().unwrap().completion_tokens, 5);
+        assert_eq!(
+            second
+                .usage
+                .as_ref()
+                .unwrap()
+                .completion_tokens_details
+                .as_ref()
+                .unwrap()
+                .reasoning_tokens,
+            Some(2)
+        );
+        assert_eq!(second.timings.as_ref().unwrap().predicted_per_second, Some(33.13));
+
+        // Semantic equality: re-serialized bytes are value-identical
+        assert_eq!(serde_json::to_value(&first).unwrap(), serde_json::to_value(&second).unwrap());
+        // And the original keys/values survive as far as the struct models them
+        let back = serde_json::to_value(&second).unwrap();
+        assert_eq!(back["model"], "qwen3-coder-30b-中文");
+        assert_eq!(back["created"], 1712345678);
+    }
+
+    #[test]
+    fn test_choices_array_null_element_still_rejected() {
+        // Pinned shipped behavior: field-level #[serde(default)] defaults MISSING
+        // fields, it does not accept a `null` ELEMENT inside Vec<Choice>.
+        // {"choices":[null]} errors ("invalid type: null") - a null element is a
+        // malformed payload, not a missing field; no leniency is shipped here.
+        let err = serde_json::from_str::<ChatCompletionResponse>(r#"{"choices":[null]}"#)
+            .expect_err("null element inside choices must not silently become a default Choice");
+        let msg = err.to_string();
+        assert!(msg.contains("invalid type"), "{msg}");
     }
 }
