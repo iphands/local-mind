@@ -21,10 +21,14 @@ pub struct RequestMetrics {
     pub client_id: Option<String>,
     /// Conversation/session ID
     pub conversation_id: Option<String>,
-    /// Number of prompt tokens
-    pub prompt_tokens: u64,
-    /// Number of completion tokens
-    pub completion_tokens: u64,
+    /// Number of prompt tokens, or `None` when the backend reported no usage
+    /// for it. `None` is the absence of a measurement; `Some(0)` is a measured
+    /// zero (a prompt-free request). Formatters print `n/a` for `None` and
+    /// exporters omit the field, so an absent count never reads as zero.
+    pub prompt_tokens: Option<u64>,
+    /// Number of completion tokens. Same absent-vs-zero contract as
+    /// `prompt_tokens`.
+    pub completion_tokens: Option<u64>,
     /// Total tokens
     pub total_tokens: u64,
     /// Prompt processing tokens per second. Only meaningful when the backend
@@ -102,8 +106,8 @@ impl RequestMetrics {
             group_name: None,
             client_id: None,
             conversation_id: None,
-            prompt_tokens: 0,
-            completion_tokens: 0,
+            prompt_tokens: None,
+            completion_tokens: None,
             total_tokens: 0,
             prompt_tps: 0.0,
             generation_tps: 0.0,
@@ -160,18 +164,18 @@ impl RequestMetrics {
 
             // Try OpenAI format first
             if let Some(prompt) = usage.get("prompt_tokens").and_then(|t| t.as_u64()) {
-                metrics.prompt_tokens = prompt;
-                metrics.completion_tokens = usage.get("completion_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
+                metrics.prompt_tokens = Some(prompt);
+                metrics.completion_tokens = usage.get("completion_tokens").and_then(|t| t.as_u64());
                 metrics.total_tokens = usage
                     .get("total_tokens")
                     .and_then(|t| t.as_u64())
-                    .unwrap_or(metrics.prompt_tokens + metrics.completion_tokens);
+                    .unwrap_or_else(|| prompt.saturating_add(metrics.completion_tokens.unwrap_or(0)));
             }
             // Try Anthropic format
             else if let Some(input) = usage.get("input_tokens").and_then(|t| t.as_u64()) {
-                metrics.prompt_tokens = input;
-                metrics.completion_tokens = usage.get("output_tokens").and_then(|t| t.as_u64()).unwrap_or(0);
-                metrics.total_tokens = metrics.prompt_tokens + metrics.completion_tokens;
+                metrics.prompt_tokens = Some(input);
+                metrics.completion_tokens = usage.get("output_tokens").and_then(|t| t.as_u64());
+                metrics.total_tokens = input.saturating_add(metrics.completion_tokens.unwrap_or(0));
             }
 
             // Extract extended usage details (Opencode/Copilot extensions)
@@ -198,14 +202,19 @@ impl RequestMetrics {
                 metrics.context_used = Some(prompt_n);
             }
 
-            // Fallback to timings for token counts when usage is missing (e.g., timeout scenarios)
-            if metrics.prompt_tokens == 0 && metrics.completion_tokens == 0 {
-                metrics.prompt_tokens = timings.get("prompt_n").and_then(|t| t.as_u64()).unwrap_or(0);
-                metrics.completion_tokens = timings.get("predicted_n").and_then(|t| t.as_u64()).unwrap_or(0);
-                metrics.total_tokens = metrics.prompt_tokens + metrics.completion_tokens;
+            // Fallback to timings for token counts when usage is missing (e.g., timeout
+            // scenarios). Absent and zero are one trigger class here, matching the
+            // pre-Option baseline where absence was stored as 0.
+            if metrics.prompt_tokens.unwrap_or(0) == 0 && metrics.completion_tokens.unwrap_or(0) == 0 {
+                metrics.prompt_tokens = timings.get("prompt_n").and_then(|t| t.as_u64());
+                metrics.completion_tokens = timings.get("predicted_n").and_then(|t| t.as_u64());
+                metrics.total_tokens = metrics
+                    .prompt_tokens
+                    .unwrap_or(0)
+                    .saturating_add(metrics.completion_tokens.unwrap_or(0));
 
                 tracing::debug!(
-                    "Using timings fallback for token counts: prompt={}, completion={}",
+                    "Using timings fallback for token counts: prompt={:?}, completion={:?}",
                     metrics.prompt_tokens,
                     metrics.completion_tokens
                 );
@@ -215,9 +224,9 @@ impl RequestMetrics {
 
             // If no timings, use prompt_tokens as context_used fallback
             // (Anthropic format responses have usage.input_tokens but no timings)
-            if metrics.prompt_tokens > 0 {
-                metrics.context_used = Some(metrics.prompt_tokens);
-                tracing::debug!("Using prompt_tokens as context_used: {}", metrics.prompt_tokens);
+            if let Some(prompt_tokens) = metrics.prompt_tokens.filter(|p| *p > 0) {
+                metrics.context_used = Some(prompt_tokens);
+                tracing::debug!("Using prompt_tokens as context_used: {}", prompt_tokens);
             }
 
             // No `timings` means the backend did not tell us where the time went.
@@ -254,14 +263,14 @@ impl RequestMetrics {
 
                 if let Some(ttft) = f("time_to_first_token_ms") {
                     metrics.prompt_ms = ttft;
-                    if metrics.prompt_tokens > 0 {
-                        metrics.prompt_tps = (metrics.prompt_tokens as f64 / ttft) * 1000.0;
+                    if let Some(prompt_tokens) = metrics.prompt_tokens.filter(|p| *p > 0) {
+                        metrics.prompt_tps = (prompt_tokens as f64 / ttft) * 1000.0;
                     }
                 }
                 if let Some(gen_ms) = f("generation_time_ms") {
                     metrics.generation_ms = gen_ms;
-                    if metrics.completion_tokens > 0 {
-                        metrics.generation_tps = (metrics.completion_tokens as f64 / gen_ms) * 1000.0;
+                    if let Some(completion_tokens) = metrics.completion_tokens.filter(|c| *c > 0) {
+                        metrics.generation_tps = (completion_tokens as f64 / gen_ms) * 1000.0;
                     }
                 }
                 metrics.has_timing_split = metrics.prompt_ms > 0.0 || metrics.generation_ms > 0.0;
@@ -362,12 +371,13 @@ impl RequestMetrics {
     ///
     /// The negative case is a stream the client abandoned before the backend's
     /// final chunk (llama.cpp carries `usage` and `timings` only there) or a
-    /// backend error body. Such a sample still has a real `duration_ms`, but
-    /// every token and tokens/sec field in it is zero: that is the *absence of a
-    /// measurement*, not a slow request. Handing it to an exporter writes a wall
-    /// of zeros that drags every aggregate toward the floor, so callers drop it
-    /// and log it instead - see
-    /// [`crate::exporters::log_sample_and_should_export`].
+    /// backend error body. Such a sample still has a real `duration_ms`, but its
+    /// token counts are `None` and every tokens/sec field in it is zero: that is
+    /// the *absence of a measurement*, not a slow request. Handing it to an
+    /// exporter writes a wall of zeros that drags every aggregate toward the
+    /// floor, so callers drop it and log it instead - see
+    /// [`crate::exporters::log_sample_and_should_export`]. `None` token counts
+    /// ARE that documented skip condition; they are never exported as zeros.
     ///
     /// Deliberately not a check on `stream_end`: a client-gone stream that *did*
     /// receive the final chunk carries a genuine measurement and is exported.
@@ -461,8 +471,8 @@ mod tests {
         assert_eq!(metrics.model, "unknown");
         assert!(metrics.client_id.is_none());
         assert!(metrics.conversation_id.is_none());
-        assert_eq!(metrics.prompt_tokens, 0);
-        assert_eq!(metrics.completion_tokens, 0);
+        assert_eq!(metrics.prompt_tokens, None);
+        assert_eq!(metrics.completion_tokens, None);
         assert_eq!(metrics.total_tokens, 0);
         assert_eq!(metrics.prompt_tps, 0.0);
         assert_eq!(metrics.generation_tps, 0.0);
@@ -515,8 +525,8 @@ mod tests {
 
         let metrics = RequestMetrics::from_response(&response, &request, true, 200.0);
 
-        assert_eq!(metrics.prompt_tokens, 100);
-        assert_eq!(metrics.completion_tokens, 50);
+        assert_eq!(metrics.prompt_tokens, Some(100));
+        assert_eq!(metrics.completion_tokens, Some(50));
         assert_eq!(metrics.total_tokens, 150);
         assert!(metrics.streaming);
     }
@@ -834,6 +844,108 @@ mod tests {
         assert_eq!(metrics.rejected_prediction_tokens, None);
     }
 
+    /// A response with neither `usage` nor `timings` carries NO token
+    /// measurement. Baseline stored that absence as 0 (formatter then printed
+    /// "0" and the skip-filtered path never distinguishes); it must be None.
+    #[test]
+    fn usage_absent_yields_none_not_zero() {
+        let response = serde_json::json!({
+            "model": "m",
+            "choices": [{"finish_reason": "stop", "message": {"content": "hi"}}]
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({}), false, 50.0);
+
+        assert_eq!(m.prompt_tokens, None);
+        assert_eq!(m.completion_tokens, None);
+        assert_eq!(m.total_tokens, 0);
+        assert!(!m.has_throughput_signal());
+    }
+
+    /// usage carrying only prompt_tokens: the prompt is measured, the
+    /// completion is NOT — None, not 0. total_tokens falls back to the
+    /// saturating sum with the absent side counted as 0 (baseline arithmetic,
+    /// unchanged).
+    #[test]
+    fn prompt_only_usage_keeps_completion_none() {
+        let response = serde_json::json!({
+            "usage": {"prompt_tokens": 5},
+            "choices": [{"finish_reason": "stop"}]
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({}), false, 50.0);
+
+        assert_eq!(m.prompt_tokens, Some(5));
+        assert_eq!(m.completion_tokens, None);
+        assert_eq!(m.total_tokens, 5);
+    }
+
+    /// usage carrying only completion_tokens is neither shape the collector
+    /// claims (OpenAI branch requires prompt_tokens, Anthropic requires
+    /// input_tokens), so nothing is recorded. Pinned pre-Option behavior: the
+    /// absent prompt must not pull the lone count in with a fabricated 0 pair.
+    #[test]
+    fn completion_only_usage_is_recorded_neither() {
+        let response = serde_json::json!({
+            "usage": {"completion_tokens": 7},
+            "choices": [{"finish_reason": "stop"}]
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({}), false, 50.0);
+
+        assert_eq!(m.prompt_tokens, None);
+        assert_eq!(m.completion_tokens, None);
+        assert_eq!(m.total_tokens, 0);
+    }
+
+    /// A measured zero is Some(0), not None — the distinction the whole change
+    /// exists for. Zero-completion still reports zero in the fields.
+    #[test]
+    fn measured_zero_stays_some_zero_not_none() {
+        let response = serde_json::json!({
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({}), false, 50.0);
+
+        assert_eq!(m.prompt_tokens, Some(0));
+        assert_eq!(m.completion_tokens, Some(0));
+        assert_eq!(m.total_tokens, 0);
+    }
+
+    /// llama.cpp timeout shape: a rate is reported but the counts are absent.
+    /// The rate is a real measurement (the sample keeps its export signal),
+    /// while the counts stay None instead of being fabricated as 0.
+    #[test]
+    fn timings_rate_without_counts_keeps_none_counts_and_real_signal() {
+        let response = serde_json::json!({
+            "model": "m",
+            "timings": {"prompt_per_second": 100.0},
+            "choices": [{"finish_reason": "stop"}]
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({}), false, 50.0);
+
+        assert_eq!(m.prompt_tokens, None);
+        assert_eq!(m.completion_tokens, None);
+        assert_eq!(m.prompt_tps, 100.0);
+        assert!(m.has_throughput_signal(), "the rate alone is a measurement");
+    }
+
+    /// Anthropic usage without output_tokens: prompt measured, completion None,
+    /// total is the saturating sum against 0.
+    #[test]
+    fn anthropic_usage_without_output_tokens_yields_none_completion() {
+        let response = serde_json::json!({
+            "model": "m",
+            "usage": {"input_tokens": 10},
+            "content": [{"type": "text", "text": "ok"}],
+            "stop_reason": "end_turn"
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({}), false, 50.0);
+
+        assert_eq!(m.prompt_tokens, Some(10));
+        assert_eq!(m.completion_tokens, None);
+        assert_eq!(m.total_tokens, 10);
+        assert_eq!(m.context_used, Some(10), "the context_used fallback still fires");
+    }
+
     #[test]
     fn test_request_metrics_from_response_timings_only() {
         // Scenario: streaming timeout where usage is missing but timings has token counts
@@ -853,8 +965,8 @@ mod tests {
 
         let metrics = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), true, 30181.0);
 
-        assert_eq!(metrics.prompt_tokens, 538);
-        assert_eq!(metrics.completion_tokens, 983);
+        assert_eq!(metrics.prompt_tokens, Some(538));
+        assert_eq!(metrics.completion_tokens, Some(983));
         assert_eq!(metrics.total_tokens, 1521);
         assert_eq!(metrics.context_used, Some(538)); // Uses prompt_n, not cache_n
     }
@@ -884,8 +996,8 @@ mod tests {
         let metrics = RequestMetrics::from_response(&response, &request, true, 8000.0);
 
         assert_eq!(metrics.model, "Qwen3-14B-128K-Q3_K_S.gguf");
-        assert_eq!(metrics.prompt_tokens, 124);
-        assert_eq!(metrics.completion_tokens, 273);
+        assert_eq!(metrics.prompt_tokens, Some(124));
+        assert_eq!(metrics.completion_tokens, Some(273));
         assert_eq!(metrics.total_tokens, 397);
         assert_eq!(metrics.finish_reason, "end_turn");
         assert_eq!(metrics.output_len, 11); // "Hello world"
@@ -920,8 +1032,8 @@ mod tests {
         let metrics = RequestMetrics::from_response(&response, &request, false, 5000.0);
 
         assert_eq!(metrics.model, "claude-3");
-        assert_eq!(metrics.prompt_tokens, 100);
-        assert_eq!(metrics.completion_tokens, 200);
+        assert_eq!(metrics.prompt_tokens, Some(100));
+        assert_eq!(metrics.completion_tokens, Some(200));
         // Output len should only count text content, not thinking
         assert_eq!(metrics.output_len, 16); // "The answer is 42"
         assert_eq!(metrics.finish_reason, "end_turn");

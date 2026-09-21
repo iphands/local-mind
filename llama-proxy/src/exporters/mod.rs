@@ -31,8 +31,9 @@ const DROP_WARN_INTERVAL: u64 = 100;
 /// The counter stays exact while the WARN is sampled, because a client that
 /// interrupts streams (Claude Code's ESC, a cancelled re-prompt) makes this a
 /// routine event that would otherwise bury every other warning. The WARN carries
-/// the only fields of such a sample that are not zero: how it ended and how long
-/// it ran.
+/// the only fields of such a sample that are not zero or absent: how it ended
+/// and how long it ran. Absent token counts print `n/a` — the sample's `None`
+/// counts ARE the documented skip condition, never reported as measured zeros.
 pub fn log_sample_and_should_export(metrics: &RequestMetrics, format: StatsFormat) -> bool {
     if metrics.has_throughput_signal() {
         let formatted = format_metrics(metrics, format);
@@ -46,11 +47,15 @@ pub fn log_sample_and_should_export(metrics: &RequestMetrics, format: StatsForma
 
     let skipped = EXPORTS_SKIPPED_TOTAL.fetch_add(1, Ordering::Relaxed) + 1;
     if skipped == 1 || skipped.is_multiple_of(DROP_WARN_INTERVAL) {
+        let prompt_tokens = match metrics.prompt_tokens {
+            Some(tokens) => tokens.to_string(),
+            None => "n/a".to_string(),
+        };
         tracing::warn!(
             model = %metrics.model,
             stream_end = metrics.stream_end_label(),
             finish_reason = %metrics.finish_reason,
-            prompt_tokens = metrics.prompt_tokens,
+            prompt_tokens = %prompt_tokens,
             duration_ms = metrics.duration_ms,
             samples_skipped = skipped,
             "no usage/timings from the backend - excluded from exporters; every drop is \

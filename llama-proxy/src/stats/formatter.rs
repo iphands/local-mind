@@ -12,6 +12,12 @@ pub fn format_metrics(metrics: &RequestMetrics, format: StatsFormat) -> String {
     }
 }
 
+/// Render a token count for display. `None` is the absence of a measurement
+/// and prints `n/a`; a measured zero prints `0`.
+fn token_cell(tokens: Option<u64>) -> String {
+    tokens.map_or_else(|| "n/a".to_string(), |t| t.to_string())
+}
+
 /// Pretty box format for terminal output
 fn format_pretty(m: &RequestMetrics) -> String {
     let context_str = match (m.context_used, m.context_total, m.context_percent) {
@@ -93,7 +99,7 @@ fn format_pretty(m: &RequestMetrics) -> String {
 │ Performance                                                      │
 {}├──────────────────────────────────────────────────────────────────┤
 │ Tokens                                                           │
-│   Input: {:6} │ Output: {:6} │ Total: {:6}                   │
+│   Input: {:>6} │ Output: {:>6} │ Total: {:>6}                   │
 {}├──────────────────────────────────────────────────────────────────┤
 │ Context: {:54}│
 │ Finish: {:56}│
@@ -104,8 +110,8 @@ fn format_pretty(m: &RequestMetrics) -> String {
         m.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
         extra_lines,
         perf_lines,
-        m.prompt_tokens,
-        m.completion_tokens,
+        token_cell(m.prompt_tokens),
+        token_cell(m.completion_tokens),
         m.total_tokens,
         reasoning_line,
         context_str,
@@ -160,8 +166,8 @@ fn format_compact(m: &RequestMetrics) -> String {
         "model={}{} tokens={}/{} {} {} {} finish={} dur={:.1}ms{}{}",
         m.model,
         group_str,
-        m.prompt_tokens,
-        m.completion_tokens,
+        token_cell(m.prompt_tokens),
+        token_cell(m.completion_tokens),
         tps_str,
         context_str,
         if m.streaming {
@@ -202,8 +208,8 @@ mod tests {
     fn create_test_metrics() -> RequestMetrics {
         let mut m = RequestMetrics::new();
         m.model = "test-model".to_string();
-        m.prompt_tokens = 100;
-        m.completion_tokens = 50;
+        m.prompt_tokens = Some(100);
+        m.completion_tokens = Some(50);
         m.total_tokens = 150;
         m.prompt_tps = 200.5;
         m.generation_tps = 42.5;
@@ -254,8 +260,8 @@ mod tests {
         m.has_timing_split = false;
         m.prompt_tps = 0.0;
         m.generation_tps = 0.0;
-        m.prompt_tokens = 39240;
-        m.completion_tokens = 146;
+        m.prompt_tokens = Some(39240);
+        m.completion_tokens = Some(146);
         m.total_tokens = 39386;
         m.duration_ms = 1731.0;
         m.total_tps = (m.total_tokens as f64 / m.duration_ms) * 1000.0;
@@ -322,6 +328,33 @@ mod tests {
 
         let output = format_compact(&m);
         assert!(output.contains("ctx=null"));
+    }
+
+    /// An absent token count must read `n/a`, never a fabricated 0.
+    #[test]
+    fn absent_token_counts_print_n_a() {
+        let mut m = create_test_metrics();
+        m.prompt_tokens = None;
+        m.completion_tokens = None;
+
+        let compact = format_compact(&m);
+        assert!(compact.contains("tokens=n/a/n/a"), "got: {compact}");
+
+        let pretty = format_pretty(&m);
+        assert!(pretty.contains("Input:    n/a"), "got: {pretty}");
+        assert!(pretty.contains("Output:    n/a"), "got: {pretty}");
+    }
+
+    /// Some(0) is a measured zero and must still print 0.
+    #[test]
+    fn measured_zero_token_counts_print_zero() {
+        let mut m = create_test_metrics();
+        m.prompt_tokens = Some(0);
+        m.completion_tokens = Some(0);
+
+        let compact = format_compact(&m);
+        assert!(compact.contains("tokens=0/0"), "got: {compact}");
+        assert!(!compact.contains("n/a"), "got: {compact}");
     }
 
     #[test]
