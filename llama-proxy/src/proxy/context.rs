@@ -326,6 +326,7 @@ mod tests {
         // (module lock: see POLICY_TEST_SERIAL - queued write().await waiters here
         // dirty tokio's RwLock drop-handoff state and WouldBlock sibling try_write calls)
         let (base, mut rx, server) = spawn_monitor_listener(true).await;
+        let _iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
 
         let ctx = fetch_context_total(&client, &base, Some("/completions")).await;
@@ -340,6 +341,7 @@ mod tests {
 
         // Adversarial edge: trailing-slash prefix must not alter the monitoring path either.
         let (base2, mut rx2, server2) = spawn_monitor_listener(true).await;
+        let _iso2 = IsolatedContextCache::new(&base2).await;
         let ctx2 = fetch_context_total(&client, &base2, Some("/completions/")).await;
         assert_eq!(ctx2, Some(4096));
         assert_eq!(next_uri(&mut rx2).await, "/props");
@@ -352,6 +354,7 @@ mod tests {
         // (module lock: see POLICY_TEST_SERIAL - queued write().await waiters here
         // dirty tokio's RwLock drop-handoff state and WouldBlock sibling try_write calls)
         let (base, mut rx, server) = spawn_monitor_listener(false).await;
+        let _iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
 
         let ctx = fetch_context_total(&client, &base, Some("/v1")).await;
@@ -432,6 +435,7 @@ mod tests {
         // (module lock: see POLICY_TEST_SERIAL - queued write().await waiters here
         // dirty tokio's RwLock drop-handoff state and WouldBlock sibling try_write calls)
         let (base, mut rx, server) = spawn_auth_props_listener().await;
+        let _iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
         let probe = ContextProbe {
             base_url: base.clone(),
@@ -455,6 +459,7 @@ mod tests {
         // (module lock: see POLICY_TEST_SERIAL - queued write().await waiters here
         // dirty tokio's RwLock drop-handoff state and WouldBlock sibling try_write calls)
         let (base, mut rx, server) = spawn_auth_props_listener().await;
+        let _iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
         let probe = ContextProbe {
             base_url: base.clone(),
@@ -509,6 +514,55 @@ mod tests {
 
     fn policy_lock() -> &'static tokio::sync::Mutex<()> {
         POLICY_TEST_SERIAL.get_or_init(|| tokio::sync::Mutex::const_new(()))
+    }
+
+    /// Big-fix 96 [C-L11] cache-isolation seam. `CONTEXT_CACHE` and
+    /// `CONTEXT_CACHE_STALE_SKIPS` are process-global, and the cross-module actors
+    /// (`backends/preflight.rs` tests calling `cache_context_from_preflight`) cannot take
+    /// this module's `policy_lock`. A test holding this guard owns its backend_url key
+    /// exclusively, and its stale-skip assertions become delta-based: `new()` removes the
+    /// key and snapshots the counter, `skips()` reports this test's own delta (exact
+    /// despite foreign skips), and `drop()` removes the key. Drop restores NO counter
+    /// value - rewinding a global would corrupt foreign snapshots. Combined with
+    /// `policy_lock()` (which keeps this module's tests off each other), every
+    /// cache/count/log assertion becomes race-free. Production code never constructs the
+    /// guard; the cache stays the permanent process-global by design.
+    struct IsolatedContextCache {
+        url: String,
+        skips_before: u64,
+    }
+
+    impl IsolatedContextCache {
+        async fn new(url: &str) -> Self {
+            let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+            cache.write().await.remove(url);
+            Self {
+                url: url.to_string(),
+                skips_before: context_cache_stale_skips(),
+            }
+        }
+
+        /// This test's own stale-skip delta, exact despite foreign skips on the global.
+        fn skips(&self) -> u64 {
+            context_cache_stale_skips() - self.skips_before
+        }
+    }
+
+    impl Drop for IsolatedContextCache {
+        fn drop(&mut self) {
+            let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+            match cache.try_write() {
+                Ok(mut w) => {
+                    w.remove(&self.url);
+                }
+                Err(_) => {
+                    // Drop cannot await; the key stays removed-in-spirit but unremovable.
+                    // Only happens if a foreign actor holds the lock at test end - the
+                    // key would leak into the next test, which policy_lock already fences.
+                    tracing::debug!(url = %self.url, "isolated cache: drop could not acquire write lock");
+                }
+            }
+        }
     }
 
     fn install_debug_capture() -> (Arc<Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
@@ -581,6 +635,7 @@ mod tests {
         let client = reqwest::Client::new();
         let (buf, _sub) = install_debug_capture();
         let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+        let iso = IsolatedContextCache::new(&base).await;
 
         // Prewarm the skip callsite UNDER the capture subscriber: tracing Interest is
         // cached process-wide at first hit (task-48 lesson), so the first else-branch hit
@@ -591,16 +646,14 @@ mod tests {
             let _warm_reader = cache.read().await;
             cache_result(cache, "http://prewarm.contention.test", 1);
         }
-        let before = context_cache_stale_skips();
-
         {
             let _reader = cache.read().await;
             let served = fetch_context_total(&client, &base, None).await;
             assert_eq!(served, Some(4096), "the fetching caller still receives the fresh value");
             assert!(!cache.read().await.contains_key(&base), "the contended write must not land");
             assert!(
-                context_cache_stale_skips() > before,
-                "the skip must be counted (>= one; the global counter may also see rare foreign collisions with this guard window)"
+                iso.skips() >= 1,
+                "the skip must be counted against this test's own delta (>= one; foreign skips are excluded by the snapshot)"
             );
             assert_eq!(
                 next_uri(&mut rx).await,
@@ -640,12 +693,12 @@ mod tests {
         // a cross-module refresh this module lock cannot fence) and that skip is COUNTED,
         // after which a further in-window fetch lands it. Silent loss is the only outcome
         // this branch rejects.
-        let before2 = context_cache_stale_skips();
+        let skips_after_phase1 = iso.skips();
         let served = fetch_context_total(&client, &base, None).await;
         assert_eq!(served, Some(4096));
         if cache.read().await.get(&base).is_none() {
             assert!(
-                context_cache_stale_skips() > before2,
+                iso.skips() > skips_after_phase1,
                 "a refresh that does not land must be counted, never silently lost"
             );
             let served2 = fetch_context_total(&client, &base, None).await;
@@ -666,6 +719,7 @@ mod tests {
         // with a different -c): the accepted-window policy serves the cached value and
         // does NOT refetch on the hit path.
         let (base, mut rx, server) = spawn_monitor_listener(false).await; // live backend: 8192 via /v1/models
+        let iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
         let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
         cache.write().await.insert(base.clone(), 4096);
@@ -683,14 +737,14 @@ mod tests {
         // lands, or (C-M9 contention class, e.g. a cross-module preflight refresh) the
         // skip is counted and a further in-window fetch lands it - never silent.
         cache.write().await.remove(&base);
-        let before_b = context_cache_stale_skips();
+        let skips_before_miss = iso.skips();
         let served = fetch_context_total(&client, &base, None).await;
         assert_eq!(served, Some(8192), "post-window refresh must serve the fresh value");
         assert_eq!(next_uri(&mut rx).await, "/props", "props is tried first on the miss");
         assert_eq!(next_uri(&mut rx).await, "/v1/models");
         if cache.read().await.get(&base).is_none() {
             assert!(
-                context_cache_stale_skips() > before_b,
+                iso.skips() > skips_before_miss,
                 "a refresh that does not land must be counted, never silently lost"
             );
             let served2 = fetch_context_total(&client, &base, None).await;
@@ -715,6 +769,7 @@ mod tests {
             }
         });
         let base = format!("http://127.0.0.1:{port}");
+        let _iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::builder()
             .timeout(Duration::from_millis(300))
             .build()
@@ -749,8 +804,8 @@ mod tests {
         let (base, mut rx, server) =
             spawn_two_endpoint_listener(r#"{"default_generation_settings":{"n_ctx":"four-k"}}"#, MODELS_BODY).await;
         let _serial = policy_lock().lock().await;
+        let iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
-        let before_a = context_cache_stale_skips();
 
         let ctx = fetch_context_total(&client, &base, None).await;
 
@@ -764,7 +819,7 @@ mod tests {
         let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
         if cache.read().await.get(&base).is_none() {
             assert!(
-                context_cache_stale_skips() > before_a,
+                iso.skips() >= 1,
                 "a fallback refresh that does not land must be counted, never silently lost"
             );
             let served2 = fetch_context_total(&client, &base, None).await;
@@ -782,6 +837,7 @@ mod tests {
     async fn garbage_on_both_endpoints_yields_none_without_poisoning() {
         let (base, mut rx, server) = spawn_two_endpoint_listener("not json at all", "also not json").await;
         let _serial = policy_lock().lock().await;
+        let _iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
 
         let ctx = fetch_context_total(&client, &base, None).await;
@@ -802,6 +858,7 @@ mod tests {
         // This test verifies the cache works, but can't test actual fetching
         // without a mock server. In real use, the function will be tested
         // through integration tests.
+        let _iso = IsolatedContextCache::new("http://test").await;
         let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
 
         // Pre-populate cache

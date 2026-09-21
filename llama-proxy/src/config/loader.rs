@@ -159,11 +159,20 @@ mod tests {
         assert!(matches!(result.unwrap_err(), ConfigError::NotFound(_)));
     }
 
+    /// Process-unique scratch path (big-fix 96): fixed /tmp names collide between
+    /// concurrent test processes (and leak between runs); pid+seq+stem keeps every
+    /// write private. The stem keeps its extension - validators may inspect it.
+    fn scratch(stem: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let n = SEQ.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("llama-proxy-{}-{}-{}", std::process::id(), n, stem))
+    }
+
     #[test]
     fn test_load_config_invalid_yaml() {
         // Create a temp file with invalid YAML
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_invalid_config.yaml");
+        let temp_file = scratch("test_invalid_config.yaml");
         std::fs::write(&temp_file, "invalid: yaml: content: [").unwrap();
 
         let result = load_config(&temp_file);
@@ -176,8 +185,7 @@ mod tests {
 
     #[test]
     fn test_load_config_valid() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_valid_config.yaml");
+        let temp_file = scratch("test_valid_config.yaml");
 
         let config_content = r#"
 server:
@@ -231,8 +239,7 @@ exporters:
     #[test]
     fn test_influxdb_batch_keys_are_rejected() {
         for key in ["batch_size: 10", "flush_interval_seconds: 5"] {
-            let temp_dir = std::env::temp_dir();
-            let temp_file = temp_dir.join(format!("test_influxdb_{key}.yaml").replace(|c: char| !c.is_alphanumeric(), "_"));
+            let temp_file = scratch(&format!("test_influxdb_{key}.yaml").replace(|c: char| !c.is_alphanumeric(), "_"));
             std::fs::write(
                 &temp_file,
                 format!(
@@ -268,8 +275,7 @@ exporters:
 
     #[test]
     fn test_load_config_https() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_https_config.yaml");
+        let temp_file = scratch("test_https_config.yaml");
 
         let config_content = r#"
 server:
@@ -316,8 +322,7 @@ exporters:
 
     #[test]
     fn test_load_config_minimal() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_minimal_config.yaml");
+        let temp_file = scratch("test_minimal_config.yaml");
 
         // Minimal config with required fields only
         let config_content = r#"
@@ -488,8 +493,7 @@ exporters:
 
     #[test]
     fn test_invalid_timeout() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_invalid_timeout.yaml");
+        let temp_file = scratch("test_invalid_timeout.yaml");
 
         let config_content = r#"
 server:
@@ -529,7 +533,7 @@ exporters:
     }
 
     fn streaming_yaml(mode_line: &str) -> std::path::PathBuf {
-        let temp_file = std::env::temp_dir().join(format!("test_streaming_{}.yaml", mode_line.replace([':', ' '], "_")));
+        let temp_file = scratch(&format!("test_streaming_{}.yaml", mode_line.replace([':', ' '], "_")));
         std::fs::write(
             &temp_file,
             format!(
@@ -584,8 +588,7 @@ streaming: {}
 
     #[test]
     fn test_load_config_with_invalid_port() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_invalid_port_config.yaml");
+        let temp_file = scratch("test_invalid_port_config.yaml");
 
         let config_content = r#"
 server:
@@ -626,8 +629,7 @@ exporters:
 
     #[test]
     fn test_load_config_with_invalid_timeout() {
-        let temp_dir = std::env::temp_dir();
-        let temp_file = temp_dir.join("test_invalid_timeout_config.yaml");
+        let temp_file = scratch("test_invalid_timeout_config.yaml");
 
         let config_content = r#"
 server:
@@ -670,7 +672,7 @@ exporters:
     fn test_load_config_nodes_only_without_backend_section() {
         // F-H1: a config with ONLY `backends:` groups must load; `backend:` is optional.
         // With no single backend, startup proceeds and requests take the task-4 503 path.
-        let temp_file = std::env::temp_dir().join("test_t69_nodes_only.yaml");
+        let temp_file = scratch("test_t69_nodes_only.yaml");
         let config_content = r#"
 server:
   port: 8066
@@ -695,7 +697,7 @@ backends:
     fn test_load_config_no_backend_at_all_loads_for_503_path() {
         // F-H1: neither `backend:` nor `backends:` must load — the proxy starts and
         // every completion request answers the task-4 503 envelope (NoMatchingBackend).
-        let temp_file = std::env::temp_dir().join("test_t69_no_backend.yaml");
+        let temp_file = scratch("test_t69_no_backend.yaml");
         std::fs::write(&temp_file, "server:\n  port: 8066\n  host: \"0.0.0.0\"\n").unwrap();
 
         let config = load_config(&temp_file).expect("backend-less config must load (503 path)");
@@ -707,7 +709,7 @@ backends:
 
     #[test]
     fn test_augment_backend_absent_enabled_defaults_false_opt_in() {
-        let temp_file = std::env::temp_dir().join("test_augment_opt_in_config.yaml");
+        let temp_file = scratch("test_augment_opt_in_config.yaml");
         let config_content = r#"
 server:
   port: 8066
@@ -737,7 +739,7 @@ augment-backend:
 
     #[test]
     fn test_augment_backend_explicit_enabled_true_still_honored() {
-        let temp_file = std::env::temp_dir().join("test_augment_opt_in_true_config.yaml");
+        let temp_file = scratch("test_augment_opt_in_true_config.yaml");
         let config_content = r#"
 server:
   port: 8066
@@ -765,7 +767,7 @@ augment-backend:
 
     #[test]
     fn test_augment_backend_timeout_secs_absent_defaults_15_via_loader() {
-        let temp_file = std::env::temp_dir().join("test_augment_timeout_default_config.yaml");
+        let temp_file = scratch("test_augment_timeout_default_config.yaml");
         let config_content = r#"
 server:
   port: 8066
@@ -793,7 +795,7 @@ augment-backend:
     }
 
     fn loaded(yaml: &str, tag: &str) -> Result<super::super::AppConfig, ConfigError> {
-        let f = std::env::temp_dir().join(format!("test_t71_{tag}.yaml"));
+        let f = scratch(&format!("test_t71_{tag}.yaml"));
         std::fs::write(&f, yaml).unwrap();
         let r = load_config(&f);
         let _ = std::fs::remove_file(&f);
@@ -819,7 +821,7 @@ augment-backend:
         let err = loaded(&yaml, "reprompt_missing").expect_err("missing prompt_file must be rejected");
         assert!(err.to_string().contains("does not exist"), "got {err}");
 
-        let prompt = std::env::temp_dir().join("test_t71_prompt_exists.md");
+        let prompt = scratch("test_t71_prompt_exists.md");
         std::fs::write(&prompt, "continue please").unwrap();
         let yaml = format!("{BASE}reprompt:\n  enabled: true\n  prompt_file: \"{}\"\n", prompt.display());
         assert!(loaded(&yaml, "reprompt_present").is_ok());
@@ -832,7 +834,7 @@ augment-backend:
             .expect_err("dump enabled with empty path must be rejected");
         assert!(err.to_string().contains("dump path"), "got {err}");
         assert!(loaded(
-            &format!("{BASE}dump:\n  enabled: true\n  path: \"/tmp/t71-dumps\"\n"),
+            &format!("{BASE}dump:\n  enabled: true\n  path: \"{}\"\n", scratch("t71-dumps").display()),
             "dump_ok"
         )
         .is_ok());
