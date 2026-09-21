@@ -1,5 +1,6 @@
 //! Response fix modules for correcting malformed LLM responses
 
+mod json_scan;
 mod registry;
 mod toolcall_bad_filepath_fix;
 mod toolcall_malformed_arguments_fix;
