@@ -17,8 +17,6 @@ pub struct InfluxDbConfig {
     pub org: String,
     pub bucket: String,
     pub token: String,
-    pub batch_size: usize,
-    pub flush_interval_seconds: u64,
 }
 
 /// The single honest answer for "requested while compiled out". One string for
@@ -96,8 +94,6 @@ impl InfluxDbExporter {
             org: config.org.clone(),
             bucket: config.bucket.clone(),
             token: config.token.clone(),
-            batch_size: config.batch_size,
-            flush_interval_seconds: config.flush_interval_seconds,
         })
     }
 }
@@ -343,8 +339,6 @@ mod queue_tests {
                 org: "o".into(),
                 bucket: "b".into(),
                 token: "t".into(),
-                batch_size: 10,
-                flush_interval_seconds: 5,
             })
             .unwrap()
         }
@@ -516,8 +510,6 @@ mod queue_tests {
             org: "o".into(),
             bucket: "b".into(),
             token: "t".into(),
-            batch_size: 10,
-            flush_interval_seconds: 5,
         })
         .unwrap();
         exporter.export(&sample("retry-me")).await.unwrap();
@@ -625,8 +617,6 @@ mod queue_tests {
                 org: "o".into(),
                 bucket: "b".into(),
                 token: "t".into(),
-                batch_size: 10,
-                flush_interval_seconds: 5,
             },
             std::time::Duration::from_millis(50),
         )
@@ -653,8 +643,6 @@ mod queue_tests {
             org: "o".into(),
             bucket: "b".into(),
             token: "t".into(),
-            batch_size: 10,
-            flush_interval_seconds: 5,
         })
         .unwrap();
         exporter.writer().shutdown();

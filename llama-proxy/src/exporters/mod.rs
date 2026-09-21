@@ -423,8 +423,9 @@ mod tests {
             org: "test".to_string(),
             bucket: "test".to_string(),
             token: "test".to_string(),
-            batch_size: 10,
-            flush_interval_seconds: 5,
+            // D2 carriers (task 84): never deserialized, configure nothing -
+            // Default fills them; this test is about enabled/disabled, not them.
+            ..Default::default()
         }
     }
 
@@ -490,8 +491,6 @@ mod tests {
                 org: "test".to_string(),
                 bucket: "test".to_string(),
                 token: "test".to_string(),
-                batch_size: 10,
-                flush_interval_seconds: 5,
             })
             .unwrap();
             let err = exporter

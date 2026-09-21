@@ -27,7 +27,7 @@ An HTTP reverse proxy for [llama.cpp](https://github.com/ggerganov/llama.cpp) se
   - `compact`: Single-line format for log aggregation
 
 - **Remote Telemetry Export**: Send metrics to external systems
-  - InfluxDB v2 support with batching
+  - InfluxDB v2 support (single write per request through a bounded queue)
   - Extensible exporter architecture for other backends
 
 - **Multi-Backend Load Balancing**: Route requests across multiple backends
@@ -326,7 +326,7 @@ model=Qwen3-14B toks=538/983 tps=1698.07/33.13 ctx:=38/4096 stream finish=stop d
 │  └────────────────────────────────────────────────────────┘ │
 │  ┌────────────────────────────────────────────────────────┐ │
 │  │  Exporters: Send metrics to external systems           │ │
-│  │  - InfluxDB (with batching)                            │ │
+│  │  - InfluxDB (bounded queue)                            │ │
 │  └────────────────────────────────────────────────────────┘ │
 └──────────────────────┬──────────────────────────────────────┘
                        │
@@ -379,7 +379,7 @@ src/
 │   └── request_log.rs   # Request logging utilities
 ├── exporters/           # Remote metrics export
 │   ├── mod.rs           # MetricsExporter trait, ExporterManager
-│   └── influxdb.rs      # InfluxDB v2 exporter with batching
+│   └── influxdb.rs      # InfluxDB v2 exporter (bounded queue)
 └── api/                 # Type definitions
     ├── openai.rs        # OpenAI API types (with Opencode extensions)
     └── llama.rs         # llama.cpp specific types

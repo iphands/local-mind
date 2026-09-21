@@ -206,8 +206,6 @@ exporters:
     org: "my-org"
     bucket: "llama-metrics"
     token: "test-token"
-    batch_size: 10
-    flush_interval_seconds: 5
 "#;
         std::fs::write(&temp_file, config_content).unwrap();
 
@@ -224,6 +222,48 @@ exporters:
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
+    }
+
+    /// D2 (task 84) acceptance: the proxy never batched - a sample is a single
+    /// write through the bounded queue (task 81). The legacy keys must be
+    /// REJECTED, not silently ignored, so a config claiming batching fails
+    /// loudly instead of configuring nothing.
+    #[test]
+    fn test_influxdb_batch_keys_are_rejected() {
+        for key in ["batch_size: 10", "flush_interval_seconds: 5"] {
+            let temp_dir = std::env::temp_dir();
+            let temp_file = temp_dir.join(format!("test_influxdb_{key}.yaml").replace(|c: char| !c.is_alphanumeric(), "_"));
+            std::fs::write(
+                &temp_file,
+                format!(
+                    r#"
+server:
+  port: 8066
+  host: "127.0.0.1"
+
+exporters:
+  influxdb:
+    enabled: true
+    url: "http://localhost:8086"
+    org: "my-org"
+    bucket: "llama-metrics"
+    token: "t"
+    {key}
+"#
+                ),
+            )
+            .unwrap();
+
+            let err = load_config(&temp_file).expect_err(&format!("{key} must be rejected, not ignored"));
+            let msg = err.to_string();
+            assert!(msg.contains("unknown field"), "{key}: {msg}");
+            assert!(
+                msg.contains("batch_size") || msg.contains("flush_interval_seconds"),
+                "{key}: {msg}"
+            );
+
+            let _ = std::fs::remove_file(&temp_file);
+        }
     }
 
     #[test]
@@ -257,8 +297,6 @@ exporters:
     org: ""
     bucket: ""
     token: ""
-    batch_size: 0
-    flush_interval_seconds: 0
 "#;
         std::fs::write(&temp_file, config_content).unwrap();
 
@@ -306,8 +344,6 @@ exporters:
     org: ""
     bucket: ""
     token: ""
-    batch_size: 0
-    flush_interval_seconds: 0
 "#;
         std::fs::write(&temp_file, config_content).unwrap();
 
@@ -479,8 +515,6 @@ exporters:
     org: ""
     bucket: ""
     token: ""
-    batch_size: 0
-    flush_interval_seconds: 0
 "#;
         std::fs::write(&temp_file, config_content).unwrap();
 
@@ -519,8 +553,6 @@ exporters:
     org: ""
     bucket: ""
     token: ""
-    batch_size: 0
-    flush_interval_seconds: 0
 streaming: {}
 "#,
                 mode_line
@@ -579,8 +611,6 @@ exporters:
     org: ""
     bucket: ""
     token: ""
-    batch_size: 0
-    flush_interval_seconds: 0
 "#;
         std::fs::write(&temp_file, config_content).unwrap();
 
@@ -623,8 +653,6 @@ exporters:
     org: ""
     bucket: ""
     token: ""
-    batch_size: 0
-    flush_interval_seconds: 0
 "#;
         std::fs::write(&temp_file, config_content).unwrap();
 

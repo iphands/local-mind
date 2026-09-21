@@ -628,9 +628,17 @@ pub struct InfluxDbConfig {
     pub bucket: String,
     #[serde(default)]
     pub token: String,
-    #[serde(default = "default_batch_size")]
+    /// REMOVED key (D2, task 84): the proxy never batched - a sample is a
+    /// single write through the bounded queue (task 81). `batch_size` in YAML
+    /// is now an UNKNOWN field and rejected. This field exists ONLY because
+    /// `main.rs`'s startup log and `handler.rs` test literals (owned by other
+    /// workers) still name it; it is never deserialized and nothing else
+    /// reads it. Delete it with those call sites.
+    #[serde(skip, default = "default_batch_size")]
     pub batch_size: usize,
-    #[serde(default = "default_flush_interval")]
+    /// Same as `batch_size`: removed key, rejected by `deny_unknown_fields`,
+    /// carrier kept only for the unowned startup-log/test call sites.
+    #[serde(skip, default = "default_flush_interval")]
     pub flush_interval_seconds: u64,
 }
 
@@ -646,6 +654,9 @@ fn default_influxdb_bucket() -> String {
     "llama-metrics".to_string()
 }
 
+/// Legacy constant for the skipped `batch_size` carrier (see field docs):
+/// the values only keep the unowned startup log compiling, they configure
+/// nothing.
 fn default_batch_size() -> usize {
     10
 }

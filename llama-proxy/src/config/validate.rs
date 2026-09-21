@@ -227,7 +227,10 @@ mod tests {
         let err =
             validate_allowed_origins(&["https://a.example\r\nX-Evil: 1".to_string()]).expect_err("CRLF entry must be rejected");
         let msg = err.to_string();
-        assert!(msg.contains("control characters"), "CRLF must get the control-char message, got {msg:?}");
+        assert!(
+            msg.contains("control characters"),
+            "CRLF must get the control-char message, got {msg:?}"
+        );
         assert!(msg.contains("\\r\\n"), "message must escape control chars, got {msg:?}");
         assert!(!msg.contains("\r\n"), "message must not carry raw CRLF");
     }
