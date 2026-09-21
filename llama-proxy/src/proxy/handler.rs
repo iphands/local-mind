@@ -107,7 +107,13 @@ mod dump {
         }
     }
 
-    /// Dump request/response pair to disk
+    /// Dump request/response pair to disk.
+    ///
+    /// `response_body` / `response_content_type` describe the ORIGINAL backend wire
+    /// response as received - pre-decompression, pre-fix [C-M10]. When the proxy
+    /// transformed the body, `decoded_variant` carries the transformed bytes and is
+    /// written next to the original as `res.<ext>.decoded`, raw - the variant exists
+    /// to be diffed byte-for-byte against what the client actually received.
     pub async fn dump_request_response(
         dump_path: &Arc<PathBuf>,
         request_method: &str,
@@ -117,6 +123,7 @@ mod dump {
         response_status: u16,
         response_body: &[u8],
         response_content_type: Option<&str>,
+        decoded_variant: Option<&[u8]>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         // Create unique request directory
         let request_id = uuid::Uuid::new_v4().to_string();
@@ -140,7 +147,8 @@ mod dump {
         }
         req_file.flush().await?;
 
-        // Write response file
+        // Write response file (ORIGINAL wire bytes; pretty-printed only if the
+        // original itself is JSON, so a compressed original lands byte-equal)
         let res_path = request_dir.join(format!("res.{}", res_ext));
         let mut res_file = fs::File::create(&res_path).await?;
         if let Ok(json_val) = serde_json::from_slice::<serde_json::Value>(response_body) {
@@ -152,12 +160,23 @@ mod dump {
         }
         res_file.flush().await?;
 
+        if let Some(variant) = decoded_variant {
+            let variant_path = request_dir.join(format!("res.{}.decoded", res_ext));
+            let mut variant_file = fs::File::create(&variant_path).await?;
+            variant_file.write_all(variant).await?;
+            variant_file.flush().await?;
+        }
+
         // Write metadata
         let meta_path = request_dir.join("meta.txt");
         let mut meta_file = fs::File::create(&meta_path).await?;
+        let variant_note = match decoded_variant {
+            Some(v) => format!("  Decoded Variant: res.{}.decoded ({} bytes)\n", res_ext, v.len()),
+            None => String::new(),
+        };
         let meta_str = format!(
-            "Request:\n  Method: {}\n  URI: {}\n  Content-Type: {:?}\n  Body Size: {} bytes\n\nResponse:\n  Status: {}\n  Content-Type: {:?}\n  Body Size: {} bytes\n",
-            request_method, request_uri, request_content_type, request_body.len(), response_status, response_content_type, response_body.len()
+            "Request:\n  Method: {}\n  URI: {}\n  Content-Type: {:?}\n  Body Size: {} bytes\n\nResponse:\n  Status: {}\n  Content-Type: {:?}\n  Body Size: {} bytes\n{}",
+            request_method, request_uri, request_content_type, request_body.len(), response_status, response_content_type, response_body.len(), variant_note
         );
         meta_file.write_all(meta_str.as_bytes()).await?;
         meta_file.flush().await?;
@@ -1164,6 +1183,13 @@ impl ProxyHandler {
     ) -> Response {
         let status = backend_response.status();
         let headers = backend_response.headers().clone();
+        // [C-M10] Content-Type as the backend sent it, captured at header-receive -
+        // before decompression or fixes touch the body. The dump must never have to
+        // re-derive it from a post-transform state.
+        let original_response_content_type = headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
 
         // Read response body
         let raw_body_bytes = match backend_response.bytes().await {
@@ -1335,7 +1361,10 @@ impl ProxyHandler {
             body_bytes.to_vec()
         };
 
-        // Dump request/response if dump mode is enabled (before any early returns)
+        // Dump request/response if dump mode is enabled (before any early returns).
+        // [C-M10] The dump records the backend's ORIGINAL pre-decompression bytes and
+        // the original Content-Type; the transformed body the proxy forwards rides
+        // along as a `.decoded` variant only when the bytes actually differ.
         if let Some(ref dump_path) = self.state.dump_path {
             let request_json_clone = request_json.clone();
             let dump_path_clone = dump_path.clone();
@@ -1345,10 +1374,9 @@ impl ProxyHandler {
                 .get(header::CONTENT_TYPE)
                 .and_then(|v| v.to_str().ok().map(|s| s.to_string()));
             let response_status = status.as_u16();
-            let response_body_clone = final_body.clone();
-            let response_content_type = headers
-                .get(header::CONTENT_TYPE)
-                .and_then(|v| v.to_str().ok().map(|s| s.to_string()));
+            let original_response_bytes = raw_body_bytes.clone();
+            let transformed_variant: Option<Vec<u8>> =
+                (body_decoded || final_body.as_slice() != &raw_body_bytes[..]).then(|| final_body.clone());
 
             tokio::spawn(async move {
                 if let Some(req_json) = request_json_clone {
@@ -1360,8 +1388,9 @@ impl ProxyHandler {
                         &req_bytes,
                         request_content_type.as_deref(),
                         response_status,
-                        &response_body_clone,
-                        response_content_type.as_deref(),
+                        &original_response_bytes,
+                        original_response_content_type.as_deref(),
+                        transformed_variant.as_deref(),
                     )
                     .await
                     {
@@ -3828,5 +3857,154 @@ mod tests {
         assert_eq!(res.status(), StatusCode::OK);
         let text = body_text(res).await;
         assert!(text.contains("choices"), "JSON document path untouched: {text}");
+    }
+
+    // ---- big-fix task 12: the dump preserves the ORIGINAL wire bytes + Content-Type;
+    //      when the proxy transformed the body it also writes a `.decoded` variant [C-M10] ----
+    //
+    // Baseline (d0f9baf): the buffered-path dump is fed `final_body` (decompressed,
+    // fixed, re-serialized) - the backend's original compressed response never reaches
+    // disk. reqwest decodes gzip backends upstream of the proxy (task-7 finding), so an
+    // end-to-end fixture must use brotli to actually exercise the proxy's own decoder;
+    // gzip keeps dump-function-level coverage in the unit test below.
+
+    /// meta.txt is the LAST file dump_request_response writes, so its presence proves
+    /// the whole dump landed. Bounded by 5 s against a spawned task writing three small
+    /// files - orders of magnitude of margin, and a missing dump FAILS instead of
+    /// hanging (task-15 recipe).
+    async fn poll_dump_request_dir(root: &std::path::Path) -> std::path::PathBuf {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(entries) = std::fs::read_dir(root) {
+                    for e in entries.flatten() {
+                        let p = e.path();
+                        if p.is_dir() && p.join("meta.txt").exists() {
+                            return p;
+                        }
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("dump dir (with meta.txt) must appear within 5 s")
+    }
+
+    #[tokio::test]
+    async fn brotli_backend_dump_holds_original_wire_bytes_and_decoded_variant() {
+        let dir = tempfile::tempdir().expect("temp dump dir");
+        let plain = completion_json_body();
+        let br_body = brotli_bytes(&plain);
+        let len = br_body.len().to_string();
+        let port = one_shot_backend(raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json"),
+                ("content-encoding", "br"),
+                ("content-length", len.as_str()),
+            ],
+            &br_body,
+        ))
+        .await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let mut handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        handler.state.dump_path = Some(Arc::new(dir.path().to_path_buf()));
+
+        let res = handler.handle(completion_request()).await;
+        let _ = body_text(res).await;
+
+        let req_dir = poll_dump_request_dir(dir.path()).await;
+        let dumped = std::fs::read(req_dir.join("res.json")).expect("res.json must exist");
+        assert_eq!(
+            dumped, br_body,
+            "res file must be byte-equal to the ORIGINAL pre-decompression bytes"
+        );
+        let variant = std::fs::read(req_dir.join("res.json.decoded")).expect(".decoded variant must exist");
+        let parsed: serde_json::Value = serde_json::from_slice(&variant).expect("variant is the transformed JSON body");
+        assert_eq!(parsed["id"], serde_json::json!("cmpl-1"));
+        let meta = std::fs::read_to_string(req_dir.join("meta.txt")).expect("meta.txt must exist");
+        assert!(
+            meta.contains("Content-Type: Some(\"application/json\")"),
+            "original Content-Type must be recorded: {meta}"
+        );
+        assert!(
+            meta.contains(&format!("Body Size: {} bytes", br_body.len())),
+            "Body Size must be the ORIGINAL size: {meta}"
+        );
+        assert!(meta.contains("Decoded Variant"), "variant must be recorded in meta: {meta}");
+    }
+
+    #[tokio::test]
+    async fn dump_unit_gzip_originals_and_non200_are_preserved() {
+        // Spec-literal acceptance at the dump-function level: gzip original byte-equal,
+        // .decoded variant raw, non-2xx status combo. An e2e gzip fixture cannot reach
+        // the dump as gzip (reqwest decodes upstream); this is the honest gzip coverage.
+        let dir = tempfile::tempdir().expect("temp dump dir");
+        let dump_path = Arc::new(dir.path().to_path_buf());
+        let plain = completion_json_body();
+        let gz = compress_with("gzip", &plain);
+        dump::dump_request_response(
+            &dump_path,
+            "POST",
+            "/v1/chat/completions",
+            br#"{"model":"m","messages":[]}"#,
+            Some("application/json"),
+            500,
+            &gz,
+            Some("application/json; charset=utf-8"),
+            Some(&plain),
+        )
+        .await
+        .expect("dump must succeed");
+        let req_dir = std::fs::read_dir(dir.path())
+            .expect("dump root")
+            .next()
+            .expect("one request dir")
+            .expect("dir entry")
+            .path();
+        assert_eq!(
+            std::fs::read(req_dir.join("res.json")).expect("res.json must exist"),
+            gz,
+            "gzip original must be byte-equal on disk"
+        );
+        assert_eq!(
+            std::fs::read(req_dir.join("res.json.decoded")).expect(".decoded variant must exist"),
+            plain,
+            "variant must be the raw transformed bytes"
+        );
+        let meta = std::fs::read_to_string(req_dir.join("meta.txt")).expect("meta.txt must exist");
+        assert!(meta.contains("Status: 500"), "non-2xx status recorded: {meta}");
+        assert!(meta.contains("charset=utf-8"), "original CT with charset: {meta}");
+        assert!(meta.contains(&format!("Body Size: {} bytes", gz.len())), "{meta}");
+    }
+
+    #[tokio::test]
+    async fn uncompressed_untouched_response_dumps_without_decoded_variant() {
+        // Nothing decoded, nothing fixed (registry empty, stats off) and
+        // completion_json_body() = json!().to_string() = compact BTreeMap order =
+        // stable under a Value round-trip: exactly three files, legacy pretty JSON,
+        // no variant.
+        let dir = tempfile::tempdir().expect("temp dump dir");
+        let port = one_shot_backend(completion_response_bytes()).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let mut handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        handler.state.dump_path = Some(Arc::new(dir.path().to_path_buf()));
+
+        let res = handler.handle(completion_request()).await;
+        let _ = body_text(res).await;
+
+        let req_dir = poll_dump_request_dir(dir.path()).await;
+        let files: Vec<String> = std::fs::read_dir(&req_dir)
+            .expect("req dir")
+            .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(files.contains(&"res.json".to_string()), "{files:?}");
+        assert!(
+            !files.iter().any(|f| f.ends_with(".decoded")),
+            "an untouched body must not get a variant: {files:?}"
+        );
+        let dumped = std::fs::read_to_string(req_dir.join("res.json")).expect("res.json");
+        let parsed: serde_json::Value = serde_json::from_str(&dumped).expect("pretty JSON");
+        assert_eq!(parsed["id"], serde_json::json!("cmpl-1"));
     }
 }
