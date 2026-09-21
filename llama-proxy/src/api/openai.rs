@@ -5,6 +5,7 @@ use serde::{Deserialize, Deserializer, Serialize};
 /// Deserialize `arguments` as either a JSON string or a JSON object.
 /// The OpenAI spec requires a string, but some backends (e.g. llama.cpp) may
 /// return a raw object. We normalize to a JSON string either way.
+/// A JSON `null` normalizes to `"{}"` (strict clients reject `"null"` arguments).
 fn deserialize_arguments<'de, D>(deserializer: D) -> Result<String, D::Error>
 where
     D: Deserializer<'de>,
@@ -12,8 +13,13 @@ where
     let value = serde_json::Value::deserialize(deserializer)?;
     match value {
         serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Null => Ok("{}".to_string()),
         other => serde_json::to_string(&other).map_err(serde::de::Error::custom),
     }
+}
+
+fn default_empty_args() -> String {
+    "{}".to_string()
 }
 
 /// Chat completion request
@@ -183,11 +189,11 @@ pub struct ResponseMessage {
 /// Tool call in response
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ToolCall {
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
-    #[serde(rename = "type", default)]
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub call_type: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub index: Option<u32>,
     pub function: FunctionCall,
 }
@@ -196,7 +202,7 @@ pub struct ToolCall {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FunctionCall {
     pub name: String,
-    #[serde(deserialize_with = "deserialize_arguments")]
+    #[serde(default = "default_empty_args", deserialize_with = "deserialize_arguments")]
     pub arguments: String,
 }
 
@@ -1601,5 +1607,80 @@ mod tests {
         assert!(content.is_array(), "content must stay an array: {out}");
         assert_eq!(content[0]["type"], "text");
         assert_eq!(content[0]["text"], "Hi");
+    }
+
+    #[test]
+    fn test_function_call_null_arguments_deserializes_to_empty_object() {
+        let call: FunctionCall = serde_json::from_str(r#"{"name":"f","arguments":null}"#).unwrap();
+        assert_eq!(call.arguments, "{}");
+    }
+
+    #[test]
+    fn test_function_call_null_arguments_round_trips_as_empty_object() {
+        let call: FunctionCall = serde_json::from_str(r#"{"name":"f","arguments":null}"#).unwrap();
+        let out = serde_json::to_string(&call).unwrap();
+        assert!(out.contains(r#""arguments":"{}""#), "{out}");
+        assert!(!out.contains(r#""arguments":null"#), "{out}");
+        assert!(!out.contains(r#""arguments":"null""#), "{out}");
+    }
+
+    #[test]
+    fn test_function_call_absent_arguments_defaults_to_empty_object() {
+        let call: FunctionCall = serde_json::from_str(r#"{"name":"f"}"#).unwrap();
+        assert_eq!(call.arguments, "{}");
+    }
+
+    #[test]
+    fn test_function_call_arguments_string_variant_round_trips_unchanged() {
+        let json = r#"{"name":"f","arguments":"{\"a\":1}"}"#;
+        let call: FunctionCall = serde_json::from_str(json).unwrap();
+        assert_eq!(call.arguments, r#"{"a":1}"#);
+        let out = serde_json::to_string(&call).unwrap();
+        assert_eq!(out, json);
+    }
+
+    #[test]
+    fn test_function_call_arguments_object_variant_normalizes_to_string() {
+        let call: FunctionCall = serde_json::from_str(r#"{"name":"f","arguments":{}}"#).unwrap();
+        assert_eq!(call.arguments, "{}");
+    }
+
+    #[test]
+    fn test_tool_call_all_none_serializes_no_null_keys() {
+        let call = ToolCall {
+            id: None,
+            call_type: None,
+            index: None,
+            function: FunctionCall {
+                name: "f".to_string(),
+                arguments: "{}".to_string(),
+            },
+        };
+        let out = serde_json::to_string(&call).unwrap();
+        for key in ["id", "type", "index"] {
+            assert!(
+                !out.contains(&format!("\"{key}\":null")),
+                "ToolCall serialization leaked null key {key}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_delta_tool_calls_serialization_leaks_no_null_keys() {
+        // Synthesis embeds the Vec<ToolCall> verbatim into delta.tool_calls
+        // (src/proxy/synthesis.rs). This serialization-level fixture models
+        // that payload: null arguments and absent id/type/index.
+        let json = r#"{"tool_calls":[{"function":{"name":"f","arguments":null}}]}"#;
+        let delta: Delta = serde_json::from_str(json).unwrap();
+        let out = serde_json::to_string(&delta).unwrap();
+        assert!(!out.contains(r#""arguments":null"#), "{out}");
+        assert!(!out.contains(r#""arguments":"null""#), "{out}");
+        for key in ["id", "type", "index"] {
+            assert!(
+                !out.contains(&format!("\"{key}\":null")),
+                "delta.tool_calls serialization leaked null key {key}: {out}"
+            );
+        }
+        assert!(out.contains(r#""arguments":"{}""#), "{out}");
     }
 }
