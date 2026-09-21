@@ -416,6 +416,30 @@ fn forward_response(status: StatusCode, headers: &HeaderMap, body: Vec<u8>, body
     response.body(Body::from(body)).unwrap().into_response()
 }
 
+/// [C-L8] Termination of a /v1/messages stream whose translation failed. The client
+/// asked for Anthropic SSE, so the proxy still answers with a valid SSE stream: an
+/// `error` event (which the Anthropic SDK raises on), then the `[DONE]` terminal data
+/// frame, then the stream ends. The alternative - falling through to the JSON return -
+/// handed the client an HTTP 200 whose body was the raw backend object, which for the
+/// OpenAI-format default is a shape Claude Code cannot parse at all. Exact bytes are
+/// pinned by `messages_stream_synthesis_failure_serves_sse_error_frame_not_openai_body`
+/// (test-side literal, deliberately not a reference to this function).
+fn anthropic_sse_error_response() -> Response {
+    let frame = concat!(
+        "event: error\n",
+        "data: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",",
+        "\"message\":\"The proxy failed to convert the backend response into ",
+        "an Anthropic streaming response\"}}\n\n",
+        "data: [DONE]\n\n",
+    );
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/event-stream")
+        .body(Body::from(frame))
+        .unwrap()
+        .into_response()
+}
+
 struct ConcurrentGuard(Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for ConcurrentGuard {
     fn drop(&mut self) {
@@ -1361,8 +1385,8 @@ impl ProxyHandler {
                             match synthesize_anthropic_streaming_response(anthropic_msg).await {
                                 Ok(response) => return response,
                                 Err(e) => {
-                                    tracing::error!(error = %e, "Failed to synthesize Anthropic streaming response");
-                                    // Fall through to return JSON
+                                    tracing::error!(error = %e, "Failed to synthesize Anthropic streaming response, ending the stream with an SSE error frame");
+                                    return anthropic_sse_error_response();
                                 }
                             }
                         }
@@ -1381,8 +1405,8 @@ impl ProxyHandler {
                                     match synthesize_anthropic_streaming_response(anthropic_msg).await {
                                         Ok(response) => return response,
                                         Err(e) => {
-                                            tracing::error!(error = %e, "Failed to synthesize after OpenAI→Anthropic conversion");
-                                            // Fall through to return JSON
+                                            tracing::error!(error = %e, "Failed to synthesize after OpenAI→Anthropic conversion, ending the stream with an SSE error frame");
+                                            return anthropic_sse_error_response();
                                         }
                                     }
                                 }
@@ -1390,9 +1414,9 @@ impl ProxyHandler {
                                     tracing::error!(
                                         error = %e,
                                         response_json = %json_preview(json),
-                                        "Failed to parse backend response as either Anthropic or OpenAI format"
+                                        "Failed to parse backend response as either Anthropic or OpenAI format, ending the stream with an SSE error frame"
                                     );
-                                    // Fall through to return JSON
+                                    return anthropic_sse_error_response();
                                 }
                             }
                         }
@@ -1424,7 +1448,9 @@ impl ProxyHandler {
             }
         }
 
-        // Return complete JSON response (either client wants non-streaming, or synthesis failed).
+        // Return complete JSON response: client wants non-streaming, or OpenAI-path
+        // synthesis failed. An Anthropic-path failure never reaches here - it answered
+        // with the SSE error frame [C-L8].
         // The backend's Content-Type is copied verbatim, charset parameter included:
         // json_value can only be Some when the original Content-Type already said JSON,
         // so the copied value stays truthful even for a fixed body.
@@ -3646,5 +3672,161 @@ mod tests {
         l_res.expect("light task");
         let done = order.lock().unwrap().clone();
         assert_eq!(done, vec!["light", "heavy"], "light request must not queue behind the decode");
+    }
+
+    // ---- big-fix task 11: /v1/messages synthesis failure ends the stream with an
+    //      Anthropic SSE error frame - never a 200 leaking the raw OpenAI body [C-L8] ----
+    //
+    // Baseline (fcec6c8): every failure arm inside the is_anthropic_api synthesis
+    // block logged and "fell through to return JSON", so a stream:true Claude Code
+    // request received HTTP 200 + application/json + the untranslated backend object.
+    // The frame bytes asserted below are the post-fix wire contract, pinned literally.
+
+    /// Backend body that translates to NEITHER API shape: it lacks Anthropic's
+    /// required fields (id/type/role/model) and carries a null `choices[].index`,
+    /// which `ChatCompletionResponse` rejects (`index: u32`). The null-index family
+    /// is the real-world malformed-completion class this arm sees in production.
+    fn untranslatable_backend_body() -> Vec<u8> {
+        br#"{"id":"cmpl-junk","choices":[{"index":null,"message":{"role":"assistant","content":"leaky"}}]}"#.to_vec()
+    }
+
+    /// Anthropic streaming request as Claude Code frames it (content-block messages,
+    /// max_tokens, stream:true).
+    fn anthropic_stream_request() -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/messages")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "model": "test-model",
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}],
+                    "stream": true
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn messages_stream_synthesis_failure_serves_sse_error_frame_not_openai_body() {
+        let backend_body = untranslatable_backend_body();
+        let len = backend_body.len().to_string();
+        let port = one_shot_backend(raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json"), ("content-length", len.as_str())],
+            &backend_body,
+        ))
+        .await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(anthropic_stream_request()).await;
+
+        let status = res.status();
+        let ct = res
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("<missing>")
+            .to_string();
+        let bytes = to_bytes(res.into_body(), 1024 * 1024).await.expect("body readable");
+        let text = String::from_utf8_lossy(&bytes).into_owned();
+        // Baseline capture lives IN this message: pre-fix it prints
+        // status=200 content-type=application/json body=<the raw OpenAI object>.
+        assert_eq!(
+            ct, "text/event-stream",
+            "failed synthesis must still be an SSE stream; got status={status} content-type={ct} body={text:?}"
+        );
+
+        // Exact wire bytes - a literal copy on purpose: the test pins the contract,
+        // it does not echo a production constant. Valid SSE per the Anthropic SDK:
+        // an `event: error` frame (which the SDK raises on), then the `[DONE]`
+        // terminal data frame mandated by big-fix 11, each properly frame-terminated.
+        const EXPECTED_FRAME: &str = concat!(
+            "event: error\n",
+            "data: {\"type\":\"error\",\"error\":{\"type\":\"api_error\",",
+            "\"message\":\"The proxy failed to convert the backend response into ",
+            "an Anthropic streaming response\"}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        assert_eq!(text, EXPECTED_FRAME, "error frame bytes, got: {text:?}");
+
+        // Machine-readable for the Anthropic SDK: the data payload parses, is typed
+        // `error`, and carries a typed inner error with a non-empty message.
+        let data_line = text
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .expect("error frame must carry a data line");
+        let payload: serde_json::Value = serde_json::from_str(data_line).expect("error data must be JSON");
+        assert_eq!(payload["type"], serde_json::json!("error"));
+        assert_eq!(payload["error"]["type"], serde_json::json!("api_error"));
+        assert!(payload["error"]["message"].as_str().is_some_and(|m| !m.is_empty()));
+
+        // No raw OpenAI body may leak into the stream.
+        assert!(!text.contains("choices"), "raw OpenAI body leaked: {text:?}");
+        assert!(!text.contains("leaky"), "backend content leaked: {text:?}");
+    }
+
+    #[tokio::test]
+    async fn translatable_backend_still_gets_synthesized_anthropic_sse() {
+        // Scope guard (green pre AND post): only the FAILURE arms gain the error
+        // frame. A parseable OpenAI-format body must still synthesize the real
+        // Anthropic stream (message_start event) with no error frame anywhere.
+        let port = one_shot_backend(completion_response_bytes()).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(anthropic_stream_request()).await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("text/event-stream")
+        );
+        let text = body_text(res).await;
+        assert!(
+            text.contains("message_start"),
+            "synthesized stream must open with message_start, got: {text}"
+        );
+        assert!(
+            !text.contains("event: error"),
+            "success path must not gain an error frame: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn nonstreaming_messages_untranslatable_body_still_returns_json() {
+        // Scope guard (green pre AND post): without stream:true the client asked for
+        // a JSON document; the verbatim JSON return stays correct there.
+        let backend_body = untranslatable_backend_body();
+        let port = one_shot_backend(raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json")],
+            &backend_body,
+        ))
+        .await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/v1/messages")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "model": "test-model",
+                    "max_tokens": 64,
+                    "messages": [{"role": "user", "content": [{"type": "text", "text": "hi"}]}]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let res = handler.handle(req).await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let text = body_text(res).await;
+        assert!(text.contains("choices"), "JSON document path untouched: {text}");
     }
 }
