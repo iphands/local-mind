@@ -273,7 +273,7 @@ llama-proxy run --config config.yaml --dump ./debug-dumps   # dump request/respo
 
 ### Compact Format
 ```
-model=Qwen3-14B toks=538/983 tps=1698.07/33.13 ctx:=38/4096 stream finish=stop dur=30181.0ms
+model=cosmo-6000 tokens=57/8 tps=536.42/115.68 ctx=57/262144 sync finish=length dur=184.0ms concurrent=1
 ```
 
 ---
