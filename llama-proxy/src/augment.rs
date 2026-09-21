@@ -34,8 +34,11 @@ impl AugmentBackend {
     }
 
     /// Load and return the request prompt file contents
-    pub fn load_request_prompt(&self) -> Result<String, std::io::Error> {
-        std::fs::read_to_string(&self.request_prompt_file)
+    ///
+    /// Async fs (task 48 carry): this runs on the request path, so a sync read
+    /// would block a runtime worker. Matches the async `load_backend_prompt` sibling.
+    pub async fn load_request_prompt(&self) -> Result<String, std::io::Error> {
+        tokio::fs::read_to_string(&self.request_prompt_file).await
     }
 
     /// Get augmentation text for the given user content.

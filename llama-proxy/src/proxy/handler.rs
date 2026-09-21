@@ -789,7 +789,7 @@ impl ProxyHandler {
                     match augment_backend.get_augmentation(&user_content).await {
                         Ok(aug) if !aug.is_empty() => {
                             tracing::info!(augmentation_length = aug.len(), "Received augmentation");
-                            let request_prompt = augment_backend.load_request_prompt().unwrap_or_else(|e| {
+                            let request_prompt = augment_backend.load_request_prompt().await.unwrap_or_else(|e| {
                                 tracing::warn!(error = %e, "Failed to load request_prompt, using empty string");
                                 String::new()
                             });
