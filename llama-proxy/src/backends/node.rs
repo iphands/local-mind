@@ -122,21 +122,28 @@ impl BackendNode {
     /// fires only on a full path-segment boundary (big-fix F12-R3): a prefix ending
     /// mid-segment ("/v1" vs "/v15/foo") leaves the path untouched.
     pub fn effective_path<'a>(&self, path: &'a str) -> &'a str {
-        let Some(prefix) = self.strip_path_prefix.as_deref() else {
-            return path;
-        };
-        let Some(rest) = path.strip_prefix(prefix) else {
-            return path;
-        };
-        // Boundary cases that may strip: the remainder opens a new segment (`rest`
-        // starts with '/'), the prefix already consumed a segment boundary (it ends
-        // with '/' — the task-13 trailing-slash misconfig pin), or the path equals
-        // the prefix (strip to root). Everything else is the partial-segment class.
-        if rest.is_empty() || rest.starts_with('/') || prefix.ends_with('/') {
-            rest
-        } else {
-            path
+        match &self.strip_path_prefix {
+            Some(prefix) => strip_at_segment_boundary(path, prefix),
+            None => path,
         }
+    }
+}
+
+/// Strip `prefix` from `path`, but only where the prefix ends on a full
+/// path-segment boundary (big-fix F12-R3, shared by [`BackendNode::effective_path`]
+/// and [`node_url`] since F12 R7): the remainder opens a new segment (`rest`
+/// starts with '/'), the prefix already consumed a segment boundary (it ends
+/// with '/' — the task-13 trailing-slash misconfig pin), or the path equals
+/// the prefix (strip to root). Everything else is the partial-segment class
+/// ("/v1" against "/v15/foo") and the path stays untouched.
+fn strip_at_segment_boundary<'a>(path: &'a str, prefix: &str) -> &'a str {
+    let Some(rest) = path.strip_prefix(prefix) else {
+        return path;
+    };
+    if rest.is_empty() || rest.starts_with('/') || prefix.ends_with('/') {
+        rest
+    } else {
+        path
     }
 }
 
@@ -158,11 +165,16 @@ pub(crate) fn with_auth(req: reqwest::RequestBuilder, api_key: Option<&str>) -> 
 /// ONE implementation behind every out-bound URL site (preflight's /v1/models
 /// probes AND the context monitor's native `/props` + `/v1/models` fetches —
 /// the monitor passes `prefix: None` because monitoring is backend-native,
-/// task 15). A prefix that is not a true prefix of `path` leaves `path`
-/// untouched, matching the per-site `strip_prefix().unwrap_or(path)` behavior
-/// this replaces.
+/// task 15). The strip shares [`strip_at_segment_boundary`] with
+/// [`BackendNode::effective_path`] (big-fix F12 R7): a non-prefix leaves `path`
+/// untouched, and a true prefix ending mid-segment ("/v1" vs "/v15/foo") does
+/// too — the byte-mangling class that hardened `effective_path` must not live
+/// on in this sibling.
 pub(crate) fn node_url(base: &str, path: &str, prefix: Option<&str>) -> String {
-    let native = prefix.and_then(|p| path.strip_prefix(p)).unwrap_or(path);
+    let native = match prefix {
+        Some(p) => strip_at_segment_boundary(path, p),
+        None => path,
+    };
     format!("{base}{native}")
 }
 
@@ -250,6 +262,57 @@ mod tests {
             node_url("http://h:1", "/v1/日本語", Some("/v1")),
             "http://h:1/日本語",
             "multibyte tail survives"
+        );
+    }
+
+    /// F12 R7 [effective_path MINOR residual]: `node_url` — "the ONE
+    /// implementation behind every out-bound URL site" (preflight `/v1/models`
+    /// probes, context-monitor `/props`) — kept the byte-prefix strip that
+    /// `effective_path` was hardened against, so a "/v1" node prefix byte-
+    /// mangled "/v15/foo" into "/5/foo" on those paths. Same boundary rule
+    /// must hold here; the preflight/monitor paths stay unchanged.
+    #[test]
+    fn node_url_strips_only_on_full_segment_boundaries() {
+        assert_eq!(
+            node_url("http://h:1", "/v15/foo", Some("/v1")),
+            "http://h:1/v15/foo",
+            "a prefix ending mid-segment must not eat into the segment"
+        );
+        assert_eq!(
+            node_url("http://h:1", "/v1x", Some("/v1")),
+            "http://h:1/v1x",
+            "same class, no tail"
+        );
+        assert_eq!(
+            node_url("http://h:1", "/v1", Some("/v1")),
+            "http://h:1",
+            "path == prefix strips to root"
+        );
+        assert_eq!(
+            node_url("http://h:1", "/completions/v1/messages", Some("/completions/")),
+            "http://h:1v1/messages",
+            "task-13 trailing-slash pin: prefix already consumed a boundary"
+        );
+        assert_eq!(
+            node_url("http://h:1", "/日本X", Some("/日本")),
+            "http://h:1/日本X",
+            "multibyte mid-segment prefix refused"
+        );
+
+        assert_eq!(
+            node_url("http://h:1", "/v1/models", Some("/v1")),
+            "http://h:1/models",
+            "preflight probe path unchanged: boundary strip kept"
+        );
+        assert_eq!(
+            node_url("http://h:1", "/props", Some("/v1")),
+            "http://h:1/props",
+            "context-monitor native path unchanged: non-prefix untouched"
+        );
+        assert_eq!(
+            node_url("http://h:1", "/日本/v1/models", Some("/日本")),
+            "http://h:1/v1/models",
+            "multibyte prefix still strips on a boundary"
         );
     }
 

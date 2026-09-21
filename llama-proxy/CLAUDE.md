@@ -98,7 +98,7 @@ cp config.yaml.default config.yaml
 **proxy/** - HTTP server and request handling
 - `server.rs`: Axum server setup, ProxyState with shared config/registry/exporters
 - `handler.rs`: Request router with pass-through endpoints (/props, /slots, /health, /v1/models, /metrics)
-- `streaming.rs`: SSE stream processing with fix application and reasoning field accumulation per chunk
+- `streaming.rs`: SSE pass-through stream forwarding (passthrough mode) — forwards backend bytes verbatim; fixes DETECT only, never repair
 - `context.rs`: Fetches context_total from backend /slots endpoint for stats
 
 **fixes/** - Pluggable response fix system

@@ -193,7 +193,10 @@ fn build_data_point(metrics: &RequestMetrics) -> Result<Option<influxdb2::models
     }
 
     if let Some(ref group_name) = metrics.group_name {
-        builder = builder.tag("group_name", group_name.as_str());
+        // Config-sourced, so it gets the same last-line treatment as every
+        // other tag: a group_name like "prod\nllama_request,model=x 1" would
+        // otherwise forge a second measurement line (F12 R7, M8 residual).
+        builder = builder.tag("group_name", tag_value("group_name", group_name.as_str()));
     }
 
     let mut point = builder
@@ -447,6 +450,32 @@ mod wire_tests {
             after,
             "a clean sample must not touch the counter"
         );
+    }
+
+    /// big-fix F12 R7 [M8 residual]: `group_name` was the ONE tag not routed
+    /// through `tag_value`, so the config-sourced vector round 1 named
+    /// (`"prod\nllama_request,model=x 1"`) still forged a second
+    /// line-protocol measurement into the operator's bucket. Red baseline
+    /// captured the 2-physical-line wire and the un-bumped counter.
+    #[test]
+    fn group_name_tag_is_sanitized_like_every_other_tag() {
+        let _turn = sanitizer_turn();
+        let before = super::TAG_SANITIZE_TOTAL.load(std::sync::atomic::Ordering::SeqCst);
+        let mut m = measurable();
+        m.group_name = Some("prod\nllama_request,model=x 1".to_string());
+        let body = line(&m).trim_end().to_string();
+        assert_eq!(
+            body.lines().count(),
+            1,
+            "one sample must be ONE physical line, got {}:\n{body}",
+            body.lines().count()
+        );
+        assert!(
+            body.contains("group_name=prod_llama_request_model_x_1"),
+            "control chars and delimiters replace to '_': {body}"
+        );
+        let after = super::TAG_SANITIZE_TOTAL.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(after - before, 1, "the rewritten group_name must count");
     }
 }
 
