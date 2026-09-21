@@ -3,7 +3,7 @@
 //! Enriches incoming user requests by calling a fast LLM backend
 //! to generate additional context before forwarding to the main backend.
 
-use crate::api::{ContentPart, Message, MessageContent};
+use crate::api::{Message, MessageContent};
 use crate::config::AugmentBackendConfig;
 
 /// Augment backend client
@@ -185,60 +185,144 @@ pub fn extract_user_content(messages: &[Message]) -> Vec<String> {
         .collect()
 }
 
-/// Inject augmentation text into the last user message of an OpenAI ChatCompletionRequest.
+/// Inject an augmentation block into a raw JSON chat-completion request with
+/// `serde_json::Value` surgery - no typed `ChatCompletionRequest` round-trip.
 ///
-/// The injected suffix is: "\n\n{request_prompt}\n\n{augmentation}"
-pub fn inject_augmentation(
-    mut request: crate::api::ChatCompletionRequest,
+/// Unknown fields at every level (top-level, message-level, content-part-level)
+/// survive BY CONSTRUCTION: the request stays a `Value` throughout and only the
+/// keys the injection needs are touched, so byte-passthrough of everything else
+/// is not a feature to implement but the shape of the operation.
+///
+/// Semantics (mapped from the typed implementation this replaces, observable
+/// behavior preserved):
+/// - The block is `"\n\n{request_prompt}\n\n{augmentation}"`, appended to the
+///   LAST `role == "user"` message. That target is the shipped contract (this
+///   function's doc, the README, and the handler's augmented-request log all
+///   describe enriching the user message), so it is kept.
+///   - string `content`: block concatenated onto the end.
+///   - array `content`: block appended to the last `{"type":"text"}` part's
+///     `text`; if no part has `type: "text"`, a new
+///     `{"type":"text","text":<block>}` part is pushed at the end; a text part
+///     whose `text` is absent or `null` drops the block (the typed
+///     implementation dropped it there too - preserved until task 45).
+///   - absent or `null` `content`: becomes the block string.
+///   - any other `content` type: `Err`. The typed deserializer gate rejected
+///     such requests wholesale (handler forwarded the original bytes, no
+///     injection), so an error keeps that net effect for callers.
+/// - `"stop": "<string>"` is normalized to `["<string>"]` BEFORE injection, on
+///   every success path regardless of which injection path runs. The typed
+///   model is `Option<Vec<String>>`, so a string `stop` previously failed the
+///   whole typed gate and augmentation was silently skipped for the entire
+///   request. Non-string `stop` values (array, number, absent) are untouched.
+/// - Repeat injection is NOT idempotent: each call appends another block.
+///   There is no begin/end marker and no replace semantics today; pinned as-is.
+/// - No user message and non-empty `messages`: falls back to appending the
+///   block onto `messages[0]` when it holds a string, warns otherwise (typed
+///   behavior, preserved here; task 44 replaces this fallback).
+/// - `messages` missing, non-array, or a non-object body: `Err` - the typed
+///   gate rejected those too, and callers treat `Err` as "forward the
+///   original bytes unchanged".
+pub fn inject_augmentation_value(
+    mut request: serde_json::Value,
     request_prompt: &str,
     augmentation: &str,
-) -> Result<crate::api::ChatCompletionRequest, Box<dyn std::error::Error + Send + Sync>> {
-    let suffix = format!("\n\n{}\n\n{}", request_prompt, augmentation);
+) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+    if !request.is_object() {
+        return Err("augment injection: request body is not a JSON object".into());
+    }
 
-    // Find last user message index
-    let last_user_idx = request.messages.iter().rposition(|m| m.role == "user");
+    // `"stop": "<string>"` -> `["<string>"]`, BEFORE any injection.
+    let normalized_stop = match request.get("stop") {
+        Some(serde_json::Value::String(s)) => Some(serde_json::json!([s.clone()])),
+        _ => None,
+    };
+    if let (Some(body), Some(stop)) = (request.as_object_mut(), normalized_stop) {
+        body.insert("stop".to_string(), stop);
+    }
 
-    if let Some(idx) = last_user_idx {
-        match &request.messages[idx].content {
-            Some(MessageContent::Text(existing)) => {
-                let new_content = format!("{}{}", existing, suffix);
-                request.messages[idx].content = Some(MessageContent::Text(new_content));
-            }
-            Some(MessageContent::Parts(parts)) => {
-                let mut parts = parts.clone();
-                // Append to last text part, or add a new one
-                if let Some(last_text) = parts.iter_mut().rev().find(|p| p.content_type == "text") {
-                    if let Some(ref mut text) = last_text.text {
-                        *text = format!("{}{}", text, suffix);
-                    }
-                } else {
-                    parts.push(ContentPart {
-                        content_type: "text".to_string(),
-                        text: Some(suffix),
-                        image_url: None,
-                    });
-                }
-                request.messages[idx].content = Some(MessageContent::Parts(parts));
-            }
-            None => {
-                request.messages[idx].content = Some(MessageContent::Text(suffix));
-            }
+    let block = format!("\n\n{}\n\n{}", request_prompt, augmentation);
+
+    let messages = request
+        .get_mut("messages")
+        .and_then(serde_json::Value::as_array_mut)
+        .ok_or("augment injection: request has no \"messages\" array")?;
+
+    if let Some(idx) = messages
+        .iter()
+        .rposition(|m| m.get("role").and_then(serde_json::Value::as_str) == Some("user"))
+    {
+        append_block_to_message(&mut messages[idx], &block)?;
+    } else if !messages.is_empty() {
+        // No user message: preserved typed fallback (task 44 replaces it with a
+        // pushed system message).
+        let first = &mut messages[0];
+        if !first.is_object() {
+            return Err("augment injection: messages[0] is not a JSON object".into());
         }
-    } else if !request.messages.is_empty() {
-        // Fallback: append to first message
-        let suffix_owned = suffix;
-        match &request.messages[0].content {
-            Some(MessageContent::Text(existing)) => {
-                let new_content = format!("{}{}", existing, suffix_owned);
-                request.messages[0].content = Some(MessageContent::Text(new_content));
-            }
-            _ => {
+        match first.get_mut("content") {
+            Some(serde_json::Value::String(s)) => s.push_str(&block),
+            None | Some(serde_json::Value::Null) | Some(serde_json::Value::Array(_)) => {
                 tracing::warn!("Could not find a user message to inject augmentation into");
+            }
+            Some(other) => {
+                return Err(format!("augment injection: unsupported content type on messages[0]: {other}").into());
             }
         }
     }
 
     Ok(request)
+}
+
+/// Append the augmentation block to one message's `content`, following the
+/// string/array/absent rules documented on [`inject_augmentation_value`].
+fn append_block_to_message(msg: &mut serde_json::Value, block: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    if matches!(msg.get("content"), None | Some(serde_json::Value::Null)) {
+        // Absent or null content becomes the block itself (typed `None` arm).
+        // A `role` match above already proves `msg` is an object, so the
+        // object-index assignment below cannot panic.
+        msg["content"] = serde_json::Value::String(block.to_string());
+        return Ok(());
+    }
+    match msg.get_mut("content").ok_or("augment injection: message has no content")? {
+        serde_json::Value::String(existing) => existing.push_str(block),
+        serde_json::Value::Array(parts) => {
+            if let Some(part) = parts
+                .iter_mut()
+                .rev()
+                .find(|p| p.get("type").and_then(serde_json::Value::as_str) == Some("text"))
+            {
+                if let Some(serde_json::Value::String(text)) = part.get_mut("text") {
+                    text.push_str(block);
+                }
+                // text part with absent/null `text`: the typed implementation
+                // dropped the block here; preserved (task 45 territory).
+            } else {
+                parts.push(serde_json::json!({ "type": "text", "text": block }));
+            }
+        }
+        other => return Err(format!("augment injection: unsupported message content type: {other}").into()),
+    }
+    Ok(())
+}
+
+/// Inject augmentation text into the last user message of an OpenAI ChatCompletionRequest.
+///
+/// The injected suffix is: "\n\n{request_prompt}\n\n{augmentation}"
+///
+/// Compatibility shim: serializes the typed request, runs
+/// [`inject_augmentation_value`] on the `serde_json::Value`, and deserializes
+/// the result. The typed round-trip through this shim still erases message- and
+/// content-part-level unknown fields (`Message` has no flatten catcher);
+/// callers holding raw request JSON should call [`inject_augmentation_value`]
+/// directly to keep them.
+pub fn inject_augmentation(
+    request: crate::api::ChatCompletionRequest,
+    request_prompt: &str,
+    augmentation: &str,
+) -> Result<crate::api::ChatCompletionRequest, Box<dyn std::error::Error + Send + Sync>> {
+    let value = serde_json::to_value(&request)?;
+    let value = inject_augmentation_value(value, request_prompt, augmentation)?;
+    Ok(serde_json::from_value(value)?)
 }
 
 #[cfg(test)]
@@ -362,5 +446,317 @@ mod tests {
     fn test_extract_response_text_unknown() {
         let body = serde_json::json!({ "foo": "bar" });
         assert!(extract_response_text(&body).is_err());
+    }
+
+    fn inject(json: serde_json::Value) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        inject_augmentation_value(json, "REQ_PROMPT", "AUG_TEXT")
+    }
+
+    fn fixture_unknown_fields() -> serde_json::Value {
+        serde_json::json!({
+            "model": "test-model",
+            "x_custom": {"deep": {"nested": [1, 2, 3], "uni": "日本語"}},
+            "messages": [
+                {"role": "system", "content": "SYS PROMPT", "x_sys_meta": {"k": [1, 2]}},
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "hello", "x_part_meta": {"p": true}}],
+                    "x_msg_level": "keep-me"
+                }
+            ],
+            "stop": ["END"],
+            "top_k": 40
+        })
+    }
+
+    #[test]
+    fn value_injection_keeps_unknown_fields_when_typed_roundtrip_loses_them() {
+        let input = fixture_unknown_fields();
+
+        let baseline_loss = serde_json::to_value(
+            inject_augmentation(
+                serde_json::from_value::<ChatCompletionRequest>(input.clone()).unwrap(),
+                "REQ_PROMPT",
+                "AUG_TEXT",
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(
+            baseline_loss["messages"][1].get("x_msg_level").is_none()
+                && baseline_loss["messages"][0].get("x_sys_meta").is_none()
+                && baseline_loss["messages"][1]["content"][0].get("x_part_meta").is_none(),
+            "the typed round-trip must be shown to erase message/part-level unknowns"
+        );
+
+        let output = inject(input.clone()).unwrap();
+
+        let bytes = |v: &serde_json::Value| serde_json::to_vec(v).expect("serialize");
+        assert_eq!(bytes(&input["x_custom"]), bytes(&output["x_custom"]), "unknown top-level key");
+        assert_eq!(
+            bytes(&input["messages"][0]["x_sys_meta"]),
+            bytes(&output["messages"][0]["x_sys_meta"]),
+            "unknown system-message key"
+        );
+        assert_eq!(
+            bytes(&input["messages"][1]["x_msg_level"]),
+            bytes(&output["messages"][1]["x_msg_level"]),
+            "unknown user-message key"
+        );
+        assert_eq!(
+            bytes(&input["messages"][1]["content"][0]["x_part_meta"]),
+            bytes(&output["messages"][1]["content"][0]["x_part_meta"]),
+            "unknown content-part key"
+        );
+
+        let mut expected = input;
+        expected["messages"][1]["content"][0]["text"] = serde_json::json!("hello\n\nREQ_PROMPT\n\nAUG_TEXT");
+        assert_eq!(output, expected, "output must equal the input plus ONLY the injected block");
+    }
+
+    #[test]
+    fn value_injection_normalizes_string_stop_to_array_before_injection() {
+        let output = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": "END"
+        }))
+        .unwrap();
+
+        assert_eq!(output["stop"], serde_json::json!(["END"]));
+        assert_eq!(output["messages"][0]["content"], "hi\n\nREQ_PROMPT\n\nAUG_TEXT");
+    }
+
+    #[test]
+    fn value_injection_normalizes_stop_even_without_user_message_and_cjk_stays_byte_safe() {
+        let output = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "assistant", "content": "prior"}],
+            "stop": "終り"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_vec(&output["stop"]).unwrap(),
+            serde_json::to_vec(&serde_json::json!(["終り"])).unwrap()
+        );
+    }
+
+    #[test]
+    fn value_injection_leaves_non_string_stop_untouched() {
+        let array = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": ["a", "b"]
+        }))
+        .unwrap();
+        assert_eq!(array["stop"], serde_json::json!(["a", "b"]));
+
+        let absent = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}]
+        }))
+        .unwrap();
+        assert!(absent.get("stop").is_none(), "no stop key must be invented");
+
+        let scalar = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "stop": 5
+        }))
+        .unwrap();
+        assert_eq!(scalar["stop"], serde_json::json!(5));
+    }
+
+    #[test]
+    fn value_injection_string_content_concat_is_exact() {
+        let output = inject(serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "user", "content": "first"},
+                {"role": "assistant", "content": "reply"},
+                {"role": "user", "content": "World"}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(output["messages"][2]["content"], "World\n\nREQ_PROMPT\n\nAUG_TEXT");
+        assert_eq!(
+            output["messages"][0]["content"], "first",
+            "only the LAST user message is touched"
+        );
+        assert_eq!(output["messages"][1]["content"], "reply");
+    }
+
+    #[test]
+    fn value_injection_array_content_appends_to_last_text_part_and_keeps_part_unknowns() {
+        let input = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "A"},
+                {"type": "image_url", "image_url": {"url": "u"}, "x_meta": 1},
+                {"type": "text", "text": "B"}
+            ]}]
+        });
+
+        let output = inject(input.clone()).unwrap();
+
+        let parts = output["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts[0]["text"], "A");
+        assert_eq!(
+            serde_json::to_vec(&parts[1]).unwrap(),
+            serde_json::to_vec(&input["messages"][0]["content"][1]).unwrap(),
+            "untouched parts stay byte-identical including unknown keys"
+        );
+        assert_eq!(parts[2]["text"], "B\n\nREQ_PROMPT\n\nAUG_TEXT");
+    }
+
+    #[test]
+    fn value_injection_array_without_text_parts_pushes_new_text_part() {
+        let output = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": [{"type": "image_url", "image_url": {"url": "u"}}]}]
+        }))
+        .unwrap();
+        let parts = output["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[1],
+            serde_json::json!({"type": "text", "text": "\n\nREQ_PROMPT\n\nAUG_TEXT"})
+        );
+
+        let empty = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": []}]
+        }))
+        .unwrap();
+        assert_eq!(empty["messages"][0]["content"].as_array().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn value_injection_text_part_with_null_text_drops_block_as_typed_did() {
+        let input = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": null}]}]
+        });
+
+        let output = inject(input.clone()).unwrap();
+
+        assert_eq!(
+            serde_json::to_vec(&output["messages"][0]).unwrap(),
+            serde_json::to_vec(&input["messages"][0]).unwrap(),
+            "typed semantics dropped the block on text:null parts; pinned until task 45"
+        );
+    }
+
+    #[test]
+    fn value_injection_absent_or_null_content_becomes_block_string() {
+        let absent = inject(serde_json::json!({"model": "m", "messages": [{"role": "user"}]})).unwrap();
+        assert_eq!(absent["messages"][0]["content"], "\n\nREQ_PROMPT\n\nAUG_TEXT");
+
+        let null = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": null}]
+        }))
+        .unwrap();
+        assert_eq!(null["messages"][0]["content"], "\n\nREQ_PROMPT\n\nAUG_TEXT");
+    }
+
+    #[test]
+    fn repeat_value_injection_appends_second_block_no_replace_semantics_today() {
+        let once = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "X"}]
+        }))
+        .unwrap();
+        let twice = inject(once).unwrap();
+
+        assert_eq!(
+            twice["messages"][0]["content"], "X\n\nREQ_PROMPT\n\nAUG_TEXT\n\nREQ_PROMPT\n\nAUG_TEXT",
+            "current semantics have no marker/replace: repeat injection duplicates the block"
+        );
+    }
+
+    #[test]
+    fn value_injection_json_braces_in_augment_text_do_not_corrupt_structure() {
+        let evil = "{\"evil\":\"}{\",\"nested\":{\"a\":[1,2]}}";
+        let output = inject_augmentation_value(
+            serde_json::json!({
+                "model": "m",
+                "x_custom": {"keep": [1, {"y": null}]},
+                "messages": [{"role": "user", "content": "base"}]
+            }),
+            "{{{{",
+            evil,
+        )
+        .unwrap();
+
+        assert_eq!(output["messages"][0]["content"], format!("base\n\n{}\n\n{}", "{{{{", evil));
+        assert_eq!(output["x_custom"], serde_json::json!({"keep": [1, {"y": null}]}));
+        let reparsed: serde_json::Value = serde_json::from_slice(&serde_json::to_vec(&output).unwrap()).unwrap();
+        assert_eq!(reparsed["messages"][0]["content"], output["messages"][0]["content"]);
+    }
+
+    #[test]
+    fn value_injection_cjk_prompt_augment_and_content_are_byte_safe() {
+        let output = inject_augmentation_value(
+            serde_json::json!({
+                "model": "m",
+                "messages": [{"role": "user", "content": "こんにちは"}]
+            }),
+            "日本語プロンプト",
+            "拡張コンテキスト🚀",
+        )
+        .unwrap();
+
+        assert_eq!(
+            serde_json::to_vec(&output["messages"][0]["content"]).unwrap(),
+            serde_json::to_vec(&serde_json::json!("こんにちは\n\n日本語プロンプト\n\n拡張コンテキスト🚀")).unwrap()
+        );
+    }
+
+    #[test]
+    fn value_injection_rejects_bodies_the_typed_gate_rejected() {
+        assert!(inject(serde_json::json!("not an object")).is_err());
+        assert!(inject(serde_json::json!([1, 2, 3])).is_err());
+        assert!(inject(serde_json::json!({"model": "m", "messages": "nope"})).is_err());
+        assert!(inject(serde_json::json!({"model": "m"})).is_err(), "missing messages key");
+        assert!(
+            inject(serde_json::json!({"model": "m", "messages": [{"role": "user", "content": 5}]})).is_err(),
+            "number content was rejected by the typed gate"
+        );
+        assert!(
+            inject(serde_json::json!({"model": "m", "messages": [{"role": "user", "content": {"k": 1}}]})).is_err(),
+            "object content was rejected by the typed gate"
+        );
+        assert!(
+            inject(serde_json::json!({"model": "m", "messages": [[42]]})).is_err(),
+            "fallback onto a non-object messages[0] was rejected by the typed gate"
+        );
+    }
+
+    #[test]
+    fn value_injection_empty_messages_stays_noop() {
+        let input = serde_json::json!({"model": "m", "messages": []});
+        let output = inject(input.clone()).unwrap();
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn fallback_no_user_string_content_appends_to_first_message_current_behavior() {
+        let output = inject(serde_json::json!({
+            "model": "m",
+            "messages": [
+                {"role": "system", "content": "IMPORTANT USER PROMPT"},
+                {"role": "assistant", "content": "prior turn"}
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(
+            output["messages"][0]["content"], "IMPORTANT USER PROMPT\n\nREQ_PROMPT\n\nAUG_TEXT",
+            "task 43 preserves the typed fallback verbatim; task 44 replaces it"
+        );
+        assert_eq!(output["messages"].as_array().unwrap().len(), 2);
     }
 }
