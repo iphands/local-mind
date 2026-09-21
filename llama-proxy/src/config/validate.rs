@@ -76,6 +76,43 @@ pub(crate) fn require_nonempty(value: &str, what: &str) -> Result<(), ConfigErro
     Ok(())
 }
 
+/// Validate `server.allowed_origins` entries (task 74).
+///
+/// Each entry must be an exact, echo-safe origin token:
+/// - non-empty, no whitespace (an origin never contains one; a padded entry
+///   could never match and would silently disable the entry);
+/// - no control characters — the entry is echoed back verbatim as a response
+///   header value, so a CR/LF here is response splitting and a NUL is a
+///   header-parse hazard;
+/// - not the `*` wildcard — `*` is not an exact origin; the permissive
+///   behavior is expressed by omitting `allowed_origins` entirely.
+pub(crate) fn validate_allowed_origins(origins: &[String]) -> Result<(), ConfigError> {
+    for entry in origins {
+        if entry.is_empty() {
+            return Err(ConfigError::Validation(
+                "server.allowed_origins contains an empty entry".to_string(),
+            ));
+        }
+        if entry.chars().any(|c| (c as u32) < 0x20 || c == '\u{7f}') {
+            return Err(ConfigError::Validation(format!(
+                "server.allowed_origins entry {entry:?} contains control characters; it would be echoed as a response header"
+            )));
+        }
+        if entry.chars().any(char::is_whitespace) {
+            return Err(ConfigError::Validation(format!(
+                "server.allowed_origins entry {entry:?} contains whitespace; origins are exact tokens like 'https://app.example'"
+            )));
+        }
+        if entry == "*" {
+            return Err(ConfigError::Validation(
+                "server.allowed_origins contains '*'; it is not an exact origin — omit allowed_origins to allow every origin"
+                    .to_string(),
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -152,5 +189,46 @@ mod tests {
     fn require_nonempty_rejects_only_empty() {
         assert!(require_nonempty("ok", "field").is_ok());
         assert!(require_nonempty("", "field").is_err());
+    }
+
+    #[test]
+    fn allowed_origins_pin_table() {
+        let accepted = [
+            vec!["https://app.example".to_string()],
+            vec!["http://localhost:3000".to_string(), "https://a.b.c".to_string()],
+            vec!["null".to_string()],
+            vec![],
+        ];
+        for list in accepted {
+            assert!(validate_allowed_origins(&list).is_ok(), "{list:?} must be accepted");
+        }
+        let rejected = [
+            vec!["".to_string()],
+            vec!["*".to_string()],
+            vec!["https://a.example".to_string(), "*".to_string()],
+            vec![" https://a.example".to_string()],
+            vec!["https://a.example ".to_string()],
+            vec!["https://a exam.example".to_string()],
+            vec!["https://a.example\r\nX-Evil: 1".to_string()],
+            vec!["https://a.example\nX-Evil: 1".to_string()],
+            vec!["https://a.example\r".to_string()],
+            vec!["https://a.example\u{0}".to_string()],
+            vec!["https://a.example\u{7f}".to_string()],
+        ];
+        for list in rejected {
+            assert!(validate_allowed_origins(&list).is_err(), "{list:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn allowed_origins_control_char_error_is_debug_escaped() {
+        // The bad entry is echoed into the error message — it must be Debug-escaped,
+        // never raw, or the CLI error output itself gets line-injected.
+        let err =
+            validate_allowed_origins(&["https://a.example\r\nX-Evil: 1".to_string()]).expect_err("CRLF entry must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("control characters"), "CRLF must get the control-char message, got {msg:?}");
+        assert!(msg.contains("\\r\\n"), "message must escape control chars, got {msg:?}");
+        assert!(!msg.contains("\r\n"), "message must not carry raw CRLF");
     }
 }

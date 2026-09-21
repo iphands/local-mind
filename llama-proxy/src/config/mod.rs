@@ -76,6 +76,18 @@ pub struct ServerConfig {
     /// rejected, so a saturated proxy stays observable.
     #[serde(default = "default_max_concurrent")]
     pub max_concurrent_requests: usize,
+
+    /// Exact `Origin` values allowed to read cross-origin responses.
+    ///
+    /// `Some(list)` installs an exact-match allow-list: a request whose
+    /// `Origin` equals a list entry gets that origin echoed in
+    /// `Access-Control-Allow-Origin`; any other origin gets no CORS echo at
+    /// all. Entries are exact strings (scheme://host[:port]) — no wildcards,
+    /// no patterns. `None` (the default, key absent) keeps the permissive
+    /// behavior of every build before this setting existed: every origin is
+    /// allowed via the `*` wildcard.
+    #[serde(default)]
+    pub allowed_origins: Option<Vec<String>>,
 }
 
 /// Default concurrency limit: unlimited.
@@ -847,6 +859,7 @@ mod tests {
             port: 8066,
             host: "0.0.0.0".to_string(),
             max_concurrent_requests: default_max_concurrent(),
+            allowed_origins: None,
         };
         assert_eq!(config.port, 8066);
         assert_eq!(config.host, "0.0.0.0");

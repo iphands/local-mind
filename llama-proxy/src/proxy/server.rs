@@ -2,6 +2,7 @@
 
 use axum::{
     extract::State,
+    http::HeaderValue,
     routing::{any, get},
     Router,
 };
@@ -10,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 use tower_http::trace::TraceLayer;
 
 use super::handler::ProxyHandler;
@@ -214,7 +215,7 @@ pub async fn run_server(
         .route("/v1/*path", any(proxy_handler))
         .route("/*path", any(proxy_handler))
         .fallback(proxy_handler_fallback)
-        .layer(CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any))
+        .layer(build_cors_layer(&config.server.allowed_origins))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -231,6 +232,38 @@ async fn health_handler() -> &'static str {
     "OK"
 }
 
+/// Build the CORS layer from `server.allowed_origins`.
+///
+/// `None` keeps the historical permissive default: `Access-Control-Allow-Origin: *`
+/// for every origin. `Some(list)` echoes back only exact matches and nothing at
+/// all for any other origin. The loader validated the entries; this still drops
+/// (with a WARN) any entry that fails `HeaderValue` parsing or is `*` —
+/// `AllowOrigin::list` panics on a wildcard, and a directly-constructed config
+/// must not be able to crash the server. Dropping is fail-CLOSED: fewer echoed
+/// origins, never more.
+fn build_cors_layer(allowed_origins: &Option<Vec<String>>) -> CorsLayer {
+    let layer = CorsLayer::new().allow_methods(Any).allow_headers(Any);
+    match allowed_origins {
+        None => layer.allow_origin(Any),
+        Some(list) => {
+            let mut values: Vec<HeaderValue> = Vec::with_capacity(list.len());
+            for entry in list {
+                if entry == "*" {
+                    tracing::warn!("allowed_origins entry '*' ignored: exact-match list cannot carry a wildcard (omit allowed_origins to allow all)");
+                    continue;
+                }
+                match HeaderValue::from_str(entry) {
+                    Ok(value) => values.push(value),
+                    Err(e) => {
+                        tracing::warn!(entry = ?entry, error = %e, "allowed_origins entry is not a valid header value; ignored")
+                    }
+                }
+            }
+            layer.allow_origin(AllowOrigin::list(values))
+        }
+    }
+}
+
 /// Main proxy handler for matched routes
 async fn proxy_handler(State(state): State<ProxyState>, req: axum::extract::Request) -> axum::response::Response {
     let handler = ProxyHandler::new(state);
@@ -241,4 +274,173 @@ async fn proxy_handler(State(state): State<ProxyState>, req: axum::extract::Requ
 async fn proxy_handler_fallback(State(state): State<ProxyState>, req: axum::extract::Request) -> axum::response::Response {
     let handler = ProxyHandler::new(state);
     handler.handle(req).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::net::TcpListener;
+
+    /// Serves the SAME router shape the proxy builds (health route + the CORS layer
+    /// under test) on an ephemeral port, so header behavior is proven on the wire.
+    async fn spawn_cors_server(
+        allowed: Option<Vec<String>>,
+    ) -> (reqwest::Client, std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+        let app = Router::new()
+            .route("/health", get(health_handler))
+            .layer(build_cors_layer(&allowed));
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+        (reqwest::Client::new(), addr, handle)
+    }
+
+    async fn get_with_origin(client: &reqwest::Client, addr: std::net::SocketAddr, origin: &str) -> reqwest::Response {
+        client
+            .get(format!("http://{addr}/health"))
+            .header("Origin", origin)
+            .send()
+            .await
+            .expect("request")
+    }
+
+    #[tokio::test]
+    async fn t74_none_keeps_permissive_wildcard_verbatim() {
+        // Given: allowed_origins absent (every config written before task 74)
+        let (client, addr, handle) = spawn_cors_server(None).await;
+        // When: any origin asks
+        let resp = get_with_origin(&client, addr, "https://evil.example").await;
+        // Then: the historical `*` echo is unchanged, byte for byte
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+        let pre = client
+            .request(reqwest::Method::OPTIONS, format!("http://{addr}/health"))
+            .header("Origin", "https://anything.at.all")
+            .header("Access-Control-Request-Method", "POST")
+            .send()
+            .await
+            .expect("preflight");
+        assert_eq!(
+            pre.headers().get("access-control-allow-origin").and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+        assert_eq!(
+            pre.headers()
+                .get("access-control-allow-methods")
+                .and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+        assert_eq!(
+            pre.headers()
+                .get("access-control-allow-headers")
+                .and_then(|v| v.to_str().ok()),
+            Some("*")
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn t74_listed_origin_gets_exact_echo() {
+        let (client, addr, handle) =
+            spawn_cors_server(Some(vec!["https://app.one".to_string(), "http://localhost:3000".to_string()])).await;
+        let resp = get_with_origin(&client, addr, "https://app.one").await;
+        assert_eq!(
+            resp.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://app.one"),
+            "listed origin must be echoed exactly, not as `*`"
+        );
+        let other = get_with_origin(&client, addr, "http://localhost:3000").await;
+        assert_eq!(
+            other
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("http://localhost:3000")
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn t74_unlisted_origin_gets_no_echo_at_all() {
+        let (client, addr, handle) = spawn_cors_server(Some(vec!["https://app.one".to_string()])).await;
+        let resp = get_with_origin(&client, addr, "https://evil.example").await;
+        assert!(
+            resp.headers().get("access-control-allow-origin").is_none(),
+            "non-listed origin must receive NO Access-Control-Allow-Origin, got {:?}",
+            resp.headers()
+        );
+        // The body still serves (200) - CORS governs browser cross-origin reads, not the response itself.
+        assert!(resp.status().is_success());
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn t74_wildcard_entry_never_matches_even_a_literal_star_origin() {
+        // Given: '*' smuggled past the loader (direct struct construction) - the layer
+        // must neither panic (AllowOrigin::list does) nor treat '*' as match-everything.
+        let (client, addr, handle) = spawn_cors_server(Some(vec!["*".to_string(), "https://app.one".to_string()])).await;
+        let star = get_with_origin(&client, addr, "*").await;
+        assert!(
+            star.headers().get("access-control-allow-origin").is_none(),
+            "'*' must not act as a wildcard"
+        );
+        let listed = get_with_origin(&client, addr, "https://app.one").await;
+        assert_eq!(
+            listed
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://app.one"),
+            "sibling entries survive the dropped wildcard"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn t74_crlf_entry_is_dropped_not_splitted() {
+        // Given: a response-splitting payload as a list entry (bypassing the loader gate)
+        let (client, addr, handle) = spawn_cors_server(Some(vec!["https://ok.example\r\nX-Injected: yes".to_string()])).await;
+        // When: a request carries the entry's PRONOUNCED origin (the prefix before CRLF)
+        let resp = get_with_origin(&client, addr, "https://ok.example").await;
+        // Then: nothing echoes and nothing was injected - the bad entry was dropped whole.
+        assert!(resp.headers().get("access-control-allow-origin").is_none());
+        assert!(
+            resp.headers().get("x-injected").is_none(),
+            "header injection must be impossible"
+        );
+        handle.abort();
+    }
+
+    #[tokio::test]
+    async fn t74_preflight_listed_origin_exact_echo() {
+        let (client, addr, handle) = spawn_cors_server(Some(vec!["https://app.one".to_string()])).await;
+        let pre = client
+            .request(reqwest::Method::OPTIONS, format!("http://{addr}/health"))
+            .header("Origin", "https://app.one")
+            .header("Access-Control-Request-Method", "POST")
+            .send()
+            .await
+            .expect("preflight");
+        assert_eq!(
+            pre.headers().get("access-control-allow-origin").and_then(|v| v.to_str().ok()),
+            Some("https://app.one")
+        );
+        let evil = client
+            .request(reqwest::Method::OPTIONS, format!("http://{addr}/health"))
+            .header("Origin", "https://evil.example")
+            .header("Access-Control-Request-Method", "POST")
+            .send()
+            .await
+            .expect("preflight");
+        assert!(evil.headers().get("access-control-allow-origin").is_none());
+        handle.abort();
+    }
 }

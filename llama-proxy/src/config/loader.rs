@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::validate::{require_nonempty, validate_bind_host, validate_http_url, validate_temperature};
+use super::validate::{
+    require_nonempty, validate_allowed_origins, validate_bind_host, validate_http_url, validate_temperature,
+};
 use super::{AppConfig, ConfigError};
 
 /// Load configuration from a YAML file.
@@ -127,6 +129,9 @@ fn validate_server_config(config: &super::ServerConfig) -> Result<(), ConfigErro
             "Server port must be between 1-65535, got {}",
             config.port
         )));
+    }
+    if let Some(origins) = &config.allowed_origins {
+        validate_allowed_origins(origins)?;
     }
     validate_bind_host(&config.host)
 }
@@ -347,6 +352,7 @@ exporters:
             port: 8066,
             host: "0.0.0.0".to_string(),
             max_concurrent_requests: super::super::default_max_concurrent(),
+            allowed_origins: None,
         };
         assert!(validate_server_config(&config).is_ok());
     }
@@ -368,11 +374,43 @@ exporters:
     }
 
     #[test]
+    fn test_server_config_allowed_origins_absent_is_none_list_present_is_exact() {
+        let absent: super::super::ServerConfig =
+            serde_yaml::from_str("port: 8066\nhost: \"0.0.0.0\"\n").expect("absent key must parse");
+        assert_eq!(absent.allowed_origins, None, "absent = permissive default");
+
+        let present: super::super::ServerConfig = serde_yaml::from_str(
+            "port: 8066\nhost: \"0.0.0.0\"\nallowed_origins: [\"https://app.one\", \"http://localhost:3000\"]\n",
+        )
+        .expect("list must parse");
+        assert_eq!(
+            present.allowed_origins,
+            Some(vec!["https://app.one".to_string(), "http://localhost:3000".to_string()]),
+            "entries must be stored verbatim, unnormalized"
+        );
+    }
+
+    #[test]
+    fn test_validate_server_config_rejects_wildcard_in_allowed_origins() {
+        // '*' in the list is a config error, not a silent permissive switch:
+        // it must never reach AllowOrigin::list (which panics on '*').
+        let config = super::super::ServerConfig {
+            port: 8066,
+            host: "0.0.0.0".to_string(),
+            max_concurrent_requests: super::super::default_max_concurrent(),
+            allowed_origins: Some(vec!["https://app.one".to_string(), "*".to_string()]),
+        };
+        let err = validate_server_config(&config).expect_err("wildcard entry must be rejected");
+        assert!(err.to_string().contains("allowed_origins"), "got {err}");
+    }
+
+    #[test]
     fn test_validate_server_config_zero_port() {
         let config = super::super::ServerConfig {
             port: 0,
             host: "0.0.0.0".to_string(),
             max_concurrent_requests: super::super::default_max_concurrent(),
+            allowed_origins: None,
         };
         let result = validate_server_config(&config);
         assert!(result.is_err());
