@@ -315,6 +315,35 @@ mod tests {
         assert_eq!(exporter2.get_export_count(), 1);
     }
 
+    /// Task 82 [A-M10b] verify: the consumers (server.rs `Arc<ExporterManager>`,
+    /// streaming.rs clones) drive the WHOLE lifecycle through one shared handle.
+    /// That compiles only while the registry stores `Arc<dyn MetricsExporter>`
+    /// and export_all/flush_all/shutdown_all all take `&self` - this test IS the
+    /// registry-shape contract; a regression to `&mut self` lifecycle breaks it.
+    #[tokio::test]
+    async fn arc_shared_manager_drives_lifecycle_through_self_ref() {
+        let mut manager = ExporterManager::new();
+        let exporter = Arc::new(MockExporter::new("test", false));
+        manager.add(Arc::clone(&exporter) as Arc<dyn MetricsExporter>);
+        let manager = Arc::new(manager); // Send + Sync through one Arc
+
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let manager = Arc::clone(&manager);
+            tasks.push(tokio::spawn(async move {
+                manager.export_all(&measurable_metrics()).await;
+                manager.flush_all().await;
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+        assert_eq!(exporter.get_export_count(), 4);
+
+        manager.shutdown_all().await; // still &self: the Arc stays shared-valid
+        drop(manager);
+    }
+
     /// `export_all` is a plain fan-out: it must not filter, so that an exporter
     /// which *wants* zero-filled samples (an audit or request-log exporter) can
     /// still be handed them. The filter lives in the gate below.
