@@ -760,6 +760,10 @@ impl ProxyHandler {
                 // runs while the body is polled. Dropping the permit here would let the
                 // limiter admit new work for a slot that is still busy.
                 permit.take(),
+                // Same contract for the balancer's busy claim: the node is still
+                // generating until the body ends, so the guard rides the stream and
+                // releases at body drop (completion or client disconnect).
+                backend,
             )
             .await
         } else {
@@ -1377,7 +1381,7 @@ mod tests {
             api_key: None,
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
-            active_requests: AtomicUsize::new(0),
+            active_requests: Arc::new(AtomicUsize::new(0)),
             strip_path_prefix: None,
             temperature: None,
         };
@@ -1447,7 +1451,7 @@ mod tests {
             api_key: None,
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
-            active_requests: AtomicUsize::new(0),
+            active_requests: Arc::new(AtomicUsize::new(0)),
             strip_path_prefix: None,
             temperature: None,
         }
@@ -2069,6 +2073,106 @@ mod tests {
         assert!(
             body["error"]["message"].as_str().is_some_and(|m| m.contains("100 MiB")),
             "the 413 must name the applicable 100 MiB main-path cap, got: {body}"
+        );
+    }
+
+    // ---- big-fix task 18: the BackendGuard claim must track streamed-body lifetime ----
+    //
+    // A streaming response body is lazy: the backend keeps generating while the
+    // client polls the body, long after handle() returned the headers. Today the
+    // guard drops at handler-return, so the pending==1 assertion below IS the
+    // accounting bug (RED signature: the load balancer sees the node idle while
+    // it is still generating). The ==0 assertions pin the release edges —
+    // drain-to-end and mid-flight drop — which must hold before AND after.
+
+    /// Connection-close framed SSE backend: writes headers + the first chunk,
+    /// then HOLDS the connection open until the test releases it; on release it
+    /// writes `tail` and closes the socket (EOF ends the body). The test drives
+    /// both edges - no sleeps, fully deterministic.
+    async fn held_open_sse_backend(first: &'static [u8], tail: &'static [u8]) -> (u16, tokio::sync::oneshot::Sender<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("sse fake must bind");
+        let port = listener.local_addr().expect("sse fake addr").port();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            let (mut sock, _) = listener.accept().await.expect("one connection");
+            let mut req = [0u8; 8192];
+            let _ = sock.read(&mut req).await;
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n")
+                .await;
+            let _ = sock.write_all(first).await;
+            let _ = sock.flush().await;
+            // Body stays open until the test releases, then the stream ends.
+            let _ = release_rx.await;
+            let _ = sock.write_all(tail).await;
+            let _ = sock.flush().await;
+            // sock drops here -> socket closed -> body EOF
+        });
+        (port, release_tx)
+    }
+
+    #[tokio::test]
+    async fn guard_claim_stays_held_while_streamed_body_unconsumed() {
+        let (port, _release) = held_open_sse_backend(b"data: a\n\n", b"data: [DONE]\n\n").await;
+        let node = node_at_port(port);
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler.handle(completion_request()).await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Headers are out, the body has not been touched once: the backend is
+        // still generating and the node must still count this request. A guard
+        // dropped at handle()-return reads 0 here - the undercount this task fixes.
+        assert_eq!(
+            node.active_requests.load(Ordering::Acquire),
+            1,
+            "claim must stay held while the streamed body is still pending"
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_claim_released_after_body_drained_to_end() {
+        let (port, release) = held_open_sse_backend(b"data: a\n\n", b"data: [DONE]\n\n").await;
+        let node = node_at_port(port);
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler.handle(completion_request()).await;
+        release.send(()).expect("backend task must still be listening");
+
+        let body = to_bytes(res.into_body(), 1024 * 1024).await.expect("SSE body must drain");
+        assert!(
+            String::from_utf8_lossy(&body).contains("data: [DONE]"),
+            "drain must reach the end of the stream"
+        );
+        assert_eq!(
+            node.active_requests.load(Ordering::Acquire),
+            0,
+            "claim must be released once the body completed"
+        );
+    }
+
+    #[tokio::test]
+    async fn guard_claim_released_when_body_dropped_mid_stream() {
+        // cancel_resume probe: a client that disconnects mid-stream (body dropped
+        // while the backend still holds the socket open) must not leak the claim.
+        let (port, _release) = held_open_sse_backend(b"data: a\n\n", b"data: [DONE]\n\n").await;
+        let node = node_at_port(port);
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler.handle(completion_request()).await;
+        assert_eq!(res.status(), StatusCode::OK);
+        drop(res);
+
+        assert_eq!(
+            node.active_requests.load(Ordering::Acquire),
+            0,
+            "mid-flight body drop must release the claim (no phantom +1)"
         );
     }
 }

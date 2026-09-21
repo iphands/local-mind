@@ -52,7 +52,7 @@ mod tests {
             api_key: None,
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
-            active_requests: AtomicUsize::new(0),
+            active_requests: Arc::new(AtomicUsize::new(0)),
             strip_path_prefix: None,
             temperature: None,
         })

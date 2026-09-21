@@ -36,12 +36,9 @@ impl LoadBalancer for PriorityFreeBalancer {
                 .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
-                // The CAS already recorded the +1; build the guard directly so its Drop is the only
-                // matching decrement (BackendGuard::new would add a second one).
-                return Ok(BackendGuard {
-                    node: node.clone(),
-                    group_name: None,
-                });
+                // The CAS already recorded the +1; wrap that claim so its BusyHandle Drop
+                // is the only matching decrement (BackendGuard::new would add a second one).
+                return Ok(BackendGuard::from_claimed(node.clone()));
             }
         }
 
@@ -68,10 +65,7 @@ impl LoadBalancer for PriorityFreeBalancer {
             }
         }
 
-        Ok(BackendGuard {
-            node: self.nodes[best_idx].clone(),
-            group_name: None,
-        })
+        Ok(BackendGuard::from_claimed(self.nodes[best_idx].clone()))
     }
 
     fn strategy_name(&self) -> &'static str {
@@ -95,7 +89,7 @@ mod tests {
             api_key: None,
             timeout_seconds: 300,
             http_client: reqwest::Client::new(),
-            active_requests: AtomicUsize::new(0),
+            active_requests: Arc::new(AtomicUsize::new(0)),
             strip_path_prefix: None,
             temperature: None,
         })

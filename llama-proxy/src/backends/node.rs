@@ -1,6 +1,7 @@
 //! Runtime handle for a single backend node
 
 use std::sync::atomic::AtomicUsize;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::config::TlsConfig;
@@ -16,7 +17,9 @@ pub struct BackendNode {
     pub api_key: Option<String>,
     pub timeout_seconds: u64,
     pub http_client: reqwest::Client,
-    pub active_requests: AtomicUsize,
+    /// Arc so a BackendGuard can keep exactly this counter alive for the whole
+    /// streamed-body lifetime, not just as long as its BackendNode borrow.
+    pub active_requests: Arc<AtomicUsize>,
     pub strip_path_prefix: Option<String>,
     /// Optional temperature override for requests to this node
     pub temperature: Option<f64>,
@@ -40,7 +43,7 @@ impl BackendNode {
             api_key,
             timeout_seconds,
             http_client,
-            active_requests: AtomicUsize::new(0),
+            active_requests: Arc::new(AtomicUsize::new(0)),
             strip_path_prefix,
             temperature,
         })

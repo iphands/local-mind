@@ -9,6 +9,7 @@ use futures::StreamExt;
 use std::sync::Arc;
 use std::time::Instant;
 
+use crate::backends::BackendGuard;
 use crate::config::StatsFormat;
 use crate::exporters::ExporterManager;
 use crate::fixes::FixRegistry;
@@ -192,11 +193,16 @@ fn count_unparsed_payloads(payloads: &[String]) -> usize {
 
 /// Pass through a response verbatim because we cannot safely frame it
 /// (e.g. an encoded body whose bytes we must not newline-split).
-fn verbatim_passthrough(backend_response: reqwest::Response, permit: Option<tokio::sync::OwnedSemaphorePermit>) -> Response {
+fn verbatim_passthrough(
+    backend_response: reqwest::Response,
+    permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    guard: BackendGuard,
+) -> Response {
     let status = backend_response.status();
     let headers = backend_response.headers().clone();
     let byte_stream = backend_response.bytes_stream().map(move |chunk_result| {
         let _permit = &permit;
+        let _guard = &guard;
         chunk_result.map_err(|e| std::io::Error::other(e.to_string()))
     });
     let mut builder = Response::builder().status(status);
@@ -263,6 +269,10 @@ struct StreamPassState<S> {
     // Concurrency permit: released when this stream is dropped (body completed
     // or client disconnected), not when the handler returns.
     _permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    // Backend busy claim: same body-lifetime contract as the permit - the node
+    // is still generating while the client polls this stream, so the guard
+    // releases here, not at handler return (big-fix E-H1).
+    _guard: BackendGuard,
 }
 
 impl<S> StreamPassState<S> {
@@ -541,6 +551,11 @@ pub async fn handle_streaming_response(
     // the work this permit accounts for happens while the client polls the body, long
     // after this function returns.
     permit: Option<tokio::sync::OwnedSemaphorePermit>,
+    // Backend busy claim from the balancer. Same body-lifetime contract as the permit:
+    // the node is still generating while the client polls the body, so the guard must
+    // ride the stream - releasing it at handler return would let the balancer pile
+    // requests onto a node that is still busy (big-fix E-H1).
+    guard: BackendGuard,
 ) -> Response {
     let status = backend_response.status();
     let headers = backend_response.headers().clone();
@@ -564,7 +579,7 @@ pub async fn handle_streaming_response(
                 "Streaming response carries Content-Encoding; proxying verbatim with no stats (backend ignored Accept-Encoding). reqwest decodes gzip transparently, so this usually means br/zstd."
             );
         }
-        return verbatim_passthrough(backend_response, permit);
+        return verbatim_passthrough(backend_response, permit, guard);
     }
 
     // Accumulate raw SSE bytes (verbatim) for end-of-stream stats/dump.
@@ -607,6 +622,7 @@ pub async fn handle_streaming_response(
         pending_error: None,
         completion_signaled: false,
         _permit: permit,
+        _guard: guard,
     };
 
     // Pass-through stream: complete SSE events are forwarded byte-for-byte as
@@ -2000,6 +2016,22 @@ mod framing_tests {
 
     type TestStream = futures::stream::Iter<std::vec::IntoIter<Result<Bytes, TestErr>>>;
 
+    /// Throwaway guard over an unshared node: framing tests exercise the stream,
+    /// the parked claim only has to exist and drop with the state.
+    fn test_guard() -> BackendGuard {
+        let node = Arc::new(crate::backends::BackendNode {
+            url: "http://test.invalid".to_string(),
+            model: None,
+            api_key: None,
+            timeout_seconds: 300,
+            http_client: reqwest::Client::new(),
+            active_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            strip_path_prefix: None,
+            temperature: None,
+        });
+        BackendGuard::new(node)
+    }
+
     fn pass_state(chunks: Vec<Result<Bytes, TestErr>>) -> StreamPassState<TestStream> {
         let (completion_tx, completion_rx) = tokio::sync::oneshot::channel::<StreamEnd>();
         let (activity_tx, activity_rx) = tokio::sync::watch::channel(());
@@ -2016,6 +2048,7 @@ mod framing_tests {
             pending_error: None,
             completion_signaled: false,
             _permit: None,
+            _guard: test_guard(),
         }
     }
 
