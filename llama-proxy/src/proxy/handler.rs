@@ -2,7 +2,7 @@
 
 use axum::{
     body::{to_bytes, Body},
-    http::{header, Method, Request, StatusCode},
+    http::{header, HeaderMap, Method, Request, StatusCode},
     response::{IntoResponse, Response},
     Json,
 };
@@ -287,6 +287,40 @@ fn decode_body_bytes(body_bytes: &[u8], content_encoding: Option<&str>) -> Resul
             Ok(Decompressed::Passthrough(body_bytes.to_vec()))
         }
     }
+}
+
+/// Hop-by-hop headers (RFC 9110 §7.6.1): scoped to one transport connection and
+/// MUST NOT be forwarded by a proxy. This predicate is the only definition — the
+/// extracted copy helper below is the only place that consults it, so the skip set
+/// cannot drift between response-forwarding sites [C-H3].
+fn is_hop_by_hop_header(name: &header::HeaderName) -> bool {
+    name == header::CONNECTION
+        || name == header::PROXY_AUTHENTICATE
+        || name == header::PROXY_AUTHORIZATION
+        || name == header::TE
+        || name == header::TRAILER
+        || name == header::UPGRADE
+}
+
+/// The single response-forwarding implementation: backend status + headers copied onto
+/// the outgoing response with the (possibly fixed or decoded) body supplied by the
+/// caller. Dropped: Content-Length and Transfer-Encoding (Axum recomputes them for the
+/// body actually sent), the hop-by-hop set, and Content-Encoding exactly when the proxy
+/// decoded the body [C-H2]. Both response-copy sites (buffered completion path and
+/// monitoring pass-through) run through here; each used to hand-roll its own loop and
+/// the skip sets had already begun to diverge.
+fn forward_response(status: StatusCode, headers: &HeaderMap, body: Vec<u8>, body_was_decoded: bool) -> Response {
+    let mut response = Response::builder().status(status);
+    for (name, value) in headers {
+        if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING || is_hop_by_hop_header(name) {
+            continue;
+        }
+        if body_was_decoded && name == header::CONTENT_ENCODING {
+            continue;
+        }
+        response = response.header(name.clone(), value.clone());
+    }
+    response.body(Body::from(body)).unwrap().into_response()
 }
 
 struct ConcurrentGuard(Arc<std::sync::atomic::AtomicUsize>);
@@ -1310,30 +1344,11 @@ impl ProxyHandler {
             }
         }
 
-        // Return complete JSON response (either client wants non-streaming, or synthesis failed)
-        let mut response = Response::builder().status(status);
-
-        // The backend's Content-Type is copied verbatim, including when we parsed (and
-        // possibly fixed) the body as JSON: a charset parameter is part of the media
-        // type, and re-emitting a bare "application/json" would silently drop it.
+        // Return complete JSON response (either client wants non-streaming, or synthesis failed).
+        // The backend's Content-Type is copied verbatim, charset parameter included:
         // json_value can only be Some when the original Content-Type already said JSON,
-        // so the verbatim value stays truthful for the fixed body too.
-        for (name, value) in headers {
-            if let Some(name) = name {
-                // Skip headers that Axum will handle
-                if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING {
-                    continue;
-                }
-                // A body we actually decoded no longer carries its encoding; one we
-                // passed through unchanged must keep the header [C-H2].
-                if body_decoded && name == header::CONTENT_ENCODING {
-                    continue;
-                }
-                response = response.header(name, value);
-            }
-        }
-
-        response.body(Body::from(final_body)).unwrap().into_response()
+        // so the copied value stays truthful even for a fixed body.
+        forward_response(status, &headers, final_body, body_decoded)
     }
 
     /// Simple pass-through with no fix application or stats collection
@@ -1438,21 +1453,7 @@ impl ProxyHandler {
             }
         };
 
-        let mut response = Response::builder().status(status);
-        for (name, value) in headers {
-            if let Some(name) = name {
-                // Skip Content-Length and Transfer-Encoding - Axum will handle these
-                // This ensures consistent behavior with handle_non_streaming_response
-                if name == header::CONTENT_LENGTH || name == header::TRANSFER_ENCODING {
-                    continue;
-                }
-                if body_decoded && name == header::CONTENT_ENCODING {
-                    continue;
-                }
-                response = response.header(name, value);
-            }
-        }
-        response.body(Body::from(body)).unwrap()
+        forward_response(status, &headers, body, body_decoded)
     }
 }
 
@@ -3292,5 +3293,113 @@ mod tests {
         assert!(res.headers().get(header::CONTENT_ENCODING).is_none());
         let parsed: serde_json::Value = serde_json::from_str(&body_text(res).await).expect("body must parse");
         assert_eq!(parsed["id"], serde_json::json!("cmpl-1"));
+    }
+
+    // ---- big-fix task 9: one forward_response, one hop-by-hop predicate [C-H3] ----
+    //
+    // The RED evidence is structural (grep BEFORE = 2 copy loops / 2 skip predicates,
+    // quoted in .omo/evidence/big-fix/task9.txt) plus the baseline header dump below:
+    // the old loops forwarded ALL SIX hop-by-hop headers to the client.
+
+    #[tokio::test]
+    async fn hop_by_hop_headers_do_not_reach_the_client() {
+        let plain = br#"{"total_slots":1}"#;
+        let response = raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json"),
+                ("upgrade", "websocket"),
+                ("te", "trailers"),
+                ("trailer", "X-Next"),
+                ("proxy-authenticate", "Basic realm=\"fake\""),
+                ("proxy-authorization", "Basic whatever"),
+                ("x-backend-marker", "keepme"),
+            ],
+            plain,
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+
+        for h in [
+            "connection",
+            "upgrade",
+            "te",
+            "trailer",
+            "proxy-authenticate",
+            "proxy-authorization",
+        ] {
+            let name = header::HeaderName::from_lowercase(h.as_bytes()).unwrap();
+            assert!(
+                res.headers().get(&name).is_none(),
+                "hop-by-hop `{h}` must not be forwarded, dump: {:?}",
+                res.headers()
+            );
+        }
+        assert_eq!(
+            res.headers().get("x-backend-marker").and_then(|v| v.to_str().ok()),
+            Some("keepme"),
+            "end-to-end headers must survive the filter"
+        );
+        assert_eq!(body_text(res).await, String::from_utf8_lossy(plain));
+    }
+
+    #[tokio::test]
+    async fn hop_by_hop_filter_applies_on_the_buffered_completion_path_too() {
+        // The extracted forwarder must govern BOTH former copy sites; a filter only on
+        // the pass-through arm would let the skip sets drift back apart.
+        let backend_body = serde_json::json!({"id": "x", "choices": []}).to_string();
+        let response = raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json"),
+                ("connection", "keep-alive"),
+                ("upgrade", "h2c"),
+            ],
+            backend_body.as_bytes(),
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(res.headers().get(header::CONNECTION).is_none());
+        assert!(res.headers().get(header::UPGRADE).is_none());
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("application/json")
+        );
+    }
+
+    #[test]
+    fn hop_by_hop_predicate_pins_the_rfc_9110_set() {
+        let in_set = [
+            header::CONNECTION,
+            header::PROXY_AUTHENTICATE,
+            header::PROXY_AUTHORIZATION,
+            header::TE,
+            header::TRAILER,
+            header::UPGRADE,
+        ];
+        for name in &in_set {
+            assert!(is_hop_by_hop_header(name), "{name} is hop-by-hop per RFC 9110 §7.6.1");
+        }
+        // The two body-framing headers are dropped separately (Axum recomputes them),
+        // and Content-Encoding is body-transform state, not connection state.
+        for name in [
+            header::CONTENT_LENGTH,
+            header::TRANSFER_ENCODING,
+            header::CONTENT_ENCODING,
+            header::CONTENT_TYPE,
+        ] {
+            assert!(
+                !is_hop_by_hop_header(&name),
+                "{name} must not live in the hop-by-hop predicate"
+            );
+        }
     }
 }
