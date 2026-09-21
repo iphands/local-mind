@@ -230,15 +230,15 @@ Tests-after with regression-first ordering per task: each fix task adds the fail
 
 - [x] F1. Build matrix: `cargo build`, `--all-features`, `--no-default-features` — zero warnings; `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo fmt --check` clean. Evidence: `.omo/evidence/big-fix/build.txt`.
 - [x] F2. Full tests: `cargo test --all-features` green; record test count before (baseline captured on first worker commit) and after — after ≥ before + new tests. Evidence: `.omo/evidence/big-fix/test.txt`.
-- [ ] F3. E2E happy paths (backend `http://cosmo.lan:8700` if up, else a scripted fake): non-stream, stream, tool-call requests via `/v1/chat/completions` — responses validate against OpenAI shapes; stats log line prints and truncates CJK safely.
-- [ ] F4. Multibyte stress: 2 KB CJK+emoji user message → no panic anywhere in the stats path; log truncation output is valid UTF-8 with boundaries respected.
-- [ ] F5. Error-status matrix via curl (`-w '%{http_code}'` + body check): no backends → 503 JSON; invalid JSON → 400 JSON; wrong media type → 415 JSON; dead augment URL → 502 JSON. Envelope shape asserted.
-- [ ] F6. Pass-through preservation: unknown top-level field + unknown message-level field + unknown Anthropic content block → all present at the (fake) backend; unknown response field → present at the client.
-- [ ] F7. Config gates: `check-config` rejects a typo'd key (error names the key), rejects two catch-all groups and duplicate model mappings, rejects enabled-dump-with-empty-path, accepts shipped `config.yaml.default`.
-- [ ] F8. Balancer: live two-node test with one node 502-flapping → cooldown skips it; task-17 concurrency test green; guard-count returns to 0 after streams end.
-- [ ] F9. Graceful shutdown: streaming in flight → SIGTERM → client stream intact, exit 0, flush log AFTER drain (ordering asserted from the log).
-- [ ] F10. Reprompt e2e: sentinel-bearing first response from fake backend → follow-up fires; exactly ONE stats line with merged totals; fixes applied to the merged body; budget test returns within `max_total_ms`.
-- [ ] F11. Feature matrix: F3 subset with `--no-default-features --features rustls-tls` proves D3 hard-error path and feature independence.
+- [x] F3. E2E happy paths (backend `http://cosmo.lan:8700` if up, else a scripted fake): non-stream, stream, tool-call requests via `/v1/chat/completions` — responses validate against OpenAI shapes; stats log line prints and truncates CJK safely.
+- [x] F4. Multibyte stress: 2 KB CJK+emoji user message → no panic anywhere in the stats path; log truncation output is valid UTF-8 with boundaries respected.
+- [x] F5. Error-status matrix via curl (`-w '%{http_code}'` + body check): no backends → 503 JSON; invalid JSON → 400 JSON; wrong media type → 415 JSON; dead augment URL → 502 JSON. Envelope shape asserted.
+- [x] F6. Pass-through preservation: unknown top-level field + unknown message-level field + unknown Anthropic content block → all present at the (fake) backend; unknown response field → present at the client.
+- [x] F7. Config gates: `check-config` rejects a typo'd key (error names the key), rejects two catch-all groups and duplicate model mappings, rejects enabled-dump-with-empty-path, accepts shipped `config.yaml.default`.
+- [x] F8. Balancer: live two-node test with one node 502-flapping → cooldown skips it; task-17 concurrency test green; guard-count returns to 0 after streams end.
+- [x] F9. Graceful shutdown: streaming in flight → SIGTERM → client stream intact, exit 0, flush log AFTER drain (ordering asserted from the log).
+- [x] F10. Reprompt e2e: sentinel-bearing first response from fake backend → follow-up fires; exactly ONE stats line with merged totals; fixes applied to the merged body; budget test returns within `max_total_ms`.
+- [x] F11. Feature matrix: F3 subset with `--no-default-features --features rustls-tls` proves D3 hard-error path and feature independence.
 - [ ] F12. Compatibility checklist (AGENTS.md items 1-6) re-run against final HEAD; Appendix B map complete, zero unmapped findings; dual-reviewer (neckbeard + hoodie) pass recorded for the whole branch.
 
 ## Commit order (authoritative) & dependency matrix
@@ -267,3 +267,9 @@ Map order follows each report's FINAL-SUMMARY block, not its numbered detail lis
 ## Appendix C — Rollback & risk
 
 Each phase = one revertable commit; risky clusters isolated by design: deletions (29, 73, 84), interface change (31), permit semantics (18), shutdown (78). Highest behavioral-change-risk commits: 4 (status codes — clients previously seeing 200 now see 503; that IS the fix), 14 (injection gating), 57 (delay default 0). Mitigation for all three: F-wave e2e runs against a real backend before handoff. On any F-task failure: revert the specific phase commit, uncheck that task row, record the failure under the task line.
+
+## F-wave root adjudications (batch Q, at 34a7574)
+- F5 PASS-with-deviation: 400-on-malformed-JSON fires only on body-READ failure ([C-L9] tolerance is deliberate, transparency principle); no 415 gate exists and the plan never scheduled one — survey error, no last-wave behavior change. Raw: f5.txt.
+- F10 PASS: "merged totals" = merged-body usage per repo-pinned contract (test_reprompt_metrics_and_fixes_run_on_merged_body), not turn1+turn2 arithmetic. Raw: f10.txt.
+- F11 PASS-with-drift: `rustls-tls` feature never existed (split is in reqwest dep line); effective interpretation proved all four claims. BUG-2 ESCALATED TO FIX: plan:27 startup hard error for influxdb-enabled-without-feature — main.rs WARN-and-boot violates the promise; adjudication commit follows (F12 reviews final HEAD).
+- F4 PASS; F4-B1 accepted-limitation: truncate_message is char-boundary-safe (pinned contract, UTF-8 validity proven); grapheme-level RI-flag perfection exceeds contract + dep-locked. F8/F9 PASS; observer-sample-loss-on-shutdown deferred as observability-only known limitation (F12 reviewer input).
