@@ -220,8 +220,9 @@ impl RepromptEngine {
     }
 
     /// Overwrite `choices[0].message.content` with `text`, leaving everything else (tool_calls,
-    /// finish_reason, usage) untouched. Returns false when the response has no message to write
-    /// into — the caller must then fall back to a shape it can write, or the text is lost.
+    /// finish_reason, usage) untouched. Returns false when there is no object-or-null message
+    /// to write into — serde_json's IndexMut panics on scalar/array messages, so a refusal
+    /// must precede the assignment. The caller falls back to `force_assistant_text`.
     #[must_use]
     fn set_assistant_text(response: &mut serde_json::Value, text: String) -> bool {
         let Some(message) = response
@@ -233,8 +234,41 @@ impl RepromptEngine {
             return false;
         };
 
+        if !message.is_object() && !message.is_null() {
+            return false;
+        }
         message["content"] = serde_json::Value::String(text);
         true
+    }
+
+    /// Install `{"role":"assistant","content":text}` as choices[0].message no matter what the
+    /// body looked like: replaces a missing or non-object message, grows an empty choices
+    /// array, or gives the body a choices array. Last-resort write path behind
+    /// `set_assistant_text`; only finish() and the merge fallback reach it, and a non-object
+    /// message at this point holds no fields worth preserving.
+    fn force_assistant_text(response: &mut serde_json::Value, text: String) {
+        if !response.is_object() {
+            *response = serde_json::Value::Object(serde_json::Map::new());
+        }
+        let has_choice = response
+            .get("choices")
+            .and_then(serde_json::Value::as_array)
+            .is_some_and(|choices| !choices.is_empty());
+        if has_choice {
+            response["choices"][0]["message"] = serde_json::json!({"role": "assistant", "content": text});
+        } else {
+            response["choices"] =
+                serde_json::json!([{"finish_reason": "stop", "message": {"role": "assistant", "content": text}}]);
+        }
+    }
+
+    fn has_assistant_message(response: &serde_json::Value) -> bool {
+        response
+            .get("choices")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|choices| choices.first())
+            .and_then(|choice| choice.get("message"))
+            .is_some_and(serde_json::Value::is_object)
     }
 
     /// Returns true if the response has tool_calls or a non-stop finish_reason.
@@ -434,9 +468,20 @@ impl RepromptEngine {
     }
 
     /// Return the original stop turn carrying every assistant text collected along the way.
+    /// The returned body always has an object message: text is never dropped for want of a
+    /// writable shape, and a message-less choice is never handed to a client.
     fn finish(&self, mut clean_stop: serde_json::Value, collected: Vec<String>, reason: &str) -> serde_json::Value {
-        if !collected.is_empty() {
-            let _ = Self::set_assistant_text(&mut clean_stop, collected.join("\n\n"));
+        let text = collected.join("\n\n");
+        if !text.is_empty() {
+            if !Self::set_assistant_text(&mut clean_stop, text.clone()) {
+                tracing::debug!(
+                    reason,
+                    "Reprompt: stop body had no writable message, forcing an assistant message"
+                );
+                Self::force_assistant_text(&mut clean_stop, text);
+            }
+        } else if !Self::has_assistant_message(&clean_stop) {
+            Self::force_assistant_text(&mut clean_stop, String::new());
         }
         if self.log_stop_responses {
             tracing::info!(
@@ -1182,5 +1227,65 @@ mod tests {
             "budget ignored: {elapsed:?}"
         );
         assert_eq!(result["choices"][0]["message"]["content"], "the answer that must arrive fast");
+    }
+
+    // --- task 66: finish() guarantees a message [C-M2] ---
+
+    #[tokio::test]
+    async fn test_finish_grows_message_when_absent() {
+        let url = spawn_backend(vec![stop_resp("follow-up text"); 5]).await;
+        let e = write_capable_engine(2);
+        let original = serde_json::json!({"choices":[{"finish_reason":"stop"}]});
+        let r = e
+            .maybe_reprompt(original, &req_with_tools(&["read", "write"]), &node_at(url).await)
+            .await;
+        assert_eq!(r["choices"][0]["message"]["role"], "assistant");
+        assert_eq!(
+            r["choices"][0]["message"]["content"], "follow-up text\n\nfollow-up text",
+            "both retry rounds survive into the forced message"
+        );
+        assert_eq!(r["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[tokio::test]
+    async fn test_finish_forces_assistant_message_on_string_message() {
+        let url = spawn_backend(vec![stop_resp("follow-up text"); 5]).await;
+        let e = write_capable_engine(2);
+        let original = serde_json::json!({"choices":[{"finish_reason":"stop","message":"raw string not object"}]});
+        let r = e
+            .maybe_reprompt(original, &req_with_tools(&["read", "write"]), &node_at(url).await)
+            .await;
+        assert_eq!(
+            r["choices"][0]["message"]["role"], "assistant",
+            "scalar message forced to a proper message, no panic"
+        );
+        assert_eq!(
+            r["choices"][0]["message"]["content"], "follow-up text\n\nfollow-up text",
+            "both retry rounds survive into the forced message"
+        );
+    }
+
+    #[test]
+    fn test_finish_grows_choice_when_choices_empty() {
+        // finish() is called only behind should_trigger, so an empty-choices body must be
+        // proven total at the finish() seam itself: it can never hand back a text-less husk.
+        let e = engine();
+        let r = e.finish(serde_json::json!({"choices": []}), vec!["orphan text".into()], "unit");
+        assert_eq!(r["choices"][0]["message"]["content"], "orphan text");
+        assert_eq!(r["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[tokio::test]
+    async fn test_body_without_stop_choice_passes_through_untouched() {
+        let e = write_capable_engine(2);
+        let original = serde_json::json!({"choices": []});
+        let r = e
+            .maybe_reprompt(
+                original.clone(),
+                &req_with_tools(&["read", "write"]),
+                &std::sync::Arc::new(test_node()),
+            )
+            .await;
+        assert_eq!(r, original, "no stop choice means no reprompt and no mutation");
     }
 }
