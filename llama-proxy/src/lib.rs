@@ -12,6 +12,7 @@ pub mod backends;
 pub mod config;
 pub mod exporters;
 pub mod fixes;
+pub mod prompt_cache;
 pub mod proxy;
 pub mod stats;
 

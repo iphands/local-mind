@@ -5,6 +5,8 @@
 
 use crate::api::{Message, MessageContent};
 use crate::config::AugmentBackendConfig;
+use crate::prompt_cache::{self, Refresh};
+use std::path::Path;
 
 /// Augment backend client
 pub struct AugmentBackend {
@@ -40,11 +42,9 @@ impl AugmentBackend {
     /// Loads backend_prompt.md, combines with user content, calls augment backend,
     /// and returns the extracted text from the response.
     pub async fn get_augmentation(&self, user_content: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
-        // Load backend prompt (empty string on failure)
-        let backend_prompt = std::fs::read_to_string(&self.prompt_file).unwrap_or_else(|e| {
-            tracing::warn!(error = %e, file = %self.prompt_file, "Failed to load backend prompt, using empty string");
-            String::new()
-        });
+        // Load backend prompt through the shared mtime-checked cache
+        // (empty string on failure)
+        let backend_prompt = self.load_backend_prompt().await;
 
         // Combine backend_prompt + user_content
         let combined = format!("{}\n\n{}", backend_prompt, user_content);
@@ -77,6 +77,22 @@ impl AugmentBackend {
 
         // Extract text from response (supports OpenAI and Anthropic format)
         extract_response_text(&body)
+    }
+
+    /// Backend prompt via the shared mtime-checked cache; `tokio::fs` reads so
+    /// the async request path never blocks the runtime on disk.
+    async fn load_backend_prompt(&self) -> String {
+        let path = Path::new(&self.prompt_file);
+        let cache = prompt_cache::shared(path).await;
+        match cache.refresh(path).await {
+            Refresh::Reloaded { text, .. } => text,
+            Refresh::Empty => String::new(),
+            Refresh::Unchanged => cache.text().await,
+            Refresh::Failed(e) => {
+                tracing::warn!(error = %e, file = %self.prompt_file, "Failed to load backend prompt, using empty string");
+                String::new()
+            }
+        }
     }
 }
 
@@ -932,5 +948,162 @@ mod tests {
                 "augmentation block lost for content: {content}"
             );
         }
+    }
+
+    // --- task 47 / F-M14: async fs + mtime-checked prompt cache ---
+
+    fn mtime(seconds: u64) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds)
+    }
+
+    fn write_with_mtime(path: &std::path::Path, content: &str, modified: std::time::SystemTime) {
+        std::fs::write(path, content).unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(modified)).unwrap();
+    }
+
+    async fn spawn_recording_augment_backend() -> (String, tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>) {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+        use tokio::sync::mpsc;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            loop {
+                let Ok((sock, _)) = listener.accept().await else { return };
+                let tx = tx.clone();
+                tokio::spawn(async move {
+                    let mut sock = sock;
+                    let mut head: Vec<u8> = Vec::new();
+                    let mut byte = [0u8; 1];
+                    loop {
+                        match sock.read(&mut byte).await {
+                            Ok(0) => return,
+                            Ok(_) => {
+                                head.push(byte[0]);
+                                if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                                    break;
+                                }
+                            }
+                            Err(_) => return,
+                        }
+                    }
+                    let content_length = String::from_utf8_lossy(&head)
+                        .lines()
+                        .find(|l| l.to_ascii_lowercase().starts_with("content-length:"))
+                        .and_then(|l| l.split(':').nth(1))
+                        .and_then(|v| v.trim().parse::<usize>().ok())
+                        .unwrap_or(0);
+                    let mut body = vec![0u8; content_length];
+                    if content_length > 0 && sock.read_exact(&mut body).await.is_err() {
+                        return;
+                    }
+                    if let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) {
+                        let _ = tx.send(parsed);
+                    }
+                    let resp_body = r#"{"choices":[{"message":{"role":"assistant","content":"AUGMENTED"}}]}"#;
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        resp_body.len(),
+                        resp_body
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        (format!("http://{addr}"), rx)
+    }
+
+    async fn first_message_content(rx: &mut tokio::sync::mpsc::UnboundedReceiver<serde_json::Value>) -> String {
+        let request = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("augment backend received a request within 5s")
+            .expect("recording channel open");
+        request["messages"][0]["content"]
+            .as_str()
+            .expect("string content")
+            .to_string()
+    }
+
+    fn backend_pointing_at(url: String, prompt_file: std::path::PathBuf) -> AugmentBackend {
+        AugmentBackend {
+            url,
+            model: "fast".to_string(),
+            prompt_file: prompt_file.to_string_lossy().into_owned(),
+            request_prompt_file: String::new(),
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn task47_prompt_file_change_bumped_by_mtime_is_served_without_restart() {
+        let (url, mut rx) = spawn_recording_augment_backend().await;
+        let dir = tempfile::tempdir().unwrap();
+        let prompt = dir.path().join("backend_prompt_v71a.md");
+        write_with_mtime(&prompt, "PROMPT-V1", mtime(1_000));
+        let backend = backend_pointing_at(url, prompt.clone());
+
+        backend.get_augmentation("USER-TEXT").await.unwrap();
+        assert_eq!(first_message_content(&mut rx).await, "PROMPT-V1\n\nUSER-TEXT");
+
+        write_with_mtime(&prompt, "PROMPT-V2", mtime(2_000));
+        backend.get_augmentation("USER-TEXT").await.unwrap();
+        assert_eq!(
+            first_message_content(&mut rx).await,
+            "PROMPT-V2\n\nUSER-TEXT",
+            "an explicit mtime bump must be visible without restarting the process"
+        );
+
+        backend.get_augmentation("USER-TEXT").await.unwrap();
+        assert_eq!(
+            first_message_content(&mut rx).await,
+            "PROMPT-V2\n\nUSER-TEXT",
+            "unchanged mtime serves the cached text"
+        );
+    }
+
+    #[tokio::test]
+    async fn task47_content_change_without_mtime_move_serves_cached_stale_by_design() {
+        let (url, mut rx) = spawn_recording_augment_backend().await;
+        let dir = tempfile::tempdir().unwrap();
+        let prompt = dir.path().join("backend_prompt_v71b.md");
+        write_with_mtime(&prompt, "PROMPT-V1", mtime(3_000));
+        let backend = backend_pointing_at(url, prompt.clone());
+
+        backend.get_augmentation("USER-TEXT").await.unwrap();
+        assert_eq!(first_message_content(&mut rx).await, "PROMPT-V1\n\nUSER-TEXT");
+
+        std::fs::write(&prompt, "PROMPT-V2").unwrap();
+        let file = std::fs::OpenOptions::new().write(true).open(&prompt).unwrap();
+        file.set_times(std::fs::FileTimes::new().set_modified(mtime(3_000))).unwrap();
+
+        backend.get_augmentation("USER-TEXT").await.unwrap();
+        assert_eq!(
+            first_message_content(&mut rx).await,
+            "PROMPT-V1\n\nUSER-TEXT",
+            "cache key is path+mtime: content rewritten under a restored mtime is a \
+             documented stale read (the uncached baseline re-read and served V2 here)"
+        );
+    }
+
+    #[tokio::test]
+    async fn task47_missing_prompt_file_keeps_the_empty_prompt_fallback_message_for_message() {
+        let (url, mut rx) = spawn_recording_augment_backend().await;
+        let missing = std::env::temp_dir().join("task47-no-such-augment-prompt-9f3a.md");
+        let backend = backend_pointing_at(url, missing);
+
+        let result = backend.get_augmentation("HI").await;
+
+        assert!(result.is_ok(), "missing prompt file must not fail the request: {result:?}");
+        assert_eq!(result.unwrap(), "AUGMENTED");
+        assert_eq!(
+            first_message_content(&mut rx).await,
+            "\n\nHI",
+            "the fallback sends an empty backend prompt joined to the user content by \
+             two newlines, exactly as the baseline's empty-string fallback did"
+        );
     }
 }

@@ -19,10 +19,12 @@
 //!
 //! When dynamic_prompt is enabled (default), the prompt file is re-read from disk on
 //! each trigger if its mtime has changed since the last read. This allows live edits
-//! to the prompt without restarting the proxy.
+//! to the prompt without restarting the proxy. The mtime-check/async-read mechanics
+//! live in the shared [`crate::prompt_cache::PromptFileCache`], not in this module.
 
 use crate::backends::BackendNode;
 use crate::config::RepromptConfig;
+use crate::prompt_cache::{PromptFileCache, Refresh};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -104,46 +106,33 @@ impl RepromptEngine {
             return self.prompt.read().await.clone();
         };
 
-        let current_mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-
-        let needs_reload = {
-            let last = self.last_mtime.read().await;
-            match (*last, current_mtime) {
-                (Some(last_t), Some(cur_t)) => cur_t != last_t,
-                (None, Some(_)) => true, // first stat after startup without mtime
-                _ => false,
+        let cache = PromptFileCache::new(self.prompt.read().await.clone(), *self.last_mtime.read().await);
+        match cache.refresh(path).await {
+            Refresh::Reloaded { text, mtime } => {
+                tracing::info!(
+                    path = %path.display(),
+                    "Reprompt: prompt file changed, reloading"
+                );
+                *self.prompt.write().await = text.clone();
+                *self.last_mtime.write().await = mtime;
+                text
             }
-        };
-
-        if needs_reload {
-            match std::fs::read_to_string(path) {
-                Ok(new_text) if !new_text.trim().is_empty() => {
-                    tracing::info!(
-                        path = %path.display(),
-                        "Reprompt: prompt file changed, reloading"
-                    );
-                    *self.prompt.write().await = new_text.clone();
-                    *self.last_mtime.write().await = current_mtime;
-                    new_text
-                }
-                Ok(_) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        "Reprompt: prompt file is empty after reload, keeping previous prompt"
-                    );
-                    self.prompt.read().await.clone()
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        path = %path.display(),
-                        error = %e,
-                        "Reprompt: failed to reload prompt file, keeping previous prompt"
-                    );
-                    self.prompt.read().await.clone()
-                }
+            Refresh::Unchanged => self.prompt.read().await.clone(),
+            Refresh::Empty => {
+                tracing::warn!(
+                    path = %path.display(),
+                    "Reprompt: prompt file is empty after reload, keeping previous prompt"
+                );
+                self.prompt.read().await.clone()
             }
-        } else {
-            self.prompt.read().await.clone()
+            Refresh::Failed(e) => {
+                tracing::warn!(
+                    path = %path.display(),
+                    error = %e,
+                    "Reprompt: failed to reload prompt file, keeping previous prompt"
+                );
+                self.prompt.read().await.clone()
+            }
         }
     }
 
@@ -940,5 +929,56 @@ mod tests {
             .maybe_reprompt(stop_resp("the only answer"), &req_with_tools(&["read", "write"]), &node)
             .await;
         assert_eq!(result["choices"][0]["message"]["content"], "the only answer");
+    }
+
+    // --- task 47 pins: reload arms that had no coverage before the shared
+    //     PromptFileCache extraction (green on baseline too - they guard the
+    //     rewiring, not new behavior) ---
+
+    #[tokio::test]
+    async fn test_resolve_prompt_dynamic_empty_file_keeps_previous_prompt() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        write!(f, "   \n  ").unwrap();
+        let path = f.path().to_path_buf();
+
+        let e = RepromptEngine {
+            prompt: RwLock::new("Old prompt.".into()),
+            prompt_file: Some(path),
+            last_mtime: RwLock::new(Some(std::time::UNIX_EPOCH)),
+            dynamic_prompt: true,
+            max_retries: 3,
+            done_sentinels: vec!["DONE".into()],
+            log_stop_responses: false,
+            skip_read_only_requests: true,
+        };
+
+        assert_eq!(e.resolve_prompt().await, "Old prompt.");
+        assert_eq!(
+            *e.prompt.read().await,
+            "Old prompt.",
+            "whitespace-only reload must not replace the prompt"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_resolve_prompt_dynamic_missing_file_keeps_previous_prompt() {
+        let e = RepromptEngine {
+            prompt: RwLock::new("Old prompt.".into()),
+            prompt_file: Some(std::env::temp_dir().join("task47-no-such-reprompt-prompt-4c1d.md")),
+            last_mtime: RwLock::new(Some(std::time::UNIX_EPOCH)),
+            dynamic_prompt: true,
+            max_retries: 3,
+            done_sentinels: vec!["DONE".into()],
+            log_stop_responses: false,
+            skip_read_only_requests: true,
+        };
+
+        assert_eq!(e.resolve_prompt().await, "Old prompt.");
+        assert_eq!(
+            *e.prompt.read().await,
+            "Old prompt.",
+            "unreadable file must not replace the prompt"
+        );
     }
 }
