@@ -9,6 +9,12 @@ use crate::config::TlsConfig;
 /// TCP connect timeout applied to every backend-node HTTP client (big-fix E-M7)
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Safety cap on a failure cooldown (big-fix F12-R3, MAJOR-6 defense-in-depth).
+/// The config validator bounds `failure_cooldown_secs`; this cap exists so the
+/// panic class dies even when a bound is missing: `Instant + Duration` PANICS on
+/// overflow, and 24h is beyond any sane cooldown.
+const COOLDOWN_CLAMP_CAP: Duration = Duration::from_secs(24 * 60 * 60);
+
 /// A single backend node with its own HTTP client
 #[derive(Debug)]
 pub struct BackendNode {
@@ -61,8 +67,26 @@ impl BackendNode {
 
     /// Take the node out of selection for `cooldown`. Repeated failures re-arm the
     /// window from the LATEST failure. A zero duration never excludes the node.
+    /// A duration that overflows the clock is saturated to [`COOLDOWN_CLAMP_CAP`]
+    /// instead of panicking (the bare `+` was the F12-R3 request-path panic).
     pub fn mark_failed(&self, cooldown: Duration) {
-        *self.cooldown_lock() = Instant::now() + cooldown;
+        let now = Instant::now();
+        let mut until = self.cooldown_lock();
+        let expiry = now.checked_add(cooldown).unwrap_or_else(|| {
+            // Log once per node per clamp episode: a repeated clamp only happens
+            // while a previously clamped expiry still sits far in the future, so a
+            // remaining window over half the cap can only be this node's own clamp.
+            let prev_remaining = until.checked_duration_since(now).unwrap_or(Duration::ZERO);
+            if prev_remaining < COOLDOWN_CLAMP_CAP / 2 {
+                tracing::debug!(
+                    node = %self.base_url(),
+                    requested_secs = cooldown.as_secs(),
+                    "backend cooldown overflowed the clock; cooldown clamped to the safety cap"
+                );
+            }
+            now.checked_add(COOLDOWN_CLAMP_CAP).unwrap_or(now)
+        });
+        *until = expiry;
         self.healthy.store(false, Ordering::Release);
     }
 
@@ -94,10 +118,22 @@ impl BackendNode {
         self.url.trim_end_matches('/')
     }
 
-    /// Returns the effective path after stripping any configured prefix
+    /// Returns the effective path after stripping any configured prefix. The strip
+    /// fires only on a full path-segment boundary (big-fix F12-R3): a prefix ending
+    /// mid-segment ("/v1" vs "/v15/foo") leaves the path untouched.
     pub fn effective_path<'a>(&self, path: &'a str) -> &'a str {
-        if let Some(ref prefix) = self.strip_path_prefix {
-            path.strip_prefix(prefix.as_str()).unwrap_or(path)
+        let Some(prefix) = self.strip_path_prefix.as_deref() else {
+            return path;
+        };
+        let Some(rest) = path.strip_prefix(prefix) else {
+            return path;
+        };
+        // Boundary cases that may strip: the remainder opens a new segment (`rest`
+        // starts with '/'), the prefix already consumed a segment boundary (it ends
+        // with '/' — the task-13 trailing-slash misconfig pin), or the path equals
+        // the prefix (strip to root). Everything else is the partial-segment class.
+        if rest.is_empty() || rest.starts_with('/') || prefix.ends_with('/') {
+            rest
         } else {
             path
         }
@@ -273,6 +309,129 @@ mod tests {
             !node.in_cooldown(Instant::now()),
             "a zero-duration failure must never take the node out of selection"
         );
+    }
+
+    /// F12-R3 [MAJOR 6 defense]: `mark_failed` sat on `Instant::now() + cooldown`,
+    /// which PANICS for a huge Duration (u64 seconds) — reachable on the request
+    /// path via handler.rs before any config bound existed. The saturating form must
+    /// exclude the node for the clamp cap (~24h) and let it recover after.
+    #[test]
+    fn mark_failed_with_huge_cooldown_saturates_to_the_cap() {
+        let node = cooldown_node();
+        node.mark_failed(Duration::from_secs(u64::MAX / 2));
+        let now = Instant::now();
+        assert!(node.in_cooldown(now), "a clamped failure still excludes the node");
+        assert!(
+            node.in_cooldown(now + Duration::from_secs(24 * 60 * 60 - 60)),
+            "the clamped window must span ~the 24h cap"
+        );
+        assert!(
+            !node.in_cooldown(now + Duration::from_secs(24 * 60 * 60 + 60)),
+            "the clamped window must expire like a window, not stick forever"
+        );
+    }
+
+    /// Minimal in-file tracing capture (registry.rs task-22 pattern): tracing-subscriber
+    /// is a regular dependency; thread-local `set_default` keeps this parallel-safe.
+    #[derive(Clone)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = Self;
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[test]
+    fn cooldown_clamp_logs_once_per_node() {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(CaptureWriter(buf.clone()))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let node = cooldown_node();
+        for _ in 0..3 {
+            node.mark_failed(Duration::from_secs(u64::MAX / 2));
+        }
+        drop(_guard);
+
+        let text = String::from_utf8(std::mem::take(&mut *buf.lock().unwrap())).unwrap();
+        let hits = text.matches("cooldown clamped to the safety cap").count();
+        assert_eq!(
+            hits, 1,
+            "one clamp episode on one node logs exactly once, got {hits}:\n{text}"
+        );
+
+        // A fresh node is a fresh episode: its first clamp must log too.
+        let buf2 = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber2 = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(CaptureWriter(buf2.clone()))
+            .finish();
+        let _guard2 = tracing::subscriber::set_default(subscriber2);
+        cooldown_node().mark_failed(Duration::from_secs(u64::MAX / 2));
+        drop(_guard2);
+        let text2 = String::from_utf8(std::mem::take(&mut *buf2.lock().unwrap())).unwrap();
+        assert_eq!(
+            text2.matches("cooldown clamped to the safety cap").count(),
+            1,
+            "a different node's clamp episode must log its own line:\n{text2}"
+        );
+    }
+
+    /// F12-R3 [MINOR]: `strip_prefix` is byte-prefix blind — a "/v1" node prefix ate
+    /// "/v15/foo" down to "5/foo". Only full path-segment boundaries may strip; the
+    /// task-13 trailing-slash pin ("/completions/" -> "v1/messages") must survive.
+    #[test]
+    fn effective_path_strips_only_on_full_segment_boundaries() {
+        let mut node = cooldown_node();
+        node.strip_path_prefix = Some("/v1".to_string());
+        assert_eq!(
+            node.effective_path("/v15/foo"),
+            "/v15/foo",
+            "a prefix ending mid-segment must not eat into the segment"
+        );
+        assert_eq!(node.effective_path("/v1x"), "/v1x", "same class, no tail");
+        assert_eq!(node.effective_path("/v1"), "", "path == prefix strips to root");
+        assert_eq!(node.effective_path("/v1/models"), "/models", "boundary strip kept");
+        assert_eq!(node.effective_path("/props"), "/props", "non-prefix untouched");
+
+        node.strip_path_prefix = Some("/completions/".to_string());
+        assert_eq!(
+            node.effective_path("/completions/v1/messages"),
+            "v1/messages",
+            "task-13 trailing-slash pin: prefix already consumed a boundary"
+        );
+
+        node.strip_path_prefix = Some("/日本".to_string());
+        assert_eq!(
+            node.effective_path("/日本/v1/models"),
+            "/v1/models",
+            "multibyte prefix still strips on a boundary"
+        );
+        assert_eq!(
+            node.effective_path("/日本X"),
+            "/日本X",
+            "multibyte mid-segment prefix refused"
+        );
+
+        node.strip_path_prefix = None;
+        assert_eq!(node.effective_path("/v1/models"), "/v1/models", "no prefix, no strip");
     }
 
     /// Wiring proof: a client produced by `build_node_client` must abort a blackholed

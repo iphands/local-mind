@@ -24,12 +24,23 @@
 //! to the prompt without restarting the proxy. The mtime-check/async-read mechanics
 //! live in the shared [`crate::prompt_cache::PromptFileCache`], not in this module.
 
-use crate::backends::BackendNode;
+use crate::backends::{BackendGuard, BackendNode};
 use crate::config::RepromptConfig;
 use crate::prompt_cache::{self, Refresh};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
+
+/// Safety cap on one reprompt loop's wall-clock budget (big-fix F12-R3, MAJOR-6
+/// defense-in-depth). The config validator bounds `max_total_ms`; this cap exists
+/// so the unchecked-deadline panic class dies even when a bound is missing, and so
+/// a huge budget means "generous 24h", never a 584-million-year deadline.
+const MAX_BUDGET_CAP: std::time::Duration = std::time::Duration::from_secs(24 * 60 * 60);
+
+/// The clamp warning is process-scoped (the engine is process-wide, not per-node)
+/// and logs once — a pathological config would otherwise emit a line per trigger.
+static BUDGET_CLAMP_LOGGED: AtomicBool = AtomicBool::new(false);
 
 pub struct RepromptEngine {
     /// Current prompt text — guarded for dynamic reload. The file's mtime is
@@ -335,11 +346,18 @@ impl RepromptEngine {
     /// original path through the node's effective_path, plus the original query verbatim.
     /// String concat, not Url::join — join truncates base-with-path nodes, which is why
     /// proxy_passthrough builds its URL the same way.
+    ///
+    /// The follow-up is a real in-flight backend request, so it holds a BackendGuard
+    /// for its duration — without one the node's `active_requests` gauge under-reported
+    /// every reprompt round (big-fix F12-R3). Gauge only: the concurrency semaphore's
+    /// permit belongs to the primary request and the handler holds it across the whole
+    /// `handle()` call, so the follow-up neither acquires nor can double-count one.
     async fn send_follow_up(
         req: &serde_json::Value,
-        backend: &BackendNode,
+        backend: &Arc<BackendNode>,
         path_and_query: &str,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
+        let _guard = BackendGuard::new(Arc::clone(backend));
         let (path, query) = match path_and_query.split_once('?') {
             Some((path, query)) => (path, Some(query)),
             None => (path_and_query, None),
@@ -400,7 +418,18 @@ impl RepromptEngine {
         let mut collected: Vec<String> = Vec::new();
         Self::push_text(&mut collected, Self::extract_assistant_text(&original_response));
         let mut current = original_response;
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(self.max_total_ms);
+        let now = tokio::time::Instant::now();
+        let budget = std::time::Duration::from_millis(self.max_total_ms);
+        if budget > MAX_BUDGET_CAP && !BUDGET_CLAMP_LOGGED.swap(true, Ordering::Relaxed) {
+            tracing::debug!(
+                max_total_ms = self.max_total_ms,
+                "Reprompt wall-clock budget exceeds the safety cap; using the 24h cap (logged once per process)"
+            );
+        }
+        // checked_add: even a clock sitting at its type limit cannot panic here;
+        // the None arm fails closed to `now`, which the loop reads as
+        // remaining.is_zero() and returns on immediately.
+        let deadline = now.checked_add(budget.min(MAX_BUDGET_CAP)).unwrap_or(now);
 
         for attempt in 0..self.max_retries {
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -1300,6 +1329,90 @@ mod tests {
             "budget ignored: {elapsed:?}"
         );
         assert_eq!(result["choices"][0]["message"]["content"], "the answer that must arrive fast");
+    }
+
+    // --- F12-R3: saturating wall-clock budget + guard accounting on follow-ups ---
+
+    #[tokio::test]
+    async fn test_huge_max_total_ms_saturates_instead_of_panicking() {
+        // [MAJOR 6 defense] The deadline was `Instant::now() +
+        // Duration::from_millis(max_total_ms)`: a u64::MAX budget PANICKED on
+        // overflow. Saturated, a huge budget must behave like a generous one:
+        // the follow-up round still runs and the continuation still merges.
+        let url = spawn_backend(vec![tool_call_resp()]).await;
+        let mut e = write_capable_engine(2);
+        e.max_total_ms = u64::MAX;
+        let result = e
+            .maybe_reprompt(
+                stop_resp("half"),
+                &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
+                &node_at(url).await,
+            )
+            .await;
+        assert_eq!(
+            result["choices"][0]["finish_reason"], "tool_calls",
+            "a saturated budget must still allow the follow-up round"
+        );
+        assert!(
+            result["choices"][0]["message"]["content"].as_str().unwrap().contains("half"),
+            "merge contract survives the saturation path"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_follow_up_holds_backend_guard_during_post() {
+        // [MINOR] send_follow_up POSTed without a BackendGuard, so the node's
+        // active_requests gauge under-reported every reprompt round. The backend
+        // itself samples the gauge on arrival: during the follow-up it must see 1,
+        // and after the loop the claim must be released (back to 0).
+        use axum::{routing::post, Json, Router};
+
+        let gauge = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(vec![stop_resp(
+            "DONE_NO_MORE_PROXY_REPROMPT",
+        )])));
+        let hits = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (route_gauge, route_queue, route_hits) = (gauge.clone(), queue.clone(), hits.clone());
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let (gauge, queue, hits) = (route_gauge.clone(), route_queue.clone(), route_hits.clone());
+                async move {
+                    hits.lock().unwrap().push(gauge.load(Ordering::Relaxed));
+                    let next = queue.lock().unwrap().pop_front();
+                    Json(next.unwrap_or_else(|| serde_json::json!({"error": "queue exhausted"})))
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut node = test_node();
+        node.url = format!("http://{addr}");
+        node.active_requests = gauge.clone();
+        let node = Arc::new(node);
+
+        let e = write_capable_engine(2);
+        e.maybe_reprompt(
+            stop_resp("half"),
+            &req_with_tools(&["read", "write"]),
+            "/v1/chat/completions",
+            &node,
+        )
+        .await;
+
+        assert_eq!(
+            hits.lock().unwrap().clone(),
+            vec![1],
+            "the node must count the follow-up while it is in flight"
+        );
+        assert_eq!(
+            gauge.load(Ordering::Relaxed),
+            0,
+            "the follow-up claim must be released when the loop ends"
+        );
     }
 
     // --- task 66: finish() guarantees a message [C-M2] ---
