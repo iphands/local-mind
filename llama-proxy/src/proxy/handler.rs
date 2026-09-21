@@ -9,7 +9,7 @@ use axum::{
 use std::io::Read;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tokio::sync::OwnedSemaphorePermit;
 
 use super::server::ProxyState;
@@ -321,6 +321,40 @@ impl ProxyHandler {
         }
     }
 
+    /// Cooldown window for the group a request was routed through: per-group
+    /// `failure_cooldown_secs`, 30s when the group is unknown (single-backend mode,
+    /// or a group renamed out from under a live guard).
+    fn failure_cooldown(&self, group_name: Option<&str>) -> Duration {
+        let secs = group_name
+            .and_then(|name| self.state.config.backends.as_ref()?.get(name))
+            .map_or(30, |group| group.failure_cooldown_secs);
+        Duration::from_secs(secs)
+    }
+
+    /// Take the node out of load-balancer selection after a backend failure
+    /// (big-fix E-M1). Wraps around the existing error envelopes; touches nothing else.
+    fn mark_backend_failed(&self, node: &BackendNode, group_name: Option<&str>, reason: &str) {
+        let cooldown = self.failure_cooldown(group_name);
+        tracing::warn!(
+            backend_url = %node.base_url(),
+            reason,
+            cooldown_secs = cooldown.as_secs(),
+            "Backend failure marks the node out of selection"
+        );
+        node.mark_failed(cooldown);
+    }
+
+    /// Record one post-forward backend status on the node's runtime health:
+    /// backend-originated 429/5xx cool the node down, 2xx proves it alive.
+    /// The proxy's own at-capacity 429 never reaches here (it precedes selection).
+    fn observe_backend_outcome(&self, node: &BackendNode, group_name: Option<&str>, status: StatusCode) {
+        if status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+            self.mark_backend_failed(node, group_name, "backend_status");
+        } else if status.is_success() {
+            node.mark_healthy();
+        }
+    }
+
     /// Handle an incoming request
     pub async fn handle(&self, req: Request<Body>) -> Response {
         let start = Instant::now();
@@ -412,7 +446,9 @@ impl ProxyHandler {
                 for (name, value) in headers.iter() {
                     req.headers_mut().insert(name.clone(), value.clone());
                 }
-                return self.proxy_passthrough(req, &backend.node).await;
+                return self
+                    .proxy_passthrough(req, &backend.node, backend.group_name.as_deref())
+                    .await;
             }
 
             // Proxy-local metrics endpoint (distinct from backend's /metrics pass-through)
@@ -696,6 +732,7 @@ impl ProxyHandler {
             Ok(resp) => resp,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to connect to backend");
+                self.mark_backend_failed(&backend.node, backend.group_name.as_deref(), "connect_error");
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(err_envelope(
@@ -709,6 +746,7 @@ impl ProxyHandler {
 
         // Log backend response status and headers for debugging
         let backend_status = backend_response.status();
+        self.observe_backend_outcome(&backend.node, backend.group_name.as_deref(), backend_status);
         tracing::debug!(
             status = %backend_status,
             headers = ?backend_response.headers(),
@@ -1231,7 +1269,7 @@ impl ProxyHandler {
 
     /// Simple pass-through with no fix application or stats collection
     /// Used for monitoring endpoints like /props, /slots, /health
-    async fn proxy_passthrough(&self, req: Request<Body>, backend: &Arc<BackendNode>) -> Response {
+    async fn proxy_passthrough(&self, req: Request<Body>, backend: &Arc<BackendNode>, group_name: Option<&str>) -> Response {
         let method = req.method().clone();
         let uri = req.uri().clone();
         let headers = req.headers().clone();
@@ -1284,6 +1322,7 @@ impl ProxyHandler {
         let backend_response = match backend_req.send().await {
             Ok(resp) => resp,
             Err(e) => {
+                self.mark_backend_failed(backend, group_name, "connect_error");
                 return (
                     StatusCode::BAD_GATEWAY,
                     Json(err_envelope("backend_connect_error", format!("Backend error: {}", e))),
@@ -1294,6 +1333,7 @@ impl ProxyHandler {
 
         // Pass through response
         let status = backend_response.status();
+        self.observe_backend_outcome(backend, group_name, status);
         let headers = backend_response.headers().clone();
         let raw_body = match backend_response.bytes().await {
             Ok(b) => b,
@@ -1353,6 +1393,7 @@ mod tests {
     use crate::fixes::FixRegistry;
     use std::collections::HashMap;
     use std::sync::atomic::AtomicUsize;
+    use std::time::Duration;
 
     #[allow(dead_code)]
     fn create_test_handler_with_streaming(streaming_config: StreamingConfig) -> ProxyHandler {
@@ -1400,6 +1441,8 @@ mod tests {
             active_requests: Arc::new(AtomicUsize::new(0)),
             strip_path_prefix: None,
             temperature: None,
+            healthy: std::sync::atomic::AtomicBool::new(true),
+            cooldown_until: std::sync::Mutex::new(std::time::Instant::now()),
         };
         let load_balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(default_node)]).unwrap());
         let fix_registry = FixRegistry::new();
@@ -1470,6 +1513,8 @@ mod tests {
             active_requests: Arc::new(AtomicUsize::new(0)),
             strip_path_prefix: None,
             temperature: None,
+            healthy: std::sync::atomic::AtomicBool::new(true),
+            cooldown_until: std::sync::Mutex::new(std::time::Instant::now()),
         }
     }
 
@@ -1832,7 +1877,7 @@ mod tests {
         let node = node_at_port(1);
 
         let res = handler
-            .proxy_passthrough(request_with_body(Method::GET, "/health", exploding_body()), &node)
+            .proxy_passthrough(request_with_body(Method::GET, "/health", exploding_body()), &node, None)
             .await;
 
         assert_error_envelope(res, StatusCode::BAD_REQUEST, "invalid_request_json").await;
@@ -2008,7 +2053,11 @@ mod tests {
         let node = node_at_port(1);
 
         let res = handler
-            .proxy_passthrough(request_with_body(Method::GET, "/health", oversized_stream_body(11)), &node)
+            .proxy_passthrough(
+                request_with_body(Method::GET, "/health", oversized_stream_body(11)),
+                &node,
+                None,
+            )
             .await;
 
         let body = assert_error_envelope(res, StatusCode::PAYLOAD_TOO_LARGE, "request_body_too_large").await;
@@ -2521,5 +2570,91 @@ mod tests {
 
         assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
         assert_eq!(handler.state.anthropic_buffered_responses_total.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn backend_5xx_marks_the_node_into_cooldown() {
+        let port = one_shot_backend(raw_http_response(
+            "502 Bad Gateway",
+            &[("content-type", "application/json")],
+            br#"{"error":{"type":"upstream","message":"backend exploded"}}"#,
+        ))
+        .await;
+        let node = node_at_port(port);
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_eq!(
+            res.status(),
+            StatusCode::BAD_GATEWAY,
+            "the backend status must still be forwarded"
+        );
+        assert!(
+            node.in_cooldown(Instant::now()),
+            "a backend 5xx must park the selected node in failure cooldown"
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_429_marks_the_node_into_cooldown() {
+        let port = one_shot_backend(raw_http_response(
+            "429 Too Many Requests",
+            &[("content-type", "application/json")],
+            br#"{"error":{"type":"rate_limited","message":"backend at capacity"}}"#,
+        ))
+        .await;
+        let node = node_at_port(port);
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(
+            node.in_cooldown(Instant::now()),
+            "a backend 429 must cool the node down, the proxy's own limiter 429 is a different signal"
+        );
+    }
+
+    #[tokio::test]
+    async fn backend_connect_failure_marks_the_node_into_cooldown() {
+        let node = node_at_port(1);
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_error_envelope(res, StatusCode::BAD_GATEWAY, "backend_connect_error").await;
+        assert!(node.in_cooldown(Instant::now()), "a refused connect must cool the node down");
+    }
+
+    #[tokio::test]
+    async fn backend_2xx_clears_the_failure_cooldown() {
+        let port = one_shot_backend(raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json")],
+            br#"{"id":"ok","choices":[]}"#,
+        ))
+        .await;
+        let node = node_at_port(port);
+        node.mark_failed(Duration::from_secs(600));
+        assert!(node.in_cooldown(Instant::now()), "precondition: node starts cooled");
+
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(completion_request()).await;
+
+        assert!(
+            res.status().is_success(),
+            "the fake backend answers 200, got {}",
+            res.status()
+        );
+        assert!(
+            !node.in_cooldown(Instant::now()),
+            "a 2xx proves the node alive and must end its cooldown"
+        );
     }
 }

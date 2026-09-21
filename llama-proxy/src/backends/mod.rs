@@ -68,6 +68,8 @@ mod tests {
             active_requests: Arc::new(AtomicUsize::new(0)),
             strip_path_prefix: None,
             temperature: None,
+            healthy: std::sync::atomic::AtomicBool::new(true),
+            cooldown_until: std::sync::Mutex::new(std::time::Instant::now()),
         })
     }
 
@@ -108,6 +110,7 @@ mod tests {
             BackendGroupConfig {
                 mappings: vec![],
                 strategy: "round_robin".to_string(),
+                failure_cooldown_secs: 30,
                 nodes: vec![BackendNodeConfig {
                     url: "http://localhost:8080".to_string(),
                     timeout_seconds: 300,

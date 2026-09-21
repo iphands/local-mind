@@ -148,6 +148,7 @@ mod tests {
         BackendGroupConfig {
             mappings: mappings.iter().map(|s| s.to_string()).collect(),
             strategy: "round_robin".to_string(),
+            failure_cooldown_secs: 30,
             nodes: urls
                 .iter()
                 .map(|url| BackendNodeConfig {
@@ -263,6 +264,7 @@ mod tests {
             BackendGroupConfig {
                 mappings: vec!["haiku".to_string()],
                 strategy: "round_robin".to_string(),
+                failure_cooldown_secs: 30,
                 nodes: vec![
                     BackendNodeConfig {
                         url: "http://localhost:8080".to_string(),

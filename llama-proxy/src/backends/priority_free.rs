@@ -2,17 +2,21 @@
 //!
 //! Always dispatches to the lowest-index backend that is not currently handling a request.
 //! If all backends are busy, picks the one with the fewest active requests (lowest index wins ties).
+//! Nodes in failure cooldown (big-fix E-M1) are skipped ahead of any claim; when every node is
+//! cooled, the soonest-to-recover one serves with a warning instead of refusing the request.
 
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use super::balancer::{BackendGuard, LoadBalancer};
-use super::node::BackendNode;
+use super::node::{soonest_recovering_node, BackendNode};
 use crate::config::NoMatchingBackend;
 
 /// Priority-free load balancer — always uses the lowest-index free node.
 pub struct PriorityFreeBalancer {
     nodes: Vec<Arc<BackendNode>>,
+    all_cooled_fallbacks: AtomicU64,
 }
 
 impl PriorityFreeBalancer {
@@ -20,17 +24,36 @@ impl PriorityFreeBalancer {
         if nodes.is_empty() {
             return Err("PriorityFreeBalancer requires at least one node".into());
         }
-        Ok(Self { nodes })
+        Ok(Self {
+            nodes,
+            all_cooled_fallbacks: AtomicU64::new(0),
+        })
+    }
+
+    fn warn_all_cooled(&self) {
+        let hits = self.all_cooled_fallbacks.fetch_add(1, Ordering::Relaxed) + 1;
+        if hits == 1 || hits.is_multiple_of(100) {
+            tracing::warn!(
+                fallbacks = hits,
+                nodes = self.nodes.len(),
+                "Every priority_free node is in failure cooldown - serving from the soonest to recover"
+            );
+        }
     }
 }
 
 impl LoadBalancer for PriorityFreeBalancer {
     fn select(&self, _model: Option<&str>) -> Result<BackendGuard, NoMatchingBackend> {
         // Model routing is handled by GroupedLoadBalancer; this balancer just selects from its nodes
-        // Claim the first node that is idle. compare_exchange is the atomic test-and-set: it both
-        // observes 0 and reserves the slot, so two concurrent selects can never both free-claim the
-        // same idle node. Lowest index is attempted first, so the first free node wins ties.
+        let now = Instant::now();
+        // Claim the first node that is neither cooled nor busy. compare_exchange is the atomic
+        // test-and-set: it both observes 0 and reserves the slot, so two concurrent selects can
+        // never both free-claim the same idle node. Lowest index is attempted first, so the first
+        // free node wins ties.
         for node in &self.nodes {
+            if node.in_cooldown(now) {
+                continue;
+            }
             if node
                 .active_requests
                 .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
@@ -42,30 +65,48 @@ impl LoadBalancer for PriorityFreeBalancer {
             }
         }
 
-        // All busy: increment-then-backtrack to find the least-loaded node with no unclaimed window.
-        // Every candidate is reserved (fetch_add) the instant it is considered, so a concurrent
-        // select never mistakes one for free mid-scan; the fetch_add return value is that candidate's
-        // load at arrival. Only a strictly lower load supersedes the current best, so the lowest index
-        // wins ties. After the scan the winner keeps its reservation and every candidate the winner
-        // was chosen over is released (fetch_sub). Releasing ALL non-selected candidates (not just
-        // those momentarily held as best) is what makes each select net exactly +1: a candidate that
-        // tied the best was still reserved and must be released, or it leaks a phantom +1.
-        let mut best_idx = 0usize;
-        let mut best_load = self.nodes[0].active_requests.fetch_add(1, Ordering::AcqRel);
-        for (idx, node) in self.nodes.iter().enumerate().skip(1) {
+        // All busy (or cooled): increment-then-backtrack to find the least-loaded node with no
+        // unclaimed window. Every non-cooled candidate is reserved (fetch_add) the instant it is
+        // considered, so a concurrent select never mistakes one for free mid-scan; the fetch_add
+        // return value is that candidate's load at arrival. Only a strictly lower load supersedes
+        // the current best, so the lowest index wins ties. After the scan the winner keeps its
+        // reservation and every other RESERVED candidate is released. Releasing ALL non-selected
+        // candidates (not just those momentarily held as best) is what makes each select net
+        // exactly +1: a candidate that tied the best was still reserved and must be released, or
+        // it leaks a phantom +1. Cooled nodes are never incremented, and the released set is the
+        // recorded set of incremented indices - so a mark_healthy landing between the two loops
+        // can never make the release loop subtract a node that was never added.
+        let mut best_idx: Option<usize> = None;
+        let mut best_load = usize::MAX;
+        let mut reserved: Vec<usize> = Vec::with_capacity(self.nodes.len());
+        for (idx, node) in self.nodes.iter().enumerate() {
+            if node.in_cooldown(now) {
+                continue;
+            }
             let load = node.active_requests.fetch_add(1, Ordering::AcqRel);
+            reserved.push(idx);
             if load < best_load {
-                best_idx = idx;
+                best_idx = Some(idx);
                 best_load = load;
             }
         }
-        for (idx, node) in self.nodes.iter().enumerate() {
-            if idx != best_idx {
-                node.active_requests.fetch_sub(1, Ordering::AcqRel);
+
+        match best_idx {
+            Some(best) => {
+                for &idx in &reserved {
+                    if idx != best {
+                        self.nodes[idx].active_requests.fetch_sub(1, Ordering::AcqRel);
+                    }
+                }
+                Ok(BackendGuard::from_claimed(self.nodes[best].clone()))
+            }
+            None => {
+                // Every node is cooled: there is nowhere healthy to send this request, so serve
+                // from the soonest to recover rather than refuse it outright.
+                self.warn_all_cooled();
+                Ok(BackendGuard::new(soonest_recovering_node(&self.nodes)))
             }
         }
-
-        Ok(BackendGuard::from_claimed(self.nodes[best_idx].clone()))
     }
 
     fn strategy_name(&self) -> &'static str {
@@ -81,6 +122,7 @@ impl LoadBalancer for PriorityFreeBalancer {
 mod tests {
     use super::*;
     use std::sync::atomic::AtomicUsize;
+    use std::time::{Duration, Instant};
 
     fn make_test_node(url: &str) -> Arc<BackendNode> {
         Arc::new(BackendNode {
@@ -92,6 +134,8 @@ mod tests {
             active_requests: Arc::new(AtomicUsize::new(0)),
             strip_path_prefix: None,
             temperature: None,
+            healthy: std::sync::atomic::AtomicBool::new(true),
+            cooldown_until: std::sync::Mutex::new(std::time::Instant::now()),
         })
     }
 
@@ -403,6 +447,102 @@ mod tests {
             (settled_a, settled_b),
             (BASELINE_A, BASELINE_B),
             "after all guards drop both counters must return exactly to their busy baseline"
+        );
+    }
+
+    #[test]
+    fn cooled_node_is_skipped_while_a_healthy_peer_wins() {
+        let cooled = make_test_node("http://localhost:8080");
+        let healthy = make_test_node("http://localhost:8081");
+        let t0 = Instant::now();
+        cooled.mark_failed(Duration::from_secs(30));
+
+        let balancer = PriorityFreeBalancer::new(vec![cooled.clone(), healthy.clone()]).unwrap();
+        assert_eq!(
+            balancer.select(None).unwrap().node.base_url(),
+            "http://localhost:8081",
+            "the cooled node is lowest-index and free, yet the healthy peer must win"
+        );
+
+        assert!(
+            cooled.in_cooldown(t0 + Duration::from_secs(1)),
+            "1s into the window the node must still be excluded"
+        );
+        assert!(
+            !cooled.in_cooldown(t0 + Duration::from_secs(31)),
+            "after the window the node must be selectable again"
+        );
+    }
+
+    #[test]
+    fn all_cooled_fallback_returns_the_soonest_expiry_node() {
+        let long = make_test_node("http://localhost:8080");
+        let short = make_test_node("http://localhost:8081");
+        long.mark_failed(Duration::from_secs(60));
+        short.mark_failed(Duration::from_secs(30));
+
+        let balancer = PriorityFreeBalancer::new(vec![long.clone(), short.clone()]).unwrap();
+        let guard = balancer.select(None).unwrap();
+        assert_eq!(
+            guard.node.base_url(),
+            "http://localhost:8081",
+            "with every node cooled, the soonest-expiring one must serve"
+        );
+        assert_eq!(
+            short.active_requests.load(Ordering::Acquire),
+            1,
+            "the fallback pick must still hold exactly one claim"
+        );
+        assert_eq!(
+            long.active_requests.load(Ordering::Acquire),
+            0,
+            "the non-picked node must stay untouched"
+        );
+    }
+
+    #[test]
+    fn single_cooled_node_still_serves_as_soonest_expiry() {
+        let only = make_test_node("http://localhost:8080");
+        only.mark_failed(Duration::from_secs(30));
+
+        let balancer = PriorityFreeBalancer::new(vec![only.clone()]).unwrap();
+        let guard = balancer.select(None).unwrap();
+        assert_eq!(
+            guard.node.base_url(),
+            "http://localhost:8080",
+            "all nodes cooled must degrade to serving, not refusing"
+        );
+        assert_eq!(only.active_requests.load(Ordering::Acquire), 1);
+        drop(guard);
+        assert_eq!(only.active_requests.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn two_failures_keep_the_node_skipped_until_it_recovers() {
+        // 2x502 simulation through the REAL mark_failed, seam-driven, no network.
+        let sick = make_test_node("http://localhost:8080");
+        let peer = make_test_node("http://localhost:8081");
+        let cooldown = Duration::from_secs(30);
+
+        sick.mark_failed(cooldown);
+        assert!(sick.in_cooldown(Instant::now()), "the first 502 must start the cooldown");
+
+        let first_expiry = sick.cooldown_expiry();
+        sick.mark_failed(cooldown);
+        assert!(
+            sick.cooldown_expiry() >= first_expiry,
+            "the second 502 must re-arm the window from the second failure"
+        );
+
+        let balancer = PriorityFreeBalancer::new(vec![sick.clone(), peer.clone()]).unwrap();
+        assert_eq!(balancer.select(None).unwrap().node.base_url(), "http://localhost:8081");
+
+        sick.mark_healthy();
+        assert!(!sick.in_cooldown(Instant::now()), "a success must end the window");
+        assert_eq!(
+            balancer.select(None).unwrap().node.base_url(),
+            "http://localhost:8080",
+            "priority order must be restored once the node recovers"
         );
     }
 }

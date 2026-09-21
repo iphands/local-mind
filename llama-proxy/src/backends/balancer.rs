@@ -95,6 +95,8 @@ mod tests {
             active_requests: Arc::new(AtomicUsize::new(0)),
             strip_path_prefix: None,
             temperature: None,
+            healthy: std::sync::atomic::AtomicBool::new(true),
+            cooldown_until: std::sync::Mutex::new(std::time::Instant::now()),
         })
     }
 

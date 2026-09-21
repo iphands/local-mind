@@ -174,12 +174,20 @@ pub struct BackendGroupConfig {
     /// Load balancing strategy (round_robin or priority_free)
     #[serde(default = "default_strategy")]
     pub strategy: String,
+    /// How long a node that just failed (connect error / 429 / 5xx) stays out of
+    /// selection. 0 disables cooldown entirely.
+    #[serde(default = "default_failure_cooldown_secs")]
+    pub failure_cooldown_secs: u64,
     /// List of backend nodes in this group
     pub nodes: Vec<BackendNodeConfig>,
 }
 
 fn default_strategy() -> String {
     "round_robin".to_string()
+}
+
+fn default_failure_cooldown_secs() -> u64 {
+    30
 }
 
 /// Multi-backend configuration - named groups with per-group strategy
@@ -1093,5 +1101,51 @@ timeout_seconds: 300
         assert_eq!(node.url, "http://localhost:8080");
         assert_eq!(node.timeout_seconds, 300);
         // mapping field no longer exists
+    }
+
+    #[test]
+    fn test_failure_cooldown_secs_defaults_to_30_when_absent() {
+        let yaml = r#"
+main:
+  mappings: []
+  nodes:
+    - url: "http://localhost:8080"
+"#;
+        let backends: BackendsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            backends.get("main").unwrap().failure_cooldown_secs,
+            30,
+            "an absent failure_cooldown_secs must default to a 30s cooldown"
+        );
+    }
+
+    #[test]
+    fn test_failure_cooldown_secs_zero_is_kept_as_zero() {
+        let yaml = r#"
+main:
+  mappings: []
+  failure_cooldown_secs: 0
+  nodes:
+    - url: "http://localhost:8080"
+"#;
+        let backends: BackendsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            backends.get("main").unwrap().failure_cooldown_secs,
+            0,
+            "0 disables cooldown and must not be replaced by the default"
+        );
+    }
+
+    #[test]
+    fn test_failure_cooldown_secs_explicit_value_is_kept() {
+        let yaml = r#"
+main:
+  mappings: []
+  failure_cooldown_secs: 90
+  nodes:
+    - url: "http://localhost:8080"
+"#;
+        let backends: BackendsConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(backends.get("main").unwrap().failure_cooldown_secs, 90);
     }
 }
