@@ -1768,4 +1768,139 @@ mod tests {
         // Verify this fix uses the default INFO log level
         assert_eq!(fix.log_level(), FixLogLevel::Info);
     }
+
+    // ---- Multibyte regression tests for the buffered `apply()` path ----
+    //
+    // These pin the fix's OWN char-safety on the schema-based truncation path
+    // (`fix_arguments` -> `find_string_end` -> `&args[..end_pos]` byte slicing).
+    // The task-2 stats truncator is irrelevant here: a panic or a wrong slice in
+    // this module would fail these tests independently of that code.
+    //
+    // Every payload below is INVALID JSON whose SECOND `filePath` key is malformed
+    // (missing colon/quotes), which is what routes `fix_arguments` through the
+    // truncation path rather than the serde round-trip. `content` is placed BEFORE
+    // `filePath` so the truncation preserves it, proving first-wins + content-kept.
+
+    /// Full OpenAI response carrying one Write tool call whose `arguments` string is
+    /// malformed and contains CJK in both the content and the winning filePath value.
+    fn cjk_multibyte_response() -> Value {
+        let args = r#"{"content":"中文测试内容","filePath":"/x/中文测试目录/file.rs","filePath"/x/第二个坏路径"}"#;
+        serde_json::json!({
+            "id": "chatcmpl-cjk",
+            "choices": [{
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "tool_calls": [{
+                        "id": "call_cjk_0",
+                        "type": "function",
+                        "index": 0,
+                        "function": { "name": "write", "arguments": args }
+                    }]
+                }
+            }]
+        })
+    }
+
+    #[test]
+    fn test_apply_buffered_cjk_multibyte_first_wins() {
+        // Given a buffered response whose tool-call arguments hold CJK content and a
+        // CJK filePath followed by a malformed duplicate filePath.
+        let fix = ToolcallBadFilepathFix::new();
+        let response = cjk_multibyte_response();
+        assert!(fix.applies(&response), "CJK payload must be detected as malformed");
+
+        // When the buffered fix runs. (A panic here fails the test = no-panic proof.)
+        let (result, action) = fix.apply(response);
+
+        // Then the rebuilt arguments are valid JSON, first-wins, and content survives.
+        let args_out = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments must remain a string");
+        assert!(fix.is_valid_json(args_out), "CJK fix produced invalid JSON: {args_out}");
+        let parsed: Value = serde_json::from_str(args_out).expect("fixed args must parse");
+        assert_eq!(
+            parsed["filePath"].as_str(),
+            Some("/x/中文测试目录/file.rs"),
+            "first (multibyte) filePath must win"
+        );
+        assert_eq!(
+            parsed["content"].as_str(),
+            Some("中文测试内容"),
+            "multibyte content before filePath must be preserved"
+        );
+        assert!(matches!(action, FixAction::Fixed { .. }), "action must be Fixed");
+    }
+
+    #[test]
+    fn test_apply_buffered_emoji_4byte_multibyte() {
+        // Given arguments whose content and winning filePath contain 4-byte UTF-8 emoji.
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"content":"写入🀄内容🎉","filePath":"/x/🀄目录/文件.rs","filePath"/x/坏🎉"}"#;
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "name": "write", "arguments": args }
+                    }]
+                }
+            }]
+        });
+        assert!(fix.applies(&response));
+
+        // When (panic on a 4-byte char boundary would fail here).
+        let (result, action) = fix.apply(response);
+
+        // Then valid JSON, first-wins, emoji content preserved.
+        let args_out = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments must remain a string");
+        assert!(fix.is_valid_json(args_out), "emoji fix produced invalid JSON: {args_out}");
+        let parsed: Value = serde_json::from_str(args_out).expect("fixed args must parse");
+        assert_eq!(parsed["filePath"].as_str(), Some("/x/🀄目录/文件.rs"));
+        assert_eq!(parsed["content"].as_str(), Some("写入🀄内容🎉"));
+        assert!(matches!(action, FixAction::Fixed { .. }));
+    }
+
+    #[test]
+    fn test_apply_buffered_escaped_unicode_probe() {
+        // Given arguments whose winning filePath carries \uXXXX escapes (raw backslash-u
+        // inside the arguments string) followed by a malformed duplicate filePath.
+        // \u4e2d\u6587\u4ef6 decodes to 中文件.
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"content":"esc content","filePath":"/x/\u4e2d\u6587\u4ef6/file.rs","filePath"/x/bad"}"#;
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "name": "write", "arguments": args }
+                    }]
+                }
+            }]
+        });
+        assert!(fix.applies(&response));
+
+        // When.
+        let (result, action) = fix.apply(response);
+
+        // Then the truncation kept the escape-sequence value intact and serde decodes it.
+        let args_out = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments must remain a string");
+        assert!(
+            fix.is_valid_json(args_out),
+            "escaped-unicode fix produced invalid JSON: {args_out}"
+        );
+        let parsed: Value = serde_json::from_str(args_out).expect("fixed args must parse");
+        assert_eq!(
+            parsed["filePath"].as_str(),
+            Some("/x/中文件/file.rs"),
+            r"\uXXXX escapes must survive truncation and decode"
+        );
+        assert_eq!(parsed["content"].as_str(), Some("esc content"));
+        assert!(matches!(action, FixAction::Fixed { .. }));
+    }
 }
