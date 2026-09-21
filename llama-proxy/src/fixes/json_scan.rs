@@ -24,8 +24,9 @@
 //! `{"meta":{"filePath":"/x"}}` it counts a nested-only key. The scanner
 //! returns 0 for both; see `key_appearance_inside_string_value_is_zero`.
 
-// Production callers are intentionally absent until tasks 24/25 wire the fixes;
-// the tests below exercise every item, and clippy/tests must stay green.
+// Both entry points have production callers since tasks 24/25 wired the fixes,
+// but `KeySpan::key` is read only by the rebuild-contract test below (task 25's
+// consumer reads `.value`), so the dead_code allow stays.
 #![allow(dead_code)]
 
 use serde::de::{IgnoredAny, MapAccess, Visitor};

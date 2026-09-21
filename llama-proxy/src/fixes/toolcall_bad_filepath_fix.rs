@@ -27,7 +27,7 @@
 //! `}` or `"_":null}`), NOT the full fixed JSON. Clients accumulate deltas, so
 //! sending full JSON would duplicate content. See `calculate_completion_delta()`.
 
-use super::json_scan::top_level_key_count;
+use super::json_scan::{top_level_key_count, top_level_key_spans};
 use super::registry::{truncate_snippet, SnippetLimit};
 use super::{FixAction, FixError, ResponseFix, ToolCallAccumulator};
 use serde_json::Value;
@@ -68,8 +68,16 @@ impl ToolcallBadFilepathFix {
     /// whole payload here and was reported as Fixed (B-H1); the fixer now reports
     /// the failure so callers keep the ORIGINAL arguments.
     fn fix_arguments(&self, args: &str) -> Result<String, FixError> {
-        // Valid JSON? Pass through (normalize it)
-        if let Ok(json) = serde_json::from_str::<Value>(args) {
+        // Valid JSON? Normalize it — but resolve duplicate depth-1 `filePath`
+        // keys FIRST-wins ([B-M2]), the same winner the streaming accumulator
+        // gives the client. Non-duplicate fields keep this serde round-trip
+        // byte-for-byte; only the winner choice is decided here.
+        if let Ok(mut json) = serde_json::from_str::<Value>(args) {
+            if let Some(first) = Self::first_wins_filepath(args) {
+                if let Value::Object(map) = &mut json {
+                    map.insert("filePath".to_string(), first);
+                }
+            }
             return serde_json::to_string(&json)
                 .map_err(|e| FixError::Rebuild(format!("re-serializing parsed arguments failed: {e}")));
         }
@@ -109,6 +117,27 @@ impl ToolcallBadFilepathFix {
             "schema-truncation candidate is still invalid JSON: {}",
             truncate_snippet(&result, 200, SnippetLimit::Chars)
         )))
+    }
+
+    /// Second parse pass over the RAW `args` using the task-23 structural
+    /// scanner: ordered depth-1 `filePath` spans. serde_json's `Value` map
+    /// collapses duplicate keys to the LAST occurrence, while the streaming
+    /// accumulator's client keeps the FIRST value — its bytes were already
+    /// forwarded before the completion delta closes the object (delta doc in
+    /// [`ResponseFix::apply_stream_with_accumulation_default`]). [B-M2]
+    ///
+    /// `Some` only when a duplicate exists; `None` leaves serde's collapsed
+    /// value in place, which is already the correct single winner. The value
+    /// parse cannot fail behind the valid-JSON gate that guards this call —
+    /// the scanner emits spans only for structurally sound input — and its
+    /// degenerate arm merely preserves the pre-existing behavior anyway.
+    fn first_wins_filepath(args: &str) -> Option<Value> {
+        let spans = top_level_key_spans(args, "filePath");
+        let (first, rest) = spans.split_first()?;
+        if rest.is_empty() {
+            return None;
+        }
+        args.get(first.value.clone()).and_then(|raw| serde_json::from_str(raw).ok())
     }
 
     /// Find the end of a JSON string value starting from position after colon.
@@ -2229,6 +2258,154 @@ mod tests {
                 "apply() and apply_with_context() must agree byte-for-byte for: {args}"
             );
             assert_eq!(format!("{apply_action:?}"), format!("{ctx_action:?}"));
+        }
+    }
+
+    // ============================================================
+    // TASK 25 (B-M2): buffered duplicate keys keep FIRST, matching streaming
+    // ============================================================
+    // A valid-JSON payload with duplicate depth-1 `filePath` keys collapsed to
+    // the LAST occurrence inside serde_json's Value map, while the streaming
+    // accumulator's client keeps the FIRST value (its bytes were forwarded
+    // before the completion delta closes the object - delta doc in
+    // apply_stream_with_accumulation_default). Both paths must agree: FIRST.
+
+    #[test]
+    fn test_buffered_duplicate_keeps_first_matching_streaming_winner() {
+        use super::ToolCallAccumulator;
+
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"filePath":"/first","content":"x","filePath":"/last"}"#;
+
+        // Given: a valid-JSON duplicate payload (detection is structural).
+        serde_json::from_str::<Value>(args).expect("dup fixture must be valid JSON");
+        assert!(fix.is_malformed(args), "duplicate keys must trigger");
+
+        // When: the buffered path repairs it.
+        let fixed = fix.fix_arguments(args).expect("valid dup stays repairable");
+        let parsed: Value = serde_json::from_str(&fixed).expect("buffered fix must be valid JSON");
+
+        // Then: the FIRST value wins - the literal documented streaming winner.
+        assert_eq!(
+            parsed["filePath"].as_str(),
+            Some("/first"),
+            "buffered winner must be the first occurrence, fixed = {fixed}"
+        );
+        assert_eq!(parsed["content"].as_str(), Some("x"), "non-dup field must survive");
+
+        // When: the same payload arrives as two streamed chunks and the client
+        // accumulates the forwarded deltas (Claude Code / Opencode behavior).
+        let mut accumulator = ToolCallAccumulator::new();
+        let chunk1 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"filePath\":\"/first\",\"content\":\"x\","}}]}}]});
+        let chunk2 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"filePath\":\"/last\"}"}}]}}]});
+        let (result1, _) = fix.apply_stream_with_accumulation_default(chunk1, &mut accumulator);
+        let (result2, action2) = fix.apply_stream_with_accumulation_default(chunk2, &mut accumulator);
+        assert!(action2.detected(), "fix must trigger on the completing chunk");
+
+        let mut client = result1["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        client.push_str(
+            result2["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
+                .as_str()
+                .unwrap(),
+        );
+        let streamed: Value = serde_json::from_str(&client).expect("client accumulation must be valid JSON");
+
+        // Then: BOTH paths carry the SAME literal winner (the spec's proof).
+        assert_eq!(
+            streamed["filePath"].as_str(),
+            Some("/first"),
+            "streaming winner must be the first occurrence, client accumulated = {client}"
+        );
+        assert_eq!(
+            parsed["filePath"], streamed["filePath"],
+            "buffered and streaming must agree on the duplicate-key winner"
+        );
+    }
+
+    #[test]
+    fn test_buffered_duplicate_cjk_first_value_wins() {
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"content":"你好世界","filePath":"/第一/文件.rs","filePath":"/第二"}"#;
+        serde_json::from_str::<Value>(args).expect("CJK dup fixture must be valid JSON");
+
+        let response = fuzz_response(Some(args));
+        let (result, action) = fix.apply(response);
+
+        let args_out = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments must remain a string");
+        let parsed: Value = serde_json::from_str(args_out).expect("CJK dup fix must be valid JSON");
+        assert_eq!(
+            parsed["filePath"].as_str(),
+            Some("/第一/文件.rs"),
+            "multibyte first value must win, got {args_out}"
+        );
+        assert_eq!(parsed["content"].as_str(), Some("你好世界"));
+        assert!(matches!(action, FixAction::Fixed { .. }));
+    }
+
+    #[test]
+    fn test_buffered_triple_duplicate_keeps_first() {
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"filePath":"/one","content":"x","filePath":"/two","filePath":"/three"}"#;
+
+        let fixed = fix.fix_arguments(args).expect("triple dup stays repairable");
+        let parsed: Value = serde_json::from_str(&fixed).expect("triple dup fix must be valid JSON");
+        assert_eq!(parsed["filePath"].as_str(), Some("/one"), "got {fixed}");
+        assert_eq!(parsed["content"].as_str(), Some("x"));
+        assert_eq!(top_level_key_count(&fixed, "filePath"), 1, "all later dups dropped");
+    }
+
+    #[test]
+    fn test_buffered_escaped_key_duplicate_first_wins() {
+        // The task-23 scanner decodes key escapes (`file\u0050ath` == "filePath"),
+        // so the escaped key FIRST is the winner the scanner reports.
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"file\u0050ath":"/first","filePath":"/last"}"#;
+        serde_json::from_str::<Value>(args).expect("escaped-key dup fixture must be valid JSON");
+        assert!(fix.is_malformed(args), "escaped-key duplicate must trigger");
+
+        let fixed = fix.fix_arguments(args).expect("escaped-key dup stays repairable");
+        let parsed: Value = serde_json::from_str(&fixed).expect("escaped-key dup fix must be valid JSON");
+        assert_eq!(parsed["filePath"].as_str(), Some("/first"), "got {fixed}");
+    }
+
+    #[test]
+    fn test_buffered_nested_duplicates_untouched_and_single_key_byte_identical() {
+        let fix = ToolcallBadFilepathFix::new();
+
+        // Duplicates ONLY inside a nested object: never the fix's problem
+        // (task-23 depth discipline) - response passes through untouched.
+        let nested_dups = r#"{"meta":{"filePath":"/a","filePath":"/b"},"content":"x"}"#;
+        let response = fuzz_response(Some(nested_dups));
+        assert!(!fix.applies(&response), "nested dups must not trigger");
+        let (result, action) = fix.apply(response.clone());
+        assert!(!action.detected());
+        assert_eq!(result, response, "nested-dup response must be byte-identical");
+
+        // Nested dups PLUS exactly one top-level key: single winner, untouched.
+        let nested_plus_one = r#"{"meta":{"filePath":"/a","filePath":"/b"},"filePath":"/keep"}"#;
+        let response = fuzz_response(Some(nested_plus_one));
+        let (result, action) = fix.apply(response.clone());
+        assert!(!action.detected());
+        assert_eq!(result, response, "single top-level key must be byte-identical");
+
+        // Non-duplicate parseable payloads keep the pre-task-25 serde
+        // round-trip byte-for-byte (normalization only, winner untouched).
+        for args in [
+            r#"{"content":"x","filePath":"/only"}"#,
+            r#"{ "filePath" : "/spaced" }"#,
+            r#"{"file\u0050ath":"/escaped-only"}"#,
+        ] {
+            let fixed = fix.fix_arguments(args).expect("valid JSON round-trips");
+            assert_eq!(
+                fixed,
+                serde_json::to_string(&serde_json::from_str::<Value>(args).unwrap()).unwrap(),
+                "non-dup path must stay the plain serde round-trip for: {args}"
+            );
         }
     }
 }

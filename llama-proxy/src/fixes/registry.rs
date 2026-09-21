@@ -1128,6 +1128,6 @@ mod tests {
             .unwrap();
         assert!(serde_json::from_str::<Value>(args_out).is_ok(), "normalized args: {args_out}");
         let parsed: Value = serde_json::from_str(args_out).unwrap();
-        assert_eq!(parsed["filePath"], "/path2");
+        assert_eq!(parsed["filePath"], "/path1", "task 25 (B-M2): duplicates resolve FIRST-wins");
     }
 }
