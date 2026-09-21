@@ -43,7 +43,7 @@ use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "llama-proxy")]
-#[command(version = "0.1.0")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "HTTP reverse proxy for llama.cpp server")]
 #[command(long_about = "
 llama-proxy is a reverse proxy for llama.cpp's llama-server that provides:
@@ -537,10 +537,41 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
     }
 }
 
+/// Honest /v1/models probe outcome: HTTP success alone is NOT evidence of a
+/// model list - the body must actually carry a `data[]` array. A 200 whose body
+/// is HTML, an error envelope, or empty counts as a FAILED probe and shows what
+/// came back instead. Returns (is_model_list, detail lines to print).
+fn models_probe_body_outcome(body: &str) -> (bool, Vec<String>) {
+    let parsed = serde_json::from_str::<serde_json::Value>(body).ok();
+    match parsed.as_ref().and_then(|v| v.get("data")).and_then(|d| d.as_array()) {
+        Some(data) => {
+            let mut details = vec![format!("    Available models: {}", data.len())];
+            for model in data.iter().take(5) {
+                if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
+                    details.push(format!("      - {id}"));
+                }
+            }
+            (true, details)
+        }
+        None => {
+            let snippet: String = body.chars().take(120).collect();
+            (
+                false,
+                vec![
+                    "  ✗ /v1/models: 200 but the body is not a model list (no data[] array)".to_string(),
+                    format!("    body starts: {snippet:?}"),
+                ],
+            )
+        }
+    }
+}
+
 /// Test connection to backend
 async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config_or_exit(&config_path);
 
+    let mut probes = 0usize;
+    let mut failures = 0usize;
     // Collect all nodes from all groups (or single backend)
     if let Some(ref backends) = config.backends {
         let total_nodes: usize = backends.values().map(|g| g.nodes.len()).sum();
@@ -568,47 +599,47 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
                 let health_url = format!("{}{}", base_url, node.effective_path("/health"));
                 println!("  Testing {}: {}", node.effective_path("/health"), health_url);
 
+                probes += 1;
                 match node.http_client.get(&health_url).send().await {
-                    Ok(resp) => {
-                        if resp.status().is_success() {
-                            println!("  ✓ Reachable ({})", resp.status());
-                            if let Ok(body) = resp.text().await {
-                                println!("    Response: {}", body.trim());
-                            }
-                        } else {
-                            println!("  ✗ Error status: {}", resp.status());
+                    Ok(resp) if resp.status().is_success() => {
+                        println!("  ✓ Reachable ({})", resp.status());
+                        if let Ok(body) = resp.text().await {
+                            println!("    Response: {}", body.trim());
                         }
+                    }
+                    Ok(resp) => {
+                        println!("  ✗ Error status: {}", resp.status());
+                        failures += 1;
                     }
                     Err(e) => {
                         println!("  ✗ Failed to connect: {}", e);
+                        failures += 1;
                     }
                 }
 
                 let models_url = format!("{}{}", base_url, node.effective_path("/v1/models"));
                 println!("  Testing {}: {}", node.effective_path("/v1/models"), models_url);
 
+                probes += 1;
                 match node.http_client.get(&models_url).send().await {
-                    Ok(resp) => {
-                        if resp.status().is_success() {
-                            println!("  ✓ /v1/models available");
-                            if let Ok(body) = resp.text().await {
-                                if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                                    if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-                                        println!("    Available models: {}", data.len());
-                                        for model in data.iter().take(5) {
-                                            if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
-                                                println!("      - {}", id);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        } else {
-                            println!("  /v1/models returned: {}", resp.status());
+                    Ok(resp) if resp.status().is_success() => {
+                        println!("  ✓ /v1/models answered {}", resp.status());
+                        let body = resp.text().await.unwrap_or_default();
+                        let (list_ok, details) = models_probe_body_outcome(&body);
+                        for line in details {
+                            println!("{line}");
+                        }
+                        if !list_ok {
+                            failures += 1;
                         }
                     }
+                    Ok(resp) => {
+                        println!("  ✗ /v1/models returned: {}", resp.status());
+                        failures += 1;
+                    }
                     Err(e) => {
-                        println!("  /v1/models error: {}", e);
+                        println!("  ✗ /v1/models error: {}", e);
+                        failures += 1;
                     }
                 }
 
@@ -635,53 +666,59 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
         let health_url = format!("{}{}", base_url, node.effective_path("/health"));
         println!("  Testing {}: {}", node.effective_path("/health"), health_url);
 
+        probes += 1;
         match node.http_client.get(&health_url).send().await {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    println!("  ✓ Reachable ({})", resp.status());
-                    if let Ok(body) = resp.text().await {
-                        println!("    Response: {}", body.trim());
-                    }
-                } else {
-                    println!("  ✗ Error status: {}", resp.status());
+            Ok(resp) if resp.status().is_success() => {
+                println!("  ✓ Reachable ({})", resp.status());
+                if let Ok(body) = resp.text().await {
+                    println!("    Response: {}", body.trim());
                 }
+            }
+            Ok(resp) => {
+                println!("  ✗ Error status: {}", resp.status());
+                failures += 1;
             }
             Err(e) => {
                 println!("  ✗ Failed to connect: {}", e);
+                failures += 1;
             }
         }
 
         let models_url = format!("{}{}", base_url, node.effective_path("/v1/models"));
         println!("  Testing {}: {}", node.effective_path("/v1/models"), models_url);
 
+        probes += 1;
         match node.http_client.get(&models_url).send().await {
-            Ok(resp) => {
-                if resp.status().is_success() {
-                    println!("  ✓ /v1/models available");
-                    if let Ok(body) = resp.text().await {
-                        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
-                            if let Some(data) = json.get("data").and_then(|d| d.as_array()) {
-                                println!("    Available models: {}", data.len());
-                                for model in data.iter().take(5) {
-                                    if let Some(id) = model.get("id").and_then(|i| i.as_str()) {
-                                        println!("      - {}", id);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    println!("  /v1/models returned: {}", resp.status());
+            Ok(resp) if resp.status().is_success() => {
+                println!("  ✓ /v1/models answered {}", resp.status());
+                let body = resp.text().await.unwrap_or_default();
+                let (list_ok, details) = models_probe_body_outcome(&body);
+                for line in details {
+                    println!("{line}");
+                }
+                if !list_ok {
+                    failures += 1;
                 }
             }
+            Ok(resp) => {
+                println!("  ✗ /v1/models returned: {}", resp.status());
+                failures += 1;
+            }
             Err(e) => {
-                println!("  /v1/models error: {}", e);
+                println!("  ✗ /v1/models error: {}", e);
+                failures += 1;
             }
         }
     } else {
         println!("No backend configured — nothing to test.");
     }
 
+    if failures > 0 {
+        return Err(format!("test-backend: {failures} of {probes} probe(s) failed").into());
+    }
+    if probes > 0 {
+        println!("✓ all {probes} probe(s) passed");
+    }
     Ok(())
 }
 
@@ -817,6 +854,40 @@ mod tests {
         assert!(
             validate_final(&cfg("server:\n  port: 8066\n  host: \"0.0.0.0\"\n")).is_ok(),
             "the F-H1 backendless (503-path) config must stay valid"
+        );
+    }
+
+    #[test]
+    fn t75_models_probe_accepts_a_real_model_list() {
+        // Given: a genuine OpenAI model-list body
+        let body = r#"{"object":"list","data":[{"id":"qwen3"},{"id":"llama"}]}"#;
+        // When
+        let (ok, details) = models_probe_body_outcome(body);
+        // Then
+        assert!(ok, "valid data[] must pass the probe");
+        assert!(details.iter().any(|l| l.contains("Available models: 2")), "{details:?}");
+        assert!(details.iter().any(|l| l.contains("qwen3")), "{details:?}");
+    }
+
+    #[test]
+    fn t75_models_probe_refuses_200_bodies_that_are_not_model_lists() {
+        // The dishonest case: status was 200 but the payload proves nothing -
+        // HTML, an error envelope, and an empty body must all FAIL the probe
+        // and surface what actually came back.
+        for body in ["<html><body>OK</body></html>", r#"{"error":"unauthorized"}"#, ""] {
+            let (ok, details) = models_probe_body_outcome(body);
+            assert!(!ok, "body {body:?} is not a model list and must fail");
+            assert!(!details.is_empty(), "failure must show what came back instead");
+        }
+    }
+
+    #[test]
+    fn t75_cli_version_follows_the_crate_not_a_frozen_literal() {
+        use clap::CommandFactory;
+        assert_eq!(
+            Cli::command().get_version().map(str::to_string),
+            Some(env!("CARGO_PKG_VERSION").to_string()),
+            "--version must report the crate version, never a hardcoded string"
         );
     }
 }
