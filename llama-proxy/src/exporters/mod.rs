@@ -6,6 +6,7 @@ use async_trait::async_trait;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+use crate::config::ExportersConfig;
 use crate::config::StatsFormat;
 use crate::stats::{format_metrics, RequestMetrics};
 
@@ -116,6 +117,19 @@ impl ExporterManager {
 
     pub fn add(&mut self, exporter: Arc<dyn MetricsExporter>) {
         self.exporters.push(exporter);
+    }
+
+    /// Build the manager from config. A disabled exporter is absent, never a
+    /// stub; an enabled-but-compiled-out influxdb is a hard error (task 80
+    /// [A-M9]) so the caller decides (startup failure vs warning) instead of
+    /// the manager silently lying about working.
+    pub fn from_config(config: &ExportersConfig) -> Result<Self, ExportError> {
+        let mut manager = Self::new();
+        if config.influxdb.enabled {
+            let influx = InfluxDbExporter::from_config(&config.influxdb)?;
+            manager.add(Arc::new(influx) as Arc<dyn MetricsExporter>);
+        }
+        Ok(manager)
     }
 
     /// Hand the sample to every exporter, unfiltered. Request samples go through
@@ -373,53 +387,133 @@ mod tests {
         manager.shutdown_all().await;
     }
 
-    #[test]
-    fn test_influxdb_exporter_new_without_feature() {
-        // Test that InfluxDbExporter::new works without the influxdb feature
-        let config = crate::exporters::influxdb::InfluxDbConfig {
-            url: "http://localhost:8086".to_string(),
+    fn app_influx_config(enabled: bool) -> crate::config::InfluxDbConfig {
+        crate::config::InfluxDbConfig {
+            enabled,
+            url: "http://127.0.0.1:1".to_string(),
             org: "test".to_string(),
             bucket: "test".to_string(),
             token: "test".to_string(),
             batch_size: 10,
             flush_interval_seconds: 5,
-        };
+        }
+    }
 
-        let exporter = InfluxDbExporter::new(config);
-        assert!(exporter.is_ok());
+    fn exporters_config_with_influx(enabled: bool) -> ExportersConfig {
+        ExportersConfig {
+            influxdb: app_influx_config(enabled),
+        }
     }
 
     #[tokio::test]
-    async fn test_influxdb_exporter_export_without_feature() {
-        let config = crate::exporters::influxdb::InfluxDbConfig {
-            url: "http://localhost:8086".to_string(),
-            org: "test".to_string(),
-            bucket: "test".to_string(),
-            token: "test".to_string(),
-            batch_size: 10,
-            flush_interval_seconds: 5,
-        };
-
-        let exporter = InfluxDbExporter::new(config).unwrap();
-        let metrics = RequestMetrics::new();
-
-        // Without the influxdb feature, this should succeed silently
-        let result = exporter.export(&metrics).await;
-        assert!(result.is_ok());
+    async fn manager_from_config_absent_exporter_stays_empty() {
+        let manager = ExporterManager::from_config(&exporters_config_with_influx(false)).unwrap();
+        assert!(manager.exporters.is_empty());
+        manager.export_all(&measurable_metrics()).await;
     }
 
-    #[test]
-    fn test_influxdb_exporter_name() {
-        let config = crate::exporters::influxdb::InfluxDbConfig {
-            url: "http://localhost:8086".to_string(),
-            org: "test".to_string(),
-            bucket: "test".to_string(),
-            token: "test".to_string(),
-            batch_size: 10,
-            flush_interval_seconds: 5,
-        };
+    /// The whole point of task 80 [A-M9], compiled ONLY in a build without the
+    /// influxdb feature: `enabled: true` must fail loudly everywhere it is
+    /// asked, and a hand-built stub must refuse instead of lying.
+    #[cfg(not(feature = "influxdb"))]
+    mod feature_off {
+        use super::*;
 
-        let exporter = InfluxDbExporter::new(config).unwrap();
-        assert_eq!(exporter.name(), "influxdb");
+        #[test]
+        fn manager_from_config_hard_errors_when_enabled() {
+            let outcome = ExporterManager::from_config(&exporters_config_with_influx(true));
+            let err = match outcome {
+                Err(e) => e,
+                Ok(_) => panic!("enabled influxdb without the feature must not construct"),
+            };
+            assert!(
+                matches!(err, ExportError::Config(_)),
+                "typed config error expected, got {err:?}"
+            );
+            assert_eq!(
+                err.to_string(),
+                "Configuration error: influxdb enabled in config but binary built without the influxdb feature"
+            );
+        }
+
+        #[test]
+        fn exporter_from_config_hard_errors_when_enabled() {
+            let outcome = InfluxDbExporter::from_config(&app_influx_config(true));
+            let err = match outcome {
+                Err(e) => e,
+                Ok(_) => panic!("the direct construction gate must fail too"),
+            };
+            assert!(err.to_string().contains("without the influxdb feature"));
+        }
+
+        #[test]
+        fn disabled_config_still_constructs_inert() {
+            assert!(InfluxDbExporter::from_config(&app_influx_config(false)).is_ok());
+        }
+
+        /// Backstop: even a hand-built compiled-out exporter reports failure
+        /// on export - the pre-task-80 stub returned Ok while dropping every
+        /// sample, which is the silent lie this task deletes.
+        #[tokio::test]
+        async fn hand_built_stub_export_errors_not_silent_ok() {
+            let exporter = InfluxDbExporter::new(crate::exporters::influxdb::InfluxDbConfig {
+                url: "http://127.0.0.1:1".to_string(),
+                org: "test".to_string(),
+                bucket: "test".to_string(),
+                token: "test".to_string(),
+                batch_size: 10,
+                flush_interval_seconds: 5,
+            })
+            .unwrap();
+            let err = exporter
+                .export(&measurable_metrics())
+                .await
+                .expect_err("compiled-out exporter must not report success");
+            assert!(err.to_string().contains("without the influxdb feature"));
+        }
+
+        /// The manager's `?` path turns the enabled config into one WARN per
+        /// startup - never a registered exporter that exports nothing.
+        #[tokio::test]
+        async fn manager_never_registers_a_compiled_out_exporter() {
+            let mut manager = ExporterManager::new();
+            let outcome = InfluxDbExporter::from_config(&app_influx_config(true));
+            match outcome {
+                Ok(exp) => manager.add(Arc::new(exp) as Arc<dyn MetricsExporter>),
+                Err(e) => tracing::warn!(error = %e, "Failed to initialize InfluxDbExporter"),
+            }
+            assert!(manager.exporters.is_empty());
+        }
+    }
+
+    /// Feature-on side of the matrix: the same config constructs, and `export`
+    /// performs a real write attempt (fails against the dead 127.0.0.1:1
+    /// endpoint - the honest inverse of the compiled-out stub's fake Ok).
+    #[cfg(all(test, feature = "influxdb"))]
+    mod feature_on {
+        use super::*;
+
+        #[test]
+        fn manager_from_config_registers_enabled_exporter() {
+            let manager = ExporterManager::from_config(&exporters_config_with_influx(true)).unwrap();
+            assert_eq!(manager.exporters.len(), 1);
+            assert_eq!(manager.exporters[0].name(), "influxdb");
+        }
+
+        #[tokio::test]
+        async fn export_really_talks_to_the_backend() {
+            let exporter = InfluxDbExporter::from_config(&app_influx_config(true)).unwrap();
+            let err = exporter
+                .export(&measurable_metrics())
+                .await
+                .expect_err("dead endpoint must surface a write error, not Ok");
+            assert!(matches!(err, ExportError::Write(_)), "got {err:?}");
+        }
+
+        #[test]
+        fn name_is_stable() {
+            let exporter = InfluxDbExporter::from_config(&app_influx_config(true)).unwrap();
+            assert_eq!(exporter.name(), "influxdb");
+        }
     }
 }

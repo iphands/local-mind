@@ -18,6 +18,14 @@ pub struct InfluxDbConfig {
     pub flush_interval_seconds: u64,
 }
 
+/// The single honest answer for "requested while compiled out". One string for
+/// both gates (config-time [`InfluxDbExporter::from_config`] and the export
+/// backstop) so no path can downgrade it to a silent success.
+#[cfg(not(feature = "influxdb"))]
+fn feature_off_error() -> ExportError {
+    ExportError::Config("influxdb enabled in config but binary built without the influxdb feature".to_string())
+}
+
 /// InfluxDB v2 metrics exporter
 pub struct InfluxDbExporter {
     #[allow(dead_code)] // Used when influxdb feature is enabled
@@ -42,15 +50,22 @@ impl InfluxDbExporter {
 
     #[cfg(not(feature = "influxdb"))]
     pub fn new(config: InfluxDbConfig) -> Result<Self, ExportError> {
-        tracing::warn!(
-            "InfluxDB exporter requested but 'influxdb' feature is not enabled. \
-             Enable with --features influxdb"
-        );
         Ok(Self { config, _phantom: () })
     }
 
-    /// Create from app config
+    /// Create from app config.
+    ///
+    /// With the `influxdb` feature compiled out, `enabled: true` is a hard
+    /// error (task 80 [A-M9]): a config that demands InfluxDB against a binary
+    /// that cannot speak it must fail loudly at construction, never settle for
+    /// a stub whose `export()` would report success while dropping every
+    /// sample. `enabled: false` constructs a live-but-inert exporter; the
+    /// export backstop below keeps that honest even if one is hand-built.
     pub fn from_config(config: &crate::config::InfluxDbConfig) -> Result<Self, ExportError> {
+        #[cfg(not(feature = "influxdb"))]
+        if config.enabled {
+            return Err(feature_off_error());
+        }
         Self::new(InfluxDbConfig {
             url: config.url.clone(),
             org: config.org.clone(),
@@ -157,8 +172,7 @@ impl MetricsExporter for InfluxDbExporter {
 
     #[cfg(not(feature = "influxdb"))]
     async fn export(&self, _metrics: &RequestMetrics) -> Result<(), ExportError> {
-        // Feature not enabled, silently succeed
-        Ok(())
+        Err(feature_off_error())
     }
 
     fn name(&self) -> &str {
