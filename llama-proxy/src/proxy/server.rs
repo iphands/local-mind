@@ -219,7 +219,7 @@ pub async fn run_server(
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    let addr: SocketAddr = format!("{}:{}", config.server.host, config.server.port).parse()?;
+    let addr = resolve_bind_addr(&config.server.host, config.server.port)?;
     let listener = tokio::net::TcpListener::bind(addr).await?;
 
     tracing::info!("llama-proxy listening on {}", addr);
@@ -230,6 +230,24 @@ pub async fn run_server(
 /// Health check endpoint
 async fn health_handler() -> &'static str {
     "OK"
+}
+
+/// Resolve `server.host` + `server.port` into the bind address, bracket-
+/// tolerant for IPv6.
+///
+/// Operators copy both shapes from URLs: `::1` and `[::1]`. The `SocketAddr`
+/// parser only accepts the bracketed form once a port is appended, so a bare
+/// IPv6 host is re-bracketed here; the config loader (task 71) already accepts
+/// both, and whatever it accepts must bind. Zone ids (`fe80::1%eth0`) never
+/// pass the loader and are refused here again rather than silently bound to
+/// some other address.
+fn resolve_bind_addr(host: &str, port: u16) -> Result<SocketAddr, std::net::AddrParseError> {
+    let bare = host.strip_prefix('[').and_then(|h| h.strip_suffix(']')).unwrap_or(host);
+    let bracketed = match bare.parse::<std::net::Ipv6Addr>() {
+        Ok(ipv6) => format!("[{ipv6}]"),
+        Err(_) => bare.to_string(),
+    };
+    format!("{bracketed}:{port}").parse()
 }
 
 /// Build the CORS layer from `server.allowed_origins`.
@@ -442,5 +460,52 @@ mod tests {
             .expect("preflight");
         assert!(evil.headers().get("access-control-allow-origin").is_none());
         handle.abort();
+    }
+
+    #[test]
+    fn t79_resolve_bind_addr_pin_table() {
+        use std::net::{Ipv4Addr, Ipv6Addr};
+        let v6 = |ip: Ipv6Addr, port: u16| SocketAddr::new(std::net::IpAddr::V6(ip), port);
+
+        // IPv6, both operator spellings, must resolve to the SAME address.
+        let expected = v6(Ipv6Addr::LOCALHOST, 8066);
+        assert_eq!(resolve_bind_addr("::1", 8066).expect("bare ::1"), expected);
+        assert_eq!(resolve_bind_addr("[::1]", 8066).expect("bracketed [::1]"), expected);
+        assert_eq!(
+            resolve_bind_addr("fe80::1", 9).expect("bare fe80::1"),
+            v6("fe80::1".parse().expect("fixture"), 9)
+        );
+        // v4-mapped parses as the IPv6 it is (bind-able), bracket-normalized.
+        assert_eq!(
+            resolve_bind_addr("::ffff:127.0.0.1", 5).expect("v4-mapped"),
+            v6("::ffff:127.0.0.1".parse().expect("fixture"), 5)
+        );
+        // IPv4 unchanged.
+        assert_eq!(
+            resolve_bind_addr("0.0.0.0", 8066).expect("v4"),
+            SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::UNSPECIFIED), 8066)
+        );
+        assert_eq!(
+            resolve_bind_addr("[127.0.0.1]", 1).expect("bracketed v4"),
+            SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::LOCALHOST), 1)
+        );
+        // Refusals: zone ids, half-brackets, names, junk, empty.
+        for bad in ["fe80::1%eth0", "[::1", "::1]", "localhost", "not a host!!", ""] {
+            assert!(resolve_bind_addr(bad, 8066).is_err(), "{bad} must be refused");
+        }
+    }
+
+    #[tokio::test]
+    async fn t79_ipv6_loopback_actually_binds_and_accepts() {
+        // The acceptance is a live socket, not a parse: resolve, bind, connect over ::1.
+        let addr = resolve_bind_addr("::1", 0).expect("bare ::1 resolves");
+        let listener = tokio::net::TcpListener::bind(addr).await.expect("bind ::1");
+        let bound = listener.local_addr().expect("local_addr");
+        assert_eq!(bound.ip(), std::net::Ipv6Addr::LOCALHOST, "must listen ON ::1, got {bound}");
+        let stream = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::TcpStream::connect(bound))
+            .await
+            .expect("connect ::1 (no hang)")
+            .expect("TCP accept");
+        drop(stream);
     }
 }
