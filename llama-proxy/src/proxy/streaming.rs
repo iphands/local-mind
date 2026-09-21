@@ -1309,14 +1309,58 @@ fn seed_choice(choice: &serde_json::Value) -> serde_json::Value {
     seeded
 }
 
+/// Merge a continuation fragment into an already-seeded tool-call slot:
+/// argument fragments concatenate, a name lands on a nameless slot or
+/// completes a split name, and an identical name resend is skipped.
+fn merge_tool_call_slot(slot: &mut serde_json::Value, new_call: &serde_json::Value) {
+    let Some(new_func) = new_call.get("function") else {
+        return;
+    };
+    if slot.get("function").is_none() {
+        slot["function"] = new_func.clone();
+        return;
+    }
+    let Some(acc_func) = slot.get_mut("function").and_then(|f| f.as_object_mut()) else {
+        return;
+    };
+    if let Some(name) = new_func.get("name").and_then(|n| n.as_str()).filter(|n| !n.is_empty()) {
+        match acc_func.get_mut("name") {
+            Some(serde_json::Value::String(existing)) if existing.is_empty() => *existing = name.to_string(),
+            Some(serde_json::Value::String(existing)) if existing != name => existing.push_str(name),
+            Some(serde_json::Value::String(_)) => {}
+            _ => {
+                acc_func.insert("name".to_string(), serde_json::Value::String(name.to_string()));
+            }
+        }
+    }
+    if let Some(args) = new_func.get("arguments").and_then(|a| a.as_str()) {
+        match acc_func.get_mut("arguments") {
+            Some(serde_json::Value::String(existing)) => existing.push_str(args),
+            _ => {
+                acc_func.insert("arguments".to_string(), serde_json::Value::String(args.to_string()));
+            }
+        }
+    }
+}
+
 fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serde_json::Value {
     match (acc, chunk) {
         (None, chunk) => {
             // Start from the chunk's envelope with no choices, then merge the chunk into
             // it, so the first delta goes through the same path as every later one.
             let mut envelope = chunk.clone();
-            if let Some(choices) = envelope.get_mut("choices").and_then(|c| c.as_array_mut()) {
-                choices.clear();
+            let seeded = match envelope.get_mut("choices").and_then(|c| c.as_array_mut()) {
+                Some(choices) => {
+                    choices.clear();
+                    true
+                }
+                None => false,
+            };
+            // A first chunk without a choices array (usage-only) must still seed the
+            // slot list: without the key, every later choice delta finds no merge
+            // target and is silently dropped (captured raw in task53 evidence).
+            if !seeded {
+                envelope["choices"] = serde_json::Value::Array(Vec::new());
             }
             merge_chunk(Some(envelope), chunk)
         }
@@ -1341,10 +1385,9 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                                 // Merge delta content
                                 if let Some(content) = delta.get("content").and_then(|c| c.as_str()) {
                                     if let Some(acc_msg) = acc_choice.get_mut("message") {
-                                        if let Some(existing) = acc_msg.get("content").and_then(|c| c.as_str()) {
-                                            acc_msg["content"] = serde_json::Value::String(format!("{}{}", existing, content));
-                                        } else {
-                                            acc_msg["content"] = serde_json::Value::String(content.to_string());
+                                        match acc_msg.get_mut("content") {
+                                            Some(serde_json::Value::String(existing)) => existing.push_str(content),
+                                            _ => acc_msg["content"] = serde_json::Value::String(content.to_string()),
                                         }
                                     }
                                 }
@@ -1352,11 +1395,9 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                                 // Merge reasoning_text (concatenate like content)
                                 if let Some(reasoning) = delta.get("reasoning_text").and_then(|r| r.as_str()) {
                                     if let Some(acc_msg) = acc_choice.get_mut("message") {
-                                        if let Some(existing) = acc_msg.get("reasoning_text").and_then(|r| r.as_str()) {
-                                            acc_msg["reasoning_text"] =
-                                                serde_json::Value::String(format!("{}{}", existing, reasoning));
-                                        } else {
-                                            acc_msg["reasoning_text"] = serde_json::Value::String(reasoning.to_string());
+                                        match acc_msg.get_mut("reasoning_text") {
+                                            Some(serde_json::Value::String(existing)) => existing.push_str(reasoning),
+                                            _ => acc_msg["reasoning_text"] = serde_json::Value::String(reasoning.to_string()),
                                         }
                                     }
                                 }
@@ -1378,39 +1419,29 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                                             (acc_tc.as_array_mut(), tool_calls.as_array())
                                         {
                                             for new_call in new_arr {
-                                                if let Some(idx) = new_call.get("index").and_then(|i| i.as_u64()) {
-                                                    let idx = idx as usize;
-                                                    if idx > 100 {
+                                                match new_call.get("index").and_then(|i| i.as_u64()) {
+                                                    Some(idx) if idx > 100 => {
                                                         tracing::warn!(idx, "tool call index too large, skipping");
-                                                        continue;
                                                     }
-                                                    // Find or create slot for this index
-                                                    while acc_arr.len() <= idx {
-                                                        acc_arr.push(serde_json::Value::Null);
-                                                    }
-                                                    if acc_arr[idx].is_null() {
-                                                        acc_arr[idx] = new_call.clone();
-                                                    } else {
-                                                        // Merge function arguments
-                                                        if let (Some(acc_func), Some(new_func)) =
-                                                            (acc_arr[idx].get_mut("function"), new_call.get("function"))
-                                                        {
-                                                            if let Some(new_args) =
-                                                                new_func.get("arguments").and_then(|a| a.as_str())
-                                                            {
-                                                                // The opening fragment may name the function
-                                                                // and omit `arguments` entirely.
-                                                                let acc_args = acc_func
-                                                                    .get("arguments")
-                                                                    .and_then(|a| a.as_str())
-                                                                    .unwrap_or("");
-                                                                acc_func["arguments"] = serde_json::Value::String(format!(
-                                                                    "{}{}",
-                                                                    acc_args, new_args
-                                                                ));
-                                                            }
+                                                    Some(idx) => {
+                                                        let idx = idx as usize;
+                                                        // Find or create slot for this index
+                                                        while acc_arr.len() <= idx {
+                                                            acc_arr.push(serde_json::Value::Null);
+                                                        }
+                                                        if acc_arr[idx].is_null() {
+                                                            acc_arr[idx] = new_call.clone();
+                                                        } else {
+                                                            merge_tool_call_slot(&mut acc_arr[idx], new_call);
                                                         }
                                                     }
+                                                    // A fragment with no index continues the last
+                                                    // recorded slot; dropping it truncates the
+                                                    // arguments mid-JSON.
+                                                    None => match acc_arr.iter_mut().rev().find(|s| !s.is_null()) {
+                                                        Some(last) => merge_tool_call_slot(last, new_call),
+                                                        None => acc_arr.push(new_call.clone()),
+                                                    },
                                                 }
                                             }
                                         }
@@ -1571,6 +1602,104 @@ mod tests {
         let merged = merge_chunk(Some(merged), chunk2);
 
         assert_eq!(merged["choices"][0]["message"]["content"].as_str().unwrap(), "Hello World");
+    }
+
+    #[test]
+    fn test_merge_chunk_seeds_choices_from_usage_only_first_chunk() {
+        // (a) A first chunk without a choices key used to leave the envelope
+        // with no slot list; every later delta was silently dropped.
+        let acc = merge_chunk(None, json!({"id": "1", "usage": {"prompt_tokens": 5}}));
+        let acc = merge_chunk(Some(acc), json!({"choices": [{"index": 0, "delta": {"content": "hi"}}]}));
+        assert_eq!(acc["choices"][0]["message"]["content"].as_str(), Some("hi"));
+    }
+
+    #[test]
+    fn test_merge_chunk_indexless_tail_extends_last_slot() {
+        // (b) Backends that omit `index` on continuation fragments used to
+        // have the arguments tail dropped, freezing arguments mid-JSON.
+        let acc = merge_chunk(
+            None,
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "f", "arguments": "{\"a\""}}]}}]}),
+        );
+        let acc = merge_chunk(
+            Some(acc),
+            json!({"choices": [{"delta": {"tool_calls": [{"function": {"arguments": ":1}"}}]}}]}),
+        );
+        assert_eq!(
+            acc["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str(),
+            Some(r#"{"a":1}"#)
+        );
+    }
+
+    #[test]
+    fn test_merge_chunk_indexless_fragment_before_any_slot_opens_one() {
+        let acc = merge_chunk(
+            None,
+            json!({"choices": [{"delta": {"tool_calls": [{"function": {"name": "f", "arguments": "{}"}}]}}]}),
+        );
+        assert_eq!(
+            acc["choices"][0]["message"]["tool_calls"][0]["function"]["name"].as_str(),
+            Some("f")
+        );
+        let acc = merge_chunk(
+            Some(acc),
+            json!({"choices": [{"delta": {"tool_calls": [{"function": {"arguments": " "}}]}}]}),
+        );
+        assert_eq!(
+            acc["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str(),
+            Some("{} ")
+        );
+    }
+
+    #[test]
+    fn test_merge_chunk_indexless_tail_targets_the_latest_call_slot() {
+        let acc = merge_chunk(
+            None,
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "a", "arguments": "1"}}]}}]}),
+        );
+        let acc = merge_chunk(
+            Some(acc),
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 1, "function": {"name": "b", "arguments": "2"}}]}}]}),
+        );
+        let acc = merge_chunk(
+            Some(acc),
+            json!({"choices": [{"delta": {"tool_calls": [{"function": {"arguments": "3"}}]}}]}),
+        );
+        let tool_calls = acc["choices"][0]["message"]["tool_calls"].as_array().unwrap();
+        assert_eq!(tool_calls[0]["function"]["arguments"].as_str(), Some("1"));
+        assert_eq!(tool_calls[1]["function"]["arguments"].as_str(), Some("23"));
+    }
+
+    #[test]
+    fn test_merge_chunk_late_name_lands_on_its_slot() {
+        // (c) Nameless opening slot, then split name fragments, then an
+        // identical resend: set, append, skip - never drop, never duplicate.
+        let acc = merge_chunk(
+            None,
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": "{}"}}]}}]}),
+        );
+        let name_of = |acc: &serde_json::Value| {
+            acc["choices"][0]["message"]["tool_calls"][0]["function"]["name"]
+                .as_str()
+                .unwrap_or("<MISSING>")
+                .to_string()
+        };
+        assert_eq!(name_of(&acc), "<MISSING>");
+        let acc = merge_chunk(
+            Some(acc),
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "tool_", "arguments": ""}}]}}]}),
+        );
+        assert_eq!(name_of(&acc), "tool_");
+        let acc = merge_chunk(
+            Some(acc),
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "x", "arguments": ""}}]}}]}),
+        );
+        assert_eq!(name_of(&acc), "tool_x");
+        let acc = merge_chunk(
+            Some(acc),
+            json!({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "tool_x", "arguments": ""}}]}}]}),
+        );
+        assert_eq!(name_of(&acc), "tool_x");
     }
 
     #[test]
