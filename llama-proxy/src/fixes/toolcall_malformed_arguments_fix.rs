@@ -16,7 +16,7 @@
 //! This fix:
 //! 1. Detects tool calls with malformed arguments containing `{}"` property names
 //! 2. Uses tool schemas from the request to determine the correct parameter name
-//! 3. Replaces the malformed property name with the correct one from the schema
+//! 3. Replaces each malformed property name with the next missing schema name, in order
 
 use super::{FixAction, ResponseFix};
 use regex::Regex;
@@ -31,9 +31,9 @@ pub struct ToolcallMalformedArgumentsFix {
 impl ToolcallMalformedArgumentsFix {
     pub fn new() -> Self {
         Self {
-            // Matches: ,{}":" or {{}":
-            // This pattern detects the specific case where {} is used as a property name
-            malformed_pattern: Regex::new(r#"[,\{]\{\}":\s*"#).unwrap(),
+            // Matches the empty-key slot: a `,` or `{` delimiter, the `{}` token (captured
+            // as `key`) that stands in for the real property name, then `":` and any space.
+            malformed_pattern: Regex::new(r#"[,\{](?P<key>\{\})":\s*"#).unwrap(),
         }
     }
 
@@ -81,55 +81,62 @@ impl ToolcallMalformedArgumentsFix {
         // First, try to parse as-is to see what we get
         let parsed = self.aggressive_parse_json(args_str)?;
 
-        // Find which schema parameters are missing from parsed object
+        // Find which schema parameters are missing from parsed object, in schema order.
         let parsed_keys: Vec<String> = parsed.keys().map(|k| k.to_string()).collect();
-        let missing_params: Vec<&String> = schema_params.iter().filter(|p| !parsed_keys.contains(p)).collect();
+        let missing_params: Vec<&str> = schema_params
+            .iter()
+            .filter(|p| !parsed_keys.contains(p))
+            .map(|p| p.as_str())
+            .collect();
 
         if missing_params.is_empty() {
             return None;
         }
 
-        // If there's exactly one missing parameter, the {} key holds its value
-        if missing_params.len() == 1 {
-            let correct_param = missing_params[0];
+        // Splice the missing keys over the empty-key `{}` slots positionally: occurrence N
+        // gets missing key N. A slot beyond the missing count keeps its `{}` token, so the
+        // result fails the validity gate below and the original arguments are preserved.
+        let fixed_args = self.splice_empty_key_slots(args_str, &missing_params);
 
-            // Replace the unquoted {} with quoted correct parameter
-            // Pattern: ,{}"= becomes ,"file_path":
-            let fixed_args = args_str.replace("{}\":", &format!("\"{}\":", correct_param));
+        if serde_json::from_str::<Value>(&fixed_args).is_ok() {
+            Some(fixed_args)
+        } else {
+            None
+        }
+    }
 
-            // Validate the fixed JSON is actually valid
-            if serde_json::from_str::<Value>(&fixed_args).is_ok() {
-                return Some(fixed_args);
+    /// Splice `missing` keys over the empty-key `{}` slots in `args_str`, left to right.
+    ///
+    /// Walks every slot matched by `malformed_pattern` in source order, rebuilding the
+    /// output by copying the source between matches verbatim. Each slot's `{}` token is
+    /// overwritten with `"<key>`; the slot's own trailing `"` and `:` close the key and
+    /// stay put. Occurrence N consumes `missing[N]`; occurrences past `missing.len()` are
+    /// copied untouched, their `{}` token surviving. Operates on raw bytes and never
+    /// re-serializes, so every other region stays byte-verbatim.
+    fn splice_empty_key_slots(&self, args_str: &str, missing: &[&str]) -> String {
+        let mut out = String::with_capacity(args_str.len());
+        let mut cursor = 0usize;
+        let mut slot = 0usize;
+        for caps in self.malformed_pattern.captures_iter(args_str) {
+            // The whole match and the `key` group always exist for a match of this
+            // pattern; should they ever not, the region is left verbatim (never corrupt).
+            let (Some(whole), Some(key_tok)) = (caps.get(0), caps.name("key")) else {
+                continue;
+            };
+            out.push_str(&args_str[cursor..whole.start()]);
+            if slot < missing.len() {
+                out.push_str(&args_str[whole.start()..key_tok.start()]);
+                out.push('"');
+                out.push_str(missing[slot]);
+                out.push_str(&args_str[key_tok.end()..whole.end()]);
+                slot += 1;
             } else {
-                return None;
+                out.push_str(whole.as_str());
             }
+            cursor = whole.end();
         }
-
-        // Multiple missing parameters - try heuristic matching
-        if missing_params.len() > 1 {
-            // Common heuristics for parameter names
-            let heuristics = [
-                "file_path",
-                "path",
-                "filepath",
-                "filename",
-                "output",
-                "output_path",
-                "destination",
-                "target",
-            ];
-
-            for guess in &heuristics {
-                if missing_params.iter().any(|p| p.as_str() == *guess) {
-                    let fixed_args = args_str.replace("{}\":", &format!("\"{}\":", guess));
-                    if serde_json::from_str::<Value>(&fixed_args).is_ok() {
-                        return Some(fixed_args);
-                    }
-                }
-            }
-        }
-
-        None
+        out.push_str(&args_str[cursor..]);
+        out
     }
 
     /// Aggressively parse JSON, trying to extract key-value pairs even from malformed input
@@ -627,11 +634,11 @@ mod tests {
     }
 
     #[test]
-    fn test_heuristic_matching() {
+    fn test_single_missing_param_among_three() {
         let fix = ToolcallMalformedArgumentsFix::new();
 
         let mut schemas = HashMap::new();
-        // Multiple parameters, but we'll guess file_path
+        // Three params, only file_path missing (content and mode are present), one slot.
         schemas.insert(
             "write".to_string(),
             vec!["file_path".to_string(), "content".to_string(), "mode".to_string()],
@@ -644,7 +651,7 @@ mod tests {
         assert!(fixed.is_some());
         let fixed = fixed.unwrap();
 
-        // Should have guessed file_path
+        // The lone slot is filled with the only missing key.
         assert!(fixed.contains("\"file_path\":"));
 
         // Should be valid JSON
@@ -719,5 +726,150 @@ mod tests {
 
         // Should have detected the fix
         assert!(action.detected());
+    }
+
+    // ---- positional empty-key-slot replacement ----
+
+    // Single-entry schema map whose key order is exactly `order`, the schema order the
+    // splicer must honour.
+    fn schema_map(order: &[&str]) -> HashMap<String, Vec<String>> {
+        let mut m = HashMap::new();
+        m.insert("write".to_string(), order.iter().map(|k| (*k).to_string()).collect());
+        m
+    }
+
+    // Given two empty-key slots and two missing keys, occurrence N gets missing key N in
+    // schema order (distinct keys, not a single key reused for every slot).
+    #[test]
+    fn test_two_empty_key_slots_assigned_in_schema_order() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let schemas = schema_map(&["path", "mode", "content"]);
+
+        let malformed = r#"{"content":"data",{}":"/tmp/a",{}":"hello"}"#;
+        let fixed = fix
+            .fix_arguments(malformed, "write", &schemas)
+            .expect("two slots / two missing keys must be fixed");
+
+        assert_eq!(fixed, r#"{"content":"data","path":"/tmp/a","mode":"hello"}"#);
+        let parsed: Value = serde_json::from_str(&fixed).expect("fixed args are valid JSON");
+        assert_eq!(parsed["path"].as_str().unwrap(), "/tmp/a");
+        assert_eq!(parsed["mode"].as_str().unwrap(), "hello");
+        assert!(!fixed.contains("{}\":"));
+    }
+
+    // Given one slot and two missing keys, the slot receives the first missing key; the
+    // second missing key has no slot and stays absent.
+    #[test]
+    fn test_one_slot_with_multiple_missing_takes_first_key() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let schemas = schema_map(&["path", "mode", "content"]);
+
+        let malformed = r#"{"content":"x",{}":"/tmp/a"}"#;
+        let fixed = fix
+            .fix_arguments(malformed, "write", &schemas)
+            .expect("single slot must be fixed with the first missing key");
+
+        assert_eq!(fixed, r#"{"content":"x","path":"/tmp/a"}"#);
+    }
+
+    // Given more slots than missing keys, the splicer fills the first slot and leaves the
+    // leftover slot's `{}` token untouched, so the result is invalid JSON and
+    // fix_arguments returns None (the caller keeps the original arguments).
+    #[test]
+    fn test_more_slots_than_missing_leaves_leftover_untouched() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+
+        // leftover slot keeps its `{}` token, byte-verbatim
+        let spliced = fix.splice_empty_key_slots(r#"{"content":"x",{}":"/tmp/a",{}":"/tmp/b"}"#, &["path"]);
+        assert_eq!(spliced, r#"{"content":"x","path":"/tmp/a",{}":"/tmp/b"}"#);
+
+        // invalid leftover fails validation -> None -> original preserved
+        let schemas = schema_map(&["path", "content"]);
+        let result = fix.fix_arguments(r#"{"content":"x",{}":"/tmp/a",{}":"/tmp/b"}"#, "write", &schemas);
+        assert!(result.is_none(), "leftover empty-key slot must fail validation");
+    }
+
+    // With no empty-key slots, the splicer returns the input byte-identical and
+    // fix_arguments makes no change.
+    #[test]
+    fn test_no_slots_output_is_byte_identical() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+
+        let clean = r#"{"path":"/x","content":"y"}"#;
+        assert_eq!(fix.splice_empty_key_slots(clean, &["z"]), clean);
+
+        let schemas = schema_map(&["path", "content"]);
+        assert!(fix.fix_arguments(clean, "write", &schemas).is_none());
+    }
+
+    // Naive-regex trap: an empty-string key `"":` living inside a string VALUE is not
+    // an empty-key slot and must not be touched (the slot form is the brace token `{}`).
+    #[test]
+    fn test_empty_string_key_in_value_is_not_a_slot() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+
+        let decoy = r#"{"x":"{\"\": 1}"}"#;
+        assert!(!fix.malformed_pattern.is_match(decoy));
+
+        let schemas = schema_map(&["path"]);
+        assert!(fix.fix_arguments(decoy, "write", &schemas).is_none());
+        // Byte-identical: the splicer has nothing to rewrite.
+        assert_eq!(fix.splice_empty_key_slots(decoy, &["path"]), decoy);
+    }
+
+    // A literal `{}` inside a string VALUE is not a slot: only the real key-position
+    // slot is replaced; the value region stays verbatim.
+    #[test]
+    fn test_braces_inside_string_value_are_not_slots() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let schemas = schema_map(&["path", "content"]);
+
+        let malformed = r#"{"content":"brace {} here",{}":"/tmp/a"}"#;
+        let fixed = fix
+            .fix_arguments(malformed, "write", &schemas)
+            .expect("real slot must be fixed");
+        assert_eq!(fixed, r#"{"content":"brace {} here","path":"/tmp/a"}"#);
+    }
+
+    // A nested `{"": ...}` (empty-string key at depth 2) is not a top-level slot and
+    // stays byte-verbatim; only the top-level brace slot is replaced.
+    #[test]
+    fn test_nested_empty_string_key_is_not_a_slot() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let schemas = schema_map(&["path", "content"]);
+
+        let malformed = r#"{"outer":{"":1},"content":"x",{}":"/tmp/a"}"#;
+        let fixed = fix
+            .fix_arguments(malformed, "write", &schemas)
+            .expect("top-level slot must be fixed");
+        assert_eq!(fixed, r#"{"outer":{"":1},"content":"x","path":"/tmp/a"}"#);
+    }
+
+    // Byte-splice proof: CJK values before and after the slots keep their multibyte
+    // payloads verbatim; the splice lands on ASCII structural boundaries regardless.
+    #[test]
+    fn test_cjk_two_slots_spliced_byte_verbatim() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let schemas = schema_map(&["path", "mode", "content"]);
+
+        let malformed = r#"{"content":"你好世界",{}":"/路径/文件.rs",{}":"第二"}"#;
+        let fixed = fix
+            .fix_arguments(malformed, "write", &schemas)
+            .expect("two slots must be fixed in order");
+        assert_eq!(fixed, r#"{"content":"你好世界","path":"/路径/文件.rs","mode":"第二"}"#);
+    }
+
+    // Byte-splice proof with escaped quotes in a value: the value region is copied
+    // verbatim (the `\"` must survive) while both slots are filled positionally.
+    #[test]
+    fn test_escaped_quote_value_preserved_verbatim() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let schemas = schema_map(&["path", "mode", "content"]);
+
+        let malformed = r#"{"content":"say \"hi\"",{}":"/tmp/a",{}":"b"}"#;
+        let fixed = fix
+            .fix_arguments(malformed, "write", &schemas)
+            .expect("two slots must be fixed in order");
+        assert_eq!(fixed, r#"{"content":"say \"hi\"","path":"/tmp/a","mode":"b"}"#);
     }
 }
