@@ -2,7 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 
 use super::validate::{
-    require_nonempty, validate_allowed_origins, validate_bind_host, validate_http_url, validate_temperature,
+    require_nonempty, validate_allowed_origins, validate_bind_host, validate_failure_cooldown_secs, validate_http_url,
+    validate_reprompt_max_total_ms, validate_synthesis, validate_temperature, validate_timeout_seconds,
 };
 use super::{AppConfig, ConfigError};
 
@@ -24,9 +25,16 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
     validate_server_config(&config.server)?;
     validate_reprompt(config.reprompt.as_ref())?;
     validate_backends(&config)?;
+    validate_synthesis(&config.synthesis)?;
     if let Some(ref augment) = config.augment_backend {
         validate_http_url(&augment.url, "Augment backend")?;
         require_nonempty(&augment.model, "augment-backend model")?;
+    }
+    // influxdb2's Client::new panics on an unparseable URL, and this is the one
+    // URL the loader never passed to validate_http_url — so an enabled exporter's
+    // URL is validated here rather than reaching that panic (F12-R2 / MAJOR 9).
+    if config.exporters.influxdb.enabled {
+        validate_http_url(&config.exporters.influxdb.url, "InfluxDB exporter")?;
     }
     if config.dump.enabled {
         require_nonempty(config.dump.path.trim(), "dump path while dump is enabled")?;
@@ -55,7 +63,7 @@ fn validate_reprompt(rep: Option<&super::RepromptConfig>) -> Result<(), ConfigEr
     for sentinel in &r.done_sentinels {
         require_nonempty(sentinel, "reprompt done_sentinels entry")?;
     }
-    Ok(())
+    validate_reprompt_max_total_ms(r.max_total_ms)
 }
 
 fn validate_backends(config: &AppConfig) -> Result<(), ConfigError> {
@@ -102,6 +110,7 @@ fn validate_backends(config: &AppConfig) -> Result<(), ConfigError> {
                 group.strategy
             )));
         }
+        validate_failure_cooldown_secs(group.failure_cooldown_secs, name)?;
         for node in &group.nodes {
             validate_backend_url(&node.url)?;
             if node.timeout_seconds == 0 {
@@ -109,6 +118,7 @@ fn validate_backends(config: &AppConfig) -> Result<(), ConfigError> {
                     "Node in group '{name}' has timeout_seconds of 0"
                 )));
             }
+            validate_timeout_seconds(node.timeout_seconds, &format!("Node in group '{name}'"))?;
             if let Some(t) = node.temperature {
                 validate_temperature(t, &format!("Node in group '{name}'"))?;
             }
@@ -144,8 +154,7 @@ fn validate_backend_config(config: &super::BackendConfig) -> Result<(), ConfigEr
             "Backend timeout_seconds must be greater than 0".to_string(),
         ));
     }
-
-    Ok(())
+    validate_timeout_seconds(config.timeout_seconds, "Backend")
 }
 
 #[cfg(test)]
@@ -924,5 +933,71 @@ augment-backend:
         let yaml = format!("{BASE}reprompt:\n  enabled: true\n  prompt: \"go\"\n  done_sentinels: [\"DONE\", \"\"]\n");
         let err = loaded(&yaml, "empty_sentinel").expect_err("empty sentinel must be rejected");
         assert!(err.to_string().contains("done_sentinels"), "got {err}");
+    }
+
+    #[test]
+    fn t_f12r2_rejects_unbounded_failure_cooldown_at_load() {
+        // MAJOR 6: this value used to pass check-config and panic on the first
+        // backend failure (Instant::now() + Duration::from_secs(u64::MAX)).
+        let yaml = format!("{BASE}backends:\n  g:\n    mappings: []\n    failure_cooldown_secs: 18446744073709551615\n    nodes:\n      - url: \"http://localhost:8080\"\n");
+        let err = loaded(&yaml, "cooldown_huge").expect_err("u64::MAX cooldown must be rejected at load");
+        assert!(err.to_string().contains("failure_cooldown_secs"), "got {err}");
+    }
+
+    #[test]
+    fn t_f12r2_rejects_unbounded_reprompt_total_ms_at_load() {
+        let yaml = format!("{BASE}reprompt:\n  enabled: true\n  prompt: \"go\"\n  max_total_ms: 18446744073709551615\n");
+        let err = loaded(&yaml, "reprompt_ms_huge").expect_err("u64::MAX max_total_ms must be rejected at load");
+        assert!(err.to_string().contains("max_total_ms"), "got {err}");
+    }
+
+    #[test]
+    fn t_f12r2_rejects_unbounded_backend_timeout_at_load() {
+        let yaml = BASE.replace(
+            "url: \"http://localhost:8080\"",
+            "url: \"http://localhost:8080\"\n  timeout_seconds: 18446744073709551615",
+        );
+        let err = loaded(&yaml, "timeout_huge").expect_err("u64::MAX backend timeout must be rejected at load");
+        assert!(err.to_string().contains("timeout_seconds"), "got {err}");
+    }
+
+    #[test]
+    fn t_f12r2_rejects_pathological_synthesis_and_accepts_sane_bounds() {
+        // new_input_parsing guard: the default and a realistic synthesis still load.
+        let ok = format!("{BASE}synthesis:\n  chunk_delay_ms: 25\n  chunk_size_chars: 512\n");
+        assert!(loaded(&ok, "synth_ok").is_ok(), "sane synthesis must load");
+        assert!(loaded(BASE, "synth_default").is_ok(), "absent synthesis (defaults) must load");
+
+        let zero = format!("{BASE}synthesis:\n  chunk_size_chars: 0\n");
+        let err = loaded(&zero, "synth_zero").expect_err("chunk_size_chars 0 must be rejected");
+        assert!(err.to_string().contains("chunk_size_chars"), "got {err}");
+
+        let delay = format!("{BASE}synthesis:\n  chunk_delay_ms: 18446744073709551615\n");
+        let err = loaded(&delay, "synth_delay").expect_err("u64::MAX chunk_delay_ms must be rejected");
+        assert!(err.to_string().contains("chunk_delay_ms"), "got {err}");
+    }
+
+    #[test]
+    fn t_f12r2_rejects_empty_influxdb_url_only_when_enabled() {
+        let enabled = format!("{BASE}exporters:\n  influxdb:\n    enabled: true\n    url: \"\"\n");
+        let err = loaded(&enabled, "influx_empty").expect_err("enabled influxdb with empty url must be rejected");
+        assert!(err.to_string().contains("InfluxDB"), "got {err}");
+
+        // Disabled keeps its inert placeholder (loader must not reject a config
+        // that never dials the URL — matches the shipped default's url: "").
+        let disabled = format!("{BASE}exporters:\n  influxdb:\n    enabled: false\n    url: \"\"\n");
+        assert!(
+            loaded(&disabled, "influx_disabled").is_ok(),
+            "disabled influxdb url is not dialed"
+        );
+    }
+
+    #[test]
+    fn t_f12r2_shipped_default_still_loads() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("config.yaml.default");
+        let cfg = load_config(&path).expect("config.yaml.default must still load after the bounds sweep");
+        // And its real values sit inside the new caps.
+        assert_eq!(cfg.synthesis.chunk_size_chars, 2000);
+        assert_eq!(cfg.synthesis.chunk_delay_ms, 0);
     }
 }

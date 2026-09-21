@@ -2,6 +2,10 @@ mod loader;
 mod validate;
 
 pub use validate::validate_http_url;
+// The binder (proxy/server.rs) shares the loader's host predicate: an IP literal
+// binds exactly, a hostname the loader accepted is resolved at bind time, and a
+// shape the loader refused (junk, an IPv6 zone id) is refused again there.
+pub(crate) use validate::validate_bind_host;
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -236,6 +240,7 @@ impl std::error::Error for NoMatchingBackend {}
 
 /// Response fix modules configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct FixesConfig {
     #[serde(default = "default_fixes_enabled")]
     pub enabled: bool,
@@ -257,6 +262,26 @@ impl Default for FixesConfig {
             enabled: default_fixes_enabled(),
             modules: HashMap::new(),
         }
+    }
+}
+
+impl FixesConfig {
+    /// Every key under `fixes.modules.<name>` that was NOT the typed `enabled`
+    /// flag landed in `FixModuleConfig.options` (its `#[serde(flatten)]` catch-
+    /// all). No fix consumes that map today, so every entry there is an operator
+    /// key doing nothing — the audit names each so a silently-ignored option can
+    /// not masquerade as an applied one. `deny_unknown_fields` cannot live on
+    /// `FixModuleConfig` (a flattened map absorbs the rest), so this WARN audit
+    /// is its counterpart. Sorted for deterministic reporting.
+    pub fn leftover_fix_module_options(&self) -> Vec<(String, String)> {
+        let mut leftovers = Vec::new();
+        for (module, cfg) in &self.modules {
+            for key in cfg.options.keys() {
+                leftovers.push((module.clone(), key.clone()));
+            }
+        }
+        leftovers.sort();
+        leftovers
     }
 }
 
@@ -599,6 +624,7 @@ impl Default for RepromptConfig {
 
 /// Exporters configuration
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 pub struct ExportersConfig {
     #[serde(default)]
     pub influxdb: InfluxDbConfig,
@@ -1337,6 +1363,65 @@ mod deny_unknown_fields_tests {
     #[test]
     fn tlsconfig_rejects_bogus_tls_key() {
         rejected::<TlsConfig>("accept_invalid_certs: false\nbogus_tls_key: 1\n", "bogus_tls_key");
+    }
+
+    #[test]
+    fn fixesconfig_rejects_bogus_fixes_key() {
+        rejected::<FixesConfig>("enabled: true\nbogus_fixes_key: 1\n", "bogus_fixes_key");
+    }
+
+    #[test]
+    fn fixesconfig_rejects_enabled_typo_instead_of_silently_enabling() {
+        // MAJOR 5: `enbaled: false` used to deserialize as `enabled: true` (typo key
+        // ignored, real key absent → default-true). A typo must never invert the
+        // operator's disable into an enable — it must name the misspelled key.
+        let err = serde_yaml::from_str::<FixesConfig>("enbaled: false\n")
+            .expect_err("`enbaled` typo must be rejected, not read as enabled:true");
+        assert!(err.to_string().contains("enbaled"), "must name the typo key, got: {err}");
+    }
+
+    #[test]
+    fn exportersconfig_rejects_bogus_exporters_key() {
+        rejected::<ExportersConfig>("bogus_exporters_key: 1\n", "bogus_exporters_key");
+    }
+
+    #[test]
+    fn exportersconfig_rejects_influxdb_typo_instead_of_silently_disabling() {
+        // MAJOR 5: `influxd:` (transposed) used to be ignored, leaving the real
+        // `influxdb` at its disabled default — telemetry silently off from a typo.
+        let err = serde_yaml::from_str::<ExportersConfig>("influxd:\n  enabled: true\n  url: \"http://localhost:8086\"\n")
+            .expect_err("`influxd` typo must be rejected, not read as an absent influxdb");
+        assert!(err.to_string().contains("influxd"), "must name the typo key, got: {err}");
+    }
+
+    #[test]
+    fn leftover_options_audit_names_the_flatten_keys_deny_unknown_fields_cannot() {
+        // Given: a fix module carrying an option key (only `enabled` is typed; the
+        // rest fall through FixModuleConfig's flatten into `options`).
+        let cfg: FixesConfig =
+            serde_yaml::from_str("enabled: true\nmodules:\n  toolcall_null_index:\n    enabled: true\n    bogus_option: 7\n")
+                .expect("valid FixesConfig");
+        // Then: the audit surfaces it — deny_unknown_fields is structurally
+        // impossible on FixModuleConfig, so this WARN is the only signal.
+        assert_eq!(
+            cfg.leftover_fix_module_options(),
+            vec![("toolcall_null_index".to_string(), "bogus_option".to_string())],
+            "leftover option key must be named, module-qualified"
+        );
+    }
+
+    #[test]
+    fn leftover_options_audit_is_empty_for_typed_keys_and_default() {
+        // When: every module key is the typed `enabled` — no leftovers, no false
+        // positives that would spam the operator for a correct config.
+        let cfg: FixesConfig = serde_yaml::from_str("enabled: true\nmodules:\n  toolcall_bad_filepath:\n    enabled: false\n")
+            .expect("valid FixesConfig");
+        assert!(
+            cfg.leftover_fix_module_options().is_empty(),
+            "{:?}",
+            cfg.leftover_fix_module_options()
+        );
+        assert!(FixesConfig::default().leftover_fix_module_options().is_empty());
     }
 
     #[test]

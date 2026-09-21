@@ -4,7 +4,7 @@
 //! re-checks what passed here (task 72 validates only what CLI overrides
 //! can change), and consumers downstream trust these values.
 
-use super::ConfigError;
+use super::{ConfigError, SynthesisConfig};
 
 /// Validate a bind host: an IP literal (IPv4 or IPv6, bracket-tolerant for
 /// the IPv6 form operators copy from URLs, e.g. `[::1]`) or an RFC-1123
@@ -113,9 +113,112 @@ pub(crate) fn validate_allowed_origins(origins: &[String]) -> Result<(), ConfigE
     Ok(())
 }
 
+// F12-R2 (MAJOR 6, 7): unbounded numeric config fields reached
+// `Instant::now() + Duration::from_secs(n)` on the request path (backend-node
+// failure cooldown, reprompt wall-clock budget) and panicked on overflow the
+// first time the code path fired; `synthesis.chunk_size_chars: 0` made every
+// character its own pre-buffered chunk. These are the single validation home for
+// the upper/lower bounds; the loader applies them at load so the value is
+// rejected with its field name long before any panic surface exists. The caps
+// are generous — a day for a cooldown/timeout, an hour for a reprompt budget, a
+// minute for a per-chunk synthesis gap — so no legitimate config is refused.
+pub(crate) const MAX_TIMEOUT_SECONDS: u64 = 86_400;
+pub(crate) const MAX_FAILURE_COOLDOWN_SECS: u64 = 86_400;
+pub(crate) const MAX_REPROMPT_TOTAL_MS: u64 = 3_600_000;
+pub(crate) const MAX_CHUNK_DELAY_MS: u64 = 60_000;
+pub(crate) const MIN_CHUNK_SIZE_CHARS: u64 = 1;
+
+fn reject_over(name: &str, value: u64, max: u64) -> Result<(), ConfigError> {
+    if value > max {
+        return Err(ConfigError::Validation(format!(
+            "{name} {value} exceeds the supported maximum {max}"
+        )));
+    }
+    Ok(())
+}
+
+/// Backend / per-node request timeout: an upper bound on a single upstream call.
+/// The `> 0` floor is checked by the loader's existing zero-gate; this is the
+/// ceiling that keeps `Duration::from_secs` off the overflow path.
+pub(crate) fn validate_timeout_seconds(secs: u64, where_: &str) -> Result<(), ConfigError> {
+    reject_over(&format!("{where_} timeout_seconds"), secs, MAX_TIMEOUT_SECONDS)
+}
+
+/// Per-group failure cooldown upper bound (the instant-overflow source).
+pub(crate) fn validate_failure_cooldown_secs(secs: u64, group: &str) -> Result<(), ConfigError> {
+    reject_over(
+        &format!("Backend group '{group}' failure_cooldown_secs"),
+        secs,
+        MAX_FAILURE_COOLDOWN_SECS,
+    )
+}
+
+/// Reprompt loop wall-clock budget upper bound (same instant-overflow class).
+pub(crate) fn validate_reprompt_max_total_ms(ms: u64) -> Result<(), ConfigError> {
+    reject_over("reprompt max_total_ms", ms, MAX_REPROMPT_TOTAL_MS)
+}
+
+/// The `synthesis:` section was never swept; both keys are now bounded here.
+pub(crate) fn validate_synthesis(synth: &SynthesisConfig) -> Result<(), ConfigError> {
+    reject_over("synthesis chunk_delay_ms", synth.chunk_delay_ms, MAX_CHUNK_DELAY_MS)?;
+    if (synth.chunk_size_chars as u64) < MIN_CHUNK_SIZE_CHARS {
+        return Err(ConfigError::Validation(
+            "synthesis chunk_size_chars must be at least 1; 0 emits one chunk per character".to_string(),
+        ));
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeout_seconds_upper_bound() {
+        assert!(validate_timeout_seconds(300, "Backend").is_ok());
+        assert!(validate_timeout_seconds(MAX_TIMEOUT_SECONDS, "Backend").is_ok());
+        let err = validate_timeout_seconds(MAX_TIMEOUT_SECONDS + 1, "Node in group 'g'")
+            .expect_err("over-cap timeout must be rejected");
+        let msg = err.to_string();
+        assert!(msg.contains("timeout_seconds") && msg.contains("maximum"), "{msg}");
+    }
+
+    #[test]
+    fn failure_cooldown_upper_bound_rejects_u64_max() {
+        // The review's exact RED: u64::MAX used to load, then panic on the first
+        // backend failure via `Instant::now() + Duration::from_secs(u64::MAX)`.
+        assert!(validate_failure_cooldown_secs(30, "g").is_ok());
+        assert!(validate_failure_cooldown_secs(0, "g").is_ok(), "0 disables cooldown");
+        let err = validate_failure_cooldown_secs(u64::MAX, "g").expect_err("u64::MAX cooldown must be rejected");
+        assert!(
+            err.to_string().contains("failure_cooldown_secs") && err.to_string().contains("maximum"),
+            "must name the field with the cap, got: {err}"
+        );
+    }
+
+    #[test]
+    fn reprompt_max_total_ms_upper_bound() {
+        assert!(validate_reprompt_max_total_ms(30_000).is_ok());
+        assert!(validate_reprompt_max_total_ms(MAX_REPROMPT_TOTAL_MS).is_ok());
+        assert!(validate_reprompt_max_total_ms(MAX_REPROMPT_TOTAL_MS + 1).is_err());
+    }
+
+    #[test]
+    fn synthesis_bounds_reject_zero_size_and_giant_delay() {
+        assert!(validate_synthesis(&SynthesisConfig::default()).is_ok(), "defaults must pass");
+        let zero = SynthesisConfig {
+            chunk_delay_ms: 0,
+            chunk_size_chars: 0,
+        };
+        let err = validate_synthesis(&zero).expect_err("chunk_size_chars 0 must be rejected");
+        assert!(err.to_string().contains("chunk_size_chars"), "{err}");
+        let giant = SynthesisConfig {
+            chunk_delay_ms: MAX_CHUNK_DELAY_MS + 1,
+            chunk_size_chars: 2000,
+        };
+        let err = validate_synthesis(&giant).expect_err("over-cap chunk_delay_ms must be rejected");
+        assert!(err.to_string().contains("chunk_delay_ms"), "{err}");
+    }
 
     #[test]
     fn bind_host_pin_table() {
