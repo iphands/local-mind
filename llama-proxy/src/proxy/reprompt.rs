@@ -24,19 +24,19 @@
 
 use crate::backends::BackendNode;
 use crate::config::RepromptConfig;
-use crate::prompt_cache::{PromptFileCache, Refresh};
+use crate::prompt_cache::{self, Refresh};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::SystemTime;
 use tokio::sync::RwLock;
 
 pub struct RepromptEngine {
-    /// Current prompt text — guarded for dynamic reload
+    /// Current prompt text — guarded for dynamic reload. The file's mtime is
+    /// deliberately NOT a second cell here: it is owned by the shared
+    /// [`prompt_cache::PromptFileCache`] keyed by `prompt_file`, so no reader can
+    /// ever pair text from one reload with the mtime of another (big-fix 63).
     prompt: RwLock<String>,
     /// Path to reload from (None when using inline prompt)
     prompt_file: Option<PathBuf>,
-    /// mtime of the prompt file at last successful read
-    last_mtime: RwLock<Option<SystemTime>>,
     /// Re-read the file on each trigger if mtime changed (default: true)
     dynamic_prompt: bool,
     pub max_retries: u32,
@@ -67,13 +67,12 @@ const MUTATING_TOOL_NAMES: &[&str] = &[
 
 impl RepromptEngine {
     pub fn from_config(config: &RepromptConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
-        let (prompt, prompt_file, initial_mtime) = if let Some(ref path) = config.prompt_file {
+        let (prompt, prompt_file) = if let Some(ref path) = config.prompt_file {
             let text =
                 std::fs::read_to_string(path).map_err(|e| format!("reprompt: failed to read prompt_file '{}': {}", path, e))?;
-            let mtime = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
-            (text, Some(PathBuf::from(path)), mtime)
+            (text, Some(PathBuf::from(path)))
         } else if let Some(ref inline) = config.prompt {
-            (inline.clone(), None, None)
+            (inline.clone(), None)
         } else {
             return Err("reprompt: neither prompt_file nor prompt is configured".into());
         };
@@ -85,7 +84,6 @@ impl RepromptEngine {
         Ok(Self {
             prompt: RwLock::new(prompt),
             prompt_file,
-            last_mtime: RwLock::new(initial_mtime),
             dynamic_prompt: config.dynamic_prompt,
             max_retries: config.max_retries,
             done_sentinels: config.done_sentinels.clone(),
@@ -106,15 +104,15 @@ impl RepromptEngine {
             return self.prompt.read().await.clone();
         };
 
-        let cache = PromptFileCache::new(self.prompt.read().await.clone(), *self.last_mtime.read().await);
+        let cache = prompt_cache::shared(path).await;
         match cache.refresh(path).await {
             Refresh::Reloaded { text, mtime } => {
                 tracing::info!(
                     path = %path.display(),
+                    mtime = ?mtime,
                     "Reprompt: prompt file changed, reloading"
                 );
                 *self.prompt.write().await = text.clone();
-                *self.last_mtime.write().await = mtime;
                 text
             }
             Refresh::Unchanged => self.prompt.read().await.clone(),
@@ -432,7 +430,6 @@ mod tests {
         RepromptEngine {
             prompt: RwLock::new("Continue or say DONE.".into()),
             prompt_file: None,
-            last_mtime: RwLock::new(None),
             dynamic_prompt: false,
             max_retries: 3,
             done_sentinels: vec!["DONE".into()],
@@ -638,7 +635,6 @@ mod tests {
         let e = RepromptEngine {
             prompt: RwLock::new("Static text.".into()),
             prompt_file: None,
-            last_mtime: RwLock::new(None),
             dynamic_prompt: true,
             max_retries: 3,
             done_sentinels: vec!["DONE".into()],
@@ -654,19 +650,17 @@ mod tests {
         let mut f = tempfile::NamedTempFile::new().unwrap();
         write!(f, "File prompt.").unwrap();
         let path = f.path().to_path_buf();
-        let mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
 
         let e = RepromptEngine {
             prompt: RwLock::new("File prompt.".into()),
             prompt_file: Some(path),
-            last_mtime: RwLock::new(Some(mtime)),
             dynamic_prompt: true,
             max_retries: 3,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
             skip_read_only_requests: true,
         };
-        // mtime hasn't changed, should return cached prompt without re-reading
+        // First resolve cold-loads the shared cache; the prompt text is unchanged.
         assert_eq!(e.resolve_prompt().await, "File prompt.");
     }
 
@@ -683,12 +677,9 @@ mod tests {
         write!(f2, "New prompt.").unwrap();
         drop(f2);
 
-        let old_mtime = std::time::UNIX_EPOCH; // clearly older than real file
-
         let e = RepromptEngine {
             prompt: RwLock::new("Old prompt.".into()),
             prompt_file: Some(path),
-            last_mtime: RwLock::new(Some(old_mtime)),
             dynamic_prompt: true,
             max_retries: 3,
             done_sentinels: vec!["DONE".into()],
@@ -854,7 +845,6 @@ mod tests {
         RepromptEngine {
             prompt: RwLock::new("Continue or say DONE.".into()),
             prompt_file: None,
-            last_mtime: RwLock::new(None),
             dynamic_prompt: false,
             max_retries,
             done_sentinels: vec!["DONE_NO_MORE_PROXY_REPROMPT".into()],
@@ -945,7 +935,6 @@ mod tests {
         let e = RepromptEngine {
             prompt: RwLock::new("Old prompt.".into()),
             prompt_file: Some(path),
-            last_mtime: RwLock::new(Some(std::time::UNIX_EPOCH)),
             dynamic_prompt: true,
             max_retries: 3,
             done_sentinels: vec!["DONE".into()],
@@ -966,7 +955,6 @@ mod tests {
         let e = RepromptEngine {
             prompt: RwLock::new("Old prompt.".into()),
             prompt_file: Some(std::env::temp_dir().join("task47-no-such-reprompt-prompt-4c1d.md")),
-            last_mtime: RwLock::new(Some(std::time::UNIX_EPOCH)),
             dynamic_prompt: true,
             max_retries: 3,
             done_sentinels: vec!["DONE".into()],
@@ -980,5 +968,73 @@ mod tests {
             "Old prompt.",
             "unreadable file must not replace the prompt"
         );
+    }
+
+    // --- task 63 pins: the engine reads through the process-wide registry ---
+
+    #[tokio::test]
+    async fn test_resolve_prompt_uses_shared_registry() {
+        let mut f = tempfile::NamedTempFile::new().unwrap();
+        use std::io::Write;
+        write!(f, "ON-DISK").unwrap();
+        let path = f.path().to_path_buf();
+
+        crate::prompt_cache::shared(&path).await.refresh(&path).await;
+
+        let e = RepromptEngine {
+            prompt: RwLock::new("ENGINE-BOOT-TEXT".into()),
+            prompt_file: Some(path),
+            dynamic_prompt: true,
+            max_retries: 3,
+            done_sentinels: vec!["DONE".into()],
+            log_stop_responses: false,
+            skip_read_only_requests: true,
+        };
+        assert_eq!(
+            e.resolve_prompt().await,
+            "ENGINE-BOOT-TEXT",
+            "a file the shared cache already validated as Unchanged must not be re-read per engine"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn test_concurrent_resolves_never_tear_and_converge() {
+        // Eventual-consistency contract: concurrent triggers each write ONE atomic
+        // prompt cell, so every observable value is a whole file text (never a mix),
+        // and a trigger after the last file write converges on it. Mid-flight, the
+        // loser of a last-writer race can linger until the next refresh re-reads -
+        // the shared cache's mtime check heals that, so the final resolve is the
+        // convergence point, not any single concurrent return.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("prompt.md");
+        std::fs::write(&path, "V1").unwrap();
+
+        let e = std::sync::Arc::new(RepromptEngine {
+            prompt: RwLock::new("V1".into()),
+            prompt_file: Some(path.clone()),
+            dynamic_prompt: true,
+            max_retries: 3,
+            done_sentinels: vec!["DONE".into()],
+            log_stop_responses: false,
+            skip_read_only_requests: true,
+        });
+
+        let mut tasks = Vec::new();
+        for _ in 0..4 {
+            let e = std::sync::Arc::clone(&e);
+            tasks.push(tokio::spawn(async move { e.resolve_prompt().await }));
+        }
+        std::fs::write(&path, "V2").unwrap();
+        let mut seen = Vec::new();
+        for t in tasks {
+            seen.push(t.await.unwrap());
+        }
+        assert!(
+            seen.iter().all(|s| s == "V1" || s == "V2"),
+            "every concurrent resolve must return a whole file text, got {seen:?}"
+        );
+
+        std::fs::write(&path, "V3").unwrap();
+        assert_eq!(e.resolve_prompt().await, "V3", "the trigger after the last write converges");
     }
 }
