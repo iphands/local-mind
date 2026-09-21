@@ -608,8 +608,6 @@ pub async fn handle_streaming_response(
     // Activity signaling for the stats observer's inactivity timeout (watch channel)
     let (activity_tx, activity_rx) = tokio::sync::watch::channel(());
 
-    let request_json_for_dump = request_json.clone();
-
     let pass_state = StreamPassState {
         underlying: FusedStream {
             inner: stream,
@@ -632,17 +630,14 @@ pub async fn handle_streaming_response(
 
     // Spawn task to collect stats and/or dump after stream completes
     if let Some(accumulated) = accumulated_out {
-        let exporter_manager = exporter_manager.clone();
-        let client = http_client.clone();
-        let backend_url = backend_url.clone();
-        let group_name = group_name; // Already owned, move into closure
-        let strip_path_prefix = strip_path_prefix.clone();
-        let dump_path = dump_path.clone();
-        let concurrent_requests = concurrent_requests;
-        let request_method = request_method.clone();
-        let request_uri = request_uri.clone();
-        let backend_request_body = backend_request_body.clone();
-        let request_json_for_dump = request_json_for_dump.clone();
+        // [D-M6] Moves, not clones: after the spawn block this fn reads only
+        // headers/status/stream, so nothing below has a second reader outside
+        // the task. The single surviving deep clone is dump-gated; the default
+        // (no --dump) path clones nothing. Do not re-clone (regression [D]M6).
+        let request_json_for_dump = dump_path.as_ref().map(|_| request_json.clone());
+        // The dump block is the only second consumer of the exact bytes sent to
+        // the backend; with no dump the buffer is dropped, never copied.
+        let backend_request_body = if dump_path.is_some() { backend_request_body } else { None };
 
         tokio::spawn(async move {
             // Reset on each chunk. There is deliberately no absolute cap: a stream that
@@ -859,7 +854,7 @@ pub async fn handle_streaming_response(
                         // either, so nothing can be done with context_percent -
                         // skip the /slots round-trip it would be wasted on.
                         if metrics.has_throughput_signal() {
-                            match fetch_context_total(&client, &backend_url, strip_path_prefix.as_deref()).await {
+                            match fetch_context_total(&http_client, &backend_url, strip_path_prefix.as_deref()).await {
                                 Some(ctx_total) => {
                                     metrics.context_total = Some(ctx_total);
                                     metrics.calculate_context_percent();
