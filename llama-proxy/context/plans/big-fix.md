@@ -223,7 +223,7 @@ Tests-after with regression-first ordering per task: each fix task adds the fail
 
 ### Phase 17 — Sweep gates
 
-- [ ] 98. **Dead-code + lint sweep.** Build with `dead_code` denied; remove everything the compiler now flags that this plan orphaned (superseded helpers from 23/53/67/86). No new `#[allow(dead_code)]`.
+- [x] 98. **Dead-code + lint sweep.** Build with `dead_code` denied; remove everything the compiler now flags that this plan orphaned (superseded helpers from 23/53/67/86). No new `#[allow(dead_code)]`.
 - [x] 99. **Findings-to-tasks coverage audit.** Walk every finding in the six saved reports against Appendix B; each maps to a completed task or an Appendix A verified-clean entry; zero gaps before the F-wave. Fix any gap by reopening the mapped task.
 
 ## Final verification wave
