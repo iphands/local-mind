@@ -693,7 +693,6 @@ impl AppConfig {
     pub fn from_file<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         load_config(path)
     }
-
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -994,7 +993,11 @@ mod tests {
         assert_eq!(StreamingMode::from_str_mode("disabled"), Some(StreamingMode::Disabled));
         assert_eq!(StreamingMode::from_str_mode("FAKE"), Some(StreamingMode::Fake));
         assert_eq!(StreamingMode::from_str_mode("Passthrough"), Some(StreamingMode::Passthrough));
-        assert_eq!(StreamingMode::from_str_mode("accumulator"), None, "the legacy alias is deleted (D2)");
+        assert_eq!(
+            StreamingMode::from_str_mode("accumulator"),
+            None,
+            "the legacy alias is deleted (D2)"
+        );
         assert_eq!(StreamingMode::from_str_mode("bogus"), None);
     }
 
@@ -1223,7 +1226,6 @@ timeout_secs: 42
         let cfg: AugmentBackendConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(cfg.timeout_secs, 42);
     }
-
 }
 
 #[cfg(test)]
