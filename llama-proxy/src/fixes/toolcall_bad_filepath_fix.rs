@@ -1781,34 +1781,23 @@ mod tests {
     // truncation path rather than the serde round-trip. `content` is placed BEFORE
     // `filePath` so the truncation preserves it, proving first-wins + content-kept.
 
-    /// Full OpenAI response carrying one Write tool call whose `arguments` string is
-    /// malformed and contains CJK in both the content and the winning filePath value.
-    fn cjk_multibyte_response() -> Value {
-        let args = r#"{"content":"中文测试内容","filePath":"/x/中文测试目录/file.rs","filePath"/x/第二个坏路径"}"#;
-        serde_json::json!({
-            "id": "chatcmpl-cjk",
-            "choices": [{
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "tool_calls": [{
-                        "id": "call_cjk_0",
-                        "type": "function",
-                        "index": 0,
-                        "function": { "name": "write", "arguments": args }
-                    }]
-                }
-            }]
-        })
-    }
-
     #[test]
     fn test_apply_buffered_cjk_multibyte_first_wins() {
         // Given a buffered response whose tool-call arguments hold CJK content and a
         // CJK filePath followed by a malformed duplicate filePath.
         let fix = ToolcallBadFilepathFix::new();
-        let response = cjk_multibyte_response();
+        let args = r#"{"content":"中文测试内容","filePath":"/x/中文测试目录/file.rs","filePath"/x/第二个坏路径"}"#;
+        let response = serde_json::json!({
+            "choices": [{
+                "finish_reason": "tool_calls",
+                "message": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "name": "write", "arguments": args }
+                    }]
+                }
+            }]
+        });
         assert!(fix.applies(&response), "CJK payload must be detected as malformed");
 
         // When the buffered fix runs. (A panic here fails the test = no-panic proof.)
