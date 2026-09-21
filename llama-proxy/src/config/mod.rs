@@ -410,7 +410,7 @@ pub type StreamingConfig = StreamingMode;
 /// Augment backend configuration - experimental feature for enriching requests
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AugmentBackendConfig {
-    /// Enable augment-backend feature
+    /// Enable augment-backend feature (opt-in: absent key defaults to false)
     #[serde(default = "default_augment_enabled")]
     pub enabled: bool,
     /// Full URL to augment backend (e.g., "http://cosmo.lan:8701")
@@ -426,7 +426,7 @@ pub struct AugmentBackendConfig {
 }
 
 fn default_augment_enabled() -> bool {
-    true
+    false
 }
 
 fn default_prompt_file() -> String {
@@ -440,7 +440,7 @@ fn default_request_prompt_file() -> String {
 impl Default for AugmentBackendConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
+            enabled: default_augment_enabled(),
             url: String::new(),
             model: String::new(),
             prompt_file: default_prompt_file(),
@@ -1147,5 +1147,26 @@ main:
 "#;
         let backends: BackendsConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(backends.get("main").unwrap().failure_cooldown_secs, 90);
+    }
+
+    #[test]
+    fn test_augment_backend_absent_enabled_deserializes_disabled() {
+        let yaml = r#"
+url: "http://localhost:8701"
+model: "fast-model"
+"#;
+        let cfg: AugmentBackendConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            !cfg.enabled,
+            "F-M13: augment-backend is opt-in - absent `enabled` must deserialize to false"
+        );
+    }
+
+    #[test]
+    fn test_augment_backend_default_impl_matches_opt_in() {
+        assert!(
+            !AugmentBackendConfig::default().enabled,
+            "the Default impl must not re-introduce the old default-true"
+        );
     }
 }

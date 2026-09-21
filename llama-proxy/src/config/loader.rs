@@ -572,4 +572,62 @@ exporters:
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
     }
+
+    #[test]
+    fn test_augment_backend_absent_enabled_defaults_false_opt_in() {
+        let temp_file = std::env::temp_dir().join("test_augment_opt_in_config.yaml");
+        let config_content = r#"
+server:
+  port: 8066
+  host: "0.0.0.0"
+
+backend:
+  url: "http://localhost:8080"
+  timeout_seconds: 300
+
+augment-backend:
+  url: "http://localhost:8701"
+  model: "fast-model"
+"#;
+        std::fs::write(&temp_file, config_content).unwrap();
+
+        let config = load_config(&temp_file).unwrap();
+        let augment = config.augment_backend.expect("section must parse");
+        assert!(
+            !augment.enabled,
+            "F-M13: augment-backend is opt-in - an absent `enabled` key must default to false"
+        );
+        assert_eq!(augment.url, "http://localhost:8701");
+        assert_eq!(augment.model, "fast-model");
+
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_augment_backend_explicit_enabled_true_still_honored() {
+        let temp_file = std::env::temp_dir().join("test_augment_opt_in_true_config.yaml");
+        let config_content = r#"
+server:
+  port: 8066
+  host: "0.0.0.0"
+
+backend:
+  url: "http://localhost:8080"
+  timeout_seconds: 300
+
+augment-backend:
+  enabled: true
+  url: "http://localhost:8701"
+  model: "fast-model"
+"#;
+        std::fs::write(&temp_file, config_content).unwrap();
+
+        let config = load_config(&temp_file).unwrap();
+        assert!(
+            config.augment_backend.expect("section parsed").enabled,
+            "explicit `enabled: true` must still opt in"
+        );
+
+        let _ = std::fs::remove_file(&temp_file);
+    }
 }
