@@ -110,17 +110,13 @@ enum Commands {
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    let level_filter = if let Some(level) = cli.log_level {
-        level.to_string()
-    } else {
-        tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"))
-            .to_string()
-    };
+    let (env_filter, log_env_warning) =
+        resolve_log_filter(cli.log_level.map(|level| level.to_string()), std::env::var("RUST_LOG").ok());
+    if let Some(warning) = log_env_warning {
+        eprintln!("{warning}");
+    }
 
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::new(&level_filter))
-        .init();
+    tracing_subscriber::fmt().with_env_filter(env_filter).init();
 
     match cli.command {
         Commands::Run {
@@ -170,15 +166,19 @@ async fn run_proxy(
     let mut config = load_config_or_exit(&config_path);
 
     // Apply CLI overrides
+    let mut applied_overrides: Vec<String> = Vec::new();
     if let Some(port) = port_override {
         config.server.port = port;
+        applied_overrides.push(format!("port={port}"));
     }
     if let Some(url) = backend_url_override {
         if config.backends.is_some() {
             tracing::warn!("--backend-url ignored: multi-backend 'backends:' config is active");
         } else if let Some(b) = config.backend.as_mut() {
             b.url = url;
+            applied_overrides.push(format!("backend-url={}", b.url));
         } else {
+            applied_overrides.push(format!("backend-url={url}"));
             config.backend = Some(BackendConfig {
                 url,
                 ..BackendConfig::default()
@@ -193,8 +193,15 @@ async fn run_proxy(
             std::process::exit(1);
         }
     };
+    if streaming_mode_override.is_some() {
+        applied_overrides.push(format!("streaming={:?}", config.streaming));
+    }
 
-    tracing::info!("Loading configuration from {:?}", config_path);
+    if applied_overrides.is_empty() {
+        tracing::info!(config = %config_path.display(), "Configuration active (no CLI overrides applied)");
+    } else {
+        tracing::info!(config = %config_path.display(), overrides = ?applied_overrides, "Configuration active (CLI overrides applied)");
+    }
 
     // Log all configuration settings
     log_config_settings(&config);
@@ -461,6 +468,7 @@ fn fix_module_states(catalog: &FixRegistry, constructed: &FixRegistry) -> Vec<Fi
 
 /// Validate configuration file
 fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+    tracing::info!("Loading configuration from {config_path:?}");
     match AppConfig::from_file(&config_path) {
         Ok(config) => {
             println!("✓ Configuration file is valid\n");
@@ -745,8 +753,35 @@ fn validate_final(cfg: &AppConfig) -> Result<(), String> {
     Ok(())
 }
 
+/// Decide the log filter and whether the user deserves to know why it is not
+/// what they asked for. Precedence: --log-level > RUST_LOG > "info". A set-but
+/// unparseable RUST_LOG falls back to "info" WITH a warning (the old silent
+/// `unwrap_or_else` made a typo'd filter look like the default); unset stays
+/// silent. Returns (filter, optional one-line stderr warning).
+fn resolve_log_filter(
+    cli_level: Option<String>,
+    env_rust_log: Option<String>,
+) -> (tracing_subscriber::EnvFilter, Option<String>) {
+    if let Some(level) = cli_level {
+        return (tracing_subscriber::EnvFilter::new(level), None);
+    }
+    match env_rust_log {
+        None => (tracing_subscriber::EnvFilter::new("info"), None),
+        Some(raw) => match tracing_subscriber::EnvFilter::try_new(&raw) {
+            Ok(filter) => (filter, None),
+            Err(e) => (
+                tracing_subscriber::EnvFilter::new("info"),
+                Some(format!(
+                    "warning: RUST_LOG={raw:?} is not a valid filter ({e}); falling back to \"info\" (fix RUST_LOG or use --log-level)"
+                )),
+            ),
+        },
+    }
+}
+
 /// Load configuration or exit with error
 fn load_config_or_exit(config_path: &Path) -> AppConfig {
+    tracing::info!("Loading configuration from {:?}", config_path);
     match AppConfig::from_file(config_path) {
         Ok(config) => config,
         Err(e) => {
@@ -889,5 +924,37 @@ mod tests {
             Some(env!("CARGO_PKG_VERSION").to_string()),
             "--version must report the crate version, never a hardcoded string"
         );
+    }
+
+    #[test]
+    fn t76_cli_log_level_beats_env_and_nags_nothing() {
+        let (filter, warn) = resolve_log_filter(Some("debug".into()), Some("!!!".into()));
+        assert_eq!(filter.to_string(), "debug", "--log-level must win outright");
+        assert!(warn.is_none(), "an overridden RUST_LOG is not our business: {warn:?}");
+    }
+
+    #[test]
+    fn t76_valid_rust_log_is_honored_silently() {
+        let (filter, warn) = resolve_log_filter(None, Some("warn,llama_proxy=trace".into()));
+        assert_eq!(filter.to_string(), "llama_proxy=trace,warn");
+        assert!(warn.is_none());
+    }
+
+    #[test]
+    fn t76_invalid_rust_log_falls_back_to_info_with_one_warning_line() {
+        // The RED case: RUST_LOG='!!!' used to degrade to info SILENTLY,
+        // making a typo'd filter indistinguishable from the default.
+        let (filter, warn) = resolve_log_filter(None, Some("!!!".into()));
+        assert_eq!(filter.to_string(), "info", "fallback must be info");
+        let w = warn.expect("invalid RUST_LOG must warn");
+        assert!(w.contains("\"!!!\"") && w.to_lowercase().starts_with("warning"), "{w}");
+        assert!(!w.contains('\n'), "warning must be exactly one line: {w:?}");
+    }
+
+    #[test]
+    fn t76_unset_rust_log_is_silent_info() {
+        let (filter, warn) = resolve_log_filter(None, None);
+        assert_eq!(filter.to_string(), "info");
+        assert!(warn.is_none(), "unset RUST_LOG must not nag");
     }
 }
