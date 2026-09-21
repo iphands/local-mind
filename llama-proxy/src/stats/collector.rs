@@ -410,7 +410,7 @@ pub struct ContextInfo {
 /// Per-slot metrics
 #[derive(Debug, Clone)]
 pub struct SlotMetrics {
-    pub slot_id: u32,
+    pub slot_id: u64,
     pub n_tokens: u64,
     pub n_ctx: u64,
     pub is_processing: bool,
@@ -420,18 +420,18 @@ impl ContextInfo {
     /// Parse from /slots response
     pub fn from_slots_response(response: &Value) -> Option<Self> {
         let slots = response.as_array()?;
-        let mut total_context = 0;
-        let mut used_context = 0;
+        let mut total_context: u64 = 0;
+        let mut used_context: u64 = 0;
         let mut slot_metrics = Vec::new();
 
         for slot in slots {
-            let slot_id = slot.get("id").and_then(|i| i.as_u64()).unwrap_or(0) as u32;
+            let slot_id = slot.get("id").and_then(|i| i.as_u64()).unwrap_or(0);
             let n_ctx = slot.get("n_ctx").and_then(|n| n.as_u64()).unwrap_or(0);
             let n_tokens = slot.get("n_tokens").and_then(|n| n.as_u64()).unwrap_or(0);
             let is_processing = slot.get("is_processing").and_then(|p| p.as_bool()).unwrap_or(false);
 
-            total_context += n_ctx;
-            used_context += n_tokens;
+            total_context = total_context.saturating_add(n_ctx);
+            used_context = used_context.saturating_add(n_tokens);
 
             slot_metrics.push(SlotMetrics {
                 slot_id,
@@ -779,6 +779,34 @@ mod tests {
         assert_eq!(info.slots.len(), 2);
         assert_eq!(info.slots[0].n_ctx, 0); // Default
         assert_eq!(info.slots[1].slot_id, 0); // Default
+    }
+
+    /// A llama.cpp slot id is a u64 on the wire. A narrower field silently
+    /// truncated u64::MAX to u32::MAX (baseline: `as u32` cast).
+    #[test]
+    fn context_info_keeps_full_u64_slot_id() {
+        let response = serde_json::json!([
+            {"id": u64::MAX, "n_ctx": 10, "n_tokens": 1}
+        ]);
+
+        let info = ContextInfo::from_slots_response(&response).unwrap();
+        assert_eq!(info.slots[0].slot_id, u64::MAX);
+    }
+
+    /// Summing slot contexts must saturate, never wrap or panic: a malformed or
+    /// hostile /slots body carrying u64::MAX must not take the proxy down
+    /// (baseline: `attempt to add with overflow` panic under debug, two's-
+    /// complement wrap under release).
+    #[test]
+    fn context_info_saturates_at_u64_max() {
+        let response = serde_json::json!([
+            {"id": 0, "n_ctx": u64::MAX, "n_tokens": u64::MAX},
+            {"id": 1, "n_ctx": 1, "n_tokens": 1}
+        ]);
+
+        let info = ContextInfo::from_slots_response(&response).unwrap();
+        assert_eq!(info.total_context, u64::MAX, "saturating_add, not wrap");
+        assert_eq!(info.used_context, u64::MAX, "saturating_add, not wrap");
     }
 
     #[test]
