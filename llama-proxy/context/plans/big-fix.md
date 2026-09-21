@@ -228,8 +228,8 @@ Tests-after with regression-first ordering per task: each fix task adds the fail
 
 ## Final verification wave
 
-- [ ] F1. Build matrix: `cargo build`, `--all-features`, `--no-default-features` — zero warnings; `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo fmt --check` clean. Evidence: `.omo/evidence/big-fix/build.txt`.
-- [ ] F2. Full tests: `cargo test --all-features` green; record test count before (baseline captured on first worker commit) and after — after ≥ before + new tests. Evidence: `.omo/evidence/big-fix/test.txt`.
+- [x] F1. Build matrix: `cargo build`, `--all-features`, `--no-default-features` — zero warnings; `cargo clippy --all-targets --all-features -- -D warnings` clean; `cargo fmt --check` clean. Evidence: `.omo/evidence/big-fix/build.txt`.
+- [x] F2. Full tests: `cargo test --all-features` green; record test count before (baseline captured on first worker commit) and after — after ≥ before + new tests. Evidence: `.omo/evidence/big-fix/test.txt`.
 - [ ] F3. E2E happy paths (backend `http://cosmo.lan:8700` if up, else a scripted fake): non-stream, stream, tool-call requests via `/v1/chat/completions` — responses validate against OpenAI shapes; stats log line prints and truncates CJK safely.
 - [ ] F4. Multibyte stress: 2 KB CJK+emoji user message → no panic anywhere in the stats path; log truncation output is valid UTF-8 with boundaries respected.
 - [ ] F5. Error-status matrix via curl (`-w '%{http_code}'` + body check): no backends → 503 JSON; invalid JSON → 400 JSON; wrong media type → 415 JSON; dead augment URL → 502 JSON. Envelope shape asserted.
