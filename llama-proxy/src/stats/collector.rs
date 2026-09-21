@@ -483,8 +483,79 @@ impl ContextInfo {
     }
 }
 
+/// Merge policy for the per-chunk stats slice of a streaming response:
+/// which envelope fields of one SSE chunk reach the accumulator, and under
+/// what condition. The stream framer owns delta assembly; this owns the
+/// measurement fields, so a new stats-carrying backend extension lands in
+/// one place.
+///
+/// - `usage`: last present chunk wins verbatim (never deep-merged).
+/// - `model`: llama.cpp sends it once in the first chunk; a null resend
+///   must not clear the recorded model.
+/// - `timings`: llama.cpp extension carried on the final chunk.
+/// - `metrics`: vLLM's equivalent of `timings`, on the usage chunk.
+///   Without it the collector sees neither key and every tokens/sec column
+///   is empty on a vLLM backend, because the wall-clock estimate it used to
+///   fall back to was removed as not-a-measurement. A null `metrics` is not
+///   a measurement and never replaces a measured block (vLLM sends
+///   `metrics: null` unless started with --enable-per-request-metrics).
+pub fn merge_stream_stats(acc: &mut Value, chunk: &Value) {
+    if let Some(usage) = chunk.get("usage") {
+        acc["usage"] = usage.clone();
+    }
+    if let Some(model) = chunk.get("model") {
+        if !model.is_null() {
+            acc["model"] = model.clone();
+        }
+    }
+    if let Some(timings) = chunk.get("timings") {
+        acc["timings"] = timings.clone();
+    }
+    if let Some(metrics) = chunk.get("metrics").filter(|v| !v.is_null()) {
+        acc["metrics"] = metrics.clone();
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::merge_stream_stats;
+    use serde_json::json;
+
+    #[test]
+    fn merge_stream_stats_usage_last_present_chunk_wins() {
+        let mut acc = json!({"usage": {"prompt_tokens": 4}});
+        merge_stream_stats(&mut acc, &json!({"usage": {"prompt_tokens": 7, "completion_tokens": 9}}));
+        assert_eq!(acc["usage"]["completion_tokens"].as_u64(), Some(9));
+        merge_stream_stats(&mut acc, &json!({"choices": []}));
+        assert_eq!(acc["usage"]["prompt_tokens"].as_u64(), Some(7));
+    }
+
+    #[test]
+    fn merge_stream_stats_null_model_resend_does_not_clear_it() {
+        let mut acc = json!({"model": "qwen3"});
+        merge_stream_stats(&mut acc, &json!({"model": null}));
+        assert_eq!(acc["model"].as_str(), Some("qwen3"));
+        merge_stream_stats(&mut acc, &json!({"model": "qwen3-coder"}));
+        assert_eq!(acc["model"].as_str(), Some("qwen3-coder"));
+    }
+
+    #[test]
+    fn merge_stream_stats_timings_land_and_persist() {
+        let mut acc = json!({});
+        merge_stream_stats(&mut acc, &json!({"timings": {"prompt_ms": 50.5}}));
+        merge_stream_stats(&mut acc, &json!({"choices": []}));
+        assert_eq!(acc["timings"]["prompt_ms"].as_f64(), Some(50.5));
+    }
+
+    #[test]
+    fn merge_stream_stats_null_metrics_never_replaces_measured_block() {
+        // vLLM sends `metrics: null` unless started with --enable-per-request-metrics.
+        let mut acc = json!({"metrics": {"generation_time_ms": 562.0}});
+        merge_stream_stats(&mut acc, &json!({"usage": {"completion_tokens": 1}, "metrics": null}));
+        assert_eq!(acc["metrics"]["generation_time_ms"].as_f64(), Some(562.0));
+        merge_stream_stats(&mut acc, &json!({"metrics": {"tokens_per_second": 84.1}}));
+        assert_eq!(acc["metrics"]["tokens_per_second"].as_f64(), Some(84.1));
+    }
     use super::*;
 
     #[test]

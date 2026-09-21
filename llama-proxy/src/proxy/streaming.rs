@@ -1460,30 +1460,9 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                 }
             }
 
-            // Merge usage if present
-            if let Some(usage) = chunk.get("usage") {
-                acc["usage"] = usage.clone();
-            }
-
-            // Explicitly preserve model field (llama.cpp includes in first chunk)
-            if let Some(model) = chunk.get("model") {
-                if !model.is_null() {
-                    acc["model"] = model.clone();
-                }
-            }
-
-            // Preserve timings if present (llama.cpp extension, in final chunk)
-            if let Some(timings) = chunk.get("timings") {
-                acc["timings"] = timings.clone();
-            }
-
-            // vLLM's equivalent of `timings`, on the usage chunk. Without this the
-            // collector sees neither key and every tokens/sec column is empty on a
-            // vLLM backend, because the wall-clock estimate it used to fall back to
-            // was removed as not-a-measurement.
-            if let Some(metrics) = chunk.get("metrics").filter(|v| !v.is_null()) {
-                acc["metrics"] = metrics.clone();
-            }
+            // The stats fields (usage/model/timings/metrics) merge under the
+            // collector's policy, so backend stats extensions live in one file.
+            crate::stats::merge_stream_stats(&mut acc, &chunk);
 
             acc
         }
