@@ -294,12 +294,15 @@ impl RepromptEngine {
     }
 
     /// Build the follow-up request: original + assistant stop turn + continue-prompt user message.
+    /// None when the original body has no usable conversation (messages missing, not an
+    /// array, or empty) — appending a stop turn and a prompt to a nonexistent conversation
+    /// can only produce a body the backend must reject.
     fn build_follow_up(
         prompt: &str,
         original_req: &serde_json::Value,
         stopped_resp: &serde_json::Value,
         backend: &BackendNode,
-    ) -> serde_json::Value {
+    ) -> Option<serde_json::Value> {
         let mut req = original_req.clone();
 
         req["stream"] = serde_json::Value::Bool(false);
@@ -318,19 +321,33 @@ impl RepromptEngine {
         let assistant_msg = serde_json::json!({"role": "assistant", "content": assistant_content});
         let user_msg = serde_json::json!({"role": "user", "content": prompt});
 
-        if let Some(msgs) = req.get_mut("messages").and_then(|m| m.as_array_mut()) {
-            msgs.push(assistant_msg);
-            msgs.push(user_msg);
+        let msgs = req.get_mut("messages").and_then(|m| m.as_array_mut())?;
+        if msgs.is_empty() {
+            return None;
         }
+        msgs.push(assistant_msg);
+        msgs.push(user_msg);
 
-        req
+        Some(req)
     }
 
+    /// POST the follow-up to the SAME backend endpoint the original request hit: the
+    /// original path through the node's effective_path, plus the original query verbatim.
+    /// String concat, not Url::join — join truncates base-with-path nodes, which is why
+    /// proxy_passthrough builds its URL the same way.
     async fn send_follow_up(
         req: &serde_json::Value,
         backend: &BackendNode,
+        path_and_query: &str,
     ) -> Result<serde_json::Value, Box<dyn std::error::Error + Send + Sync>> {
-        let url = format!("{}/v1/chat/completions", backend.base_url());
+        let (path, query) = match path_and_query.split_once('?') {
+            Some((path, query)) => (path, Some(query)),
+            None => (path_and_query, None),
+        };
+        let url = match query {
+            Some(query) => format!("{}{}?{}", backend.base_url(), backend.effective_path(path), query),
+            None => format!("{}{}", backend.base_url(), backend.effective_path(path)),
+        };
         let mut builder = backend.http_client.post(&url).json(req);
         if let Some(ref key) = backend.api_key {
             builder = builder.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", key));
@@ -350,6 +367,7 @@ impl RepromptEngine {
         &self,
         original_response: serde_json::Value,
         original_request: &serde_json::Value,
+        path_and_query: &str,
         backend: &Arc<BackendNode>,
     ) -> serde_json::Value {
         if !self.should_trigger(&original_response) {
@@ -397,23 +415,27 @@ impl RepromptEngine {
 
             tracing::debug!(attempt, "Sending reprompt follow-up");
 
-            let follow_up_req = Self::build_follow_up(&prompt, original_request, &current, backend);
-
-            let new_resp = match tokio::time::timeout(remaining, Self::send_follow_up(&follow_up_req, backend)).await {
-                Ok(Ok(r)) => r,
-                Ok(Err(e)) => {
-                    tracing::warn!(attempt, error = %e, "Reprompt request failed, returning collected text");
-                    return self.finish(clean_stop, collected, "request failed");
-                }
-                Err(_elapsed) => {
-                    tracing::debug!(
-                        attempt,
-                        max_total_ms = self.max_total_ms,
-                        "Reprompt follow-up exceeded the time budget, returning collected text"
-                    );
-                    return self.finish(clean_stop, collected, "time budget");
-                }
+            let Some(follow_up_req) = Self::build_follow_up(&prompt, original_request, &current, backend) else {
+                tracing::warn!("Reprompt skipped: original request has no usable messages to continue");
+                return self.finish(clean_stop, collected, "unbuildable follow-up");
             };
+
+            let new_resp =
+                match tokio::time::timeout(remaining, Self::send_follow_up(&follow_up_req, backend, path_and_query)).await {
+                    Ok(Ok(r)) => r,
+                    Ok(Err(e)) => {
+                        tracing::warn!(attempt, error = %e, "Reprompt request failed, returning collected text");
+                        return self.finish(clean_stop, collected, "request failed");
+                    }
+                    Err(_elapsed) => {
+                        tracing::debug!(
+                            attempt,
+                            max_total_ms = self.max_total_ms,
+                            "Reprompt follow-up exceeded the time budget, returning collected text"
+                        );
+                        return self.finish(clean_stop, collected, "time budget");
+                    }
+                };
 
             let new_text = Self::extract_assistant_text(&new_resp);
 
@@ -604,7 +626,8 @@ mod tests {
             "model": "test",
             "messages": [{"role": "user", "content": "Do X"}]
         });
-        let result = RepromptEngine::build_follow_up("Continue or say DONE.", &req, &stop_resp("I did half."), &node);
+        let result = RepromptEngine::build_follow_up("Continue or say DONE.", &req, &stop_resp("I did half."), &node)
+            .expect("buildable");
         let msgs = result["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 3);
         assert_eq!(msgs[1]["role"], "assistant");
@@ -623,7 +646,7 @@ mod tests {
             "stream_options": {"include_usage": true},
             "messages": [{"role": "user", "content": "Hi"}]
         });
-        let result = RepromptEngine::build_follow_up("Continue.", &req, &stop_resp("ok"), &node);
+        let result = RepromptEngine::build_follow_up("Continue.", &req, &stop_resp("ok"), &node).expect("buildable");
         assert!(result.get("stream_options").is_none());
     }
 
@@ -635,8 +658,23 @@ mod tests {
             "model": "original",
             "messages": [{"role": "user", "content": "Hi"}]
         });
-        let result = RepromptEngine::build_follow_up("Continue.", &req, &stop_resp("ok"), &node);
+        let result = RepromptEngine::build_follow_up("Continue.", &req, &stop_resp("ok"), &node).expect("buildable");
         assert_eq!(result["model"], "override-model");
+    }
+
+    #[test]
+    fn test_build_follow_up_refuses_unusable_messages() {
+        let node = test_node();
+        for req in [
+            serde_json::json!({"model": "m", "messages": []}),
+            serde_json::json!({"model": "m"}),
+            serde_json::json!({"model": "m", "messages": "not an array"}),
+        ] {
+            assert!(
+                RepromptEngine::build_follow_up("Continue.", &req, &stop_resp("ok"), &node).is_none(),
+                "no conversation to continue: {req}"
+            );
+        }
     }
 
     #[test]
@@ -829,7 +867,12 @@ mod tests {
         let node = Arc::new(test_node());
         let original = stop_resp("**Issues**: none. Looks good.");
         let result = e
-            .maybe_reprompt(original.clone(), &req_with_tools(&["read", "grep", "glob"]), &node)
+            .maybe_reprompt(
+                original.clone(),
+                &req_with_tools(&["read", "grep", "glob"]),
+                "/v1/chat/completions",
+                &node,
+            )
             .await;
         assert_eq!(result, original);
     }
@@ -888,6 +931,7 @@ mod tests {
             .maybe_reprompt(
                 stop_resp("the review that must survive"),
                 &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
                 &node_at(url).await,
             )
             .await;
@@ -950,6 +994,7 @@ mod tests {
             .maybe_reprompt(
                 stop_resp("**Issues**: [HIGH] null deref at foo.rs:12"),
                 &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
                 &node_at(url).await,
             )
             .await;
@@ -967,6 +1012,7 @@ mod tests {
             .maybe_reprompt(
                 stop_resp("first half of the review"),
                 &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
                 &node_at(url).await,
             )
             .await;
@@ -987,7 +1033,12 @@ mod tests {
         let e = write_capable_engine(2);
         let original = stop_resp("the complete review");
         let result = e
-            .maybe_reprompt(original, &req_with_tools(&["read", "write"]), &node_at(url).await)
+            .maybe_reprompt(
+                original,
+                &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
+                &node_at(url).await,
+            )
             .await;
 
         let content = result["choices"][0]["message"]["content"].as_str().unwrap();
@@ -1001,7 +1052,12 @@ mod tests {
         let url = spawn_backend(vec![body]).await;
         let e = write_capable_engine(2);
         let result = e
-            .maybe_reprompt(stop_resp("half"), &req_with_tools(&["read", "write"]), &node_at(url).await)
+            .maybe_reprompt(
+                stop_resp("half"),
+                &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
+                &node_at(url).await,
+            )
             .await;
         assert_eq!(
             result["choices"][0]["finish_reason"], "tool_calls",
@@ -1026,6 +1082,7 @@ mod tests {
             .maybe_reprompt(
                 stop_resp("first half"),
                 &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
                 &node_at(url).await,
             )
             .await;
@@ -1042,7 +1099,12 @@ mod tests {
         let e = write_capable_engine(2);
         let node = node_at("http://127.0.0.1:1".into()).await;
         let result = e
-            .maybe_reprompt(stop_resp("the only answer"), &req_with_tools(&["read", "write"]), &node)
+            .maybe_reprompt(
+                stop_resp("the only answer"),
+                &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
+                &node,
+            )
             .await;
         assert_eq!(result["choices"][0]["message"]["content"], "the only answer");
     }
@@ -1181,6 +1243,7 @@ mod tests {
             .maybe_reprompt(
                 stop_resp("answer before the budget"),
                 &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
                 &node_at(url).await,
             )
             .await;
@@ -1218,6 +1281,7 @@ mod tests {
             .maybe_reprompt(
                 stop_resp("the answer that must arrive fast"),
                 &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
                 &std::sync::Arc::new(node),
             )
             .await;
@@ -1237,7 +1301,12 @@ mod tests {
         let e = write_capable_engine(2);
         let original = serde_json::json!({"choices":[{"finish_reason":"stop"}]});
         let r = e
-            .maybe_reprompt(original, &req_with_tools(&["read", "write"]), &node_at(url).await)
+            .maybe_reprompt(
+                original,
+                &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
+                &node_at(url).await,
+            )
             .await;
         assert_eq!(r["choices"][0]["message"]["role"], "assistant");
         assert_eq!(
@@ -1253,7 +1322,12 @@ mod tests {
         let e = write_capable_engine(2);
         let original = serde_json::json!({"choices":[{"finish_reason":"stop","message":"raw string not object"}]});
         let r = e
-            .maybe_reprompt(original, &req_with_tools(&["read", "write"]), &node_at(url).await)
+            .maybe_reprompt(
+                original,
+                &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
+                &node_at(url).await,
+            )
             .await;
         assert_eq!(
             r["choices"][0]["message"]["role"], "assistant",
@@ -1283,9 +1357,83 @@ mod tests {
             .maybe_reprompt(
                 original.clone(),
                 &req_with_tools(&["read", "write"]),
+                "/v1/chat/completions",
                 &std::sync::Arc::new(test_node()),
             )
             .await;
         assert_eq!(r, original, "no stop choice means no reprompt and no mutation");
+    }
+
+    /// Serve responses on ANY path, recording each hit's full path+query.
+    async fn spawn_recording_backend(responses: Vec<serde_json::Value>) -> (String, Arc<std::sync::Mutex<Vec<String>>>) {
+        use axum::{http::Uri, routing::any, Json, Router};
+        use std::sync::Mutex;
+
+        let queue = Arc::new(Mutex::new(std::collections::VecDeque::from(responses)));
+        let hits: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let hits_route = hits.clone();
+        let app = Router::new().fallback(any(move |uri: Uri| {
+            let queue = queue.clone();
+            let hits = hits_route.clone();
+            async move {
+                let recorded = uri
+                    .path_and_query()
+                    .map(|pq| pq.as_str().to_string())
+                    .unwrap_or_else(|| uri.path().to_string());
+                hits.lock().unwrap().push(recorded);
+                let next = queue.lock().unwrap().pop_front();
+                Json(next.unwrap_or_else(|| serde_json::json!({"error": "queue exhausted"})))
+            }
+        }));
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        (format!("http://{}", addr), hits)
+    }
+
+    // --- task 67: follow-up URL fidelity + unbuildable follow-up [C-M1, C-L20] ---
+
+    #[tokio::test]
+    async fn test_follow_up_preserves_query_and_prefix() {
+        let (url, hits) = spawn_recording_backend(vec![stop_resp("cont"); 4]).await;
+        let mut node = test_node();
+        node.url = url;
+        node.strip_path_prefix = Some("/gateway".into());
+        let e = write_capable_engine(2);
+        e.maybe_reprompt(
+            stop_resp("half"),
+            &req_with_tools(&["read", "write"]),
+            "/gateway/v1/chat/completions?user=alice&x=1",
+            &Arc::new(node),
+        )
+        .await;
+        let recorded = hits.lock().unwrap().clone();
+        assert!(!recorded.is_empty(), "follow-ups must still reach the backend");
+        assert!(
+            recorded.iter().all(|h| h == "/v1/chat/completions?user=alice&x=1"),
+            "query preserved, prefix stripped exactly once: {recorded:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_follow_up_skips_round_when_messages_unusable() {
+        let write_tool =
+            serde_json::json!({"type": "function", "function": {"name": "write", "parameters": {"type": "object"}}});
+        for req in [
+            serde_json::json!({"model": "m", "messages": [], "tools": [write_tool]}),
+            serde_json::json!({"model": "m", "tools": [write_tool]}),
+            serde_json::json!({"model": "m", "messages": "not an array", "tools": [write_tool]}),
+        ] {
+            let (url, hits) = spawn_recording_backend(vec![stop_resp("cont"); 4]).await;
+            let e = write_capable_engine(2);
+            let r = e
+                .maybe_reprompt(stop_resp("half"), &req, "/v1/chat/completions", &node_at(url).await)
+                .await;
+            assert_eq!(hits.lock().unwrap().len(), 0, "no POST for an unusable conversation: {req}");
+            assert_eq!(r["choices"][0]["message"]["content"], "half", "collected text still returned");
+        }
     }
 }

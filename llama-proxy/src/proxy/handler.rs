@@ -1326,7 +1326,8 @@ impl ProxyHandler {
         let json_value = if !is_anthropic_api {
             match (&self.state.reprompt_engine, &request_json, json_value) {
                 (Some(engine), Some(req_json), Some(current_json)) => {
-                    let result = engine.maybe_reprompt(current_json, req_json, backend).await;
+                    let path_and_query = request_uri.path_and_query().map_or("/", |pq| pq.as_str());
+                    let result = engine.maybe_reprompt(current_json, req_json, path_and_query, backend).await;
                     Some(result)
                 }
                 (_, _, jv) => jv,
