@@ -201,10 +201,10 @@ pub fn extract_user_content(messages: &[Message]) -> Vec<String> {
 ///   describe enriching the user message), so it is kept.
 ///   - string `content`: block concatenated onto the end.
 ///   - array `content`: block appended to the last `{"type":"text"}` part's
-///     `text`; if no part has `type: "text"`, a new
-///     `{"type":"text","text":<block>}` part is pushed at the end; a text part
-///     whose `text` is absent or `null` drops the block (the typed
-///     implementation dropped it there too - preserved until task 45).
+///     `text`; a new `{"type":"text","text":<block>}` part is pushed at the
+///     end when no part has `type: "text"` OR when the last text part's
+///     `text` is absent, `null`, or not a string (F-M12, task 45: the block
+///     is never dropped and such a part is never mutated).
 ///   - absent or `null` `content`: becomes the block string.
 ///   - any other `content` type: `Err`. The typed deserializer gate rejected
 ///     such requests wholesale (handler forwarded the original bytes, no
@@ -281,17 +281,25 @@ fn append_block_to_message(msg: &mut serde_json::Value, block: &str) -> Result<(
     match msg.get_mut("content").ok_or("augment injection: message has no content")? {
         serde_json::Value::String(existing) => existing.push_str(block),
         serde_json::Value::Array(parts) => {
-            if let Some(part) = parts
+            let appended = if let Some(part) = parts
                 .iter_mut()
                 .rev()
                 .find(|p| p.get("type").and_then(serde_json::Value::as_str) == Some("text"))
             {
-                if let Some(serde_json::Value::String(text)) = part.get_mut("text") {
-                    text.push_str(block);
+                match part.get_mut("text") {
+                    Some(serde_json::Value::String(text)) => {
+                        text.push_str(block);
+                        true
+                    }
+                    // F-M12: a text-typed part whose `text` is absent, null,
+                    // or a non-string is never mutated here; the block rides
+                    // in the fresh part appended below instead.
+                    _ => false,
                 }
-                // text part with absent/null `text`: the typed implementation
-                // dropped the block here; preserved (task 45 territory).
             } else {
+                false
+            };
+            if !appended {
                 parts.push(serde_json::json!({ "type": "text", "text": block }));
             }
         }
@@ -629,19 +637,17 @@ mod tests {
     }
 
     #[test]
-    fn value_injection_text_part_with_null_text_drops_block_as_typed_did() {
+    fn value_injection_text_part_with_null_text_appends_new_part_since_task45() {
         let input = serde_json::json!({
             "model": "m",
             "messages": [{"role": "user", "content": [{"type": "text", "text": null}]}]
         });
 
-        let output = inject(input.clone()).unwrap();
+        let output = inject(input).unwrap();
 
-        assert_eq!(
-            serde_json::to_vec(&output["messages"][0]).unwrap(),
-            serde_json::to_vec(&input["messages"][0]).unwrap(),
-            "typed semantics dropped the block on text:null parts; pinned until task 45"
-        );
+        let parts = output["messages"][0]["content"].as_array().unwrap();
+        assert_eq!(parts.len(), 2, "task 45 (F-M12): the block is appended, never dropped");
+        assert_eq!(parts[1]["text"], "\n\nREQ_PROMPT\n\nAUG_TEXT");
     }
 
     #[test]
@@ -808,5 +814,123 @@ mod tests {
         let msgs = output["messages"].as_array().unwrap();
         assert_eq!(msgs.len(), 2, "fallback never reads messages[0] any more");
         assert_eq!(msgs[1]["role"], "system");
+    }
+
+    // --- task 45 / F-M12: Parts else-arm must APPEND, never drop or mutate ---
+
+    fn parts_of(output: &serde_json::Value) -> Vec<serde_json::Value> {
+        output["messages"][0]["content"].as_array().expect("array content").clone()
+    }
+
+    #[test]
+    fn task45_parts_arm_text_part_with_null_text_appends_new_part_instead_of_dropping() {
+        let input = serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": null}]}]
+        });
+        let output = inject(input).unwrap();
+        let parts = parts_of(&output);
+
+        assert_eq!(
+            parts.len(),
+            2,
+            "F-M12: block must be APPENDED as a new text part, not dropped"
+        );
+        assert_eq!(
+            parts[0],
+            serde_json::json!({"type": "text", "text": null}),
+            "the existing part must NOT be mutated (no text: null -> text: Some(block))"
+        );
+        assert_eq!(
+            parts[1],
+            serde_json::json!({"type": "text", "text": "\n\nREQ_PROMPT\n\nAUG_TEXT"}),
+            "the appended part carries the full block"
+        );
+    }
+
+    #[test]
+    fn task45_parts_arm_text_part_with_absent_text_appends_new_part() {
+        let output = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": [{"type": "text"}]}]
+        }))
+        .unwrap();
+        let parts = parts_of(&output);
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(parts[0], serde_json::json!({"type": "text"}), "absent text stays absent");
+        assert_eq!(parts[1]["text"], "\n\nREQ_PROMPT\n\nAUG_TEXT");
+    }
+
+    #[test]
+    fn task45_parts_arm_text_part_with_non_string_text_appends_without_mutating_it() {
+        let output = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": [{"type": "text", "text": 5}]}]
+        }))
+        .unwrap();
+        let parts = parts_of(&output);
+
+        assert_eq!(parts.len(), 2);
+        assert_eq!(
+            parts[0],
+            serde_json::json!({"type": "text", "text": 5}),
+            "non-string text untouched"
+        );
+        assert_eq!(parts[1]["text"], "\n\nREQ_PROMPT\n\nAUG_TEXT");
+    }
+
+    #[test]
+    fn task45_parts_arm_unusable_last_text_part_appends_after_earlier_usable_one() {
+        // Reverse search targets the LAST text-typed part ([2], text: null).
+        // It is unusable -> a new part lands at the END of the array; the
+        // earlier usable text part ([0]) is NOT the fallback target.
+        let output = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": [
+                {"type": "text", "text": "A"},
+                {"type": "image_url", "image_url": {"url": "u"}},
+                {"type": "text", "text": null}
+            ]}]
+        }))
+        .unwrap();
+        let parts = parts_of(&output);
+
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0]["text"], "A", "earlier text part stays untouched");
+        assert_eq!(parts[2], serde_json::json!({"type": "text", "text": null}));
+        assert_eq!(parts[3]["text"], "\n\nREQ_PROMPT\n\nAUG_TEXT", "new part lands last");
+    }
+
+    #[test]
+    fn task45_injection_never_loses_the_block_for_any_array_content() {
+        // Harm class pin (F-M12): every array-content shape must end up with
+        // the block SOMEWHERE in the content - the pre-45 code silently
+        // dropped it (handler logged success, user got an unenriched request).
+        for content in [
+            serde_json::json!([{"type": "text", "text": null}]),
+            serde_json::json!([{"type": "text"}]),
+            serde_json::json!([{"type": "text", "text": 5}]),
+            serde_json::json!([{"type": "text", "text": "A"}, {"type": "image_url", "image_url": {"url": "u"}}, {"type": "text"}]),
+            serde_json::json!([{"type": "image_url", "image_url": {"url": "u"}}]),
+            serde_json::json!([]),
+        ] {
+            let output = inject(serde_json::json!({
+                "model": "m",
+                "messages": [{"role": "user", "content": content}]
+            }))
+            .expect("injection ok");
+            let joined = output["messages"][0]["content"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join("|");
+            assert!(
+                joined.contains("REQ_PROMPT\n\nAUG_TEXT"),
+                "augmentation block lost for content: {content}"
+            );
+        }
     }
 }
