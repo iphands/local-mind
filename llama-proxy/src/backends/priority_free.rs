@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::balancer::{BackendGuard, LoadBalancer};
+use super::balancer::{candidate_order, BackendGuard, LoadBalancer};
 use super::node::{soonest_recovering_node, BackendNode};
 use crate::config::NoMatchingBackend;
 
@@ -48,9 +48,9 @@ impl LoadBalancer for PriorityFreeBalancer {
         let now = Instant::now();
         // Claim the first node that is neither cooled nor busy. compare_exchange is the atomic
         // test-and-set: it both observes 0 and reserves the slot, so two concurrent selects can
-        // never both free-claim the same idle node. Lowest index is attempted first, so the first
-        // free node wins ties.
-        for node in &self.nodes {
+        // never both free-claim the same idle node. The shared candidate_order(0) walk visits
+        // the lowest index first, so the first free node wins ties.
+        for (_, node) in candidate_order(&self.nodes, 0) {
             if node.in_cooldown(now) {
                 continue;
             }
@@ -79,7 +79,7 @@ impl LoadBalancer for PriorityFreeBalancer {
         let mut best_idx: Option<usize> = None;
         let mut best_load = usize::MAX;
         let mut reserved: Vec<usize> = Vec::with_capacity(self.nodes.len());
-        for (idx, node) in self.nodes.iter().enumerate() {
+        for (idx, node) in candidate_order(&self.nodes, 0) {
             if node.in_cooldown(now) {
                 continue;
             }

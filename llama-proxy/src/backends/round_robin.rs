@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::balancer::{BackendGuard, LoadBalancer};
+use super::balancer::{candidate_order, BackendGuard, LoadBalancer};
 use super::node::{soonest_recovering_node, BackendNode};
 use crate::config::NoMatchingBackend;
 
@@ -34,12 +34,12 @@ impl RoundRobinBalancer {
 impl LoadBalancer for RoundRobinBalancer {
     fn select(&self, _model: Option<&str>) -> Result<BackendGuard, NoMatchingBackend> {
         // Model routing is handled by GroupedLoadBalancer; this balancer just cycles through nodes
-        // (modulo first: both summands stay < len, so the walk over cooled nodes cannot overflow).
+        // on the shared candidate_order walk (modulo lives inside the helper: both summands stay
+        // < len, so the walk over cooled nodes cannot overflow even with an unbounded counter).
         let now = Instant::now();
         let len = self.nodes.len();
-        let start = self.counter.fetch_add(1, Ordering::Relaxed) % len;
-        for step in 0..len {
-            let node = &self.nodes[(start + step) % len];
+        let start = self.counter.fetch_add(1, Ordering::Relaxed);
+        for (_, node) in candidate_order(&self.nodes, start) {
             if !node.in_cooldown(now) {
                 return Ok(BackendGuard::new(node.clone()));
             }

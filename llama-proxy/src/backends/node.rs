@@ -106,14 +106,14 @@ impl BackendNode {
 
 /// The node whose failure cooldown expires earliest; ties go to the lowest index
 /// (`min_by_key` keeps the first minimum). Callers pass a node set where every node
-/// is cooled; balancers reject empty node lists at construction, so the index fallback
-/// is unreachable.
+/// is cooled; balancers reject empty node lists at construction, so the non-empty
+/// invariant is asserted, not papered over (big-fix E-L1: no silent fallback).
 pub(crate) fn soonest_recovering_node(nodes: &[Arc<BackendNode>]) -> Arc<BackendNode> {
     nodes
         .iter()
         .min_by_key(|node| node.cooldown_expiry())
         .cloned()
-        .unwrap_or_else(|| nodes[0].clone())
+        .expect("at least one candidate")
 }
 
 /// Build an HTTP client for a single backend node
