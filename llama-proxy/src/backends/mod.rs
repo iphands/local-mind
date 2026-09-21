@@ -177,6 +177,7 @@ mod tests {
                 mappings: vec![],
                 strategy: "round_robin".to_string(),
                 failure_cooldown_secs: 30,
+                exclusive: false,
                 nodes: vec![BackendNodeConfig {
                     url: "http://localhost:8080".to_string(),
                     timeout_seconds: 300,

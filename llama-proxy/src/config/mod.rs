@@ -204,6 +204,13 @@ pub struct BackendGroupConfig {
     /// selection. 0 disables cooldown entirely.
     #[serde(default = "default_failure_cooldown_secs")]
     pub failure_cooldown_secs: u64,
+    /// Opt this group out of the no-catch-all positional fallback (E-M6):
+    /// an unmatched model is never routed here unless the group maps it
+    /// explicitly. A group with empty `mappings` is the catch-all and owns
+    /// unmatched traffic at a rung that never consults this flag, so
+    /// `exclusive: true` on a catch-all group is a no-op.
+    #[serde(default)]
+    pub exclusive: bool,
     /// List of backend nodes in this group
     pub nodes: Vec<BackendNodeConfig>,
 }
@@ -1059,6 +1066,54 @@ nodes:
 "#;
         let group: BackendGroupConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(group.strategy, "round_robin"); // default
+    }
+
+    #[test]
+    fn test_backend_group_config_exclusive_defaults_false() {
+        let yaml = r#"
+mappings:
+  - "opus"
+nodes:
+  - url: "http://localhost:8080"
+"#;
+        let group: BackendGroupConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(
+            !group.exclusive,
+            "absent exclusive key defaults false — every group keeps f414d16 pre-plumbing fallback eligibility"
+        );
+    }
+
+    #[test]
+    fn test_backend_group_config_exclusive_true_loads() {
+        // The task-70 deny_unknown_fields gate rejected this key outright
+        // (unknown field `exclusive`) until the 87-follow landed the field.
+        let yaml = r#"
+mappings:
+  - "opus"
+exclusive: true
+nodes:
+  - url: "http://localhost:8080"
+"#;
+        let group: BackendGroupConfig = serde_yaml::from_str(yaml).unwrap();
+        assert!(group.exclusive, "exclusive: true must reach the group struct");
+    }
+
+    #[test]
+    fn test_backend_group_config_exclusive_string_rejected_by_typed_bool() {
+        // new_input_parsing gate: the field is a typed bool, not a lenient
+        // stringly flag — `exclusive: "true"` must fail with the serde typed
+        // error, never coerce.
+        let yaml = r#"
+mappings: []
+exclusive: "true"
+nodes: []
+"#;
+        let err = serde_yaml::from_str::<BackendGroupConfig>(yaml).expect_err("string 'true' must not coerce into bool");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid type: string \"true\"") && msg.contains("boolean"),
+            "error must be the honest typed-bool rejection, got: {msg}"
+        );
     }
 
     #[test]

@@ -452,6 +452,7 @@ mod tests {
             mappings: vec![],
             strategy: "round_robin".to_string(),
             failure_cooldown_secs: 0,
+            exclusive: false,
             nodes,
         }
     }

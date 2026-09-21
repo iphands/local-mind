@@ -15,8 +15,9 @@ struct BackendGroup {
     /// Group name for logging
     name: String,
     /// Opts this group out of being the no-catch-all fallback target (E-M6).
-    /// Config plumbing arrives with loader task 71 (W9-owned); until then
-    /// every group is a fallback candidate.
+    /// Driven by `exclusive` on the group's config (BackendGroupConfig,
+    /// plumbed by the 87-follow); default false keeps every group a
+    /// fallback candidate.
     exclusive: bool,
 }
 
@@ -74,7 +75,7 @@ impl GroupedLoadBalancer {
                 mappings: config.mappings,
                 balancer,
                 name,
-                exclusive: false,
+                exclusive: config.exclusive,
             });
         }
 
@@ -158,6 +159,7 @@ mod tests {
             mappings: mappings.iter().map(|s| s.to_string()).collect(),
             strategy: "round_robin".to_string(),
             failure_cooldown_secs: 30,
+            exclusive: false,
             nodes: urls
                 .iter()
                 .map(|url| BackendNodeConfig {
@@ -273,6 +275,7 @@ mod tests {
                 mappings: vec!["haiku".to_string()],
                 strategy: "round_robin".to_string(),
                 failure_cooldown_secs: 30,
+                exclusive: false,
                 nodes: vec![
                     BackendNodeConfig {
                         url: "http://localhost:8080".to_string(),
@@ -410,5 +413,71 @@ mod tests {
             "exclusive opted out of positional fallback"
         );
         assert!(lb.select(None).is_err());
+    }
+
+    #[test]
+    fn exclusive_from_config_is_not_fallback_target() {
+        // The struct-literal pin above cannot catch a plumbing regression
+        // (GroupedLoadBalancer::new ignoring BackendGroupConfig.exclusive);
+        // this one drives the SAME semantics through the config path.
+        let mut cfg = make_group_config(vec!["m1"], vec!["http://localhost:8080"]);
+        cfg.exclusive = true;
+        let mut groups = HashMap::new();
+        groups.insert("solo".to_string(), cfg);
+
+        let balancer = GroupedLoadBalancer::new(groups).unwrap();
+        assert_eq!(
+            balancer.select(Some("m1")).unwrap().node.base_url(),
+            "http://localhost:8080",
+            "exclusive group still serves its own mappings"
+        );
+        assert!(
+            balancer.select(Some("other")).is_err(),
+            "config exclusive: true must reach find_group — no positional fallback"
+        );
+        assert!(balancer.select(None).is_err());
+    }
+
+    #[test]
+    fn exclusive_group_sorting_first_yields_fallback_to_first_inclusive_group() {
+        let mut aaa = make_group_config(vec!["m1"], vec!["http://localhost:8080"]);
+        aaa.exclusive = true;
+        let mut groups = HashMap::new();
+        groups.insert("aaa".to_string(), aaa);
+        groups.insert(
+            "bbb".to_string(),
+            make_group_config(vec!["m2"], vec!["http://localhost:8081"]),
+        );
+
+        let balancer = GroupedLoadBalancer::new(groups).unwrap();
+        assert_eq!(
+            balancer.select(Some("nope")).unwrap().group_name.as_deref(),
+            Some("bbb"),
+            "sorted-first aaa opted out; the positional fallback moves to the first non-exclusive group"
+        );
+        assert_eq!(balancer.select(Some("m1")).unwrap().group_name.as_deref(), Some("aaa"));
+    }
+
+    #[test]
+    fn catch_all_group_with_exclusive_still_catches_all() {
+        // f414d16 semantics pinned: the catch-all rung never consults
+        // exclusive — a group with empty mappings owns unmatched traffic by
+        // definition, so exclusive on it is a documented no-op (the honest
+        // loader-side rejection of this combo is a recorded carry).
+        let mut catch = make_group_config(vec![], vec!["http://localhost:8081"]);
+        catch.exclusive = true;
+        let mut groups = HashMap::new();
+        groups.insert(
+            "aaa_specific".to_string(),
+            make_group_config(vec!["mine"], vec!["http://localhost:8080"]),
+        );
+        groups.insert("zzz_catch".to_string(), catch);
+
+        let balancer = GroupedLoadBalancer::new(groups).unwrap();
+        assert_eq!(
+            balancer.select(Some("nope")).unwrap().group_name.as_deref(),
+            Some("zzz_catch")
+        );
+        assert_eq!(balancer.select(None).unwrap().group_name.as_deref(), Some("zzz_catch"));
     }
 }
