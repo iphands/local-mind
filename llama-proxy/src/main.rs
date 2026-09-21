@@ -243,6 +243,10 @@ async fn run_proxy(
 
     // Add InfluxDB exporter if enabled
     if config.exporters.influxdb.enabled {
+        if let Some(gate_err) = influxdb_startup_gate(config.exporters.influxdb.enabled, &config_path) {
+            eprintln!("Error: {gate_err}");
+            std::process::exit(1);
+        }
         match InfluxDbExporter::from_config(&config.exporters.influxdb) {
             Ok(exporter) => {
                 exporter_manager.add(Arc::new(exporter));
@@ -265,6 +269,33 @@ async fn run_proxy(
     .await?;
 
     Ok(())
+}
+
+/// plan:27 (D3): `exporters.influxdb.enabled: true` on a binary compiled
+/// without the `influxdb` cargo feature is a `run`-path startup HARD ERROR,
+/// not a WARN-and-boot with a dead exporter (F11 BUG-2 adjudication). Returns
+/// the actionable message when the gate fires; the caller turns it into the
+/// startup error (exit 1, no listener bound). `check-config` deliberately
+/// never consults this gate — its validation surface is load+structure only
+/// (F7 pinned its exit codes).
+#[cfg(not(feature = "influxdb"))]
+fn influxdb_startup_gate(enabled: bool, config_path: &Path) -> Option<String> {
+    enabled.then(|| {
+        format!(
+            "exporters.influxdb.enabled is true but this binary was built without the \
+             `influxdb` cargo feature — rebuild with `cargo build --features influxdb` \
+             or set exporters.influxdb.enabled: false in {}",
+            config_path.display()
+        )
+    })
+}
+
+/// Feature-compiled-in counterpart: the gate can never fire — `from_config`
+/// builds the real exporter and the run path behaves exactly as before (F11-B2
+/// scope lock: feature-ON path byte-identical behavior).
+#[cfg(feature = "influxdb")]
+fn influxdb_startup_gate(_enabled: bool, _config_path: &Path) -> Option<String> {
+    None
 }
 
 /// Single source of truth for printing the effective configuration. Shared by
@@ -811,6 +842,32 @@ mod tests {
             validate_final(&cfg("server:\n  port: 8066\n  host: \"0.0.0.0\"\n")).is_ok(),
             "the F-H1 backendless (503-path) config must stay valid"
         );
+    }
+
+    #[test]
+    fn f11b2_gate_stays_quiet_when_exporter_disabled() {
+        // Given: exporters.influxdb.enabled: false — When: gate consulted
+        // Then: no error in ANY feature set (WARN-when-disabled path stays)
+        assert!(influxdb_startup_gate(false, Path::new("cfg.yaml")).is_none());
+    }
+
+    #[cfg(not(feature = "influxdb"))]
+    #[test]
+    fn f11b2_gate_hard_errors_when_enabled_without_feature() {
+        // plan:27 (D3): enabled + feature compiled out = startup hard error.
+        let msg = influxdb_startup_gate(true, Path::new("/tmp/cfg.yaml"))
+            .expect("enabled without the influxdb feature must produce the startup error");
+        assert!(msg.contains("influxdb"), "must name the missing feature: {msg}");
+        assert!(msg.contains("--features influxdb"), "must give the rebuild hint: {msg}");
+        assert!(msg.contains("enabled: false"), "must give the config hint: {msg}");
+        assert!(msg.contains("/tmp/cfg.yaml"), "must name the config file: {msg}");
+    }
+
+    #[cfg(feature = "influxdb")]
+    #[test]
+    fn f11b2_gate_never_fires_when_feature_compiled_in() {
+        // Scope lock: with the feature built in, `run` behaves exactly as before.
+        assert!(influxdb_startup_gate(true, Path::new("cfg.yaml")).is_none());
     }
 
     #[test]
