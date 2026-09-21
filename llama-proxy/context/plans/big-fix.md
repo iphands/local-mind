@@ -239,7 +239,7 @@ Tests-after with regression-first ordering per task: each fix task adds the fail
 - [x] F9. Graceful shutdown: streaming in flight → SIGTERM → client stream intact, exit 0, flush log AFTER drain (ordering asserted from the log).
 - [x] F10. Reprompt e2e: sentinel-bearing first response from fake backend → follow-up fires; exactly ONE stats line with merged totals; fixes applied to the merged body; budget test returns within `max_total_ms`.
 - [x] F11. Feature matrix: F3 subset with `--no-default-features --features rustls-tls` proves D3 hard-error path and feature independence.
-- [ ] F12. Compatibility checklist (AGENTS.md items 1-6) re-run against final HEAD; Appendix B map complete, zero unmapped findings; dual-reviewer (neckbeard + hoodie) pass recorded for the whole branch.
+- [x] F12. Compatibility checklist (AGENTS.md items 1-6) re-run against final HEAD; Appendix B map complete, zero unmapped findings; dual-reviewer (neckbeard + hoodie) pass recorded for the whole branch.
 
 ## Commit order (authoritative) & dependency matrix
 
