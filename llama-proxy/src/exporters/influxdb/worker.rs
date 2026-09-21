@@ -9,8 +9,14 @@
 //! samples: past the ceiling the sample is dropped, counted, and logged at
 //! DEBUG - the overflow policy sacrifices telemetry, never the request path.
 //! The worker owns the network: exactly ONE thread per exporter (fixed spawn
-//! count), 3 retries per point, and a drain-exit so a graceful shutdown never
-//! discards what `export()` already reported as queued.
+//! count) and 3 retries per point. The drain-exit HONESTY IS BOUNDED: when
+//! the senders close the worker delivers every queued sample on its OWN
+//! thread — FIFO, never discarded at close — but nobody is forced to wait for
+//! that thread. Only [`WriterQueue::shutdown`] (via `MetricsExporter::shutdown`
+//! through `ExporterManager::shutdown_all`, which the server calls AFTER the
+//! graceful connection drain per the F12 contract) joins it, within a budget;
+//! a plain `Drop` closes without joining, so there the accepted-but-unwritten
+//! samples drain in racing with process exit and no loss is ever reported.
 //!
 //! All queue plumbing is plain `std::sync::mpsc` and the worker runs on its
 //! own OS thread, so neither the senders nor the shutdown join ever depends
@@ -394,7 +400,9 @@ impl Drop for WriterQueue {
     fn drop(&mut self) {
         // Taking the senders out is the close: the worker drains and exits on
         // its own thread. No join here - Drop must not block whoever drops
-        // the exporter last.
+        // the exporter last, so a Drop-only teardown races process exit and
+        // reports nothing; the bounded JOIN lives in shutdown_after, reached
+        // through ExporterManager::shutdown_all at the server's drain point.
         drop(self.samples_tx.lock().unwrap().take());
     }
 }

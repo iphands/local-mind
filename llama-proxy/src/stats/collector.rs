@@ -258,16 +258,50 @@ fn extract_usage(metrics: &mut RequestMetrics, response: &Value) {
     }
 }
 
+/// Gate a backend-sourced f64 metric (a rate or a duration) for the wire.
+///
+/// serde_json's f64 parse maps any too-large literal (1e400) to +inf, and a
+/// derived `tokens / ms * 1000` overflows to +inf on subnormal inputs. An inf
+/// anywhere in the exporter's JSON body is rejected wholesale (InfluxDB 400),
+/// the write retry ladder burns four attempts per sample, and the sample dies
+/// counted-but-silent. The metrics contract already renders 0.0 as "not
+/// reported", so a non-finite value maps to 0.0 and is DEBUG-named.
+fn finite_rate(value: f64, field: &str, model: &str) -> f64 {
+    if value.is_finite() {
+        return value;
+    }
+    tracing::debug!(field, model, raw = %value, "non-finite backend metric - reporting 0.0 (not reported), never inf");
+    0.0
+}
+
 /// Extract llama.cpp `timings`, with the token-count fallback and, when timings
 /// are absent, the context_used fallback and the vLLM `metrics` path.
 fn extract_timings(metrics: &mut RequestMetrics, response: &Value, duration_ms: f64) {
     // Extract timings (llama.cpp specific)
     if let Some(timings) = response.get("timings") {
         tracing::debug!("Found timings: {:?}", timings);
-        metrics.prompt_ms = timings.get("prompt_ms").and_then(|t| t.as_f64()).unwrap_or(0.0);
-        metrics.generation_ms = timings.get("predicted_ms").and_then(|t| t.as_f64()).unwrap_or(0.0);
-        metrics.prompt_tps = timings.get("prompt_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0);
-        metrics.generation_tps = timings.get("predicted_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0);
+        metrics.prompt_ms = timings
+            .get("prompt_ms")
+            .and_then(|t| t.as_f64())
+            .map(|v| finite_rate(v, "prompt_ms", &metrics.model))
+            .unwrap_or(0.0);
+        metrics.generation_ms = timings
+            .get("predicted_ms")
+            .and_then(|t| t.as_f64())
+            .map(|v| finite_rate(v, "generation_ms", &metrics.model))
+            .unwrap_or(0.0);
+        // Same finite gate as the vLLM path: serde_json turns 1e400 into +inf,
+        // and an inf rate poisons the whole exporter batch (see `finite_rate`).
+        metrics.prompt_tps = finite_rate(
+            timings.get("prompt_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0),
+            "prompt_tps",
+            &metrics.model,
+        );
+        metrics.generation_tps = finite_rate(
+            timings.get("predicted_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0),
+            "generation_tps",
+            &metrics.model,
+        );
         metrics.has_timing_split = true;
 
         // Context info - use prompt_n for actual context consumption
@@ -336,7 +370,18 @@ fn extract_vllm_usage(metrics: &mut RequestMetrics, response: &Value, duration_m
     // and prefill; time_to_first_token_ms is measured from scheduling,
     // so it excludes queue wait too.
     if let Some(vm) = response.get("metrics").filter(|v| !v.is_null()) {
-        let f = |k: &str| vm.get(k).and_then(|v| v.as_f64()).filter(|v| *v > 0.0);
+        // A usable backend measurement is FINITE and at least f64's smallest
+        // NORMAL number: JSON's f64 parse turns 1e-400 into 0.0 and clamps
+        // 1e-45..1e-308 to SUBNORMALS, and `*v > 0.0` admits every one of
+        // them. A subnormal ttft/gen_ms then overflows tokens/ms*1000 to
+        // +inf, the exporter's JSON body carries a literal `inf`, InfluxDB
+        // answers 400, the retry ladder burns 4 attempts per sample, and the
+        // loss is silent. Below normal range there is no timing signal.
+        let f = |k: &str| {
+            vm.get(k)
+                .and_then(|v| v.as_f64())
+                .filter(|v| v.is_finite() && *v >= f64::MIN_POSITIVE)
+        };
 
         metrics.queue_ms = f("queue_time_ms");
         metrics.mean_itl_ms = f("mean_itl_ms");
@@ -344,13 +389,14 @@ fn extract_vllm_usage(metrics: &mut RequestMetrics, response: &Value, duration_m
         if let Some(ttft) = f("time_to_first_token_ms") {
             metrics.prompt_ms = ttft;
             if let Some(prompt_tokens) = metrics.prompt_tokens.filter(|p| *p > 0) {
-                metrics.prompt_tps = (prompt_tokens as f64 / ttft) * 1000.0;
+                metrics.prompt_tps = finite_rate(prompt_tokens as f64 / ttft * 1000.0, "prompt_tps", &metrics.model);
             }
         }
         if let Some(gen_ms) = f("generation_time_ms") {
             metrics.generation_ms = gen_ms;
             if let Some(completion_tokens) = metrics.completion_tokens.filter(|c| *c > 0) {
-                metrics.generation_tps = (completion_tokens as f64 / gen_ms) * 1000.0;
+                metrics.generation_tps =
+                    finite_rate(completion_tokens as f64 / gen_ms * 1000.0, "generation_tps", &metrics.model);
             }
         }
         metrics.has_timing_split = metrics.prompt_ms > 0.0 || metrics.generation_ms > 0.0;
@@ -1223,5 +1269,86 @@ mod tests {
         assert_eq!(m.generation_tps, 0.0);
         assert_eq!(m.queue_ms, None);
         assert!((m.total_tps - 22753.32).abs() < 0.1);
+    }
+
+    /// big-fix F12-R4 [MAJOR 10]: the baseline filter `*v > 0.0` admits
+    /// SUBNORMALS (1e-320 parses as-is, 1e-400 lands 0.0), and
+    /// `prompt_tokens / ttft * 1000` on a subnormal ttft overflows to +inf.
+    /// An inf field makes serde_json emit a literal `inf`, InfluxDB rejects
+    /// the whole body with 400, the retry ladder burns 4 attempts, and the
+    /// sample dies silently. A subnormal duration is the absence of a
+    /// timing signal, not a measurement.
+    #[test]
+    fn subnormal_vllm_durations_yield_no_infinite_rate() {
+        let response: serde_json::Value = serde_json::from_str(
+            r#"{"model":"m",
+               "usage":{"prompt_tokens":100,"completion_tokens":50,"total_tokens":150},
+               "metrics":{"time_to_first_token_ms":1e-320,"generation_time_ms":1e-320},
+               "choices":[{"finish_reason":"stop","message":{"content":""}}]}"#,
+        )
+        .unwrap();
+        let request = serde_json::json!({"messages": []});
+        let m = RequestMetrics::from_response(&response, &request, false, 1000.0);
+
+        assert!(!m.prompt_tps.is_infinite(), "prompt_tps = {}", m.prompt_tps);
+        assert_eq!(m.prompt_tps, 0.0);
+        assert!(!m.generation_tps.is_infinite(), "generation_tps = {}", m.generation_tps);
+        assert_eq!(m.generation_tps, 0.0);
+        assert_eq!(m.prompt_ms, 0.0, "a subnormal duration is not a measurement");
+        assert_eq!(m.generation_ms, 0.0);
+        assert!(!m.has_timing_split);
+        assert!(m.total_tps.is_finite(), "total_tps = {}", m.total_tps);
+    }
+
+    /// The gate's other input class: a duration that PASSES the filter
+    /// (f64::MIN_POSITIVE is finite and normal-range) with a huge token count
+    /// still overflows `tokens / ms * 1000` past f64 -> +inf. The derived-rate
+    /// gate maps that to the contract's 0.0 = "not reported". A huge-but-
+    /// FINITE rate is deliberately NOT rejected (implausibility is not what
+    /// this gate owns; +inf is).
+    #[test]
+    fn derived_rate_overflow_is_clamped_to_not_reported() {
+        let response: serde_json::Value = serde_json::from_str(&format!(
+            r#"{{"model":"m",
+               "usage":{{"prompt_tokens":{},"completion_tokens":{},"total_tokens":{}}},
+               "metrics":{{"time_to_first_token_ms":{},"generation_time_ms":{}}},
+               "choices":[{{"finish_reason":"stop","message":{{"content":""}}}}]}}"#,
+            u64::MAX,
+            u64::MAX,
+            u64::MAX,
+            f64::MIN_POSITIVE,
+            f64::MIN_POSITIVE,
+        ))
+        .unwrap();
+        let request = serde_json::json!({"messages": []});
+        let m = RequestMetrics::from_response(&response, &request, false, 1000.0);
+
+        assert!(!m.prompt_tps.is_infinite(), "prompt_tps = {}", m.prompt_tps);
+        assert_eq!(m.prompt_tps, 0.0, "u64::MAX/MIN_POSITIVE*1000 overflows f64 -> not reported");
+        assert!(!m.generation_tps.is_infinite(), "generation_tps = {}", m.generation_tps);
+        assert_eq!(m.generation_tps, 0.0);
+        // The durations themselves are real (if absurd) measurements and survive.
+        assert_eq!(m.prompt_ms, f64::MIN_POSITIVE);
+        assert_eq!(m.generation_ms, f64::MIN_POSITIVE);
+    }
+
+    /// Honest limit of the hostile-body class: serde_json REJECTS an
+    /// out-of-range number literal outright ("number out of range" - pinned
+    /// raw below), so +inf never arrives through `as_f64` and the real inf
+    /// vector is the derived division above. The `timings` gate is therefore
+    /// belt-and-braces; this pins both the parse-level wall and the gate
+    /// itself against a hand-built +inf that no parser produces but no wire
+    /// may ever carry.
+    #[test]
+    fn out_of_range_literals_reject_at_parse_and_the_gate_covers_handbuilt_inf() {
+        let hostile = serde_json::from_str::<serde_json::Value>(r#"{"timings":{"prompt_per_second":1e400}}"#);
+        assert!(
+            matches!(&hostile, Err(e) if e.to_string().contains("number out of range")),
+            "serde_json's own parse-level wall, got {hostile:?}"
+        );
+
+        assert_eq!(finite_rate(f64::INFINITY, "prompt_tps", "m"), 0.0);
+        assert_eq!(finite_rate(f64::NEG_INFINITY, "generation_ms", "m"), 0.0);
+        assert_eq!(finite_rate(12.5, "prompt_ms", "m"), 12.5, "finite values ride through");
     }
 }

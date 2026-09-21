@@ -35,11 +35,76 @@ pub struct InfluxDbExporter {
     _phantom: (),
 }
 
+/// Check the destination URL before handing it to influxdb2.
+///
+/// `influxdb2::Client::new` PANICS on an unparseable url (its builder does
+/// `Url::parse(..).unwrap_or_else(|_| panic!(..))`), which would take the
+/// process down at startup and make every caller's `Err` arm unreachable.
+/// The load-time gate lives in config validation (F12-R2); this is the
+/// last-line checked parse so construction degrades to a typed
+/// [`ExportError::Config`] no matter how a config reached this point.
+#[cfg(feature = "influxdb")]
+fn checked_client_url(url: &str) -> Result<(), ExportError> {
+    let parsed = url::Url::parse(url).map_err(|e| ExportError::Config(format!("influxdb.url is not a valid URL: {e}")))?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return Err(ExportError::Config(format!(
+            "influxdb.url must be an http or https URL: {url}"
+        )));
+    }
+    Ok(())
+}
+
+/// Tag values rewritten at the wire boundary. Reconciliation number for the
+/// "sanitized, not skipped" policy of [`tag_value`].
+#[cfg(feature = "influxdb")]
+pub(crate) static TAG_SANITIZE_TOTAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// WARN interval for tag sanitization - same counter-exact/log-sampled split
+/// as the exporter's skip filter, because a hostile backend would flood.
+#[cfg(feature = "influxdb")]
+const TAG_SANITIZE_WARN_INTERVAL: u64 = 100;
+
+/// Neutralize line-protocol control characters in a tag value.
+///
+/// influxdb2 0.5 escapes only `,`, `=` and ` ` in tag values
+/// (`TAG_VALUE_DELIMITERS`); `\n` and `\r` pass through UNESCAPED, so a
+/// response-sourced value like `"m\nforged_measurement 1"` forges a second
+/// measurement line into the operator's bucket - remotely writable through
+/// the model the backend echoes. Policy: REPLACE every control char (<0x20
+/// plus DEL) and the three delimiters with `_`, keep the sample, count it in
+/// [`TAG_SANITIZE_TOTAL`] and WARN 1-in-100 (first always). Skipping the
+/// whole sample would destroy a valid measurement and hand a hostile backend
+/// a telemetry-off switch; the delimiters are replaced although influxdb2
+/// backslash-escapes them so tag cardinality never depends on hostile
+/// quoting. The control chars are what the injection proof turns on; the
+/// replacement never widens the value.
+#[cfg(feature = "influxdb")]
+fn tag_value<'a>(field: &'static str, raw: &'a str) -> std::borrow::Cow<'a, str> {
+    fn is_unsafe(ch: char) -> bool {
+        (ch as u32) < 0x20 || ch == '\u{7f}' || matches!(ch, ',' | '=' | ' ')
+    }
+    if !raw.chars().any(is_unsafe) {
+        return std::borrow::Cow::Borrowed(raw);
+    }
+    let sanitized: String = raw.chars().map(|ch| if is_unsafe(ch) { '_' } else { ch }).collect();
+    let total = TAG_SANITIZE_TOTAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if total == 1 || total.is_multiple_of(TAG_SANITIZE_WARN_INTERVAL) {
+        tracing::warn!(
+            tag = field,
+            sanitized_total = total,
+            "influxdb tag value carried line-protocol control characters or delimiters - \
+             replaced with '_' (sample kept, counted in tag sanitize total; 1 in 100 logs)"
+        );
+    }
+    std::borrow::Cow::Owned(sanitized)
+}
+
 impl InfluxDbExporter {
     /// Create a new InfluxDB exporter. The bounded writer thread starts here
     /// and here only - one per exporter, for the exporter's whole life.
     #[cfg(feature = "influxdb")]
     pub fn new(config: InfluxDbConfig) -> Result<Self, ExportError> {
+        checked_client_url(&config.url)?;
         let client = influxdb2::Client::new(&config.url, &config.org, &config.token);
         let queue = WriterQueue::spawn(client, config, REQUEST_TIMEOUT);
 
@@ -54,6 +119,7 @@ impl InfluxDbExporter {
         config: InfluxDbConfig,
         request_timeout: std::time::Duration,
     ) -> Result<Self, ExportError> {
+        checked_client_url(&config.url)?;
         let client = influxdb2::Client::new(&config.url, &config.org, &config.token);
         let queue = WriterQueue::spawn(client, config, request_timeout);
 
@@ -110,17 +176,20 @@ fn build_data_point(metrics: &RequestMetrics) -> Result<Option<influxdb2::models
     use influxdb2::models::DataPoint;
 
     let mut builder = DataPoint::builder("llama_request")
-        .tag("model", &metrics.model)
+        .tag("model", tag_value("model", &metrics.model))
         .tag("streaming", metrics.streaming.to_string())
-        .tag("finish_reason", &metrics.finish_reason)
+        .tag("finish_reason", tag_value("finish_reason", &metrics.finish_reason))
         .tag("stream_end", metrics.stream_end_label());
 
     if let Some(ref client_id) = metrics.client_id {
-        builder = builder.tag("client_id", client_id.as_str());
+        // Shipped as a tag straight from a request header once a producer
+        // fills the field, so it gets the same last-line treatment as the
+        // response-sourced tags, whatever feeds it later.
+        builder = builder.tag("client_id", tag_value("client_id", client_id.as_str()));
     }
 
     if let Some(ref conv_id) = metrics.conversation_id {
-        builder = builder.tag("conversation_id", conv_id.as_str());
+        builder = builder.tag("conversation_id", tag_value("conversation_id", conv_id.as_str()));
     }
 
     if let Some(ref group_name) = metrics.group_name {
@@ -278,6 +347,106 @@ mod wire_tests {
         let line = line(&m);
         assert!(line.contains("prompt_tokens=100"), "got: {line}");
         assert!(line.contains("completion_tokens=0"), "measured zero written: {line}");
+    }
+
+    /// big-fix F12-R4 [MAJOR 8]: `model` and `finish_reason` arrive VERBATIM
+    /// from the backend response body, and influxdb2 0.5 escapes only
+    /// `,`/`=`/` ` in tag values — `TAG_VALUE_DELIMITERS` (data_point.rs:312)
+    /// never touches `\n`, so the raw newline reached the line-protocol body
+    /// and the backend forged a second measurement into the operator's
+    /// bucket. Red baseline captured the 2-physical-line wire raw.
+    /// Serialize the tests that sanitize tags. The counter is process-global
+    /// and these tests run on parallel harness threads, so an exact delta is
+    /// only assertable while the sanitizing tests take turns (no other test
+    /// in the binary reaches `tag_value` with unsafe input).
+    static SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn sanitizer_turn() -> std::sync::MutexGuard<'static, ()> {
+        SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    #[test]
+    fn newline_in_model_cannot_forge_a_second_measurement_line() {
+        let _turn = sanitizer_turn();
+        let mut m = measurable();
+        m.model = "m\nforged_measurement 1".to_string();
+        let wire = line(&m);
+        let body = wire.trim_end();
+        assert_eq!(
+            body.lines().count(),
+            1,
+            "one sample must be ONE physical line, got {}:\n{body}",
+            body.lines().count()
+        );
+        assert!(
+            body.starts_with("llama_request,"),
+            "the measurement name is untouched: {body}"
+        );
+        assert!(
+            body.contains("model=m_forged_measurement_1,"),
+            "control chars and delimiters replace to '_': {body}"
+        );
+    }
+
+    #[test]
+    fn carriage_return_and_raw_control_chars_are_neutralized() {
+        let _turn = sanitizer_turn();
+        let mut m = measurable();
+        m.model = "a\r\nb\tc\u{1}d".to_string();
+        let body = line(&m).trim_end().to_string();
+        assert_eq!(body.lines().count(), 1, "got:\n{body}");
+        assert!(body.contains("model=a__b_c_d,"), "got: {body}");
+    }
+
+    #[test]
+    fn finish_reason_header_and_conversation_tags_are_sanitized() {
+        let _turn = sanitizer_turn();
+        let mut m = measurable();
+        m.finish_reason = "stop\nforged 2".to_string();
+        m.client_id = Some("cli\rent".to_string());
+        m.conversation_id = Some("conv=1,x 3".to_string());
+        let body = line(&m).trim_end().to_string();
+        assert_eq!(body.lines().count(), 1, "got:\n{body}");
+        assert!(body.contains("finish_reason=stop_forged_2,"), "got: {body}");
+        assert!(body.contains("client_id=cli_ent,"), "got: {body}");
+        assert!(body.contains("conversation_id=conv_1_x_3,"), "got: {body}");
+    }
+
+    #[test]
+    fn clean_tag_values_pass_through_byte_identical() {
+        let mut m = measurable();
+        m.model = "Qwen3-14B-128K-Q3_K_S.gguf".to_string();
+        m.finish_reason = "tool_calls".to_string();
+        let body = line(&m).trim_end().to_string();
+        assert!(body.contains("model=Qwen3-14B-128K-Q3_K_S.gguf,"), "got: {body}");
+        assert!(body.contains("finish_reason=tool_calls,"), "got: {body}");
+    }
+
+    /// The keep-the-sample policy is reconciled by a counter, not by a
+    /// whisper: every rewritten tag value increments it. The counter is
+    /// process-global, so this test takes the sanitizer_turn() serialization
+    /// shared by every sanitizing test in the binary (the exact-delta
+    /// validity condition).
+    #[test]
+    fn sanitized_tags_are_counted_not_silently_rewritten() {
+        let _turn = sanitizer_turn();
+        let before = super::TAG_SANITIZE_TOTAL.load(std::sync::atomic::Ordering::SeqCst);
+        let mut m = measurable();
+        m.model = "m\nx".to_string();
+        m.finish_reason = "a b".to_string();
+        let _ = line(&m);
+        let after = super::TAG_SANITIZE_TOTAL.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(after - before, 2, "two rewritten tag values must count as two");
+
+        let mut clean = measurable();
+        clean.model = "plain-model".to_string();
+        clean.finish_reason = "stop".to_string();
+        let _ = line(&clean);
+        assert_eq!(
+            super::TAG_SANITIZE_TOTAL.load(std::sync::atomic::Ordering::SeqCst),
+            after,
+            "a clean sample must not touch the counter"
+        );
     }
 }
 
@@ -653,5 +822,52 @@ mod queue_tests {
         exporter.writer().shutdown();
         let second = exporter.export(&sample("later")).await;
         assert!(second.is_err(), "second shutdown stays idempotent");
+    }
+}
+
+/// big-fix F12-R4 [MAJOR 9]: `influxdb2::Client::new` panics
+/// (`Url::parse(..).unwrap_or_else(panic)`) on an unparseable url, so an
+/// unvalidated `influxdb.url` took the process down at startup and main's
+/// `Err -> warn` arm was unreachable. Construction now checks the URL first
+/// and returns `ExportError::Config`. Feature-gated: without the feature
+/// there is no client and no panic to guard.
+#[cfg(all(test, feature = "influxdb"))]
+mod url_gate_tests {
+    use super::{ExportError, InfluxDbConfig, InfluxDbExporter};
+
+    fn config_with_url(url: &str) -> InfluxDbConfig {
+        InfluxDbConfig {
+            url: url.to_string(),
+            org: "o".into(),
+            bucket: "b".into(),
+            token: "t".into(),
+        }
+    }
+
+    #[test]
+    fn unparseable_or_unusable_urls_return_config_errors_never_panic() {
+        for url in ["", "not-a-url", "http://", "mailto:ops@example.com", "ftp://influx:8086"] {
+            let outcome = std::panic::catch_unwind(|| InfluxDbExporter::new(config_with_url(url)));
+            let err = match outcome {
+                Ok(Err(e)) => e,
+                Ok(Ok(_)) => panic!("url {url:?} must not construct an exporter"),
+                Err(_) => panic!("url {url:?} must return Err, not panic through Client::new"),
+            };
+            assert!(
+                matches!(err, ExportError::Config(_)),
+                "typed config error expected for {url:?}, got {err:?}"
+            );
+            assert!(
+                err.to_string().contains("influxdb.url"),
+                "the error must name the offending field, got {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn parseable_urls_still_construct() {
+        let exporter =
+            InfluxDbExporter::new(config_with_url("http://127.0.0.1:1")).expect("a parseable http url must keep constructing");
+        exporter.writer().shutdown();
     }
 }

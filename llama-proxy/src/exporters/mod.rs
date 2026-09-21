@@ -78,7 +78,8 @@ pub trait MetricsExporter: Send + Sync {
         Ok(())
     }
 
-    /// Shutdown the exporter gracefully
+    /// Flush, then close the delivery path so nothing is accepted after the
+    /// point of no return. Blocking is bounded by the exporter's own budget.
     async fn shutdown(&self) -> Result<(), ExportError> {
         self.flush().await
     }
@@ -164,6 +165,13 @@ impl ExporterManager {
         }
     }
 
+    /// Drive `shutdown()` on every exporter. This is the PROCESS-SHUTDOWN
+    /// hook: call it after the server has drained its connections, so no
+    /// request hands a sample in behind it and the influxdb worker's
+    /// drain-exit is actually JOINED (its bounded budget is documented on
+    /// `worker::WriterQueue::shutdown_after`). Until a call site awaits this,
+    /// accepted samples can die with the process after `export()` said
+    /// queued - see worker.rs' module header.
     pub async fn shutdown_all(&self) {
         for exporter in &self.exporters {
             if let Err(e) = exporter.shutdown().await {
