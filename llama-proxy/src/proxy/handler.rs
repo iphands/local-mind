@@ -31,6 +31,38 @@ fn err_envelope(kind: &str, msg: impl Into<String>) -> serde_json::Value {
     })
 }
 
+/// True when a body-read failure is axum's over-cap error. `to_bytes` surfaces
+/// `http_body_util::LengthLimitError` boxed in a transparent `axum_core::Error`,
+/// whose Display is exactly this lowercase string (http-body-util 0.1.3
+/// limited.rs). Matching Display avoids a direct http-body-util dependency.
+fn is_length_limit_error(e: &impl std::fmt::Display) -> bool {
+    e.to_string() == "length limit exceeded"
+}
+
+/// Map a `to_bytes` failure: over the hard-coded cap -> 413 naming `cap_label`,
+/// any other read/parse failure -> 400 invalid_request_json with the cause.
+fn body_read_error(e: impl std::fmt::Display, cap_label: &str) -> Response {
+    if is_length_limit_error(&e) {
+        (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(err_envelope(
+                "request_body_too_large",
+                format!("Request body exceeds the {cap_label} limit"),
+            )),
+        )
+            .into_response()
+    } else {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(err_envelope(
+                "invalid_request_json",
+                format!("Failed to read request body: {e}"),
+            )),
+        )
+            .into_response()
+    }
+}
+
 /// Response when server is at capacity
 fn at_capacity_response(max: usize) -> Response {
     tracing::warn!(max = max, "Server at capacity, rejecting request");
@@ -313,14 +345,7 @@ impl ProxyHandler {
             Ok(bytes) => bytes,
             Err(e) => {
                 tracing::error!(error = %e, "Failed to read request body");
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(err_envelope(
-                        "invalid_request_json",
-                        format!("Failed to read request body: {}", e),
-                    )),
-                )
-                    .into_response();
+                return body_read_error(e, "100 MiB");
             }
         };
 
@@ -1198,13 +1223,7 @@ impl ProxyHandler {
         // Read body
         let body_bytes = match to_bytes(req.into_body(), 1024 * 1024 * 10).await {
             Ok(bytes) => bytes,
-            Err(e) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(err_envelope("invalid_request_json", format!("Failed to read body: {}", e))),
-                )
-                    .into_response();
-            }
+            Err(e) => return body_read_error(e, "10 MiB"),
         };
 
         // Build complete URL with query string as-is (don't parse/re-encode)
@@ -1929,6 +1948,127 @@ mod tests {
                 .unwrap_or("<missing>"),
             "application/json; charset=utf-8",
             "backend JSON content-type must pass through verbatim, charset included"
+        );
+    }
+
+    // ---- big-fix task 6: body-reader errors map to 413 vs 400 by kind ----
+    //
+    // Pre-fix, BOTH to_bytes Err arms answer 400 invalid_request_json, so the
+    // 413/request_body_too_large assertions below are exactly the RED signature.
+    // No DefaultBodyLimit layer exists; the caps are the hard-coded to_bytes
+    // limits (100 MiB main path, 10 MiB pass-through).
+
+    /// Streaming body of `chunks` × ~1 MiB of CJK UTF-8 frames: with enough
+    /// chunks it crosses the 10 MiB pass-through cap. Bounded stream, no
+    /// sleeps - deterministic, and at most ~cap+1 MiB is ever buffered.
+    fn oversized_stream_body(chunks: usize) -> Body {
+        let frame = bytes::Bytes::from("汉字符负载".repeat(70_000)); // 70_000 × 15 B ≈ 1 MiB
+        Body::from_stream(futures::stream::iter(
+            (0..chunks).map(move |_| Ok::<_, std::io::Error>(frame.clone())),
+        ))
+    }
+
+    /// ~1 MiB frames followed by a mid-stream read failure: the client-half
+    /// "drop the body" probe - a genuine read error, never a limit error.
+    fn mid_stream_failing_body(chunks: usize) -> Body {
+        let frame = bytes::Bytes::from(vec![b'x'; 1024 * 1024]);
+        let ok_frames = (0..chunks).map(move |_| Ok::<_, std::io::Error>(frame.clone()));
+        let drop = std::iter::once(Err(std::io::Error::other("client aborted mid-body 🚪")));
+        Body::from_stream(futures::stream::iter(ok_frames.chain(drop)))
+    }
+
+    #[tokio::test]
+    async fn oversized_passthrough_stream_body_answers_413_with_limit_message() {
+        // 11 MiB streamed into the 10 MiB pass-through cap. proxy_passthrough
+        // is called directly because handle() pre-buffers with the 100 MiB
+        // main cap before rebuilding passthrough requests (task 5 learning).
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+        let node = node_at_port(1);
+
+        let res = handler
+            .proxy_passthrough(request_with_body(Method::GET, "/health", oversized_stream_body(11)), &node)
+            .await;
+
+        let body = assert_error_envelope(res, StatusCode::PAYLOAD_TOO_LARGE, "request_body_too_large").await;
+        assert!(
+            body["error"]["message"].as_str().is_some_and(|m| m.contains("10 MiB")),
+            "the 413 must name the applicable 10 MiB pass-through cap, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn mid_stream_body_failure_still_answers_400_not_413() {
+        // Guard (green pre AND post): a real read failure on the main path
+        // (4 MiB of frames, then the stream dies) must stay 400 with the
+        // unreadable-text verbatim - the 413 branch must not swallow it.
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
+        let handler = handler_with_balancer(balancer, None);
+
+        let res = handler
+            .handle(request_with_body(
+                Method::POST,
+                "/v1/chat/completions",
+                mid_stream_failing_body(4),
+            ))
+            .await;
+
+        let body = assert_error_envelope(res, StatusCode::BAD_REQUEST, "invalid_request_json").await;
+        assert!(
+            body["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains("client aborted mid-body 🚪")),
+            "untrusted read-error text must survive into the 400 envelope, got: {body}"
+        );
+    }
+
+    /// A TRUE over-limit error from the same axum surface the handlers use:
+    /// `to_bytes` with a 1 MiB cap over a bigger streaming body.
+    async fn real_length_limit_error() -> axum::Error {
+        to_bytes(oversized_stream_body(4), 1024 * 1024)
+            .await
+            .expect_err("4 MiB body must exceed a 1 MiB cap")
+    }
+
+    #[tokio::test]
+    async fn real_axum_over_limit_error_is_the_classified_surface() {
+        // Pins the classification primitive against the REAL error, not a
+        // hand-made string: axum must surface http-body-util's LengthLimitError
+        // Display verbatim through its transparent wrapper.
+        let e = real_length_limit_error().await;
+        assert_eq!(
+            e.to_string(),
+            "length limit exceeded",
+            "axum-core error Display must delegate to the boxed LengthLimitError"
+        );
+        assert!(
+            is_length_limit_error(&e),
+            "the real over-limit error must classify as a length limit"
+        );
+
+        let other = to_bytes(mid_stream_failing_body(2), 1024 * 1024 * 100)
+            .await
+            .expect_err("mid-stream io error must surface");
+        assert!(
+            !is_length_limit_error(&other),
+            "an ordinary read failure must NOT classify as a length limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn main_path_limit_branch_maps_real_error_to_413_with_cap_label() {
+        // The main path's 100 MiB cap needs a >100 MiB body to trigger through
+        // handle() - too heavy for CI (a 100+ MiB buffer per run, flaky under
+        // parallel workers). Both Err arms share body_read_error, whose 413
+        // branch is pinned end-to-end by oversized_passthrough_stream_body_...
+        // (10 MiB side); this test pins the SAME branch with the main path's
+        // cap label against a real LengthLimitError.
+        let e = real_length_limit_error().await;
+        let res = body_read_error(e, "100 MiB");
+        let body = assert_error_envelope(res, StatusCode::PAYLOAD_TOO_LARGE, "request_body_too_large").await;
+        assert!(
+            body["error"]["message"].as_str().is_some_and(|m| m.contains("100 MiB")),
+            "the 413 must name the applicable 100 MiB main-path cap, got: {body}"
         );
     }
 }
