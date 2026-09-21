@@ -267,75 +267,110 @@ async fn run_proxy(
     Ok(())
 }
 
-/// Log all configuration settings at startup (masks sensitive values)
-fn log_config_settings(config: &AppConfig) {
-    tracing::info!("=== Configuration ===");
+/// Single source of truth for printing the effective configuration. Shared by
+/// `log_config_settings` (run, via tracing) and `check_config` (via println),
+/// so the two views can never drift apart. Plain lines, fixed section order;
+/// the InfluxDB token is intentionally never rendered.
+fn render_config_summary(config: &AppConfig) -> Vec<String> {
+    let mut lines = vec![format!("Server: {}:{}", config.server.host, config.server.port)];
 
-    // Server
-    tracing::info!(
-        host = %config.server.host,
-        port = config.server.port,
-        "Server"
-    );
-
-    // Backend(s)
     if let Some(ref backends) = config.backends {
-        // Multi-backend mode
-        tracing::info!(group_count = backends.len(), "Backends (multi-group mode)");
+        lines.push(format!("Backend: multi-group mode ({} group(s))", backends.len()));
         for (name, group) in backends {
             let mapping_str = if group.mappings.is_empty() {
                 "catch-all".to_string()
             } else {
                 format!("{:?}", group.mappings)
             };
-            tracing::info!(
-                group = %name,
-                mappings = %mapping_str,
-                strategy = %group.strategy,
-                node_count = group.nodes.len(),
-                "Backend group"
-            );
+            lines.push(format!(
+                "  Group [{name}]: mappings={mapping_str} strategy={} nodes={}",
+                group.strategy,
+                group.nodes.len()
+            ));
+            for (i, node) in group.nodes.iter().enumerate() {
+                lines.push(format!("    Node [{i}]: {}", node.url.trim_end_matches('/')));
+            }
         }
     } else if let Some(ref backend) = config.backend {
-        // Single backend mode
-        tracing::info!(
-            url = %backend.base_url(),
-            timeout_seconds = backend.timeout_seconds,
-            "Backend"
-        );
+        lines.push(format!(
+            "Backend: single {} (timeout {}s)",
+            backend.base_url(),
+            backend.timeout_seconds
+        ));
         if let Some(ref tls) = backend.tls {
-            tracing::info!(
-                accept_invalid_certs = tls.accept_invalid_certs,
-                ca_cert = tls.ca_cert_path.as_deref().unwrap_or("none"),
-                client_cert = tls.client_cert_path.as_deref().unwrap_or("none"),
-                "Backend TLS"
-            );
+            lines.push(format!(
+                "  TLS: accept_invalid_certs={} ca_cert={} client_cert={}",
+                tls.accept_invalid_certs,
+                tls.ca_cert_path.as_deref().unwrap_or("none"),
+                tls.client_cert_path.as_deref().unwrap_or("none")
+            ));
         }
     } else {
-        tracing::info!("Backend: none configured — completion requests answer 503");
+        lines.push("Backend: none configured — completion requests answer 503".to_string());
     }
 
-    // Fixes
-    tracing::info!(
-        enabled = config.fixes.enabled,
-        module_count = config.fixes.modules.len(),
-        "Fixes"
-    );
+    lines.push(format!(
+        "Fixes: enabled={} modules={}",
+        config.fixes.enabled,
+        config.fixes.modules.len()
+    ));
     for (name, module) in &config.fixes.modules {
-        tracing::info!(
-            module = %name,
-            enabled = module.enabled,
-            "Fix module"
-        );
+        lines.push(format!("  {name}: {}", module.enabled));
     }
 
-    // Streaming
-    tracing::info!(
-        mode = %config.streaming,
-        effective = config.streaming.effective_label(),
-        honored_on = if config.streaming.is_passthrough() { "/v1/chat/completions with stream:true" } else { "all streaming clients" },
-        "Streaming"
-    );
+    lines.push(format!(
+        "Streaming: mode={} effective={} honored_on={}",
+        config.streaming,
+        config.streaming.effective_label(),
+        if config.streaming.is_passthrough() {
+            "/v1/chat/completions with stream:true"
+        } else {
+            "all streaming clients"
+        }
+    ));
+    if config.streaming.is_passthrough() {
+        lines.push("  Anthropic /v1/messages: buffered + synthesized (no OpenAI->Anthropic SSE translator yet)".to_string());
+        lines.push(format!(
+            "  Fixes on this path: {} - DETECT ONLY, not repaired (passthrough_fix_unrepaired_total)",
+            if config.fixes.enabled {
+                "enabled"
+            } else {
+                "disabled in config"
+            }
+        ));
+        let reprompt_asked = config.reprompt.as_ref().map(|r| r.enabled).unwrap_or(false);
+        lines.push(format!(
+            "  Reprompt on the streamed path: cannot run{}",
+            if reprompt_asked {
+                " - config asks for enabled: true; it still runs on non-streaming and /v1/messages"
+            } else {
+                ""
+            }
+        ));
+    }
+
+    lines.push(format!(
+        "Stats: enabled={} format={:?}",
+        config.stats.enabled, config.stats.format
+    ));
+    lines.push(format!(
+        "InfluxDB exporter: enabled={} url={} org={} bucket={} batch_size={} flush_interval_seconds={}",
+        config.exporters.influxdb.enabled,
+        config.exporters.influxdb.url,
+        config.exporters.influxdb.org,
+        config.exporters.influxdb.bucket,
+        config.exporters.influxdb.batch_size,
+        config.exporters.influxdb.flush_interval_seconds
+    ));
+    lines
+}
+
+/// Log all configuration settings at startup (masks sensitive values)
+fn log_config_settings(config: &AppConfig) {
+    tracing::info!("=== Configuration ===");
+    for line in render_config_summary(config) {
+        tracing::info!("{line}");
+    }
 
     // A mode can quietly switch off features the config explicitly asked for. Say it
     // once, loudly, naming them - otherwise the user debugs "why didn't reprompt fire"
@@ -371,25 +406,6 @@ fn log_config_settings(config: &AppConfig) {
             tracing::info!("{}", msg);
         }
     }
-
-    // Stats
-    tracing::info!(
-        enabled = config.stats.enabled,
-        format = ?config.stats.format,
-        "Stats"
-    );
-
-    // Exporters
-    tracing::info!(
-        enabled = config.exporters.influxdb.enabled,
-        url = %config.exporters.influxdb.url,
-        org = %config.exporters.influxdb.org,
-        bucket = %config.exporters.influxdb.bucket,
-        batch_size = config.exporters.influxdb.batch_size,
-        flush_interval_seconds = config.exporters.influxdb.flush_interval_seconds,
-        "InfluxDB exporter"
-        // Note: token is intentionally NOT logged
-    );
 
     tracing::info!("=== End Configuration ===");
 }
@@ -472,70 +488,9 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
     match AppConfig::from_file(&config_path) {
         Ok(config) => {
             println!("✓ Configuration file is valid\n");
-            println!("Server:");
-            println!("  Listen: {}:{}", config.server.host, config.server.port);
-
-            println!("\nBackend(s):");
-            if let Some(ref backends) = config.backends {
-                println!("  Mode: multi-group");
-                println!("  Groups: {}", backends.len());
-                for (name, group) in backends {
-                    let mapping_str = if group.mappings.is_empty() {
-                        "catch-all".to_string()
-                    } else {
-                        format!("{:?}", group.mappings)
-                    };
-                    println!("  Group [{}]:", name);
-                    println!("    Mappings: {}", mapping_str);
-                    println!("    Strategy: {}", group.strategy);
-                    println!("    Nodes: {}", group.nodes.len());
-                    for (i, node) in group.nodes.iter().enumerate() {
-                        println!("      Node [{}]: {}", i, node.url.trim_end_matches('/'));
-                    }
-                }
-            } else if let Some(ref backend) = config.backend {
-                println!("  Mode: single");
-                println!("  URL: {}", backend.base_url());
-                println!("  Timeout: {}s", backend.timeout_seconds);
-            } else {
-                println!("  Mode: none");
-                println!("  No backend configured - completion requests answer 503");
+            for line in render_config_summary(&config) {
+                println!("{line}");
             }
-
-            println!("\nFixes:");
-            println!("  Global: {}", config.fixes.enabled);
-            for (name, module) in &config.fixes.modules {
-                println!("  {} : {}", name, module.enabled);
-            }
-            println!("\nStats:");
-            println!("  Enabled: {}", config.stats.enabled);
-            println!("  Format: {:?}", config.stats.format);
-            println!("\nStreaming:");
-            println!("  Mode: {}", config.streaming);
-            println!("  Effective: {}", config.streaming.effective_label());
-            if config.streaming.is_passthrough() {
-                println!("  Honored on: /v1/chat/completions with stream:true");
-                println!("  Anthropic /v1/messages: buffered + synthesized (no OpenAI->Anthropic SSE translator yet)");
-                println!(
-                    "  Fixes on this path: {} - DETECT ONLY, not repaired (passthrough_fix_unrepaired_total)",
-                    if config.fixes.enabled {
-                        "enabled"
-                    } else {
-                        "disabled in config"
-                    }
-                );
-                let reprompt_asked = config.reprompt.as_ref().map(|r| r.enabled).unwrap_or(false);
-                println!(
-                    "  Reprompt on the streamed path: cannot run{}",
-                    if reprompt_asked {
-                        " - config asks for enabled: true; it still runs on non-streaming and /v1/messages"
-                    } else {
-                        ""
-                    }
-                );
-            }
-            println!("\nExporters:");
-            println!("  InfluxDB: {}", config.exporters.influxdb.enabled);
             Ok(())
         }
         Err(e) => {
@@ -574,6 +529,59 @@ fn models_probe_body_outcome(body: &str) -> (bool, Vec<String>) {
     }
 }
 
+/// Probe ONE node's /health and /v1/models - the single probe implementation
+/// shared by the grouped and single loops (they were verbatim clones). Runs
+/// exactly two probes; returns (report lines to print, failed probe count).
+/// The caller owns the node label, the blank separator, and the counters.
+async fn probe_one_node(node: &BackendNode) -> (Vec<String>, usize) {
+    let base_url = node.base_url();
+    let mut lines = Vec::new();
+    let mut failures = 0usize;
+
+    let health_url = format!("{base_url}{}", node.effective_path("/health"));
+    lines.push(format!("  Testing {}: {}", node.effective_path("/health"), health_url));
+    match node.http_client.get(&health_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            lines.push(format!("  ✓ Reachable ({})", resp.status()));
+            if let Ok(body) = resp.text().await {
+                lines.push(format!("    Response: {}", body.trim()));
+            }
+        }
+        Ok(resp) => {
+            lines.push(format!("  ✗ Error status: {}", resp.status()));
+            failures += 1;
+        }
+        Err(e) => {
+            lines.push(format!("  ✗ Failed to connect: {}", e));
+            failures += 1;
+        }
+    }
+
+    let models_url = format!("{base_url}{}", node.effective_path("/v1/models"));
+    lines.push(format!("  Testing {}: {}", node.effective_path("/v1/models"), models_url));
+    match node.http_client.get(&models_url).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            lines.push(format!("  ✓ /v1/models answered {}", resp.status()));
+            let body = resp.text().await.unwrap_or_default();
+            let (list_ok, details) = models_probe_body_outcome(&body);
+            lines.extend(details);
+            if !list_ok {
+                failures += 1;
+            }
+        }
+        Ok(resp) => {
+            lines.push(format!("  ✗ /v1/models returned: {}", resp.status()));
+            failures += 1;
+        }
+        Err(e) => {
+            lines.push(format!("  ✗ /v1/models error: {}", e));
+            failures += 1;
+        }
+    }
+
+    (lines, failures)
+}
+
 /// Test connection to backend
 async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config_or_exit(&config_path);
@@ -601,54 +609,12 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
                     node_cfg.temperature,
                 )?;
 
-                let base_url = node.base_url().to_string();
-                println!("[{}]: {}", group_name, base_url);
-
-                let health_url = format!("{}{}", base_url, node.effective_path("/health"));
-                println!("  Testing {}: {}", node.effective_path("/health"), health_url);
-
-                probes += 1;
-                match node.http_client.get(&health_url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        println!("  ✓ Reachable ({})", resp.status());
-                        if let Ok(body) = resp.text().await {
-                            println!("    Response: {}", body.trim());
-                        }
-                    }
-                    Ok(resp) => {
-                        println!("  ✗ Error status: {}", resp.status());
-                        failures += 1;
-                    }
-                    Err(e) => {
-                        println!("  ✗ Failed to connect: {}", e);
-                        failures += 1;
-                    }
-                }
-
-                let models_url = format!("{}{}", base_url, node.effective_path("/v1/models"));
-                println!("  Testing {}: {}", node.effective_path("/v1/models"), models_url);
-
-                probes += 1;
-                match node.http_client.get(&models_url).send().await {
-                    Ok(resp) if resp.status().is_success() => {
-                        println!("  ✓ /v1/models answered {}", resp.status());
-                        let body = resp.text().await.unwrap_or_default();
-                        let (list_ok, details) = models_probe_body_outcome(&body);
-                        for line in details {
-                            println!("{line}");
-                        }
-                        if !list_ok {
-                            failures += 1;
-                        }
-                    }
-                    Ok(resp) => {
-                        println!("  ✗ /v1/models returned: {}", resp.status());
-                        failures += 1;
-                    }
-                    Err(e) => {
-                        println!("  ✗ /v1/models error: {}", e);
-                        failures += 1;
-                    }
+                println!("[{}]: {}", group_name, node.base_url());
+                let (report, failed) = probe_one_node(&node).await;
+                probes += 2;
+                failures += failed;
+                for line in report {
+                    println!("{line}");
                 }
 
                 println!();
@@ -668,54 +634,12 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
             None, // single-backend mode has no temperature override
         )?;
 
-        let base_url = node.base_url().to_string();
-        println!("[single]: {}", base_url);
-
-        let health_url = format!("{}{}", base_url, node.effective_path("/health"));
-        println!("  Testing {}: {}", node.effective_path("/health"), health_url);
-
-        probes += 1;
-        match node.http_client.get(&health_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                println!("  ✓ Reachable ({})", resp.status());
-                if let Ok(body) = resp.text().await {
-                    println!("    Response: {}", body.trim());
-                }
-            }
-            Ok(resp) => {
-                println!("  ✗ Error status: {}", resp.status());
-                failures += 1;
-            }
-            Err(e) => {
-                println!("  ✗ Failed to connect: {}", e);
-                failures += 1;
-            }
-        }
-
-        let models_url = format!("{}{}", base_url, node.effective_path("/v1/models"));
-        println!("  Testing {}: {}", node.effective_path("/v1/models"), models_url);
-
-        probes += 1;
-        match node.http_client.get(&models_url).send().await {
-            Ok(resp) if resp.status().is_success() => {
-                println!("  ✓ /v1/models answered {}", resp.status());
-                let body = resp.text().await.unwrap_or_default();
-                let (list_ok, details) = models_probe_body_outcome(&body);
-                for line in details {
-                    println!("{line}");
-                }
-                if !list_ok {
-                    failures += 1;
-                }
-            }
-            Ok(resp) => {
-                println!("  ✗ /v1/models returned: {}", resp.status());
-                failures += 1;
-            }
-            Err(e) => {
-                println!("  ✗ /v1/models error: {}", e);
-                failures += 1;
-            }
+        println!("[single]: {}", node.base_url());
+        let (report, failed) = probe_one_node(&node).await;
+        probes += 2;
+        failures += failed;
+        for line in report {
+            println!("{line}");
         }
     } else {
         println!("No backend configured — nothing to test.");
@@ -956,5 +880,42 @@ mod tests {
         let (filter, warn) = resolve_log_filter(None, None);
         assert_eq!(filter.to_string(), "info");
         assert!(warn.is_none(), "unset RUST_LOG must not nag");
+    }
+
+    #[test]
+    fn t77_summary_names_the_whole_effective_config() {
+        let text = render_config_summary(&cfg(VALID)).join("\n");
+        for needle in [
+            "Server: ",
+            "Backend: single",
+            "Fixes: ",
+            "Streaming: ",
+            "Stats: ",
+            "InfluxDB exporter: ",
+        ] {
+            assert!(text.contains(needle), "missing {needle:?}:\n{text}");
+        }
+        assert!(text.contains("http://localhost:8080"), "backend url must appear:\n{text}");
+    }
+
+    #[test]
+    fn t77_summary_backendless_names_the_503_path() {
+        let text = render_config_summary(&cfg("server:\n  port: 8066\n  host: \"0.0.0.0\"\n")).join("\n");
+        assert!(text.contains("none configured") && text.contains("503"), "{text}");
+    }
+
+    #[test]
+    fn t77_summary_lists_every_group_and_node() {
+        // Given: multi-group config with two nodes (one with a trailing slash)
+        let yaml = "server:\n  port: 8066\n  host: \"0.0.0.0\"\nbackends:\n  g1:\n    mappings: [\"qwen3\"]\n    strategy: round_robin\n    nodes:\n      - url: \"http://a:8080\"\n      - url: \"http://b:8080/\"\n";
+        let text = render_config_summary(&cfg(yaml)).join("\n");
+        // Then: both nodes named, single-mode wording absent
+        assert!(text.contains("Group [g1]"), "{text}");
+        assert!(
+            text.contains("http://a:8080") && text.contains("http://b:8080"),
+            "both node urls:\n{text}"
+        );
+        assert!(!text.contains("Backend: single"), "multi-group must not render single mode");
+        assert!(!text.contains("b:8080/"), "node urls render without trailing slash:\n{text}");
     }
 }
