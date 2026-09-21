@@ -36,6 +36,7 @@ use llama_proxy::{
     config::AppConfig,
     create_default_registry,
     exporters::{ExporterManager, InfluxDbExporter},
+    fixes::create_registry_from_config,
     run_server,
 };
 
@@ -199,20 +200,11 @@ async fn run_proxy(
         tracing::info!(dump_path = %dump_path.display(), "Debug dump mode enabled");
     }
 
-    // Create fix registry
-    let mut fix_registry = create_default_registry();
-
-    // Configure fixes from config
-    if !config.fixes.enabled {
-        // Disable all fixes - collect names first to avoid borrow issues
-        let fix_names: Vec<String> = fix_registry.list_fixes().iter().map(|f| f.name().to_string()).collect();
-        for name in fix_names {
-            fix_registry.set_enabled(&name, false);
-        }
-    } else {
-        // Apply individual fix settings
-        fix_registry.configure(&config.fixes.modules);
-    }
+    // Build the fix registry honoring the `fixes:` config at startup: a module
+    // with `enabled: false` is never constructed into the registry, so it
+    // cannot run; each skip is named by a "not constructed" INFO line from
+    // create_registry_from_config.
+    let fix_registry = create_registry_from_config(&config.fixes);
 
     let enabled_fixes: Vec<&str> = fix_registry
         .list_fixes()
