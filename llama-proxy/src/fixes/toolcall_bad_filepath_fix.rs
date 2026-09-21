@@ -27,6 +27,7 @@
 //! `}` or `"_":null}`), NOT the full fixed JSON. Clients accumulate deltas, so
 //! sending full JSON would duplicate content. See `calculate_completion_delta()`.
 
+use super::json_scan::top_level_key_count;
 use super::registry::{truncate_snippet, SnippetLimit};
 use super::{FixAction, ResponseFix, ToolCallAccumulator};
 use serde_json::Value;
@@ -44,23 +45,12 @@ impl ToolcallBadFilepathFix {
         Self {}
     }
 
-    /// Check if arguments string is malformed
-    /// Simplified detection: Invalid JSON + contains "filePath" = malformed
-    /// Also treats duplicate filePath keys as malformed (even if syntactically valid JSON)
+    /// Check if arguments are malformed: invalid JSON, or syntactically valid
+    /// JSON carrying more than one depth-1 `filePath` key. The count is
+    /// structural (`json_scan::top_level_key_count`), so content-embedded
+    /// `"filePath"` literals and nested-only keys never register.
     fn is_malformed(&self, args: &str) -> bool {
-        // Check for duplicate filePath keys first (even if JSON is valid)
-        // Duplicate keys are syntactically valid JSON but semantically wrong for our schema
-        if args.matches(r#""filePath""#).count() > 1 {
-            return true;
-        }
-
-        // Valid JSON with single filePath? → Not malformed
-        if self.is_valid_json(args) {
-            return false;
-        }
-
-        // Invalid JSON with "filePath" → Our fix applies
-        args.contains(r#""filePath""#)
+        serde_json::from_str::<Value>(args).is_err() || top_level_key_count(args, "filePath") > 1
     }
 
     /// Check if a string is valid JSON
@@ -714,10 +704,21 @@ mod tests {
     fn test_fix_malformed_json_no_filepath() {
         let fix = ToolcallBadFilepathFix::new();
 
-        // Malformed JSON but no filePath - should still try to fix
+        // Malformed JSON and no filePath. Task 24 (B-H4): ANY unparseable
+        // arguments are malformed — detection is `from_str::<Value>(args).is_err()
+        // || top_level_key_count(...) > 1` and no longer requires an intact
+        // `"filePath"` substring (the old heuristic's false negative let a broken
+        // key like `{"filePath: ...` slip through unfixed). The original comment
+        // of this test already stated the desired behavior ("should still try to
+        // fix"); its old assertion pinned the substring heuristic, not the intent.
         let malformed = r#"{"key": "value" broken"#;
-        // This doesn't contain filePath, so is_malformed returns false
-        assert!(!fix.is_malformed(malformed));
+        assert!(fix.is_malformed(malformed), "invalid JSON is malformed");
+
+        let fixed = fix.fix_arguments(malformed);
+        assert!(
+            fix.is_valid_json(&fixed),
+            "fix_arguments must still return valid JSON for no-filePath garbage, got: {fixed}"
+        );
     }
 
     #[test]
@@ -1891,5 +1892,149 @@ mod tests {
         );
         assert_eq!(parsed["content"].as_str(), Some("esc content"));
         assert!(matches!(action, FixAction::Fixed { .. }));
+    }
+
+    // ============================================================
+    // TASK 24 (B-M1, B-H4): structural detection via json_scan
+    // ============================================================
+    // is_malformed must be exactly: invalid JSON OR more than one depth-1
+    // `filePath` key. Content-embedded `"filePath"` literals, nested-only keys,
+    // and escaped-quote decoys must NOT trigger; real duplicates (valid or
+    // malformed) and any unparseable payload MUST trigger.
+
+    #[test]
+    fn test_content_embedded_filepath_literal_not_malformed() {
+        // Given valid JSON whose content value carries a literal `{"filePath":`
+        // decoy plus exactly one real top-level filePath key.
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"content":"write it like {\"filePath\": \"x\"} please","filePath":"/real/path"}"#;
+        serde_json::from_str::<Value>(args).expect("fixture must be valid JSON");
+
+        // Then detection stays false (old substring heuristic counted 2 -> RED).
+        assert!(!fix.is_malformed(args), "content-embedded decoy must not trigger");
+
+        // Same for the closing-quote-completion decoy: the value ends in
+        // `\"filePath` so its closing quote completes a raw `"filePath"`
+        // substring; the old heuristic counted it plus the real key = 2 (RED).
+        let completion_decoy = r#"{"content":"say \"filePath","filePath":"/real/path"}"#;
+        serde_json::from_str::<Value>(completion_decoy).expect("decoy fixture must be valid JSON");
+        assert!(
+            !fix.is_malformed(completion_decoy),
+            "value-completion `\"filePath\"` substring must not trigger"
+        );
+
+        // And the buffered path leaves the response untouched.
+        let response = serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "name": "write", "arguments": args }
+                    }]
+                }
+            }]
+        });
+        assert!(!fix.applies(&response), "applies() must not fire on a decoy");
+        let (result, action) = fix.apply(response.clone());
+        assert!(!action.detected(), "no fix action for a decoy");
+        assert_eq!(result, response);
+    }
+
+    #[test]
+    fn test_real_duplicate_top_level_keys_malformed() {
+        // Given real duplicate top-level filePath keys, in both the
+        // valid-JSON and the malformed (missing-colon) variant.
+        let fix = ToolcallBadFilepathFix::new();
+        let valid_dup = r#"{"filePath":"/path1","filePath":"/path2"}"#;
+        serde_json::from_str::<Value>(valid_dup).expect("valid-JSON dup fixture");
+        let malformed_dup = r#"{"content":"code","filePath":"/path","filePath"/path"}"#;
+
+        // Then both are malformed (green before AND after the swap).
+        assert!(fix.is_malformed(valid_dup), "valid JSON with dup keys is malformed");
+        assert!(fix.is_malformed(malformed_dup), "malformed dup payload is malformed");
+    }
+
+    #[test]
+    fn test_nested_only_filepath_not_malformed() {
+        // Given a purely nested filePath key. Old heuristic already said false
+        // here (count == 1, valid JSON) - pinned so it stays false under the
+        // structural scanner.
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"meta":{"filePath":"/x"},"content":"hi"}"#;
+        serde_json::from_str::<Value>(args).expect("nested fixture must be valid JSON");
+        assert!(!fix.is_malformed(args), "nested-only filePath must not trigger");
+    }
+
+    #[test]
+    fn test_duplicate_inside_nested_not_malformed() {
+        // Given duplicate filePath keys INSIDE a nested object and none at the
+        // top level. Old heuristic counted 2 and triggered (RED); the depth-1
+        // scanner sees zero top-level keys.
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"meta":{"filePath":"/a","filePath":"/b"},"content":"x"}"#;
+        serde_json::from_str::<Value>(args).expect("nested-dup fixture must be valid JSON");
+        assert!(
+            !fix.is_malformed(args),
+            "duplicate keys below depth 1 are not this fix's schema violation"
+        );
+    }
+
+    #[test]
+    fn test_unparseable_garbage_malformed() {
+        // Given unparseable payloads with and without a filePath literal.
+        let fix = ToolcallBadFilepathFix::new();
+        let garbage_no_key = r#"{"key": "value" broken"#;
+        let garbage_with_key = r#"{"filePath": "/path" broken"#;
+
+        // Then BOTH are malformed: validity alone carries the detection
+        // (the no-key variant is the behavior flip pinned above).
+        assert!(fix.is_malformed(garbage_no_key), "unparseable garbage is malformed");
+        assert!(fix.is_malformed(garbage_with_key), "invalid filePath JSON is malformed");
+    }
+
+    #[test]
+    fn test_escaped_quote_decoy_keys_not_malformed() {
+        // Given escaped-quote decoys: a value ending in `\"filePath"` and a key
+        // that merely CONTAINS the target between escaped quotes.
+        let fix = ToolcallBadFilepathFix::new();
+        let value_decoy = r#"{"msg":"he said \"filePath"}"#;
+        let key_decoy = r#"{"say\"filePath\"x":1,"filePath":2}"#;
+        serde_json::from_str::<Value>(value_decoy).expect("value decoy must be valid JSON");
+        serde_json::from_str::<Value>(key_decoy).expect("key decoy must be valid JSON");
+
+        // Then neither triggers: one (or zero) real depth-1 key each.
+        assert!(!fix.is_malformed(value_decoy), "escaped-quote value must not trigger");
+        assert!(!fix.is_malformed(key_decoy), "decoy key containing target must not trigger");
+    }
+
+    #[test]
+    fn test_unicode_escape_key_counts_as_real_duplicate() {
+        // Given a duplicate expressed as a `\u0050` Unicode escape key
+        // (`file\u0050ath` decodes to `filePath`).
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"file\u0050ath":"/a","filePath":"/b"}"#;
+        serde_json::from_str::<Value>(args).expect("escaped-key fixture must be valid JSON");
+
+        // Then it triggers: keys compare decoded (old literal heuristic missed
+        // this duplicate entirely - the false-negative twin of B-M1).
+        assert!(fix.is_malformed(args), "escaped-key duplicate must trigger");
+    }
+
+    #[test]
+    fn test_multibyte_and_escaped_content_duplicates_malformed() {
+        // Given real duplicates riding alongside multibyte and escaped-quote
+        // content (the shapes that previously relied on miscounting).
+        let fix = ToolcallBadFilepathFix::new();
+        let cjk_dup = r#"{"content":"你好世界","filePath":"/路径/文件.rs","filePath":"/第二"}"#;
+        let escaped_content_dup = r#"{"content":"x = \"filePath\"; y","filePath":"/a","filePath":"/b"}"#;
+        serde_json::from_str::<Value>(cjk_dup).expect("CJK fixture must be valid JSON");
+        serde_json::from_str::<Value>(escaped_content_dup).expect("escaped fixture must be valid JSON");
+
+        // Then both trigger on the structural count of 2 (green AND after).
+        assert!(fix.is_malformed(cjk_dup), "CJK duplicate payload must trigger");
+        assert!(
+            fix.is_malformed(escaped_content_dup),
+            "escaped-quote content with real dups must trigger"
+        );
     }
 }
