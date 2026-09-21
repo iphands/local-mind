@@ -412,14 +412,21 @@ impl From<AnthropicMessage> for ChatCompletionResponse {
         // Convert content blocks to text and tool_calls
         let mut content_parts = Vec::new();
         let mut tool_calls = Vec::new();
+        let mut reasoning_parts = Vec::new();
+        let mut reasoning_opaque: Option<String> = None;
 
         for block in &msg.content {
             match block {
                 AnthropicContentBlock::Text { text } => {
                     content_parts.push(text.clone());
                 }
-                AnthropicContentBlock::Thinking { thinking, .. } => {
-                    content_parts.push(thinking.clone());
+                AnthropicContentBlock::Thinking { thinking, signature } => {
+                    // A-M6: reasoning is not content - it lands in the
+                    // reasoning fields of the OpenAI message instead.
+                    reasoning_parts.push(thinking.clone());
+                    if reasoning_opaque.is_none() {
+                        reasoning_opaque = signature.clone();
+                    }
                 }
                 AnthropicContentBlock::ToolUse { id, name, input } => {
                     // Convert Anthropic tool_use to OpenAI tool_calls format
@@ -434,9 +441,22 @@ impl From<AnthropicMessage> for ChatCompletionResponse {
                     });
                 }
                 AnthropicContentBlock::ToolResult { content, .. } => {
-                    // Include tool results as text for now
-                    if let Some(text) = content.as_str() {
-                        content_parts.push(text.to_string());
+                    // A-M7: the String shape keeps the verbatim text; the
+                    // array-of-parts shape joins its text parts (non-text
+                    // parts skipped); any other shape contributes nothing.
+                    match content {
+                        serde_json::Value::String(s) => content_parts.push(s.clone()),
+                        serde_json::Value::Array(parts) => {
+                            let texts: Vec<&str> = parts
+                                .iter()
+                                .filter(|p| p.get("type").and_then(|t| t.as_str()) == Some("text"))
+                                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                .collect();
+                            if !texts.is_empty() {
+                                content_parts.push(texts.join("\n"));
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -446,6 +466,11 @@ impl From<AnthropicMessage> for ChatCompletionResponse {
             None
         } else {
             Some(content_parts.join("\n"))
+        };
+        let reasoning_text = if reasoning_parts.is_empty() {
+            None
+        } else {
+            Some(reasoning_parts.join("\n"))
         };
 
         let tool_calls_opt = if tool_calls.is_empty() { None } else { Some(tool_calls) };
@@ -473,8 +498,8 @@ impl From<AnthropicMessage> for ChatCompletionResponse {
                     role: msg.role,
                     content,
                     tool_calls: tool_calls_opt,
-                    reasoning_text: None,
-                    reasoning_opaque: None,
+                    reasoning_text,
+                    reasoning_opaque,
                 }),
                 delta: None,
                 finish_reason,
@@ -1051,7 +1076,11 @@ mod tests {
     }
 
     #[test]
-    fn test_anthropic_to_openai_with_thinking() {
+    fn test_anthropic_to_openai_thinking_converts_to_reasoning_text() {
+        // Task 40 rule 1 (A-M6): a thinking block converts to reasoning_text,
+        // NOT merged into content.
+        // RED baseline (raw, probe at 92ab176): content=Some("THINK\nANS")
+        // reasoning_text=None reasoning_opaque=None (thinking landed in content).
         let anthropic_msg = AnthropicMessage {
             id: "msg-456".to_string(),
             message_type: "message".to_string(),
@@ -1075,11 +1104,10 @@ mod tests {
         };
 
         let openai_response: ChatCompletionResponse = anthropic_msg.into();
-        // Content should concatenate thinking and text with newline
-        assert_eq!(
-            openai_response.choices[0].message.as_ref().unwrap().content,
-            Some("Let me think...\nAnswer".to_string())
-        );
+        let message = openai_response.choices[0].message.as_ref().unwrap();
+        assert_eq!(message.content, Some("Answer".to_string()));
+        assert_eq!(message.reasoning_text, Some("Let me think...".to_string()));
+        assert_eq!(message.reasoning_opaque, None);
     }
 
     #[test]
@@ -1935,5 +1963,100 @@ mod tests {
         let resp: ChatCompletionResponse = msg.into();
         let usage = resp.usage.unwrap();
         assert_eq!((usage.prompt_tokens, usage.completion_tokens, usage.total_tokens), (0, 0, 0));
+    }
+
+    // ============================================================================
+    // Task 40: thinking/ToolResult conversion fidelity (report A M6/M7)
+    // ============================================================================
+
+    fn assistant_msg(content: Vec<AnthropicContentBlock>) -> AnthropicMessage {
+        AnthropicMessage {
+            id: "msg-t40".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content,
+            model: "m".to_string(),
+            stop_reason: None,
+            stop_sequence: None,
+            usage: AnthropicUsage::default(),
+        }
+    }
+
+    #[test]
+    fn test_thinking_signature_maps_to_reasoning_opaque_when_present() {
+        // Task 40 rule 2 (A-M6): the ResponseMessage reasoning fields were
+        // hardcoded None (openai.rs:476-477 at 92ab176). thinking.signature is
+        // the opaque proof-of-integrity state and maps to reasoning_opaque;
+        // a thinking block WITHOUT a signature leaves reasoning_opaque None.
+        // RED baseline (raw): both fields always None (probe confirmed).
+        let msg = assistant_msg(vec![
+            AnthropicContentBlock::Thinking {
+                thinking: "step one".to_string(),
+                signature: Some("SIG_ABC".to_string()),
+            },
+            AnthropicContentBlock::Thinking {
+                thinking: "step two".to_string(),
+                signature: None,
+            },
+        ]);
+        let resp: ChatCompletionResponse = msg.into();
+        let message = resp.choices[0].message.as_ref().unwrap();
+        assert_eq!(message.content, None, "thinking must not leak into content");
+        assert_eq!(
+            message.reasoning_text,
+            Some("step one\nstep two".to_string()),
+            "multiple thinking blocks join with newline, matching the content joiner"
+        );
+        assert_eq!(message.reasoning_opaque, Some("SIG_ABC".to_string()));
+
+        // Adversarial: thinking WITHOUT the signature field at all -> None.
+        let json = serde_json::json!({
+            "id": "msg-nosig", "type": "message", "role": "assistant", "model": "m",
+            "content": [{"type": "thinking", "thinking": "bare"}]
+        });
+        let msg: AnthropicMessage = serde_json::from_value(json).unwrap();
+        let resp: ChatCompletionResponse = msg.into();
+        let message = resp.choices[0].message.as_ref().unwrap();
+        assert_eq!(message.reasoning_text, Some("bare".to_string()));
+        assert_eq!(message.reasoning_opaque, None);
+    }
+
+    #[test]
+    fn test_tool_result_array_parts_join_text_fields_non_text_skipped() {
+        // Task 40 rule 3 (A-M7): tool_result content as array-of-parts was
+        // DROPPED by the conversion (content.as_str() only). Text parts now
+        // join with "\n"; non-text parts are skipped. The plain-String shape
+        // keeps working (both shapes probed at baseline: both deserialize).
+        // RED baseline (raw): array shape -> content None (dropped).
+        let array_content = serde_json::json!([
+            {"type": "text", "text": "a"},
+            {"type": "image", "x": 1},
+            {"type": "text", "text": "b"}
+        ]);
+        let msg = assistant_msg(vec![AnthropicContentBlock::ToolResult {
+            tool_use_id: "toolu_1".to_string(),
+            content: array_content,
+            is_error: None,
+        }]);
+        let resp: ChatCompletionResponse = msg.into();
+        assert_eq!(resp.choices[0].message.as_ref().unwrap().content, Some("a\nb".to_string()));
+
+        // Plain String shape unchanged.
+        let msg = assistant_msg(vec![AnthropicContentBlock::ToolResult {
+            tool_use_id: "toolu_2".to_string(),
+            content: serde_json::json!("plain"),
+            is_error: None,
+        }]);
+        let resp: ChatCompletionResponse = msg.into();
+        assert_eq!(resp.choices[0].message.as_ref().unwrap().content, Some("plain".to_string()));
+
+        // Array with only non-text parts contributes nothing (no empty line).
+        let msg = assistant_msg(vec![AnthropicContentBlock::ToolResult {
+            tool_use_id: "toolu_3".to_string(),
+            content: serde_json::json!([{"type": "image"}]),
+            is_error: None,
+        }]);
+        let resp: ChatCompletionResponse = msg.into();
+        assert_eq!(resp.choices[0].message.as_ref().unwrap().content, None);
     }
 }
