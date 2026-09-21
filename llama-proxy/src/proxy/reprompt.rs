@@ -460,7 +460,7 @@ impl RepromptEngine {
                 return merged;
             }
 
-            if let Some(matched) = self.done_sentinels.iter().find(|s| new_text.contains(s.as_str())) {
+            if let Some(matched) = self.done_sentinels.iter().find(|s| !anthropic_has_continuation(&new_text, s)) {
                 tracing::info!(attempt, sentinel = %matched, "Reprompt: done sentinel without continuation, closing the loop");
                 // The sentinel turn stays in the returned text, sentinel intact: it can carry
                 // the model's closing summary, and dropping it is the consumed-then-lost bug.
@@ -514,6 +514,15 @@ impl RepromptEngine {
         }
         clean_stop
     }
+}
+
+/// The ONE text-level sentinel-to-continuation mapping, shared with streaming.rs (Anthropic
+/// streaming sees only accumulated text, never the OpenAI finish_reason/tool_calls shape).
+/// A text mentioning the done sentinel is a finished turn; anything else may still continue.
+/// Both consumers call this so the OpenAI engine and the Anthropic path cannot drift.
+#[must_use]
+pub fn anthropic_has_continuation(text: &str, sentinel: &str) -> bool {
+    !text.contains(sentinel)
 }
 
 #[cfg(test)]
@@ -1435,5 +1444,24 @@ mod tests {
             assert_eq!(hits.lock().unwrap().len(), 0, "no POST for an unusable conversation: {req}");
             assert_eq!(r["choices"][0]["message"]["content"], "half", "collected text still returned");
         }
+    }
+
+    // --- task 68: shared text-level sentinel mapping ---
+
+    #[test]
+    fn test_anthropic_has_continuation_sentinel_semantics() {
+        assert!(!anthropic_has_continuation(
+            "all done DONE_NO_MORE_PROXY_REPROMPT",
+            "DONE_NO_MORE_PROXY_REPROMPT"
+        ));
+        assert!(anthropic_has_continuation(
+            "let me edit the file",
+            "DONE_NO_MORE_PROXY_REPROMPT"
+        ));
+        assert!(
+            anthropic_has_continuation("", "DONE_NO_MORE_PROXY_REPROMPT"),
+            "empty text carries no sentinel - continuation is not excluded"
+        );
+        assert!(!anthropic_has_continuation("x", "x"), "single-char sentinel still closes");
     }
 }

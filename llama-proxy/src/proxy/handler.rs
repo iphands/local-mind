@@ -1247,63 +1247,14 @@ impl ProxyHandler {
         // Only try to parse as JSON if Content-Type indicates JSON
         let is_json_response = Self::is_json_content_type(content_type);
 
-        // Try to parse as JSON and apply fixes (only if Content-Type is JSON)
-        let (json_value, mut metrics) = if is_json_response {
-            if let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+        // Try to parse as JSON (only if Content-Type is JSON). Fixes and metrics deliberately
+        // live BELOW the reprompt block (big-fix 68): both must see the FINAL body. Reprompt
+        // judging the raw parsed body is safe - the fix layer rewrites tool-call args and
+        // indices, never the stop-vs-continuation shape reprompt reads.
+        let parsed = if is_json_response {
+            if let Ok(json) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
                 tracing::debug!("Response parsed as JSON successfully");
-                // Apply fixes with request context if available
-                let original_json = json.clone();
-                json = if let Some(ref req_json) = request_json {
-                    self.state.fix_registry.apply_fixes_with_context(json, req_json)
-                } else {
-                    self.state.fix_registry.apply_fixes(json)
-                };
-                if json != original_json {
-                    tracing::debug!("Fixes applied to non-streaming response");
-                } else {
-                    tracing::debug!("No fixes applied to response");
-                }
-
-                // Collect stats if enabled
-                let mut metrics = if self.state.config.stats.enabled {
-                    if let Some(ref req_json) = request_json {
-                        let mut m = RequestMetrics::from_response(
-                            &json,
-                            req_json,
-                            false, // We forced non-streaming
-                            start.elapsed().as_millis() as f64,
-                        );
-                        // Set group name if we're in multi-backend mode
-                        m.group_name = group_name.map(|s| s.to_string());
-                        Some(m)
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
-
-                // Fetch and set context_total, gated on the same
-                // has_throughput_signal the export gate uses: with no token count
-                // there is nothing for context_percent to divide. This also skips
-                // warn_context_fetch_failed_once for those samples.
-                if let Some(m) = metrics.as_mut().filter(|m| m.has_throughput_signal()) {
-                    match fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref())
-                        .await
-                    {
-                        Some(ctx_total) => {
-                            m.context_total = Some(ctx_total);
-                            m.calculate_context_percent();
-                        }
-                        None => {
-                            // Warn once per backend URL, not per request
-                            crate::proxy::warn_context_fetch_failed_once(backend.base_url(), &m.model).await;
-                            // Continue without context metrics - the request still succeeds
-                        }
-                    }
-                }
-
-                (Some(json), metrics)
+                Some(json)
             } else {
                 // Content-Type says JSON but parsing failed - log warning
                 tracing::warn!(
@@ -1311,7 +1262,7 @@ impl ProxyHandler {
                     body_preview = %String::from_utf8_lossy(&body_bytes[..body_bytes.len().min(200)]),
                     "Content-Type indicates JSON but parsing failed - returning original body unchanged"
                 );
-                (None, None)
+                None
             }
         } else {
             // Content-Type is not JSON - this is expected, just passthrough
@@ -1319,12 +1270,12 @@ impl ProxyHandler {
                 content_type = %content_type,
                 "Non-JSON content type, passing through unchanged"
             );
-            (None, None)
+            None
         };
 
         // Apply reprompt engine if enabled (OpenAI API path only)
         let json_value = if !is_anthropic_api {
-            match (&self.state.reprompt_engine, &request_json, json_value) {
+            match (&self.state.reprompt_engine, &request_json, parsed) {
                 (Some(engine), Some(req_json), Some(current_json)) => {
                     let path_and_query = request_uri.path_and_query().map_or("/", |pq| pq.as_str());
                     let result = engine.maybe_reprompt(current_json, req_json, path_and_query, backend).await;
@@ -1333,7 +1284,67 @@ impl ProxyHandler {
                 (_, _, jv) => jv,
             }
         } else {
-            json_value
+            parsed
+        };
+
+        // Fixes, then metrics, both on the final (possibly merged) body: the ONE log/export
+        // line below carries merged token totals, and its duration spans the reprompt rounds
+        // because the start instant comes from handle().
+        let (json_value, mut metrics) = if let Some(json) = json_value {
+            // Apply fixes with request context if available
+            let original_json = json.clone();
+            let json = if let Some(ref req_json) = request_json {
+                self.state.fix_registry.apply_fixes_with_context(json, req_json)
+            } else {
+                self.state.fix_registry.apply_fixes(json)
+            };
+            if json != original_json {
+                tracing::debug!("Fixes applied to non-streaming response");
+            } else {
+                tracing::debug!("No fixes applied to response");
+            }
+
+            // Collect stats if enabled
+            let mut metrics = if self.state.config.stats.enabled {
+                if let Some(ref req_json) = request_json {
+                    let mut m = RequestMetrics::from_response(
+                        &json,
+                        req_json,
+                        false, // We forced non-streaming
+                        start.elapsed().as_millis() as f64,
+                    );
+                    // Set group name if we're in multi-backend mode
+                    m.group_name = group_name.map(|s| s.to_string());
+                    Some(m)
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            // Fetch and set context_total, gated on the same
+            // has_throughput_signal the export gate uses: with no token count
+            // there is nothing for context_percent to divide. This also skips
+            // warn_context_fetch_failed_once for those samples.
+            if let Some(m) = metrics.as_mut().filter(|m| m.has_throughput_signal()) {
+                match fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref()).await
+                {
+                    Some(ctx_total) => {
+                        m.context_total = Some(ctx_total);
+                        m.calculate_context_percent();
+                    }
+                    None => {
+                        // Warn once per backend URL, not per request
+                        crate::proxy::warn_context_fetch_failed_once(backend.base_url(), &m.model).await;
+                        // Continue without context metrics - the request still succeeds
+                    }
+                }
+            }
+
+            (Some(json), metrics)
+        } else {
+            (None, None)
         };
 
         // The gate logs the sample and decides whether it is fit to export.
@@ -4071,5 +4082,164 @@ mod tests {
         assert_eq!(body["error"]["type"], serde_json::json!("backend_connect_error"));
 
         server.abort();
+    }
+
+    // --- task 68: fixes + metrics run on the MERGED body [C-L18, C-M1] ---
+
+    struct CapturingExporter {
+        samples: Arc<std::sync::Mutex<Vec<crate::stats::RequestMetrics>>>,
+    }
+    #[async_trait::async_trait]
+    impl crate::exporters::MetricsExporter for CapturingExporter {
+        async fn export(&self, metrics: &crate::stats::RequestMetrics) -> Result<(), crate::exporters::ExportError> {
+            self.samples.lock().unwrap().push(metrics.clone());
+            Ok(())
+        }
+        fn name(&self) -> &str {
+            "capture"
+        }
+    }
+
+    /// Queue backend where each entry is (response-delay-ms, body).
+    async fn queue_backend(responses: Vec<(u64, serde_json::Value)>) -> String {
+        use axum::{routing::post, Json, Router};
+        let queue = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::from(responses)));
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(move || {
+                let queue = queue.clone();
+                async move {
+                    let (delay_ms, body) = queue
+                        .lock()
+                        .unwrap()
+                        .pop_front()
+                        .unwrap_or((0, serde_json::json!({"error": "queue exhausted"})));
+                    if delay_ms > 0 {
+                        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    }
+                    Json(body)
+                }
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    fn reprompt_e2e_handler(url: &str, samples: Arc<std::sync::Mutex<Vec<crate::stats::RequestMetrics>>>) -> ProxyHandler {
+        use crate::proxy::reprompt::RepromptEngine;
+        let config = AppConfig {
+            server: crate::config::ServerConfig {
+                port: 8066,
+                host: "0.0.0.0".to_string(),
+                max_concurrent_requests: crate::config::default_max_concurrent(),
+                allowed_origins: None,
+            },
+            backend: Some(BackendConfig::default()),
+            backends: None,
+            fixes: crate::config::FixesConfig {
+                enabled: true,
+                modules: HashMap::new(),
+            },
+            stats: crate::config::StatsConfig {
+                enabled: true,
+                format: crate::config::StatsFormat::Compact,
+            },
+            exporters: crate::config::ExportersConfig {
+                influxdb: crate::config::InfluxDbConfig {
+                    enabled: false,
+                    url: "http://localhost:8086".to_string(),
+                    org: "test".to_string(),
+                    bucket: "test".to_string(),
+                    token: "test".to_string(),
+                    batch_size: 1,
+                    flush_interval_seconds: 1,
+                },
+            },
+            streaming: StreamingMode::Fake,
+            synthesis: crate::config::SynthesisConfig::default(),
+            augment_backend: None,
+            reprompt: None,
+            dump: crate::config::DumpConfig::default(),
+        };
+        let mut reg = FixRegistry::new();
+        reg.register(Arc::new(crate::fixes::ToolCallNullIndexFix::new(true)));
+        let mut mgr = ExporterManager::new();
+        mgr.add(Arc::new(CapturingExporter { samples }));
+        let rep_cfg = crate::config::RepromptConfig {
+            enabled: true,
+            prompt: Some("Continue.".into()),
+            max_retries: 2,
+            done_sentinels: vec!["DONE_NO_MORE".into()],
+            ..Default::default()
+        };
+        let node = BackendNode {
+            url: url.to_string(),
+            ..bare_node(None)
+        };
+        let lb = Arc::new(RoundRobinBalancer::new(vec![Arc::new(node)]).unwrap());
+        ProxyHandler::new(ProxyState {
+            config: Arc::new(config),
+            load_balancer: lb,
+            fix_registry: Arc::new(reg),
+            exporter_manager: Arc::new(mgr),
+            augment_backend: None,
+            reprompt_engine: Some(Arc::new(RepromptEngine::from_config(&rep_cfg).expect("engine"))),
+            hide_requests: false,
+            log_augmented_request_text: false,
+            dump_path: None,
+            concurrent_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            backend_streaming_fallback_hits: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            openai_stream_passthrough_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            backend_nonsse_when_streamed_for: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            anthropic_buffered_responses_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            anthropic_buffered_notice_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            rejected_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            concurrent_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(100))),
+        })
+    }
+
+    #[tokio::test]
+    async fn test_reprompt_metrics_and_fixes_run_on_merged_body() {
+        let premature = serde_json::json!({"id":"a","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"stopped early"},"finish_reason":"stop"}],"usage":{"prompt_tokens":10,"completion_tokens":5,"total_tokens":15}});
+        let merged = serde_json::json!({"id":"b","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"now the tool call","tool_calls":[{"id":"c1","type":"function","function":{"name":"write","arguments":"{\"filePath\":\"/x\"}"}}]},"finish_reason":"tool_calls"}],"usage":{"prompt_tokens":10,"completion_tokens":77,"total_tokens":87}});
+        let url = queue_backend(vec![(0, premature), (300, merged)]).await;
+        let samples = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handler = reprompt_e2e_handler(&url, samples.clone());
+        let body = serde_json::json!({"model":"m","messages":[{"role":"user","content":"do it"}],"tools":[{"type":"function","function":{"name":"write","parameters":{"type":"object"}}}]});
+        let res = handler
+            .handle(request_with_body(
+                Method::POST,
+                "/v1/chat/completions",
+                Body::from(body.to_string()),
+            ))
+            .await;
+        let out = axum::body::to_bytes(res.into_body(), 10_000).await.unwrap();
+        let out: serde_json::Value = serde_json::from_slice(&out).unwrap();
+
+        let mut exported = Vec::new();
+        for _ in 0..40 {
+            exported = samples.lock().unwrap().clone();
+            if !exported.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert_eq!(exported.len(), 1, "the ONE log/export line");
+        assert_eq!(exported[0].finish_reason, "tool_calls", "metrics reflect the merged body");
+        assert_eq!(exported[0].completion_tokens, Some(77), "merged completion_tokens");
+        assert!(
+            exported[0].duration_ms >= 250.0,
+            "duration spans the reprompt rounds: {}",
+            exported[0].duration_ms
+        );
+        assert_eq!(
+            out["choices"][0]["message"]["tool_calls"][0]["index"].as_u64(),
+            Some(0),
+            "fixes run on the merged body"
+        );
     }
 }
