@@ -416,8 +416,7 @@ impl ProxyHandler {
         // Forwarding keeps its own effective_path application unchanged, so the strip
         // happens exactly once.
         let routed = backend.node.effective_path(path);
-        let is_completion_route =
-            routed.starts_with("/completions") || routed.contains("/chat/completions") || routed.contains("/v1/messages");
+        let is_completion_route = Self::completion_shaped_path(routed);
         let is_anthropic_api = path.starts_with("/v1/messages") || routed.starts_with("/v1/messages");
         tracing::debug!(
             is_anthropic_api = is_anthropic_api,
@@ -714,9 +713,9 @@ impl ProxyHandler {
 
         // Use enriched_body_bytes if augmentation was injected, otherwise use original body
         let (final_body_bytes, sent_stream_true) = if enriched_body_bytes != body_bytes {
-            Self::apply_backend_overrides_bytes(&enriched_body_bytes, &backend.node, allow_stream)
+            Self::apply_backend_overrides_bytes(&enriched_body_bytes, &backend.node, allow_stream, path)
         } else {
-            Self::apply_backend_overrides_bytes(&body_bytes, &backend.node, allow_stream)
+            Self::apply_backend_overrides_bytes(&body_bytes, &backend.node, allow_stream, path)
         };
         // The router must dispatch on what was actually sent, not on what the client
         // asked for - augmentation or a backend override could change it.
@@ -863,17 +862,45 @@ impl ProxyHandler {
             && name != header::ACCEPT_ENCODING
     }
 
+    /// Path half of the completion-shape predicate, evaluated on the node-native
+    /// (routed) path: the OpenAI chat route, the Anthropic messages route, or llama.cpp's
+    /// native `/completions`. Single source of truth shared with the routing DEBUG field
+    /// in `handle` (big-fix 13) and the [C-H5] body-injection gate below.
+    fn completion_shaped_path(path: &str) -> bool {
+        path.starts_with("/completions") || path.contains("/chat/completions") || path.contains("/v1/messages")
+    }
+
+    /// [C-H5] Whether the body may receive completion-pipeline rewrites: a completion-
+    /// shaped routed path, or any JSON body carrying a non-empty `messages` array (the
+    /// one-element array `[{}]` counts as non-empty; `[]` alone is not completion-shaped).
+    fn looks_like_completion_request(body: &serde_json::Value, routed_path: &str) -> bool {
+        Self::completion_shaped_path(routed_path)
+            || body
+                .get("messages")
+                .and_then(|m| m.as_array())
+                .is_some_and(|msgs| !msgs.is_empty())
+    }
+
     /// Rewrites the outgoing backend body for the resolved streaming mode and returns
     /// it together with the `stream` flag the backend will actually see.
+    ///
+    /// All four rewrites (forced `stream:false`, `stream_options` strip, model override,
+    /// temperature override) run ONLY on completion-shaped requests: a body forwarded to
+    /// a non-completion passthrough route (/tokenize, /embedding, /descriptions...)
+    /// leaves byte-identical, because those fields mean nothing downstream and silently
+    /// mutating a body the proxy does not own breaks opaque backends.
     ///
     /// When `allow_stream` is set (passthrough, OpenAI path) the client's `stream:true`
     /// is preserved so the backend's own SSE reaches the client. Otherwise `stream:false`
     /// is forced and `stream_options` stripped, because the proxy answers with
     /// synthesized SSE built from one complete JSON body.
-    fn apply_backend_overrides_bytes(body: &[u8], backend: &BackendNode, allow_stream: bool) -> (Vec<u8>, bool) {
+    fn apply_backend_overrides_bytes(body: &[u8], backend: &BackendNode, allow_stream: bool, path: &str) -> (Vec<u8>, bool) {
         let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) else {
             return (body.to_vec(), false);
         };
+        if !Self::looks_like_completion_request(&json, backend.effective_path(path)) {
+            return (body.to_vec(), false);
+        }
 
         let client_wants_stream = json.get("stream").and_then(|s| s.as_bool()).unwrap_or(false);
         let keep_stream = allow_stream && client_wants_stream;
@@ -1519,8 +1546,12 @@ mod tests {
     }
 
     fn rewrite(body: serde_json::Value, allow_stream: bool) -> (serde_json::Value, bool) {
-        let (bytes, sent_stream) =
-            ProxyHandler::apply_backend_overrides_bytes(body.to_string().as_bytes(), &bare_node(None), allow_stream);
+        let (bytes, sent_stream) = ProxyHandler::apply_backend_overrides_bytes(
+            body.to_string().as_bytes(),
+            &bare_node(None),
+            allow_stream,
+            "/v1/chat/completions",
+        );
         (
             serde_json::from_slice(&bytes).expect("rewritten body must be valid JSON"),
             sent_stream,
@@ -1587,7 +1618,8 @@ mod tests {
     #[test]
     fn non_json_body_passes_through_and_reports_no_stream() {
         let raw = b"not json at all".to_vec();
-        let (bytes, sent_stream) = ProxyHandler::apply_backend_overrides_bytes(&raw, &bare_node(None), true);
+        let (bytes, sent_stream) =
+            ProxyHandler::apply_backend_overrides_bytes(&raw, &bare_node(None), true, "/v1/chat/completions");
         assert_eq!(bytes, raw);
         assert!(!sent_stream);
     }
@@ -1601,7 +1633,12 @@ mod tests {
         };
         for allow_stream in [true, false] {
             let body = serde_json::json!({"model": "client-name", "stream": true, "temperature": 0.9});
-            let (bytes, _) = ProxyHandler::apply_backend_overrides_bytes(body.to_string().as_bytes(), &node, allow_stream);
+            let (bytes, _) = ProxyHandler::apply_backend_overrides_bytes(
+                body.to_string().as_bytes(),
+                &node,
+                allow_stream,
+                "/v1/chat/completions",
+            );
             let out: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
             assert_eq!(out["model"], serde_json::json!("renamed"));
             assert_eq!(out["temperature"], serde_json::json!(0.1));
@@ -2655,6 +2692,206 @@ mod tests {
         assert!(
             !node.in_cooldown(Instant::now()),
             "a 2xx proves the node alive and must end its cooldown"
+        );
+    }
+
+    // ---- big-fix task 14: passthrough body injections are gated on completion shape [C-H5] ----
+    //
+    // `apply_backend_overrides_bytes` ran the completion-pipeline rewrites (stream:false,
+    // stream_options strip/inject, model override, temperature override) on EVERY routed
+    // JSON body. A POST to a non-completion passthrough route (/tokenize, /embedding,
+    // llama.cpp /completions...) with a node-level model/temperature override configured
+    // got those fields injected into a body that was never a chat completion. The fix
+    // gates all four injections on looks_like_completion_request (completion-shaped
+    // path OR non-empty `messages` array); a non-completion body must go forward
+    // BYTE-IDENTICAL - byte comparison, not value comparison.
+
+    /// Everything after the head/body separator of a raw HTTP/1.1 request.
+    fn recorded_body(raw: &str) -> &[u8] {
+        let bytes = raw.as_bytes();
+        let sep = bytes
+            .windows(4)
+            .position(|w| w == b"\r\n\r\n")
+            .map(|p| p + 4)
+            .expect("recorded request must carry a head/body separator");
+        &bytes[sep..]
+    }
+
+    fn override_node(port: u16) -> Arc<BackendNode> {
+        Arc::new(BackendNode {
+            url: format!("http://127.0.0.1:{port}"),
+            model: Some("renamed".to_string()),
+            temperature: Some(0.1),
+            ..bare_node(None)
+        })
+    }
+
+    #[tokio::test]
+    async fn non_completion_passthrough_route_forwards_body_byte_identical() {
+        // RED [C-H5]: node carries model + temperature overrides; the client POSTs a
+        // llama.cpp /tokenize body WITHOUT `messages`. Every routed body used to run
+        // through the completion rewrites, so the baseline leaks "stream":false,
+        // "temperature":0.1 and rewrites "model" to the node's override - and even
+        // re-serialises, so not one byte (key order, spacing) survives.
+        let client_body = br#"{"content":"hello world","specials":"a\nb\t\"c\""}"#;
+        let (port, rx) = recording_backend(raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json")],
+            br#"[{"token":0,"toksize":1,"text":"hello"}]"#,
+        ))
+        .await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![override_node(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler
+            .handle(request_with_body(Method::POST, "/tokenize", Body::from(&client_body[..])))
+            .await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let raw = recorded_raw(rx).await;
+        assert_eq!(
+            recorded_body(&raw),
+            &client_body[..],
+            "a non-completion passthrough body must reach the backend byte-identical, got: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chat_completion_route_still_gets_backend_overrides() {
+        // Green guard (passes before AND after): the completion pipeline must KEEP
+        // applying the node's model/temperature overrides. Without this, the RED test
+        // above could be "fixed" by deleting the injection code entirely.
+        let (port, rx) = recording_backend(completion_response_bytes()).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![override_node(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(completion_request()).await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let raw = recorded_raw(rx).await;
+        let forwarded: serde_json::Value =
+            serde_json::from_slice(recorded_body(&raw)).expect("chat body stays JSON, got: {raw}");
+        assert_eq!(
+            forwarded["model"],
+            serde_json::json!("renamed"),
+            "model override must ride the chat body, got: {raw}"
+        );
+        assert_eq!(
+            forwarded["temperature"],
+            serde_json::json!(0.1),
+            "temperature override must ride the chat body, got: {raw}"
+        );
+        assert_eq!(
+            forwarded["stream"],
+            serde_json::json!(false),
+            "fake mode still forces stream:false, got: {raw}"
+        );
+    }
+
+    #[test]
+    fn completion_shape_predicate_pins_path_and_messages_edges() {
+        let shaped = |body: &serde_json::Value, path: &str| ProxyHandler::looks_like_completion_request(body, path);
+        let with_msgs = serde_json::json!({"model": "m", "messages": [{"role": "user", "content": "hi"}]});
+        let one_empty_msg = serde_json::json!({"model": "m", "messages": [{}]});
+        let empty_msgs = serde_json::json!({"model": "m", "messages": []});
+        let no_msgs = serde_json::json!({"content": "text to tokenize"});
+
+        assert!(
+            shaped(&no_msgs, "/v1/chat/completions"),
+            "chat path alone is completion-shaped"
+        );
+        assert!(shaped(&no_msgs, "/v1/messages"), "anthropic path alone is completion-shaped");
+        assert!(
+            shaped(&no_msgs, "/completions"),
+            "llama.cpp native completions is completion-shaped"
+        );
+        assert!(
+            shaped(&with_msgs, "/tokenize"),
+            "messages on a plain route is completion-shaped via the OR clause"
+        );
+        assert!(
+            shaped(&one_empty_msg, "/tokenize"),
+            "messages:[{{}}] (one empty object) is a NON-EMPTY array -> completion-shaped (pinned edge)"
+        );
+        assert!(
+            !shaped(&empty_msgs, "/tokenize"),
+            "messages:[] is empty -> NOT completion-shaped unless the path says so (pinned edge)"
+        );
+        assert!(
+            shaped(&empty_msgs, "/v1/chat/completions"),
+            "path wins over an empty messages array"
+        );
+        assert!(!shaped(&no_msgs, "/tokenize"), "bare tokenize body is not completion-shaped");
+    }
+
+    #[test]
+    fn non_completion_route_body_is_forwarded_byte_identical_at_the_gate() {
+        let node = BackendNode {
+            model: Some("renamed".to_string()),
+            temperature: Some(0.1),
+            ..bare_node(None)
+        };
+        // Key order + escapes deliberately un-canonical: a serde round-trip re-orders and
+        // re-serialises, so this fails unless the bytes are returned UNTOUCHED.
+        let client_body = br#"{"zz":"last","content":"a\nb\t\"c\"","nested":{"k":[1,2,3]}}"#;
+        for allow_stream in [true, false] {
+            for route in ["/tokenize", "/embedding", "/descriptions", "/lora-adapters"] {
+                let (bytes, sent_stream) = ProxyHandler::apply_backend_overrides_bytes(client_body, &node, allow_stream, route);
+                assert_eq!(bytes, &client_body[..], "{route} body must not be rewritten");
+                assert!(!sent_stream, "a body that was not rewritten never reports stream:true");
+            }
+        }
+    }
+
+    #[test]
+    fn completion_shaped_body_on_plain_route_still_gets_injections() {
+        // The OR clause: a non-empty `messages` array opens the gate even on a path the
+        // predicate does not recognise, keeping the completion pipeline intact.
+        let node = BackendNode {
+            model: Some("renamed".to_string()),
+            temperature: Some(0.1),
+            ..bare_node(None)
+        };
+        let body = serde_json::json!({"model": "client-name", "messages": [{"role": "user", "content": "hi"}]});
+        let (bytes, _) = ProxyHandler::apply_backend_overrides_bytes(body.to_string().as_bytes(), &node, false, "/oddsuffix");
+        let out: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(out["model"], serde_json::json!("renamed"));
+        assert_eq!(out["temperature"], serde_json::json!(0.1));
+        assert_eq!(out["stream"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn gate_evaluates_the_routed_path_consistent_with_task13_routing() {
+        // Node mounted at "/completions": the client's "/completions/tokenize" is the
+        // node-native "/tokenize" - NOT completion-shaped, even though the raw path
+        // starts with "/completions". Task 13 routes on the routed path; the gate must
+        // agree, or the two views disagree exactly where strip_path_prefix is set.
+        let node = BackendNode {
+            url: "http://127.0.0.1:8080".to_string(),
+            model: Some("renamed".to_string()),
+            temperature: Some(0.1),
+            strip_path_prefix: Some("/completions".to_string()),
+            ..bare_node(None)
+        };
+        let client_body = br#"{"content":"hello world"}"#;
+        let (bytes, sent_stream) =
+            ProxyHandler::apply_backend_overrides_bytes(client_body, &node, false, "/completions/tokenize");
+        assert_eq!(bytes, &client_body[..], "routed /tokenize must forward byte-identical");
+        assert!(!sent_stream);
+
+        // Same mount, native chat path: gate opens on the routed view.
+        let chat = serde_json::json!({"model": "client-name"});
+        let (bytes, _) = ProxyHandler::apply_backend_overrides_bytes(
+            chat.to_string().as_bytes(),
+            &node,
+            false,
+            "/completions/v1/chat/completions",
+        );
+        let out: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            out["model"],
+            serde_json::json!("renamed"),
+            "routed chat path keeps injections"
         );
     }
 }
