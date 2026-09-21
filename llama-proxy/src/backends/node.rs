@@ -195,10 +195,26 @@ mod tests {
     fn node_url_applies_the_prefix_exactly_once() {
         assert_eq!(node_url("http://h:1", "/v1/models", Some("/v1")), "http://h:1/models");
         assert_eq!(node_url("http://h:1", "/v1/models", None), "http://h:1/v1/models");
-        assert_eq!(node_url("http://h:1", "/v1/models", Some("/日本")), "http://h:1/v1/models", "non-prefix leaves the path untouched");
-        assert_eq!(node_url("http://h:1", "/v1/models", Some("/v1/models")), "http://h:1", "degenerate prefix==path strips to root");
-        assert_eq!(node_url("http://h:1", "/props", Some("/v1")), "http://h:1/props", "true prefix of a native path is NOT stripped away by accident");
-        assert_eq!(node_url("http://h:1", "/v1/日本語", Some("/v1")), "http://h:1/日本語", "multibyte tail survives");
+        assert_eq!(
+            node_url("http://h:1", "/v1/models", Some("/日本")),
+            "http://h:1/v1/models",
+            "non-prefix leaves the path untouched"
+        );
+        assert_eq!(
+            node_url("http://h:1", "/v1/models", Some("/v1/models")),
+            "http://h:1",
+            "degenerate prefix==path strips to root"
+        );
+        assert_eq!(
+            node_url("http://h:1", "/props", Some("/v1")),
+            "http://h:1/props",
+            "true prefix of a native path is NOT stripped away by accident"
+        );
+        assert_eq!(
+            node_url("http://h:1", "/v1/日本語", Some("/v1")),
+            "http://h:1/日本語",
+            "multibyte tail survives"
+        );
     }
 
     fn cooldown_node() -> BackendNode {
