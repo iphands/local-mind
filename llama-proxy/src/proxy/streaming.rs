@@ -419,8 +419,19 @@ fn signal_end(completion_tx: &mut Option<tokio::sync::oneshot::Sender<StreamEnd>
     }
 }
 
+/// Byte prefilter for completion detection: both terminal markers must appear
+/// literally in a block's bytes. `is_completion_event` matches an `event:`
+/// field exactly `message_stop` and a `data:` payload whose trim is exactly
+/// `[DONE]` - `split_event` does no JSON escape decoding, so firing requires
+/// the literal windows checked here. Conservative by construction: a false
+/// positive falls through to the parser, a false negative is impossible, and
+/// the overwhelmingly common non-terminal block pays nothing.
+fn mentions_bridge_event(b: &[u8]) -> bool {
+    b.windows(5).any(|w| w == b"[DONE") || b.windows(12).any(|w| w == b"message_stop")
+}
+
 fn detect_and_signal_completion(bytes: &[u8], completion_tx: &mut Option<tokio::sync::oneshot::Sender<StreamEnd>>) -> bool {
-    if completion_tx.is_none() {
+    if completion_tx.is_none() || !mentions_bridge_event(bytes) {
         return false;
     }
     let text = String::from_utf8_lossy(bytes);
@@ -1777,6 +1788,46 @@ mod framing_tests {
     fn message_stop_in_content_does_not_fire() {
         let mut tx = Some(tokio::sync::oneshot::channel::<StreamEnd>().0);
         signal_completion_events(b"data: {\"text\":\"event: message_stop\"}\n\n", &mut tx);
+        assert!(tx.is_some());
+    }
+
+    #[test]
+    fn prefilter_matches_only_literal_marker_windows() {
+        assert!(!mentions_bridge_event(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n"
+        ));
+        assert!(mentions_bridge_event(b"data: [DONE]\n\n"));
+        assert!(mentions_bridge_event(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\"}\n\n"
+        ));
+        // CRLF framing keeps both markers literal in the bytes
+        assert!(mentions_bridge_event(b"data: [DONE]\r\n\r\n"));
+    }
+
+    #[test]
+    fn markerless_block_skips_parse_and_keeps_sender() {
+        // Pay-for-what-you-use: the common delta block must not fire, and the
+        // sender must survive for the block that actually carries the marker.
+        let mut tx = Some(tokio::sync::oneshot::channel::<StreamEnd>().0);
+        let fired = detect_and_signal_completion(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"counting: 1, 2,\"}}]}\n\n",
+            &mut tx,
+        );
+        assert!(!fired);
+        assert!(tx.is_some());
+        // ...and the marker block that follows still fires
+        let fired = detect_and_signal_completion(b"data: [DONE]\n\n", &mut tx);
+        assert!(fired);
+        assert!(tx.is_none());
+    }
+
+    #[test]
+    fn prefilter_hit_inside_content_still_parses_honestly() {
+        // Literal "[DONE" inside JSON string content passes the prefilter; the
+        // parse must still refuse to fire - superset prefilter, honest parser.
+        let mut tx = Some(tokio::sync::oneshot::channel::<StreamEnd>().0);
+        let fired = detect_and_signal_completion(b"data: {\"text\":\"looks like [DONE] but is content\"}\n\n", &mut tx);
+        assert!(!fired);
         assert!(tx.is_some());
     }
 
