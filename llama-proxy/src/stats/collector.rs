@@ -158,201 +158,16 @@ impl RequestMetrics {
             tracing::debug!("No model field found in response");
         }
 
-        // Extract usage (support both OpenAI and Anthropic formats)
-        if let Some(usage) = response.get("usage") {
-            tracing::debug!("Found usage: {:?}", usage);
+        extract_usage(&mut metrics, response);
 
-            // Try OpenAI format first
-            if let Some(prompt) = usage.get("prompt_tokens").and_then(|t| t.as_u64()) {
-                metrics.prompt_tokens = Some(prompt);
-                metrics.completion_tokens = usage.get("completion_tokens").and_then(|t| t.as_u64());
-                metrics.total_tokens = usage
-                    .get("total_tokens")
-                    .and_then(|t| t.as_u64())
-                    .unwrap_or_else(|| prompt.saturating_add(metrics.completion_tokens.unwrap_or(0)));
-            }
-            // Try Anthropic format
-            else if let Some(input) = usage.get("input_tokens").and_then(|t| t.as_u64()) {
-                metrics.prompt_tokens = Some(input);
-                metrics.completion_tokens = usage.get("output_tokens").and_then(|t| t.as_u64());
-                metrics.total_tokens = input.saturating_add(metrics.completion_tokens.unwrap_or(0));
-            }
-
-            // Extract extended usage details (Opencode/Copilot extensions)
-            if let Some(details) = usage.get("completion_tokens_details") {
-                metrics.reasoning_tokens = details.get("reasoning_tokens").and_then(|t| t.as_u64());
-                metrics.accepted_prediction_tokens = details.get("accepted_prediction_tokens").and_then(|t| t.as_u64());
-                metrics.rejected_prediction_tokens = details.get("rejected_prediction_tokens").and_then(|t| t.as_u64());
-            }
-        } else {
-            tracing::debug!("No usage field found in response");
-        }
-
-        // Extract timings (llama.cpp specific)
-        if let Some(timings) = response.get("timings") {
-            tracing::debug!("Found timings: {:?}", timings);
-            metrics.prompt_ms = timings.get("prompt_ms").and_then(|t| t.as_f64()).unwrap_or(0.0);
-            metrics.generation_ms = timings.get("predicted_ms").and_then(|t| t.as_f64()).unwrap_or(0.0);
-            metrics.prompt_tps = timings.get("prompt_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0);
-            metrics.generation_tps = timings.get("predicted_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0);
-            metrics.has_timing_split = true;
-
-            // Context info - use prompt_n for actual context consumption
-            if let Some(prompt_n) = timings.get("prompt_n").and_then(|t| t.as_u64()) {
-                metrics.context_used = Some(prompt_n);
-            }
-
-            // Fallback to timings for token counts when usage is missing (e.g., timeout
-            // scenarios). Absent and zero are one trigger class here, matching the
-            // pre-Option baseline where absence was stored as 0.
-            if metrics.prompt_tokens.unwrap_or(0) == 0 && metrics.completion_tokens.unwrap_or(0) == 0 {
-                metrics.prompt_tokens = timings.get("prompt_n").and_then(|t| t.as_u64());
-                metrics.completion_tokens = timings.get("predicted_n").and_then(|t| t.as_u64());
-                metrics.total_tokens = metrics
-                    .prompt_tokens
-                    .unwrap_or(0)
-                    .saturating_add(metrics.completion_tokens.unwrap_or(0));
-
-                tracing::debug!(
-                    "Using timings fallback for token counts: prompt={:?}, completion={:?}",
-                    metrics.prompt_tokens,
-                    metrics.completion_tokens
-                );
-            }
-        } else {
-            tracing::debug!("No timings field found in response");
-
-            // If no timings, use prompt_tokens as context_used fallback
-            // (Anthropic format responses have usage.input_tokens but no timings)
-            if let Some(prompt_tokens) = metrics.prompt_tokens.filter(|p| *p > 0) {
-                metrics.context_used = Some(prompt_tokens);
-                tracing::debug!("Using prompt_tokens as context_used: {}", prompt_tokens);
-            }
-
-            // No `timings` means the backend did not tell us where the time went.
-            // `timings` is llama.cpp-specific (prompt_per_second/predicted_per_second),
-            // so every vLLM response lands here.
-            //
-            // This used to split the wall clock 20% prompt / 80% generation and
-            // divide the token counts by those. That is not a measurement, and it
-            // reads as one: on a vLLM server whose real prefill was measured at
-            // ~14.5k tok/s it reported 113,344 tok/s, purely because a 39k-token
-            // prompt was divided by 20% of a 1.7s request. The two figures were
-            // also locked to each other -- prompt_tps/generation_tps was always
-            // exactly 4 * prompt_tokens/completion_tokens -- so they carried no
-            // information the token counts did not already carry, while making
-            // short-completion requests look like a throughput collapse.
-            //
-            // Report only what a single duration can support: total throughput.
-            // A real split needs either backend timings or a measured TTFT, which
-            // is only observable on streaming responses.
-            // vLLM reports the same information under `metrics`, but only when
-            // the server was started with --enable-per-request-metrics. Without
-            // that flag the key is present and null, which is exactly how this
-            // code ended up estimating instead of measuring.
-            //
-            // Field semantics are vLLM's own: generation_time_ms is the decode
-            // interval alone (first output token -> last), excluding queue wait
-            // and prefill; time_to_first_token_ms is measured from scheduling,
-            // so it excludes queue wait too.
-            if let Some(vm) = response.get("metrics").filter(|v| !v.is_null()) {
-                let f = |k: &str| vm.get(k).and_then(|v| v.as_f64()).filter(|v| *v > 0.0);
-
-                metrics.queue_ms = f("queue_time_ms");
-                metrics.mean_itl_ms = f("mean_itl_ms");
-
-                if let Some(ttft) = f("time_to_first_token_ms") {
-                    metrics.prompt_ms = ttft;
-                    if let Some(prompt_tokens) = metrics.prompt_tokens.filter(|p| *p > 0) {
-                        metrics.prompt_tps = (prompt_tokens as f64 / ttft) * 1000.0;
-                    }
-                }
-                if let Some(gen_ms) = f("generation_time_ms") {
-                    metrics.generation_ms = gen_ms;
-                    if let Some(completion_tokens) = metrics.completion_tokens.filter(|c| *c > 0) {
-                        metrics.generation_tps = (completion_tokens as f64 / gen_ms) * 1000.0;
-                    }
-                }
-                metrics.has_timing_split = metrics.prompt_ms > 0.0 || metrics.generation_ms > 0.0;
-
-                tracing::debug!(
-                    "vLLM per-request metrics: ttft={:.1}ms gen={:.1}ms queue={:?}ms itl={:?}ms",
-                    metrics.prompt_ms,
-                    metrics.generation_ms,
-                    metrics.queue_ms,
-                    metrics.mean_itl_ms
-                );
-            } else if duration_ms > 0.0 && metrics.total_tokens > 0 {
-                tracing::debug!(
-                    "No backend timings and no vLLM metrics (is the server missing \
-                     --enable-per-request-metrics?); reporting total throughput only: {:.2} tok/s",
-                    (metrics.total_tokens as f64 / duration_ms) * 1000.0
-                );
-            }
-        }
+        extract_timings(&mut metrics, response, duration_ms);
 
         // Always available, whether or not the backend reported a split.
         if duration_ms > 0.0 && metrics.total_tokens > 0 {
             metrics.total_tps = (metrics.total_tokens as f64 / duration_ms) * 1000.0;
         }
 
-        // Extract finish reason and output length (support both OpenAI and Anthropic formats)
-        // Try OpenAI format first
-        if let Some(choices) = response.get("choices").and_then(|c| c.as_array()) {
-            if let Some(first_choice) = choices.first() {
-                metrics.finish_reason = first_choice
-                    .get("finish_reason")
-                    .and_then(|f| f.as_str())
-                    .unwrap_or("unknown")
-                    .to_string();
-
-                // Extract output length
-                if let Some(content) = first_choice
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_str())
-                {
-                    metrics.output_len = content.len();
-                }
-            }
-        }
-        // Try Anthropic format
-        else if let Some(stop_reason) = response.get("stop_reason").and_then(|f| f.as_str()) {
-            metrics.finish_reason = stop_reason.to_string();
-
-            // Extract output length from content array
-            if let Some(content_array) = response.get("content").and_then(|c| c.as_array()) {
-                metrics.output_len = content_array
-                    .iter()
-                    .filter_map(|item| {
-                        // Sum up text content lengths
-                        item.get("text").and_then(|t| t.as_str()).map(|s| s.len())
-                    })
-                    .sum();
-            }
-        }
-
-        // Extract request info
-        if let Some(messages) = request.get("messages").and_then(|m| m.as_array()) {
-            metrics.input_messages = messages.len();
-            metrics.input_len = messages
-                .iter()
-                .map(|m| {
-                    m.get("content")
-                        .and_then(|c| match c {
-                            Value::String(s) => Some(s.len()),
-                            Value::Array(arr) => Some(
-                                arr.iter()
-                                    .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
-                                    .map(|s| s.len())
-                                    .sum(),
-                            ),
-                            _ => None,
-                        })
-                        .unwrap_or(0)
-                })
-                .sum();
-        }
+        extract_length_fallbacks(&mut metrics, response, request);
 
         metrics
     }
@@ -406,6 +221,215 @@ impl RequestMetrics {
 impl Default for RequestMetrics {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Extract usage counts (support both OpenAI and Anthropic formats) and the
+/// Opencode/Copilot `completion_tokens_details` extensions.
+fn extract_usage(metrics: &mut RequestMetrics, response: &Value) {
+    // Extract usage (support both OpenAI and Anthropic formats)
+    if let Some(usage) = response.get("usage") {
+        tracing::debug!("Found usage: {:?}", usage);
+
+        // Try OpenAI format first
+        if let Some(prompt) = usage.get("prompt_tokens").and_then(|t| t.as_u64()) {
+            metrics.prompt_tokens = Some(prompt);
+            metrics.completion_tokens = usage.get("completion_tokens").and_then(|t| t.as_u64());
+            metrics.total_tokens = usage
+                .get("total_tokens")
+                .and_then(|t| t.as_u64())
+                .unwrap_or_else(|| prompt.saturating_add(metrics.completion_tokens.unwrap_or(0)));
+        }
+        // Try Anthropic format
+        else if let Some(input) = usage.get("input_tokens").and_then(|t| t.as_u64()) {
+            metrics.prompt_tokens = Some(input);
+            metrics.completion_tokens = usage.get("output_tokens").and_then(|t| t.as_u64());
+            metrics.total_tokens = input.saturating_add(metrics.completion_tokens.unwrap_or(0));
+        }
+
+        // Extract extended usage details (Opencode/Copilot extensions)
+        if let Some(details) = usage.get("completion_tokens_details") {
+            metrics.reasoning_tokens = details.get("reasoning_tokens").and_then(|t| t.as_u64());
+            metrics.accepted_prediction_tokens = details.get("accepted_prediction_tokens").and_then(|t| t.as_u64());
+            metrics.rejected_prediction_tokens = details.get("rejected_prediction_tokens").and_then(|t| t.as_u64());
+        }
+    } else {
+        tracing::debug!("No usage field found in response");
+    }
+}
+
+/// Extract llama.cpp `timings`, with the token-count fallback and, when timings
+/// are absent, the context_used fallback and the vLLM `metrics` path.
+fn extract_timings(metrics: &mut RequestMetrics, response: &Value, duration_ms: f64) {
+    // Extract timings (llama.cpp specific)
+    if let Some(timings) = response.get("timings") {
+        tracing::debug!("Found timings: {:?}", timings);
+        metrics.prompt_ms = timings.get("prompt_ms").and_then(|t| t.as_f64()).unwrap_or(0.0);
+        metrics.generation_ms = timings.get("predicted_ms").and_then(|t| t.as_f64()).unwrap_or(0.0);
+        metrics.prompt_tps = timings.get("prompt_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0);
+        metrics.generation_tps = timings.get("predicted_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0);
+        metrics.has_timing_split = true;
+
+        // Context info - use prompt_n for actual context consumption
+        if let Some(prompt_n) = timings.get("prompt_n").and_then(|t| t.as_u64()) {
+            metrics.context_used = Some(prompt_n);
+        }
+
+        // Fallback to timings for token counts when usage is missing (e.g., timeout
+        // scenarios). Absent and zero are one trigger class here, matching the
+        // pre-Option baseline where absence was stored as 0.
+        if metrics.prompt_tokens.unwrap_or(0) == 0 && metrics.completion_tokens.unwrap_or(0) == 0 {
+            metrics.prompt_tokens = timings.get("prompt_n").and_then(|t| t.as_u64());
+            metrics.completion_tokens = timings.get("predicted_n").and_then(|t| t.as_u64());
+            metrics.total_tokens = metrics
+                .prompt_tokens
+                .unwrap_or(0)
+                .saturating_add(metrics.completion_tokens.unwrap_or(0));
+
+            tracing::debug!(
+                "Using timings fallback for token counts: prompt={:?}, completion={:?}",
+                metrics.prompt_tokens,
+                metrics.completion_tokens
+            );
+        }
+    } else {
+        tracing::debug!("No timings field found in response");
+
+        // If no timings, use prompt_tokens as context_used fallback
+        // (Anthropic format responses have usage.input_tokens but no timings)
+        if let Some(prompt_tokens) = metrics.prompt_tokens.filter(|p| *p > 0) {
+            metrics.context_used = Some(prompt_tokens);
+            tracing::debug!("Using prompt_tokens as context_used: {}", prompt_tokens);
+        }
+
+        extract_vllm_usage(metrics, response, duration_ms);
+    }
+}
+
+/// Extract vLLM per-request `metrics` (needs --enable-per-request-metrics);
+/// with neither timings nor metrics, total throughput is all a duration supports.
+fn extract_vllm_usage(metrics: &mut RequestMetrics, response: &Value, duration_ms: f64) {
+    // No `timings` means the backend did not tell us where the time went.
+    // `timings` is llama.cpp-specific (prompt_per_second/predicted_per_second),
+    // so every vLLM response lands here.
+    //
+    // This used to split the wall clock 20% prompt / 80% generation and
+    // divide the token counts by those. That is not a measurement, and it
+    // reads as one: on a vLLM server whose real prefill was measured at
+    // ~14.5k tok/s it reported 113,344 tok/s, purely because a 39k-token
+    // prompt was divided by 20% of a 1.7s request. The two figures were
+    // also locked to each other -- prompt_tps/generation_tps was always
+    // exactly 4 * prompt_tokens/completion_tokens -- so they carried no
+    // information the token counts did not already carry, while making
+    // short-completion requests look like a throughput collapse.
+    //
+    // Report only what a single duration can support: total throughput.
+    // A real split needs either backend timings or a measured TTFT, which
+    // is only observable on streaming responses.
+    // vLLM reports the same information under `metrics`, but only when
+    // the server was started with --enable-per-request-metrics. Without
+    // that flag the key is present and null, which is exactly how this
+    // code ended up estimating instead of measuring.
+    //
+    // Field semantics are vLLM's own: generation_time_ms is the decode
+    // interval alone (first output token -> last), excluding queue wait
+    // and prefill; time_to_first_token_ms is measured from scheduling,
+    // so it excludes queue wait too.
+    if let Some(vm) = response.get("metrics").filter(|v| !v.is_null()) {
+        let f = |k: &str| vm.get(k).and_then(|v| v.as_f64()).filter(|v| *v > 0.0);
+
+        metrics.queue_ms = f("queue_time_ms");
+        metrics.mean_itl_ms = f("mean_itl_ms");
+
+        if let Some(ttft) = f("time_to_first_token_ms") {
+            metrics.prompt_ms = ttft;
+            if let Some(prompt_tokens) = metrics.prompt_tokens.filter(|p| *p > 0) {
+                metrics.prompt_tps = (prompt_tokens as f64 / ttft) * 1000.0;
+            }
+        }
+        if let Some(gen_ms) = f("generation_time_ms") {
+            metrics.generation_ms = gen_ms;
+            if let Some(completion_tokens) = metrics.completion_tokens.filter(|c| *c > 0) {
+                metrics.generation_tps = (completion_tokens as f64 / gen_ms) * 1000.0;
+            }
+        }
+        metrics.has_timing_split = metrics.prompt_ms > 0.0 || metrics.generation_ms > 0.0;
+
+        tracing::debug!(
+            "vLLM per-request metrics: ttft={:.1}ms gen={:.1}ms queue={:?}ms itl={:?}ms",
+            metrics.prompt_ms,
+            metrics.generation_ms,
+            metrics.queue_ms,
+            metrics.mean_itl_ms
+        );
+    } else if duration_ms > 0.0 && metrics.total_tokens > 0 {
+        tracing::debug!(
+            "No backend timings and no vLLM metrics (is the server missing \
+                     --enable-per-request-metrics?); reporting total throughput only: {:.2} tok/s",
+            (metrics.total_tokens as f64 / duration_ms) * 1000.0
+        );
+    }
+}
+
+/// Extract finish reason and output length (OpenAI and Anthropic shapes) plus
+/// the request-side message count and input length.
+fn extract_length_fallbacks(metrics: &mut RequestMetrics, response: &Value, request: &Value) {
+    // Extract finish reason and output length (support both OpenAI and Anthropic formats)
+    // Try OpenAI format first
+    if let Some(choices) = response.get("choices").and_then(|c| c.as_array()) {
+        if let Some(first_choice) = choices.first() {
+            metrics.finish_reason = first_choice
+                .get("finish_reason")
+                .and_then(|f| f.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            // Extract output length
+            if let Some(content) = first_choice
+                .get("message")
+                .and_then(|m| m.get("content"))
+                .and_then(|c| c.as_str())
+            {
+                metrics.output_len = content.len();
+            }
+        }
+    }
+    // Try Anthropic format
+    else if let Some(stop_reason) = response.get("stop_reason").and_then(|f| f.as_str()) {
+        metrics.finish_reason = stop_reason.to_string();
+
+        // Extract output length from content array
+        if let Some(content_array) = response.get("content").and_then(|c| c.as_array()) {
+            metrics.output_len = content_array
+                .iter()
+                .filter_map(|item| {
+                    // Sum up text content lengths
+                    item.get("text").and_then(|t| t.as_str()).map(|s| s.len())
+                })
+                .sum();
+        }
+    }
+
+    // Extract request info
+    if let Some(messages) = request.get("messages").and_then(|m| m.as_array()) {
+        metrics.input_messages = messages.len();
+        metrics.input_len = messages
+            .iter()
+            .map(|m| {
+                m.get("content")
+                    .and_then(|c| match c {
+                        Value::String(s) => Some(s.len()),
+                        Value::Array(arr) => Some(
+                            arr.iter()
+                                .filter_map(|p| p.get("text").and_then(|t| t.as_str()))
+                                .map(|s| s.len())
+                                .sum(),
+                        ),
+                        _ => None,
+                    })
+                    .unwrap_or(0)
+            })
+            .sum();
     }
 }
 
