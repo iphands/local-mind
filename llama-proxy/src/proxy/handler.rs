@@ -4166,7 +4166,7 @@ mod tests {
             dump: crate::config::DumpConfig::default(),
         };
         let mut reg = FixRegistry::new();
-        reg.register(Arc::new(crate::fixes::ToolCallNullIndexFix::new(true)));
+        reg.register(Arc::new(crate::fixes::ToolCallNullIndexFix::new()));
         let mut mgr = ExporterManager::new();
         mgr.add(Arc::new(CapturingExporter { samples }));
         let rep_cfg = crate::config::RepromptConfig {
