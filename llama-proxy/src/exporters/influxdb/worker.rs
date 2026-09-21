@@ -39,6 +39,13 @@ const IDLE_POLL: Duration = Duration::from_millis(2);
 /// call can reach it.
 const FLUSH_WAIT: Duration = Duration::from_secs(60);
 
+/// Wall-clock bound on ONE write attempt (task 83 [A-M8/L8]). influxdb2 0.5
+/// pins reqwest 0.11 internally and its builder exposes no timeout knob our
+/// reqwest 0.12 can drive, so the timeout is enforced at the call site with
+/// tokio - same contract: a stalled endpoint fails the attempt in 10 s and
+/// the retry chain runs, instead of parking the worker forever.
+pub const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// Upper bound on a shutdown join: the worker may carry a network call that
 /// cannot finish (pre-task-83 clients had no timeout). Shutdown warns and
 /// proceeds instead of wedging the process; the worker still drains and
@@ -100,23 +107,27 @@ fn poll_samples(samples: &mpsc::Receiver<RequestMetrics>) -> Poll {
     }
 }
 
+/// Everything a write needs: the client, its destination, the per-attempt
+/// bound, and the two counters the chain owns. Bundled so the writer chain
+/// stays narrow and no call site can desync one piece from another.
+struct WriteCtx {
+    client: influxdb2::Client,
+    config: Arc<InfluxDbConfig>,
+    request_timeout: Duration,
+    retries: Counter,
+    dropped: Counter,
+}
+
 /// Deliver queued samples until the queue reports empty or closed. A drain
 /// ticket registered before the worker picked up its drain ping guards
 /// enqueues that happened before the ticket - those sit in this same FIFO,
 /// so an empty queue here means every guarded enqueue is delivered or
 /// exhaustion-dropped.
-async fn drain_queue(
-    samples: &mpsc::Receiver<RequestMetrics>,
-    client: &influxdb2::Client,
-    config: &InfluxDbConfig,
-    retries: &Counter,
-    dropped: &Counter,
-    acked: &mut dyn FnMut(),
-) {
+async fn drain_queue(ctx: &WriteCtx, samples: &mpsc::Receiver<RequestMetrics>, acked: &mut dyn FnMut()) {
     loop {
         match poll_samples(samples) {
             Poll::Ready(sample) => {
-                write_with_retry(client, config, &sample, retries, dropped).await;
+                write_with_retry(ctx, &sample).await;
             }
             Poll::Empty => {
                 acked();
@@ -131,10 +142,7 @@ fn spawn_writer(
     samples: mpsc::Receiver<RequestMetrics>,
     drains: mpsc::Receiver<()>,
     waiters: Arc<Mutex<Vec<Ticket>>>,
-    client: influxdb2::Client,
-    config: Arc<InfluxDbConfig>,
-    retries: Counter,
-    dropped: Counter,
+    ctx: WriteCtx,
 ) -> std::thread::JoinHandle<()> {
     std::thread::Builder::new()
         .name("influxdb-exporter".to_string())
@@ -164,7 +172,7 @@ fn spawn_writer(
                             // this iteration's Empty check: the drain below
                             // re-acks an empty queue, so a too-early ping is
                             // harmless.
-                            drain_queue(&samples, &client, &config, &retries, &dropped, &mut || ack_waiters(&waiters)).await;
+                            drain_queue(&ctx, &samples, &mut || ack_waiters(&waiters)).await;
                             continue;
                         }
                         Err(mpsc::TryRecvError::Disconnected) => break,
@@ -172,7 +180,7 @@ fn spawn_writer(
                     }
                     match poll_samples(&samples) {
                         Poll::Ready(sample) => {
-                            write_with_retry(&client, &config, &sample, &retries, &dropped).await;
+                            write_with_retry(&ctx, &sample).await;
                         }
                         Poll::Gone => break,
                         Poll::Empty => {
@@ -186,7 +194,7 @@ fn spawn_writer(
                 }
                 // Senders all closed: deliver everything still queued, then
                 // leave - never discard what export() reported as Queued.
-                drain_queue(&samples, &client, &config, &retries, &dropped, &mut || ack_waiters(&waiters)).await;
+                drain_queue(&ctx, &samples, &mut || ack_waiters(&waiters)).await;
                 ack_waiters(&waiters);
             })
         })
@@ -194,28 +202,34 @@ fn spawn_writer(
 }
 
 /// One point, up to 4 attempts (first + 3 retries). Exhaustion is counted in
-/// `dropped` - the write path never reports a success it did not get.
-async fn write_with_retry(
-    client: &influxdb2::Client,
-    config: &InfluxDbConfig,
-    sample: &RequestMetrics,
-    retries: &Counter,
-    dropped: &Counter,
-) {
+/// the ctx's dropped counter - the write path never reports a success it did
+/// not get.
+async fn write_with_retry(ctx: &WriteCtx, sample: &RequestMetrics) {
     let point = match build_data_point(sample) {
-        Ok(point) => point,
+        Ok(Some(point)) => point,
+        // Unrepresentable timestamp: skipped, counted, debugged - never a
+        // fabricated epoch-0 line on the wire.
+        Ok(None) => {
+            tracing::debug!(
+                model = %sample.model,
+                timestamp = %sample.timestamp,
+                "influxdb timestamp unrepresentable - point skipped (never epoch 0)"
+            );
+            ctx.dropped.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
         Err(e) => {
             tracing::debug!(error = %e, "influxdb point rejected before write");
-            dropped.fetch_add(1, Ordering::Relaxed);
+            ctx.dropped.fetch_add(1, Ordering::Relaxed);
             return;
         }
     };
     for attempt in 0..=RETRY_DELAYS_MS.len() {
-        match write_once(client, config, point.clone()).await {
+        match write_once(ctx, point.clone()).await {
             Ok(()) => return,
             Err(e) => {
                 let Some(delay_ms) = RETRY_DELAYS_MS.get(attempt).copied() else {
-                    dropped.fetch_add(1, Ordering::Relaxed);
+                    ctx.dropped.fetch_add(1, Ordering::Relaxed);
                     tracing::debug!(
                         error = %e,
                         attempts = attempt + 1,
@@ -223,23 +237,21 @@ async fn write_with_retry(
                     );
                     return;
                 };
-                retries.fetch_add(1, Ordering::Relaxed);
+                ctx.retries.fetch_add(1, Ordering::Relaxed);
                 tokio::time::sleep(Duration::from_millis(delay_ms)).await;
             }
         }
     }
 }
 
-async fn write_once(
-    client: &influxdb2::Client,
-    config: &InfluxDbConfig,
-    point: influxdb2::models::DataPoint,
-) -> Result<(), ExportError> {
+async fn write_once(ctx: &WriteCtx, point: influxdb2::models::DataPoint) -> Result<(), ExportError> {
     use futures::stream;
-    client
-        .write(&config.bucket, stream::iter(vec![point]))
-        .await
-        .map_err(|e| ExportError::Write(e.to_string()))
+    let write = ctx.client.write(&ctx.config.bucket, stream::iter(vec![point]));
+    match tokio::time::timeout(ctx.request_timeout, write).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(ExportError::Write(e.to_string())),
+        Err(_) => Err(ExportError::Write(format!("write timed out after {:?}", ctx.request_timeout))),
+    }
 }
 
 /// The queue end held by [`super::InfluxDbExporter`]. `shutdown()` and
@@ -256,21 +268,20 @@ pub struct WriterQueue {
 }
 
 impl WriterQueue {
-    pub fn spawn(client: influxdb2::Client, config: InfluxDbConfig) -> Self {
+    pub fn spawn(client: influxdb2::Client, config: InfluxDbConfig, request_timeout: Duration) -> Self {
         let (samples_tx, samples_rx) = mpsc::sync_channel(CAPACITY);
         let (drains_tx, drains_rx) = mpsc::channel();
         let waiters = Arc::new(Mutex::new(Vec::new()));
         let retries = Arc::new(AtomicU64::new(0));
         let dropped = Arc::new(AtomicU64::new(0));
-        let worker = spawn_writer(
-            samples_rx,
-            drains_rx,
-            Arc::clone(&waiters),
+        let ctx = WriteCtx {
             client,
-            Arc::new(config),
-            Arc::clone(&retries),
-            Arc::clone(&dropped),
-        );
+            config: Arc::new(config),
+            request_timeout,
+            retries: Arc::clone(&retries),
+            dropped: Arc::clone(&dropped),
+        };
+        let worker = spawn_writer(samples_rx, drains_rx, Arc::clone(&waiters), ctx);
         Self {
             samples_tx: Mutex::new(Some(samples_tx)),
             drains_tx: Mutex::new(Some(drains_tx)),

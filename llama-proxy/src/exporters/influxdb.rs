@@ -8,7 +8,7 @@ use crate::stats::RequestMetrics;
 #[cfg(feature = "influxdb")]
 mod worker;
 #[cfg(feature = "influxdb")]
-use worker::{SendOutcome, WriterQueue};
+use worker::{SendOutcome, WriterQueue, REQUEST_TIMEOUT};
 
 /// InfluxDB v2 exporter configuration
 #[derive(Debug, Clone)]
@@ -46,7 +46,21 @@ impl InfluxDbExporter {
     #[cfg(feature = "influxdb")]
     pub fn new(config: InfluxDbConfig) -> Result<Self, ExportError> {
         let client = influxdb2::Client::new(&config.url, &config.org, &config.token);
-        let queue = WriterQueue::spawn(client, config);
+        let queue = WriterQueue::spawn(client, config, REQUEST_TIMEOUT);
+
+        Ok(Self { queue })
+    }
+
+    /// Test-only constructor pinning a short per-attempt write timeout, so the
+    /// stalled-endpoint test proves the timeout drives the retry chain instead
+    /// of sleeping out the production 10 s window.
+    #[cfg(all(test, feature = "influxdb"))]
+    pub(crate) fn new_with_request_timeout(
+        config: InfluxDbConfig,
+        request_timeout: std::time::Duration,
+    ) -> Result<Self, ExportError> {
+        let client = influxdb2::Client::new(&config.url, &config.org, &config.token);
+        let queue = WriterQueue::spawn(client, config, request_timeout);
 
         Ok(Self { queue })
     }
@@ -92,7 +106,14 @@ impl InfluxDbExporter {
 /// testable without a network: an absent token count (`None`) omits its field
 /// entirely rather than writing a fabricated 0 into the aggregate.
 #[cfg(feature = "influxdb")]
-fn build_data_point(metrics: &RequestMetrics) -> Result<influxdb2::models::DataPoint, ExportError> {
+fn build_data_point(metrics: &RequestMetrics) -> Result<Option<influxdb2::models::DataPoint>, ExportError> {
+    // Unrepresentable nanosecond timestamp (chrono i64 overflow: years ~2262+ and
+    // pre-1677) => skip the point entirely. Epoch 0 is a real, wrong timestamp;
+    // a skipped point is recoverable ignorance, a fabricated one is silent
+    // corruption of the time series (task 83 [A-L8]).
+    let Some(ts_nanos) = metrics.timestamp.timestamp_nanos_opt() else {
+        return Ok(None);
+    };
     use influxdb2::models::DataPoint;
 
     let mut builder = DataPoint::builder("llama_request")
@@ -155,10 +176,10 @@ fn build_data_point(metrics: &RequestMetrics) -> Result<influxdb2::models::DataP
         point = point.field("context_percent", ctx_pct);
     }
 
-    let point = point.timestamp(metrics.timestamp.timestamp_nanos_opt().unwrap_or(0));
-
     point
+        .timestamp(ts_nanos)
         .build()
+        .map(Some)
         .map_err(|e| ExportError::Write(format!("Failed to build data point: {}", e)))
 }
 
@@ -207,7 +228,7 @@ mod wire_tests {
 
     /// Serialize the real point through influxdb2's own line-protocol writer.
     fn line(metrics: &RequestMetrics) -> String {
-        let point = build_data_point(metrics).unwrap();
+        let point = build_data_point(metrics).unwrap().unwrap();
         let mut buf = Vec::new();
         point.write_data_point_to(&mut buf).unwrap();
         String::from_utf8(buf).unwrap()
@@ -226,6 +247,34 @@ mod wire_tests {
         assert!(!line.contains("prompt_tokens"), "fabricated field: {line}");
         assert!(!line.contains("completion_tokens"), "fabricated field: {line}");
         assert!(line.contains("total_tokens=150"), "measured total kept: {line}");
+    }
+
+    #[test]
+    fn representable_timestamp_is_written_verbatim() {
+        let mut m = measurable();
+        m.timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-21T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let nanos = m.timestamp.timestamp_nanos_opt().unwrap();
+        let line = line(&m);
+        assert!(
+            line.trim_end().ends_with(&format!(" {nanos}")),
+            "the point's own timestamp belongs on the wire: {line}"
+        );
+    }
+
+    #[test]
+    fn unrepresentable_timestamp_builds_no_point() {
+        // chrono's i64-ns window ends in 2262; the baseline (@ f1efa80) wrote a
+        // fabricated epoch-0 line for exactly this sample.
+        let mut m = measurable();
+        m.timestamp = chrono::DateTime::parse_from_rfc3339("2300-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        assert!(
+            build_data_point(&m).unwrap().is_none(),
+            "skip the point - never fabricate a timestamp"
+        );
     }
 
     #[test]
@@ -537,6 +586,64 @@ mod queue_tests {
                 "shutdown discarded an accepted sample:\n{bodies}"
             );
         }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn unrepresentable_timestamp_is_skipped_never_epoch_zero() {
+        // Baseline wrongness @ f1efa80: this sample wrote a real epoch-0 line
+        // (`timestamp_nanos_opt().unwrap_or(0)`). Now the point is skipped:
+        // counted, debugged, and NEVER on the wire.
+        let fake = FakeInflux::spawn("204");
+        let exporter = fake.exporter();
+        let mut m = sample("far-future");
+        m.timestamp = chrono::DateTime::parse_from_rfc3339("2300-01-01T00:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        exporter.export(&m).await.unwrap();
+        exporter.writer().flush().unwrap();
+
+        assert_eq!(
+            fake.bodies.lock().unwrap().len(),
+            0,
+            "an unrepresentable timestamp must skip the point, not fabricate epoch 0"
+        );
+        assert_eq!(exporter.writer().dropped_total(), 1, "the skip is counted");
+        exporter.writer().shutdown();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stalled_writes_are_cut_by_the_request_timeout() {
+        // The stalled fake accepts and never answers. Without the per-attempt
+        // timeout (baseline) the worker parked forever; with it, each attempt
+        // dies at the timeout, the retry chain runs to exhaustion, and flush
+        // returns - bounded by timeouts, not by sleeps.
+        let fake = FakeInflux::spawn("stalled");
+        let exporter = InfluxDbExporter::new_with_request_timeout(
+            InfluxDbConfig {
+                url: fake.url.clone(),
+                org: "o".into(),
+                bucket: "b".into(),
+                token: "t".into(),
+                batch_size: 10,
+                flush_interval_seconds: 5,
+            },
+            std::time::Duration::from_millis(50),
+        )
+        .unwrap();
+
+        let started = std::time::Instant::now();
+        exporter.export(&sample("stalled-write")).await.unwrap();
+        exporter.writer().flush().unwrap();
+        let took = started.elapsed();
+
+        assert!(
+            took < std::time::Duration::from_secs(15),
+            "4 attempts x 50 ms timeouts + 2.6 s backoff must finish in seconds, took {took:?}"
+        );
+        assert_eq!(exporter.writer().retries_total(), 3);
+        assert_eq!(exporter.writer().dropped_total(), 1);
+        exporter.writer().shutdown();
     }
 
     #[tokio::test(flavor = "current_thread")]
