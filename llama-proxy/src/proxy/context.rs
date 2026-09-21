@@ -33,9 +33,8 @@ static CONTEXT_CACHE_STALE_SKIPS: AtomicU64 = AtomicU64::new(0);
 /// Read-only view of the skipped-refresh counter, for the stats line / metrics surface.
 ///
 /// `mod context` is private to `proxy`, so `crate::proxy::context::context_cache_stale_skips()`
-/// already resolves from `handler.rs`; rendering it in `/proxy/metrics` and the per-request
-/// stats line is the recorded CARRY for the handler/stats owners (files fenced for this task).
-#[allow(dead_code)] // consumer wiring is the CARRY above; repo allow+reason convention (json_scan, SnippetLimit::Bytes)
+/// resolves from `handler.rs`, which renders it on `/proxy/metrics` (big-fix 94 carry). The
+/// per-request stats line stays with the stats owners.
 pub fn context_cache_stale_skips() -> u64 {
     CONTEXT_CACHE_STALE_SKIPS.load(Ordering::Relaxed)
 }

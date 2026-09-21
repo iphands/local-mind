@@ -715,24 +715,28 @@ impl ProxyHandler {
                      # TYPE llama_proxy_passthrough_compressed_responses_total counter\n\
                      llama_proxy_passthrough_compressed_responses_total {}\n\
                      # HELP llama_proxy_metrics_export_skipped_total Metric samples excluded from every exporter because the backend reported no token count and no rate: a stream the client abandoned before usage/timings arrived, or a backend error body. They are logged at WARN instead. Spans the buffered and pass-through paths, and is NOT the same as passthrough_stream_client_gone_total - a client-gone stream that did carry usage is exported and is not counted here. Remote token totals under-count backend work by this amount.\n\
-                     # TYPE llama_proxy_metrics_export_skipped_total counter\n\
-                     llama_proxy_metrics_export_skipped_total {}\n",
-                    fallback_hits,
-                    concurrent,
-                    rejected,
-                    routed_stream,
-                    backend_no_stream,
-                    anthropic_buffered,
-                    l(&stream_stats::PASSTHROUGH_STREAMS_TOTAL),
-                    l(&stream_stats::SSE_EVENTS_TOTAL),
-                    l(&stream_stats::SSE_UNPARSED_EVENTS_TOTAL),
-                    l(&stream_stats::STREAM_TRUNCATED_TOTAL),
-                    l(&stream_stats::STREAM_STALLED_TOTAL),
-                    l(&stream_stats::STREAM_CLIENT_GONE_TOTAL),
-                    l(&stream_stats::FIX_UNREPAIRED_TOTAL),
-                    l(&stream_stats::STREAM_COMPRESSED_TOTAL),
-                    l(&crate::exporters::EXPORTS_SKIPPED_TOTAL),
-                );
+                      # TYPE llama_proxy_metrics_export_skipped_total counter\n\
+                      llama_proxy_metrics_export_skipped_total {}\n\
+                      # HELP llama_proxy_context_cache_stale_skips_total Context-cache refreshes skipped because the write lock was held when a fresh value arrived; the cache keeps its previous value, so context_total can read stale. Not a defect signal on its own - it explains context_percent jumps. Spans the buffered and pass-through paths.\n\
+                      # TYPE llama_proxy_context_cache_stale_skips_total counter\n\
+                      llama_proxy_context_cache_stale_skips_total {}\n",
+                     fallback_hits,
+                     concurrent,
+                     rejected,
+                     routed_stream,
+                     backend_no_stream,
+                     anthropic_buffered,
+                     l(&stream_stats::PASSTHROUGH_STREAMS_TOTAL),
+                     l(&stream_stats::SSE_EVENTS_TOTAL),
+                     l(&stream_stats::SSE_UNPARSED_EVENTS_TOTAL),
+                     l(&stream_stats::STREAM_TRUNCATED_TOTAL),
+                     l(&stream_stats::STREAM_STALLED_TOTAL),
+                     l(&stream_stats::STREAM_CLIENT_GONE_TOTAL),
+                     l(&stream_stats::FIX_UNREPAIRED_TOTAL),
+                     l(&stream_stats::STREAM_COMPRESSED_TOTAL),
+                     l(&crate::exporters::EXPORTS_SKIPPED_TOTAL),
+                     crate::proxy::context::context_cache_stale_skips(),
+                 );
 
                 return (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response();
             }
@@ -2134,6 +2138,40 @@ mod tests {
             .await;
 
         assert_error_envelope(res, StatusCode::BAD_GATEWAY, "backend_connect_error").await;
+    }
+
+    #[tokio::test]
+    async fn proxy_metrics_renders_context_cache_stale_skips() {
+        // big-fix 94 carry: the staleness counter must be readable on /proxy/metrics.
+        // The accessor is process-global and other tests in this binary can bump it
+        // concurrently, so pin the rendered value between a pre- and post-read instead
+        // of demanding one exact number.
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
+
+        let before = crate::proxy::context::context_cache_stale_skips();
+        let res = handler
+            .handle(request_with_body(Method::GET, "/proxy/metrics", Body::empty()))
+            .await;
+        let body = body_text(res).await;
+        let after = crate::proxy::context::context_cache_stale_skips();
+
+        let prefix = "llama_proxy_context_cache_stale_skips_total ";
+        let rendered: u64 = body
+            .lines()
+            .find_map(|line| line.strip_prefix(prefix))
+            .unwrap_or_else(|| panic!("metrics body must carry {prefix}:\n{body}"))
+            .trim()
+            .parse()
+            .expect("stale-skip line must carry a u64");
+        assert!(
+            (before..=after).contains(&rendered),
+            "rendered {rendered} outside [{before}, {after}] monotonic window"
+        );
+        assert!(
+            body.contains("# TYPE llama_proxy_context_cache_stale_skips_total counter"),
+            "stale-skip line needs a TYPE declaration:\n{body}"
+        );
     }
 
     #[tokio::test]
