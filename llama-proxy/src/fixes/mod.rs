@@ -7,10 +7,13 @@ mod toolcall_malformed_arguments_fix;
 mod toolcall_null_index_fix;
 
 use async_trait::async_trait;
-use registry::{truncate_snippet, SnippetLimit};
 use serde_json::Value;
-use std::collections::HashMap;
 use std::sync::Arc;
+
+// Only the snippet tests below use these since task 29 deleted the streaming
+// call sites that needed them in the library build.
+#[cfg(test)]
+use registry::{truncate_snippet, SnippetLimit};
 
 pub use registry::{AsAny, FixRegistry};
 pub use toolcall_bad_filepath_fix::ToolcallBadFilepathFix;
@@ -111,106 +114,14 @@ pub enum FixOutcome {
     Fixed,
 }
 
-/// Accumulates tool call arguments across streaming chunks for fixing
-#[derive(Default)]
-pub struct ToolCallAccumulator {
-    /// Map of tool call index -> accumulated arguments string
-    accumulated: HashMap<usize, String>,
-    /// Map of tool call index -> whether this index has been fixed
-    /// After a fix is applied, subsequent chunks for this index are suppressed
-    fixed: HashMap<usize, bool>,
-}
-
-impl ToolCallAccumulator {
-    /// Create a new empty accumulator
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Add chunk arguments for a tool call and return the accumulated string
-    pub fn accumulate(&mut self, index: usize, chunk_args: &str) -> String {
-        let accumulated = self.accumulated.entry(index).or_default();
-        accumulated.push_str(chunk_args);
-        accumulated.clone()
-    }
-
-    /// Add chunk arguments and return the accumulated string
-    /// Also checks for malformed patterns and logs warnings
-    pub fn accumulate_and_check(&mut self, index: usize, chunk_args: &str, fix_name: &str) -> String {
-        let accumulated = self.accumulated.entry(index).or_default();
-        accumulated.push_str(chunk_args);
-
-        // NEW: Eager detection - check for malformed patterns as we accumulate
-        let accumulated_str = accumulated.clone();
-
-        // Check for duplicate "filePath" keys
-        let filepath_count = accumulated_str.matches(r#""filePath""#).count();
-        if filepath_count > 1 {
-            // Log warning IMMEDIATELY when duplicate detected
-            tracing::warn!(
-                fix_name = fix_name,
-                index = index,
-                filepath_count = filepath_count,
-                accumulated_length = accumulated_str.len(),
-                snippet = truncate_snippet(&accumulated_str, 100, SnippetLimit::Bytes),
-                "DETECTED: Duplicate filePath in accumulated arguments"
-            );
-        }
-
-        // Debug logging to trace accumulation
-        tracing::debug!(
-            fix_name = fix_name,
-            index = index,
-            chunk_length = chunk_args.len(),
-            accumulated_length = accumulated_str.len(),
-            filepath_count = filepath_count,
-            "Accumulating tool call arguments"
-        );
-
-        accumulated_str
-    }
-
-    /// Clear accumulated arguments for a tool call (after sending fixed version)
-    pub fn clear(&mut self, index: usize) {
-        self.accumulated.remove(&index);
-    }
-
-    /// Mark a tool call index as fixed (after sending completion delta)
-    /// Subsequent chunks for this index will be suppressed
-    pub fn mark_fixed(&mut self, index: usize) {
-        self.fixed.insert(index, true);
-        // Also clear accumulated content since we've sent the completion
-        self.accumulated.remove(&index);
-    }
-
-    /// Check if a tool call index has been fixed
-    /// Returns true if this index should have subsequent chunks suppressed
-    pub fn is_fixed(&self, index: usize) -> bool {
-        self.fixed.get(&index).copied().unwrap_or(false)
-    }
-
-    /// Reset both accumulated and fixed state for a tool call index
-    /// Used when a new tool call starts (new index or finish_reason indicates completion)
-    pub fn reset(&mut self, index: usize) {
-        self.accumulated.remove(&index);
-        self.fixed.remove(&index);
-    }
-
-    /// Get the accumulated arguments for a tool call index (for testing)
-    #[cfg(test)]
-    pub fn get(&self, index: usize) -> Option<&str> {
-        self.accumulated.get(&index).map(|s| s.as_str())
-    }
-}
-
 /// Trait for response fix modules
 ///
-/// PRIMARY PATH: We now work with complete JSON responses (via `apply()` method).
-/// All client streaming is synthesized after fixes are applied to complete JSON.
-///
-/// LEGACY PATH: Streaming methods below are kept ONLY for the fallback streaming handler
-/// that handles unexpected streaming responses from the backend. New fixes should focus
-/// on implementing `apply()` for complete JSON only.
+/// Fixes run on complete JSON responses (`apply()` / `apply_with_context()`):
+/// the default `fake` streaming mode buffers the backend and synthesizes SSE
+/// after the fixes ran, and `passthrough` only detects via
+/// [`FixRegistry::detect_fixes`]. The legacy per-chunk streaming machinery
+/// (trait streaming methods + `ToolCallAccumulator`) was dead code and was
+/// deleted (task 29).
 #[async_trait]
 pub trait ResponseFix: Send + Sync {
     /// Unique identifier for the fix
@@ -232,12 +143,6 @@ pub trait ResponseFix: Send + Sync {
     /// Implementations MUST return appropriate FixAction for logging
     fn apply(&self, response: Value) -> (Value, FixAction);
 
-    /// **LEGACY**: Apply fix to streaming chunk (ONLY used by fallback streaming handler)
-    /// Default: no-op. Most fixes should not need to implement this anymore.
-    fn apply_stream(&self, chunk: Value) -> (Value, FixAction) {
-        (chunk, FixAction::NotApplicable)
-    }
-
     // Context-aware methods
 
     /// Check if this fix applies to the response with request context
@@ -256,30 +161,6 @@ pub trait ResponseFix: Send + Sync {
     /// [`FixError`]: FixError
     fn apply_with_context(&self, response: Value, _request: &Value) -> Result<(Value, FixAction), FixError> {
         Ok(self.apply(response))
-    }
-
-    /// **LEGACY**: Apply fix to streaming chunk with request context
-    fn apply_stream_with_context(&self, chunk: Value, _request: &Value) -> (Value, FixAction) {
-        self.apply_stream(chunk)
-    }
-
-    /// **LEGACY**: Apply fix to streaming chunk with accumulation support (with request context)
-    fn apply_stream_with_accumulation(
-        &self,
-        chunk: Value,
-        request: &Value,
-        _accumulator: &mut ToolCallAccumulator,
-    ) -> (Value, FixAction) {
-        self.apply_stream_with_context(chunk, request)
-    }
-
-    /// **LEGACY**: Apply fix to streaming chunk with accumulation support (without request context)
-    fn apply_stream_with_accumulation_default(
-        &self,
-        chunk: Value,
-        _accumulator: &mut ToolCallAccumulator,
-    ) -> (Value, FixAction) {
-        self.apply_stream(chunk)
     }
 }
 
@@ -392,37 +273,6 @@ pub fn create_registry_from_config(fixes: &crate::config::FixesConfig) -> FixReg
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn test_accumulate_and_check_logs_warning_on_duplicate() {
-        let mut acc = ToolCallAccumulator::new();
-
-        // Simulate streaming chunks with duplicate filePath
-        let chunk1 = r#"{"content":"code","filePath":"/path","#;
-        let chunk2 = r#""filePath":"/corrupted"}"#;
-
-        let acc1 = acc.accumulate_and_check(0, chunk1, "test_fix");
-        // Should not warn yet (only 1 filePath)
-        assert_eq!(acc1.matches(r#""filePath""#).count(), 1);
-
-        let acc2 = acc.accumulate_and_check(0, chunk2, "test_fix");
-        // Should WARN (now has 2 filePath strings)
-        // The warning will be logged by tracing, which we can't easily test in unit tests
-        // but we can verify the count
-        assert!(acc2.contains("filePath"));
-        assert_eq!(acc2.matches(r#""filePath""#).count(), 2);
-    }
-
-    #[test]
-    fn test_accumulate_and_check_no_warning_on_single_filepath() {
-        let mut acc = ToolCallAccumulator::new();
-
-        let chunk = r#"{"content":"code","filePath":"/path"}"#;
-        let result = acc.accumulate_and_check(0, chunk, "test_fix");
-
-        // Should only have 1 filePath - no warning
-        assert_eq!(result.matches(r#""filePath""#).count(), 1);
-    }
 
     #[test]
     fn test_truncate_snippet_bytes_truncates_long_text() {

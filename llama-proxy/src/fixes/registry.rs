@@ -1,6 +1,6 @@
 //! Fix module registry
 
-use super::{FixAction, FixError, FixLogLevel, ResponseFix, ToolCallAccumulator};
+use super::{FixAction, FixError, FixLogLevel, ResponseFix};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,6 +19,8 @@ pub(crate) enum SnippetLimit {
     /// Budget counts bytes; the clip keeps up to `max` bytes + `...`, widened
     /// down to the nearest char boundary. Faithful to the historical
     /// byte-slicing helpers it replaces (which panicked on mid-sequence cuts).
+    /// Test-only constructor since task 29 deleted the streaming call sites.
+    #[allow(dead_code)]
     Bytes,
 }
 
@@ -103,33 +105,6 @@ impl FixRegistry {
         result
     }
 
-    /// Apply fixes to a streaming chunk, with centralized logging
-    ///
-    /// Applies-gate note [B-L5]: this and the chunk methods below skip
-    /// `applies()` because a partial delta chunk can never satisfy the
-    /// whole-response predicates the [`ResponseFix`] contract evaluates
-    /// them on; the buffered paths (`apply_fixes`,
-    /// `apply_fixes_with_context`, `detect_fixes`) do gate on it, per that
-    /// contract. The historical asymmetry - streamed fixes bypassing the
-    /// gate - is resolved: default `fake` streaming buffers the complete
-    /// response and runs it through the gated buffered path, and
-    /// `passthrough` only detects via [`Self::detect_fixes`], which gates
-    /// too. The chunk family below survives only on the legacy streaming
-    /// fallback.
-    pub fn apply_fixes_stream(&self, chunk: Value) -> Value {
-        let mut result = chunk;
-
-        for fix in &self.fixes {
-            if self.is_enabled(fix.name()) {
-                let (new_result, action) = fix.apply_stream(result);
-                Self::log_fix_action(fix.name(), &action, fix.log_level());
-                result = new_result;
-            }
-        }
-
-        result
-    }
-
     /// Apply all enabled fixes with request context, with centralized logging
     pub fn apply_fixes_with_context(&self, response: Value, request: &Value) -> Value {
         let mut result = response;
@@ -151,56 +126,6 @@ impl FixRegistry {
                         Self::log_fix_action(fix.name(), &action, fix.log_level());
                     }
                 }
-            }
-        }
-
-        result
-    }
-
-    /// Apply fixes to a streaming chunk with request context, with centralized logging
-    pub fn apply_fixes_stream_with_context(&self, chunk: Value, request: &Value) -> Value {
-        let mut result = chunk;
-
-        for fix in &self.fixes {
-            if self.is_enabled(fix.name()) {
-                let (new_result, action) = fix.apply_stream_with_context(result, request);
-                Self::log_fix_action(fix.name(), &action, fix.log_level());
-                result = new_result;
-            }
-        }
-
-        result
-    }
-
-    /// Apply fixes to a streaming chunk with tool call accumulation, with centralized logging
-    pub fn apply_fixes_stream_with_accumulation(
-        &self,
-        chunk: Value,
-        request: &Value,
-        accumulator: &mut ToolCallAccumulator,
-    ) -> Value {
-        let mut result = chunk;
-
-        for fix in &self.fixes {
-            if self.is_enabled(fix.name()) {
-                let (new_result, action) = fix.apply_stream_with_accumulation(result, request, accumulator);
-                Self::log_fix_action(fix.name(), &action, fix.log_level());
-                result = new_result;
-            }
-        }
-
-        result
-    }
-
-    /// Apply fixes without request context but with accumulation, with centralized logging
-    pub fn apply_fixes_stream_with_accumulation_default(&self, chunk: Value, accumulator: &mut ToolCallAccumulator) -> Value {
-        let mut result = chunk;
-
-        for fix in &self.fixes {
-            if self.is_enabled(fix.name()) {
-                let (new_result, action) = fix.apply_stream_with_accumulation_default(result, accumulator);
-                Self::log_fix_action(fix.name(), &action, fix.log_level());
-                result = new_result;
             }
         }
 
@@ -548,21 +473,6 @@ mod tests {
     }
 
     #[test]
-    fn test_registry_apply_fixes_stream() {
-        let mut registry = FixRegistry::new();
-        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
-
-        let chunk = serde_json::json!({
-            "choices": [{
-                "delta": {"content": "test"}
-            }]
-        });
-
-        let result = registry.apply_fixes_stream(chunk.clone());
-        assert_eq!(result, chunk);
-    }
-
-    #[test]
     fn test_registry_configure() {
         let mut registry = FixRegistry::new();
         registry.register(Arc::new(ToolcallBadFilepathFix::new()));
@@ -738,51 +648,6 @@ mod tests {
 
         // Should not have applied the fix (disabled)
         assert_eq!(result, response);
-    }
-
-    #[test]
-    fn test_apply_fixes_stream_with_context() {
-        let mut registry = FixRegistry::new();
-        let fix = Arc::new(crate::fixes::ToolcallMalformedArgumentsFix::new());
-        registry.register(fix);
-
-        let request = serde_json::json!({
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "write",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": {"type": "string"},
-                            "content": {"type": "string"}
-                        }
-                    }
-                }
-            }]
-        });
-
-        let chunk = serde_json::json!({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [{
-                        "function": {
-                            "name": "write",
-                            "arguments": r#"{"content":"data",{}":"/path.txt"}"#
-                        }
-                    }]
-                }
-            }]
-        });
-
-        let result = registry.apply_fixes_stream_with_context(chunk, &request);
-
-        let args = result["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
-            .as_str()
-            .unwrap();
-
-        assert!(args.contains(r#""file_path":"#));
-        assert!(!args.contains(r#"{}":"#));
     }
 
     #[test]

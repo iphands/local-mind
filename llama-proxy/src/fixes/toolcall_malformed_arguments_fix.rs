@@ -265,57 +265,6 @@ impl ToolcallMalformedArgumentsFix {
 
         Ok((response, overall_action))
     }
-
-    /// Fix tool calls in streaming delta using request context. A no-guess `Err`
-    /// (ambiguous or empty candidate set) cannot ride the non-Result streaming
-    /// trait, so that call's chunk passes through byte-verbatim — the same
-    /// original-preserving fail-safe the registry applies on the buffered path.
-    fn fix_stream_with_context(&self, mut chunk: Value, request: &Value) -> (Value, FixAction) {
-        let schemas = Self::extract_tool_schemas(request);
-
-        if schemas.is_empty() {
-            tracing::debug!(
-                fix_name = self.name(),
-                "No tool schemas in request - cannot fix malformed arguments in streaming"
-            );
-            return (chunk, FixAction::NotApplicable);
-        }
-
-        let mut overall_action = FixAction::NotApplicable;
-
-        // Navigate to tool_calls in delta
-        if let Some(choices) = chunk.get_mut("choices").and_then(|c| c.as_array_mut()) {
-            for choice in choices {
-                if let Some(delta) = choice.get_mut("delta") {
-                    if let Some(tool_calls) = delta.get_mut("tool_calls").and_then(|tc| tc.as_array_mut()) {
-                        for tool_call in tool_calls {
-                            if let Some(function) = tool_call.get_mut("function") {
-                                let tool_name = function.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
-
-                                if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
-                                    let args = args.to_string();
-                                    match self.fix_arguments(&args, &tool_name, &schemas) {
-                                        Err(error) => tracing::debug!(
-                                            fix_name = self.name(),
-                                            %error,
-                                            "streaming delta left verbatim: no-guess refusal"
-                                        ),
-                                        Ok(Some(fixed_args)) => {
-                                            function["arguments"] = Value::String(fixed_args.clone());
-                                            overall_action = FixAction::fixed(&args, &fixed_args);
-                                        }
-                                        Ok(None) => {}
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        (chunk, overall_action)
-    }
 }
 
 impl ResponseFix for ToolcallMalformedArgumentsFix {
@@ -336,11 +285,6 @@ impl ResponseFix for ToolcallMalformedArgumentsFix {
         (response, FixAction::NotApplicable)
     }
 
-    fn apply_stream(&self, chunk: Value) -> (Value, FixAction) {
-        // Without context, we can't fix - just pass through
-        (chunk, FixAction::NotApplicable)
-    }
-
     fn applies_with_context(&self, response: &Value, request: &Value) -> bool {
         // Same all-choices gate as applies(), plus the schema precondition:
         // without `tools` in the request there is no candidate, so the fixer
@@ -350,10 +294,6 @@ impl ResponseFix for ToolcallMalformedArgumentsFix {
 
     fn apply_with_context(&self, response: Value, request: &Value) -> Result<(Value, FixAction), FixError> {
         self.fix_response_with_context(response, request)
-    }
-
-    fn apply_stream_with_context(&self, chunk: Value, request: &Value) -> (Value, FixAction) {
-        self.fix_stream_with_context(chunk, request)
     }
 }
 
@@ -586,50 +526,6 @@ mod tests {
         assert!(parsed.is_ok());
 
         // Should have detected the fix
-        assert!(action.detected());
-    }
-
-    #[test]
-    fn test_fix_stream_with_context() {
-        let fix = ToolcallMalformedArgumentsFix::new();
-
-        let request = json!({
-            "tools": [{
-                "type": "function",
-                "function": {
-                    "name": "write",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "file_path": {"type": "string"},
-                            "content": {"type": "string"}
-                        }
-                    }
-                }
-            }]
-        });
-
-        let chunk = json!({
-            "choices": [{
-                "delta": {
-                    "tool_calls": [{
-                        "function": {
-                            "name": "write",
-                            "arguments": "{\"content\":\"data\",{}\":\"/path.txt\"}"
-                        }
-                    }]
-                }
-            }]
-        });
-
-        let (fixed, action) = fix.fix_stream_with_context(chunk, &request);
-
-        let args = fixed["choices"][0]["delta"]["tool_calls"][0]["function"]["arguments"]
-            .as_str()
-            .unwrap();
-
-        assert!(args.contains("\"file_path\":"));
-        assert!(!args.contains("{}\":"));
         assert!(action.detected());
     }
 
