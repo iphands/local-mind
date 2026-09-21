@@ -16,9 +16,12 @@
 //! This fix:
 //! 1. Detects tool calls with malformed arguments containing `{}"` property names
 //! 2. Uses tool schemas from the request to determine the correct parameter name
-//! 3. Fills a slot ONLY when exactly one schema parameter is missing; on an
-//!    ambiguous or empty candidate set it returns `Err` (no-guess, task 27) so
-//!    the registry forwards the ORIGINAL response untouched
+//! 3. Fills slots by BIJECTION only when the count of missing schema parameters
+//!    equals the slot count — the model emits slot values in schema order by
+//!    construction, so an order-isomorphic assignment is not a guess. Zero,
+//!    fewer-than-slots, or more-than-slots candidates return `Err` (subset
+//!    selection is guesswork, root adjudication) so the registry forwards the
+//!    ORIGINAL response untouched
 
 use super::{json_scan::top_level_key_count, FixAction, FixError, ResponseFix};
 use regex::Regex;
@@ -71,8 +74,10 @@ impl ToolcallMalformedArgumentsFix {
     /// proves present. The scanner cannot read a malformed document, so presence
     /// is proven through a masked copy: every `{}` slot is spliced to an
     /// unguessable sentinel key, and the scanner counts each schema key in that
-    /// copy. Exactly one candidate fills its slots; zero candidates or more than
-    /// one return `Err(Rebuild)` so the registry keeps the ORIGINAL response.
+    /// copy. `candidates == slots` is an order-isomorphic bijection and splices
+    /// (the model emits slot values in schema order by construction). Zero
+    /// candidates, fewer than slots, or more than slots (subset selection)
+    /// return `Err(Rebuild)` so the registry keeps the ORIGINAL response.
     /// `Ok(None)` means the input is not our malformed shape at all.
     fn fix_arguments(
         &self,
@@ -90,17 +95,26 @@ impl ToolcallMalformedArgumentsFix {
 
         let candidates = self.candidate_keys(args_str, schema_params);
         let slots = self.malformed_pattern.find_iter(args_str).count();
-        match candidates.as_slice() {
-            [] => Err(FixError::Rebuild("no candidate keys".to_string())),
-            [single] => {
-                let fixed_args = self.splice_empty_key_slots(args_str, &[*single]);
+        match candidates.len() {
+            0 => Err(FixError::Rebuild("no candidate keys".to_string())),
+            n if n == slots => {
+                let fixed_args = self.splice_empty_key_slots(args_str, &candidates);
                 if serde_json::from_str::<Value>(&fixed_args).is_ok() {
                     Ok(Some(fixed_args))
                 } else {
-                    Err(FixError::Rebuild(format!("fill invalid: {slots} slots, 1 candidate")))
+                    let plural = if n == 1 { "" } else { "s" };
+                    Err(FixError::Rebuild(format!(
+                        "fill invalid: {slots} slots, {n} candidate{plural}"
+                    )))
                 }
             }
-            many => Err(FixError::Rebuild(format!("ambiguous: {} candidates", many.len()))),
+            n if n < slots => {
+                let plural = if n == 1 { "" } else { "s" };
+                Err(FixError::Rebuild(format!(
+                    "fill invalid: {slots} slots, {n} candidate{plural}"
+                )))
+            }
+            n => Err(FixError::Rebuild(format!("ambiguous: {n} candidates for {slots} slots"))),
         }
     }
 
@@ -704,22 +718,21 @@ mod tests {
         m
     }
 
-    // Given two empty-key slots and two missing schema keys the old code GUESSED:
-    // occurrence N took missing key N. Two candidate keys is exactly the ambiguous
-    // case task 27 forbids — the fix must error, not guess. The splicer mechanism
-    // (task 26) is unchanged and stays pinned here at its own level: distinct keys
-    // in schema order, occurrence N gets missing key N.
+    // Root adjudication (fix-forward from d239188): Qwen3-Coder empty-key slots
+    // carry values in schema order BY CONSTRUCTION (task-26 B-H3, HIGH severity),
+    // so candidates == slots is an order-isomorphic BIJECTION, not a guess:
+    // occurrence N gets candidate N. Splicer-mechanism pin (task 26) kept below.
     #[test]
-    fn test_two_empty_key_slots_ambiguous_not_guessed() {
+    fn test_two_empty_key_slots_assigned_in_schema_order() {
         let fix = ToolcallMalformedArgumentsFix::new();
         let schemas = schema_map(&["path", "mode", "content"]);
 
         let malformed = r#"{"content":"data",{}":"/tmp/a",{}":"hello"}"#;
-        let err = fix
+        let fixed = fix
             .fix_arguments(malformed, "write", &schemas)
-            .expect_err("two candidate keys must Err, never be positionally guessed");
-        assert!(matches!(err, FixError::Rebuild(_)), "must be Rebuild, got {err:?}");
-        assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates");
+            .expect("2 candidates / 2 slots is a bijection")
+            .expect("bijection must assign, not no-op");
+        assert_eq!(fixed, r#"{"content":"data","path":"/tmp/a","mode":"hello"}"#);
 
         // Splicer-mechanism pin (task 26, unchanged): given the key list it splices
         // distinct keys in order — occurrence N gets missing key N.
@@ -727,9 +740,9 @@ mod tests {
         assert_eq!(spliced, r#"{"content":"data","path":"/tmp/a","mode":"hello"}"#);
     }
 
-    // One slot with two candidate keys (path, mode) must Err: choosing the first
-    // missing key WAS the positional guess. Splicer-level pin kept: one key spliced
-    // into one slot fills it.
+    // One slot with two candidate keys (path, mode) must Err: taking candidate[0]
+    // is SUBSET SELECTION — the condemned guess class (adjudication concurs).
+    // Splicer-level pin kept: one key spliced into one slot fills it.
     #[test]
     fn test_one_slot_with_multiple_candidates_ambiguous() {
         let fix = ToolcallMalformedArgumentsFix::new();
@@ -738,8 +751,8 @@ mod tests {
         let malformed = r#"{"content":"x",{}":"/tmp/a"}"#;
         let err = fix
             .fix_arguments(malformed, "write", &schemas)
-            .expect_err("two candidate keys for one slot must Err");
-        assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates");
+            .expect_err("two candidate keys for one slot is subset selection -> Err");
+        assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates for 1 slots");
 
         assert_eq!(
             fix.splice_empty_key_slots(malformed, &["path"]),
@@ -748,10 +761,8 @@ mod tests {
     }
 
     // Given more slots than viable keys: the lone candidate (content is present)
-    // cannot cover both slots — splicing it leaves the second `{}` token, so the
-    // fill is invalid. The old code returned None silently; under the no-guess rule
-    // this is an Err(Rebuild) and the registry keeps the original — a strictly
-    // louder version of the same preservation. Splicer-level leftover pin kept:
+    // cannot cover both slots — no bijection exists, so Err(Rebuild) and the
+    // registry keeps the original. Splicer-level leftover pin kept:
     // slots past the key list survive byte-verbatim.
     #[test]
     fn test_more_slots_than_candidates_fill_invalid_err() {
@@ -840,11 +851,11 @@ mod tests {
     }
 
     // Byte-splice proof (task 26 splicer, mechanism unchanged): CJK values before
-    // and after the slots keep their multibyte payloads verbatim when the splicer
-    // IS given keys. At fix_arguments level this input is two candidates, which
-    // task 27 refuses to guess — Err, original preserved.
+    // and after the slots keep their multibyte payloads verbatim. At fix_arguments
+    // level this is 2 candidates / 2 slots — bijection, so the ordered splice runs
+    // (adjudication) — and the multibyte regions survive byte-for-byte.
     #[test]
-    fn test_cjk_two_slots_splicer_verbatim_but_ambiguous_at_fix_level() {
+    fn test_cjk_two_slots_splicer_verbatim_assigned_at_fix_level() {
         let fix = ToolcallMalformedArgumentsFix::new();
         let schemas = schema_map(&["path", "mode", "content"]);
 
@@ -852,17 +863,18 @@ mod tests {
         let spliced = fix.splice_empty_key_slots(malformed, &["path", "mode"]);
         assert_eq!(spliced, r#"{"content":"你好世界","path":"/路径/文件.rs","mode":"第二"}"#);
 
-        let err = fix
+        let fixed = fix
             .fix_arguments(malformed, "write", &schemas)
-            .expect_err("two candidate keys must Err, not guess");
-        assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates");
+            .expect("2 candidates / 2 slots is a bijection")
+            .expect("bijection assigns in schema order");
+        assert_eq!(fixed, r#"{"content":"你好世界","path":"/路径/文件.rs","mode":"第二"}"#);
     }
 
     // Byte-splice proof with escaped quotes (task 26 splicer, mechanism unchanged):
-    // the `\"` value region survives verbatim. Two candidates at fix_arguments
-    // level -> Err under the no-guess rule.
+    // the `\"` value region survives verbatim. 2 candidates / 2 slots -> bijection
+    // assigns; escaped region byte-verbatim at fix level too.
     #[test]
-    fn test_escaped_quote_splicer_verbatim_but_ambiguous_at_fix_level() {
+    fn test_escaped_quote_splicer_verbatim_assigned_at_fix_level() {
         let fix = ToolcallMalformedArgumentsFix::new();
         let schemas = schema_map(&["path", "mode", "content"]);
 
@@ -870,18 +882,20 @@ mod tests {
         let spliced = fix.splice_empty_key_slots(malformed, &["path", "mode"]);
         assert_eq!(spliced, r#"{"content":"say \"hi\"","path":"/tmp/a","mode":"b"}"#);
 
-        let err = fix
+        let fixed = fix
             .fix_arguments(malformed, "write", &schemas)
-            .expect_err("two candidate keys must Err, not guess");
-        assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates");
+            .expect("2 candidates / 2 slots is a bijection")
+            .expect("bijection assigns in schema order");
+        assert_eq!(fixed, r#"{"content":"say \"hi\"","path":"/tmp/a","mode":"b"}"#);
     }
 
-    // ---- task 27: no-guess candidate parsing ----
+    // ---- task 27 (bijection-gated, root adjudication): no-guess candidate parsing ----
     //
     // Candidates = (schema keys, iterated in SCHEMA order) minus (keys proven
-    // present by the task-23 scanner on the slot-masked copy). Exactly one
-    // candidate fills; zero or many return Err(Rebuild) so the registry keeps
-    // the ORIGINAL response.
+    // present by the task-23 scanner on the slot-masked copy). candidates == slots
+    // is an order-isomorphic bijection and assigns; candidates < slots, candidates
+    // == 0, and candidates > slots (subset selection) all Err(Rebuild) so the
+    // registry keeps the ORIGINAL response.
 
     // The candidate set is computed correctly under CJK schema keys, dotted key
     // names, and escaped-\" string values mid-object: the scanner sees through
@@ -936,15 +950,17 @@ mod tests {
         );
     }
 
-    // Two-candidate garbage must NEVER be positionally guessed: the fixer errors
-    // and the response reaches the client BYTE-IDENTICAL to the input (the
-    // task-31 registry forwards the untouched original on Err).
+    // RETARGETED by the adjudication: the old fixture was 2 slots / 2 candidates,
+    // which the bijection gate now ASSIGNS. The genuine subset shape (2 slots, 3
+    // candidates — `content` absent, `note` not in schema) is the refused guess
+    // class: the fixer errors and the response reaches the client BYTE-IDENTICAL
+    // to the input (the task-31 registry forwards the untouched original on Err).
     #[test]
-    fn task27_two_candidates_error_and_response_bytes_preserved() {
+    fn task27_subset_selection_error_and_response_bytes_preserved() {
         let fix = ToolcallMalformedArgumentsFix::new();
         let request = write_request(&["path", "mode", "content"]);
 
-        let args = r#"{"content":"data",{}":"/tmp/a",{}":"b"}"#;
+        let args = r#"{"note":"data",{}":"/tmp/a",{}":"b"}"#;
         let response = json!({
             "choices": [{
                 "message": {
@@ -961,13 +977,13 @@ mod tests {
         let result = fix.apply_with_context(response.clone(), &request);
         match result {
             Ok((v, _a)) => panic!(
-                "RED (harm demonstration) — baseline guessed instead of erroring; \
+                "RED (harm demonstration) — a guesser would subset-select here; \
                  the wrong-key fill it produced for the client was: {:?}",
                 v["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str()
             ),
             Err(err) => {
                 assert!(matches!(err, FixError::Rebuild(_)), "must be Rebuild, got {err:?}");
-                assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates");
+                assert_eq!(err.to_string(), "rebuild error: ambiguous: 3 candidates for 2 slots");
             }
         }
         assert_eq!(
@@ -975,6 +991,26 @@ mod tests {
             input_bytes,
             "fixer must not mutate what the fail-safe forwards"
         );
+    }
+
+    // Subset-selection refusal at the unit level: 2 slots with 3 candidates must
+    // Err — picking any 2-of-3 is the condemned guess class. CJK candidates and
+    // duplicate slot values included (parsing-adversarial shapes).
+    #[test]
+    fn test_two_slots_three_candidates_ambiguous() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+
+        let cjk = schema_map(&["路径", "模式", "备注"]);
+        let err = fix
+            .fix_arguments(r#"{"杂项":"x",{}":"/甲",{}":"/乙"}"#, "write", &cjk)
+            .expect_err("3 candidates for 2 slots is subset selection -> Err");
+        assert_eq!(err.to_string(), "rebuild error: ambiguous: 3 candidates for 2 slots");
+
+        let latin = schema_map(&["path", "mode", "content"]);
+        let err = fix
+            .fix_arguments(r#"{"other":"x",{}":"same",{}":"same"}"#, "write", &latin)
+            .expect_err("duplicate slot values do not make a bijection");
+        assert_eq!(err.to_string(), "rebuild error: ambiguous: 3 candidates for 2 slots");
     }
 
     /// Request carrying a `write` tool whose schema key order is exactly `order`.
