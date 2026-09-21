@@ -46,7 +46,15 @@ pub async fn synthesize_streaming_response(
     let tool_calls = message.tool_calls.clone();
     let reasoning_text = message.reasoning_text.clone();
     let reasoning_opaque = message.reasoning_opaque.clone();
-    let finish_reason = choice.finish_reason.clone().unwrap_or_else(|| "stop".to_string());
+    // Honest derivation only when the backend omitted finish_reason: tool calls
+    // present -> tool_calls, else stop. An explicit value is never overridden.
+    let finish_reason = choice.finish_reason.clone().unwrap_or_else(|| {
+        if message.tool_calls.as_ref().is_some_and(|t| !t.is_empty()) {
+            "tool_calls".to_string()
+        } else {
+            "stop".to_string()
+        }
+    });
 
     // Get usage for final chunk
     let usage = response.usage.clone();
@@ -134,17 +142,6 @@ fn synthesize_chunks(
     // First chunk: role only (standard OpenAI streaming pattern)
     chunks.push(Ok(create_sse_event(&sse_envelope(&meta, "role", json!("assistant"), 0))));
 
-    // If tool calls exist, send them as a SINGLE complete chunk
-    // This is key to avoiding delta calculation - send complete tool_calls array at once
-    if let Some(tools) = tool_calls {
-        chunks.push(Ok(create_sse_event(&sse_envelope(
-            &meta,
-            "tool_calls",
-            serde_json::to_value(&tools).unwrap(),
-            0,
-        ))));
-    }
-
     // Stream reasoning_text if present (Opencode extension)
     // Send as single chunk since it's usually not huge
     if let Some(reasoning) = reasoning_text {
@@ -171,6 +168,17 @@ fn synthesize_chunks(
         for text_chunk in text_chunks {
             chunks.push(Ok(create_sse_event(&sse_envelope(&meta, "content", json!(text_chunk), 0))));
         }
+    }
+
+    // Tool calls ride LAST (role -> reasoning -> text -> tool-call args), as a
+    // SINGLE complete chunk - this is the key to avoiding delta calculation.
+    if let Some(tools) = tool_calls {
+        chunks.push(Ok(create_sse_event(&sse_envelope(
+            &meta,
+            "tool_calls",
+            serde_json::to_value(&tools).unwrap(),
+            0,
+        ))));
     }
 
     // Final chunk with finish_reason, usage, and timings
@@ -507,12 +515,23 @@ fn build_content_block_stop_event(index: usize) -> serde_json::Value {
     })
 }
 
+/// Derive the stop_reason the backend omitted: a tool_use block -> tool_use,
+/// otherwise end_turn. max_tokens is NEVER derived (only the backend can say it).
+fn derive_stop_reason(msg: &AnthropicMessage) -> String {
+    if msg.content.iter().any(|b| matches!(b, AnthropicContentBlock::ToolUse { .. })) {
+        "tool_use".to_string()
+    } else {
+        "end_turn".to_string()
+    }
+}
+
 /// Build message_delta event with stop_reason and final usage
 fn build_message_delta_event(msg: &AnthropicMessage) -> serde_json::Value {
+    let stop_reason = msg.stop_reason.clone().or_else(|| Some(derive_stop_reason(msg)));
     json!({
         "type": "message_delta",
         "delta": {
-            "stop_reason": msg.stop_reason,
+            "stop_reason": stop_reason,
             "stop_sequence": msg.stop_sequence
         },
         "usage": {
@@ -1299,9 +1318,12 @@ mod envelope_factory_tests {
 
     #[tokio::test]
     async fn refactor_preserves_exact_sse_bytes() {
-        // Golden bytes captured VERBATIM from the pre-refactor (21f0548) response for
-        // this exact fixture (red_probe capture, task58 evidence). Any envelope drift fails.
-        const BASELINE_BYTES: &str = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\",\"name\":\"lookup\"},\"id\":\"call_1\",\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_text\":\"Hmm, let me think.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Answer here.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":7,\"prompt_tokens\":5,\"total_tokens\":12}}\n\ndata: [DONE]\n\n";
+        // Golden bytes captured VERBATIM from the REAL response for this exact fixture.
+        // Pre-58 capture proved the sse_envelope refactor was byte-identical (task58
+        // evidence); retargeted in task 59 to the post-order/derivation stream
+        // (tool-call args last, finish_reason derived to "tool_calls").
+        const BASELINE_BYTES: &str = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_text\":\"Hmm, let me think.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Answer here.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\",\"name\":\"lookup\"},\"id\":\"call_1\",\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\"}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\",\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":7,\"prompt_tokens\":5,\"total_tokens\":12}}\n\ndata: [DONE]\n\n";
+
         let raw = serde_json::json!({
             "id": "cmpl-probe", "object": "chat.completion", "created": 171, "model": "qwen3",
             "system_fingerprint": "fp_999",
@@ -1317,5 +1339,158 @@ mod envelope_factory_tests {
         let resp = synthesize_streaming_response(typed, &cfg).await.unwrap();
         let body = axum::body::to_bytes(resp.into_body(), 10_000_000).await.unwrap();
         assert_eq!(String::from_utf8(body.to_vec()).unwrap(), BASELINE_BYTES);
+    }
+}
+
+#[cfg(test)]
+mod order_finish_reason_tests {
+    use super::*;
+    use crate::api::AnthropicUsage;
+
+    async fn body(resp: Response) -> String {
+        let b = axum::body::to_bytes(resp.into_body(), 10_000_000).await.unwrap();
+        String::from_utf8(b.to_vec()).unwrap()
+    }
+
+    fn mixed_no_finish() -> ChatCompletionResponse {
+        let raw = serde_json::json!({
+            "id": "c59", "created": 9, "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "TEXT-BODY", "reasoning_text": "REASON-BODY",
+                "tool_calls": [{"id": "call_9", "type": "function", "function": {"name": "f", "arguments": "{}"}}]}}]
+        });
+        serde_json::from_value(raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn tool_call_delta_follows_text_delta() {
+        // Given: message with reasoning + content + tool_calls, NO finish_reason
+        // When: OpenAI synthesis
+        // Then: order is role -> reasoning -> content -> tool_calls (baseline emitted
+        //       tool_calls SECOND, before reasoning/text)
+        let cfg = SynthesisConfig::default();
+        let b = body(synthesize_streaming_response(mixed_no_finish(), &cfg).await.unwrap()).await;
+        let i_reason = b.find("REASON-BODY").expect("reasoning delta");
+        let i_text = b.find("TEXT-BODY").expect("content delta");
+        let i_tool = b.find("call_9").expect("tool_calls delta");
+        assert!(i_reason < i_text, "reasoning must precede text");
+        assert!(i_text < i_tool, "text must precede tool-call args (baseline order = RED)");
+    }
+
+    #[tokio::test]
+    async fn finish_reason_derives_tool_calls_when_absent() {
+        // Then: final chunk finish_reason == "tool_calls", not the fabricated "stop"
+        let cfg = SynthesisConfig::default();
+        let b = body(synthesize_streaming_response(mixed_no_finish(), &cfg).await.unwrap()).await;
+        assert!(
+            b.contains("\"finish_reason\":\"tool_calls\""),
+            "finish_reason must be derived, got:\n{b}"
+        );
+        let final_idx = b.rfind("\"finish_reason\":\"stop\"");
+        assert!(final_idx.is_none(), "fabricated \"stop\" must be gone");
+    }
+
+    #[tokio::test]
+    async fn finish_reason_still_derives_stop_when_nothing_else() {
+        // Given: content-only message without finish_reason -> honest default stays "stop"
+        let raw = serde_json::json!({"id":"c","created":1,"model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"x"}}]});
+        let typed: ChatCompletionResponse = serde_json::from_value(raw).unwrap();
+        let cfg = SynthesisConfig::default();
+        let b = body(synthesize_streaming_response(typed, &cfg).await.unwrap()).await;
+        assert!(b.contains("\"finish_reason\":\"stop\""));
+    }
+
+    #[tokio::test]
+    async fn explicit_finish_reason_is_never_overridden() {
+        let raw = serde_json::json!({"id":"c","created":1,"model":"m","choices":[{"index":0,"finish_reason":"length","message":{"role":"assistant","content":"x","tool_calls":[{"id":"t","type":"function","function":{"name":"f","arguments":"{}"}}]}}]});
+        let typed: ChatCompletionResponse = serde_json::from_value(raw).unwrap();
+        let cfg = SynthesisConfig::default();
+        let b = body(synthesize_streaming_response(typed, &cfg).await.unwrap()).await;
+        assert!(b.contains("\"finish_reason\":\"length\""));
+    }
+
+    #[tokio::test]
+    async fn anthropic_stop_reason_derives_tool_use_when_absent() {
+        // Given: ToolUse block, stop_reason None (typed path == handler's Anthropic-format branch)
+        // Then: message_delta carries "tool_use", not null
+        let msg = AnthropicMessage {
+            id: "m59".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::ToolUse {
+                id: "t1".to_string(),
+                name: "f".to_string(),
+                input: json!({}),
+            }],
+            model: "m".to_string(),
+            stop_reason: None,
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+        let b = body(
+            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            b.contains("\"stop_reason\":\"tool_use\""),
+            "baseline emits null => RED, got:\n{b}"
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_stop_reason_derives_end_turn_when_no_tool_use() {
+        let msg = AnthropicMessage {
+            id: "m59b".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::Text { text: "hi".to_string() }],
+            model: "m".to_string(),
+            stop_reason: None,
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+        let b = body(
+            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            b.contains("\"stop_reason\":\"end_turn\""),
+            "baseline emits null => RED, got:\n{b}"
+        );
+    }
+
+    #[tokio::test]
+    async fn anthropic_explicit_max_tokens_is_preserved() {
+        // max_tokens can only come from the backend (finish_reason length -> From maps it);
+        // the derivation must not clobber it
+        let msg = AnthropicMessage {
+            id: "m59c".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::Text { text: "hi".to_string() }],
+            model: "m".to_string(),
+            stop_reason: Some("max_tokens".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+        let b = body(
+            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(b.contains("\"stop_reason\":\"max_tokens\""));
     }
 }
