@@ -877,6 +877,12 @@ pub mod dump {
     }
 
     /// Dump request/response pair to disk
+    //
+    // big-fix F1: the streaming sibling of handler.rs's 9-arg dump contract
+    // (task 12: positional ORIGINAL-bytes inputs, single caller in this
+    // module) - a params struct here would reshape the dump wire format in
+    // the final wave for lint noise only.
+    #[allow(clippy::too_many_arguments)]
     pub async fn dump_request_response(
         dump_path: &Arc<PathBuf>,
         request_method: &str,

@@ -49,6 +49,7 @@ use serde_json::Value;
 /// Uses schema-based truncation: Since the Write tool schema only allows
 /// `content` and `filePath` fields (no additional properties), we truncate
 /// after the first complete `"filePath":"value"` occurrence.
+#[derive(Default)]
 pub struct ToolcallBadFilepathFix {}
 
 impl ToolcallBadFilepathFix {

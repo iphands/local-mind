@@ -116,6 +116,13 @@ mod dump {
     /// transformed the body, `decoded_variant` carries the transformed bytes and is
     /// written next to the original as `res.<ext>.decoded`, raw - the variant exists
     /// to be diffed byte-for-byte against what the client actually received.
+    //
+    // big-fix F1 [C-L11 family]: 9 args is the dump wire contract pinned by the
+    // task-12 spec-literal acceptance test (ORIGINAL bytes + optional .decoded
+    // variant as positional inputs) and the task-95 decision "shrink the body,
+    // not the signature" - grouping args into a params struct would reshape the
+    // contract the dump tests pin, i.e. behavior churn in the final wave.
+    #[allow(clippy::too_many_arguments)]
     pub async fn dump_request_response(
         dump_path: &Arc<PathBuf>,
         request_method: &str,
@@ -1333,6 +1340,12 @@ impl ProxyHandler {
     }
 
     /// Handle a non-streaming response
+    //
+    // big-fix F1: task 95 [C-L11] split handle() and EXPLICITLY kept this
+    // signature ("the parent fn keeps its args; shrink the body, not the
+    // signature" - learnings, task 95). Trimming the 10 args would break the
+    // call contract the seam split was built to preserve.
+    #[allow(clippy::too_many_arguments)]
     async fn handle_non_streaming_response(
         &self,
         backend_response: reqwest::Response,

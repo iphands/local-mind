@@ -53,9 +53,10 @@ pub enum FixLogLevel {
 }
 
 /// Result of applying a fix, used for standardized logging
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub enum FixAction {
     /// Fix did not apply (content was fine or fix doesn't handle this)
+    #[default]
     NotApplicable,
     /// Malformed content detected and successfully fixed
     Fixed {
@@ -130,12 +131,6 @@ impl FixAction {
     /// Returns true if malformed content was detected (Fixed or Failed)
     pub fn detected(&self) -> bool {
         matches!(self, Self::Fixed { .. } | Self::Failed { .. })
-    }
-}
-
-impl Default for FixAction {
-    fn default() -> Self {
-        Self::NotApplicable
     }
 }
 

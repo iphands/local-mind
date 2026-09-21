@@ -40,22 +40,13 @@ pub struct AppConfig {
 }
 
 /// Debug dump configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DumpConfig {
     #[serde(default)]
     pub enabled: bool,
     #[serde(default)]
     pub path: String,
-}
-
-impl Default for DumpConfig {
-    fn default() -> Self {
-        Self {
-            enabled: false,
-            path: String::new(),
-        }
-    }
 }
 
 /// Proxy server configuration
@@ -607,18 +598,10 @@ impl Default for RepromptConfig {
 }
 
 /// Exporters configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct ExportersConfig {
     #[serde(default)]
     pub influxdb: InfluxDbConfig,
-}
-
-impl Default for ExportersConfig {
-    fn default() -> Self {
-        Self {
-            influxdb: InfluxDbConfig::default(),
-        }
-    }
 }
 
 /// InfluxDB exporter configuration

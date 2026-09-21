@@ -642,7 +642,7 @@ impl From<ChatCompletionResponse> for AnthropicMessage {
         // Extract content from the first choice and convert to content blocks
         let content: Vec<AnthropicContentBlock> = resp
             .choices
-            .get(0)
+            .first()
             .and_then(|c| c.message.as_ref())
             .map(|m| {
                 let mut blocks = Vec::new();
@@ -705,7 +705,7 @@ impl From<ChatCompletionResponse> for AnthropicMessage {
         // Map OpenAI finish_reason to Anthropic stop_reason
         let stop_reason = resp
             .choices
-            .get(0)
+            .first()
             .and_then(|c| c.finish_reason.as_ref())
             .map(|r| match r.as_str() {
                 "stop" => "end_turn".to_string(),

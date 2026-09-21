@@ -33,6 +33,12 @@ pub struct ToolcallMalformedArgumentsFix {
     malformed_pattern: Regex,
 }
 
+impl Default for ToolcallMalformedArgumentsFix {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ToolcallMalformedArgumentsFix {
     pub fn new() -> Self {
         Self {
