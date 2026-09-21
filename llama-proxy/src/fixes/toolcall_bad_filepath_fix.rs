@@ -16,9 +16,11 @@
 //!
 //! **Fix approach:**
 //! 1. Find first `"filePath":"<value>"` occurrence
-//! 2. Truncate after the closing quote of the value
-//! 3. Remove trailing comma if present
-//! 4. Close with `}`
+//! 2. Refuse when the value carries a swallowed-quote signature (a dangling
+//!    backslash makes the scan's end a lie — see `swallowed_quote_in_value`)
+//! 3. Refuse when a schema-valid `content` entry provably follows the cut
+//!    (`json_scan::keys_after`) — deleting it would mean an empty-file Write
+//! 4. Truncate after the closing quote of the value, close with `}`
 //!
 //! This is simpler and more robust than previous multi-stage fallback approaches.
 //!
@@ -39,10 +41,58 @@
 //! structural duplicate/malformed predicates, so a well-formed Write call of
 //! ANY shape passes through untouched.
 
-use super::json_scan::{top_level_key_count, top_level_key_spans};
+use super::json_scan::{depth1_keys, keys_after, top_level_key_count, top_level_key_spans};
 use super::registry::{truncate_snippet, SnippetLimit};
 use super::{FixAction, FixError, ResponseFix};
 use serde_json::Value;
+
+/// The one non-`filePath` key the Write schema (content + filePath, no
+/// additionalProperties) allows after `filePath`: the file body. Deleting a
+/// proven instance of it is the damage this fix must never do, so it is the
+/// named trigger of the truncation refusal.
+const SCHEMA_BODY_KEY: &str = "content";
+
+/// True when the scanned `"value"` token's raw region contains an escaped
+/// quote (`\"`) under escape-pair walking. That is the signature of a lone
+/// trailing backslash on the model's intended value: the backslash ate the
+/// value's closing quote, the scanner ran on to a later key's quote, and the
+/// resulting cut point deletes everything it wrongly claimed was one value.
+/// A legitimately escaped quote inside a path produces the same signature and
+/// is refused too — the fixer cannot delimit it honestly either, and refusing
+/// keeps the ORIGINAL bytes instead of guessing.
+fn swallowed_quote_in_value(value_raw: &str) -> bool {
+    let mut inner = value_raw[1..value_raw.len() - 1].chars();
+    while let Some(c) = inner.next() {
+        if c != '\\' {
+            continue;
+        }
+        match inner.next() {
+            Some('"') | None => return true,
+            Some(_) => continue,
+        }
+    }
+    false
+}
+
+/// True when some depth-1 key OTHER than `filePath` appears two or more
+/// times. `filePath` duplicates are this fix's declared contract (FIRST-wins
+/// via spans); every other duplicated key would collapse LAST-wins silently
+/// inside the serde Value round-trip — a winner the module neither defines
+/// nor may pick. Callers refuse the repair on `true`. Nested duplicates stay
+/// out of scope, matching the task-23 depth discipline.
+fn has_foreign_duplicate(args: &str) -> bool {
+    let Some(keys) = depth1_keys(args) else {
+        return false; // not parseable: the round-trip never runs, nothing collapses
+    };
+    let mut seen: Vec<&str> = Vec::new();
+    keys.iter().map(String::as_str).filter(|k| *k != "filePath").any(|k| {
+        if seen.contains(&k) {
+            return true;
+        }
+        seen.push(k);
+        false
+    })
+}
 
 /// Fix for malformed filePath in Qwen3-Coder tool calls
 ///
@@ -74,7 +124,10 @@ impl ToolcallBadFilepathFix {
     /// Attempt to fix malformed arguments string using schema-based truncation
     /// Key insight: Write tool schema has only 2 fields (content, filePath) with no
     /// additional properties allowed. Once we find the first complete "filePath":"value",
-    /// everything after is garbage by definition.
+    /// everything after is garbage by definition — PROVED garbage, that is: two
+    /// refusal rules gate the cut (see `swallowed_quote_in_value` and the
+    /// `keys_after` guard below), because on those shapes "everything after"
+    /// is not provably garbage and truncating would destroy client data.
     ///
     /// `Ok` guarantees valid JSON. `Err` means the arguments are unparseable and
     /// no schema surgery can rebuild them — the old `"{}"` fallback destroyed the
@@ -114,13 +167,33 @@ impl ToolcallBadFilepathFix {
                 truncate_snippet(args, 200, SnippetLimit::Chars)
             )));
         };
-        let end_pos = start + filepath_key.len() + value_end;
-        let mut result = args[..end_pos].to_string();
-
-        // Remove trailing comma if present (invalid before closing brace)
-        if result.trim_end().ends_with(',') {
-            result = result.trim_end().trim_end_matches(',').to_string();
+        // A lone trailing backslash on the model's intended value swallows the
+        // value's own closing quote, so the scan above stopped on some LATER
+        // key's quote: the path comes out mangled and everything up to that
+        // quote gets deleted. The cut point is a lie — refuse.
+        if swallowed_quote_in_value(&after_colon[..value_end]) {
+            return Err(FixError::Parse(format!(
+                "first filePath value carries a swallowed quote (dangling backslash before a closing quote) - the value boundary is unknowable: {}",
+                truncate_snippet(args, 200, SnippetLimit::Chars)
+            )));
         }
+        let end_pos = start + filepath_key.len() + value_end;
+
+        // Truncation is only sound when everything after the first complete
+        // filePath is garbage. Schema-wise the one key that may legally follow
+        // is `content` (the Write body), and deleting a PROVEN `content` entry
+        // turns the call into an empty-file Write. keys_after proves each
+        // entry it can walk; a `content` among them (or anywhere the walk can
+        // reach) refuses the cut. Past the first structural break nothing is
+        // provable and truncation proceeds, which is the fix's declared
+        // domain: only provable garbage gets deleted beyond a provable cut.
+        if keys_after(args, end_pos).iter().any(|key| key == SCHEMA_BODY_KEY) {
+            return Err(FixError::Rebuild(format!(
+                "a schema-valid \"{SCHEMA_BODY_KEY}\" entry follows the first filePath value - truncating there would delete the file body: {}",
+                truncate_snippet(args, 200, SnippetLimit::Chars)
+            )));
+        }
+        let mut result = args[..end_pos].to_string();
 
         result.push('}');
 
@@ -207,6 +280,21 @@ impl ToolcallBadFilepathFix {
                         if let Some(function) = call.get_mut("function") {
                             if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
                                 if self.is_malformed(args) {
+                                    // Root rule: FIRST-wins is defined for
+                                    // filePath only. A duplicated ANY OTHER
+                                    // depth-1 key would silently collapse
+                                    // LAST-wins in the Value round-trip, so
+                                    // the whole repair is refused for this
+                                    // call — skipped without an action, WARN
+                                    // for the operator. No guessing.
+                                    if has_foreign_duplicate(args) {
+                                        tracing::warn!(
+                                            fix_name = self.name(),
+                                            arguments = %truncate_snippet(args, 200, SnippetLimit::Chars),
+                                            "Duplicated non-filePath key - refusing repair (FIRST-wins is only defined for filePath)"
+                                        );
+                                        continue;
+                                    }
                                     let original = args.to_string();
                                     let fixed = self.fix_arguments(args)?;
                                     function["arguments"] = Value::String(fixed.clone());
@@ -565,6 +653,90 @@ mod tests {
 
         let fixed = fix.fix_arguments(valid).expect("valid JSON round-trips");
         assert!(fix.is_valid_json(&fixed));
+    }
+
+    // ============================================================
+    // BIG-FIX F12-R1 (MAJOR 1-3): truncation must REFUSE, not destroy
+    // The three review repro shapes (raws in
+    // .omo/evidence/big-fix/f12-fix-r1.txt) each silently deleted or
+    // rewrote client data on the pre-fix baseline.
+    // ============================================================
+
+    #[test]
+    fn f12r1_major1_proven_content_after_first_filepath_refuses() {
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"filePath":"/tmp/x.txt","content":"THE ENTIRE FILE BODY","filePath"/tmp/x.txt"}"#;
+        assert!(fix.is_malformed(args));
+
+        let outcome = fix.fix_arguments(args);
+        assert!(
+            matches!(outcome, Err(FixError::Rebuild(_))),
+            "a provable `content` entry after the cut must refuse truncation, got {outcome:?}"
+        );
+
+        let response = fuzz_response(Some(args));
+        let (result, action) = fix.apply(response);
+        let args_out = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        assert_eq!(args_out, args, "refusal must forward the ORIGINAL bytes");
+        assert!(matches!(action, FixAction::Failed { .. }), "refusal must report Failed");
+    }
+
+    #[test]
+    fn f12r1_major1_content_first_dup_still_repairs() {
+        // Control for the refusal above: the declared shape (body BEFORE
+        // filePath) still repairs — the keys_after walk from the cut finds
+        // only the broken filePath entry, never `content`.
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"content":"BODY","filePath":"/x","filePath"/bad"}"#;
+        let fixed = fix.fix_arguments(args).expect("content-first shape must repair");
+        let parsed: Value = serde_json::from_str(&fixed).expect("valid JSON");
+        assert_eq!(parsed["content"], "BODY");
+        assert_eq!(parsed["filePath"], "/x");
+    }
+
+    #[test]
+    fn f12r1_major2_swallowed_quote_refuses() {
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"filePath":"/p\","content":"BODY"}"#;
+        assert!(fix.is_malformed(args));
+
+        let outcome = fix.fix_arguments(args);
+        assert!(
+            matches!(outcome, Err(FixError::Parse(_))),
+            "a swallowed quote makes the cut point a lie — must refuse, got {outcome:?}"
+        );
+
+        let response = fuzz_response(Some(args));
+        let (result, _action) = fix.apply(response);
+        let args_out = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        assert_eq!(args_out, args, "original bytes must survive the refusal");
+    }
+
+    #[test]
+    fn f12r1_major2_even_backslash_control_repairs() {
+        // Legit trailing backslash (EVEN escape pair): the scan ends honestly,
+        // truncation repairs as declared.
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"filePath":"/p\\","filePath"/x"}"#;
+        let fixed = fix.fix_arguments(args).expect("even-backslash shape must repair");
+        let parsed: Value = serde_json::from_str(&fixed).expect("valid JSON");
+        assert_eq!(parsed["filePath"].as_str(), Some("/p\\"), "winner is one trailing backslash");
+    }
+
+    #[test]
+    fn f12r1_major3_foreign_duplicate_key_refused_untouched() {
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"filePath":"/first","filePath":"/second","content":"GOOD BODY","content":"BAD BODY"}"#;
+        assert!(fix.is_malformed(args));
+
+        let response = fuzz_response(Some(args));
+        let (result, action) = fix.apply(response.clone());
+        assert_eq!(result, response, "refused repair must not touch the response");
+        assert!(!action.detected(), "skipped repair reports no fix action");
     }
 
     #[test]

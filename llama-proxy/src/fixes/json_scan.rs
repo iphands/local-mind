@@ -18,9 +18,9 @@
 //! `top_level_key_count` to the raw scanner (same signature).
 //!
 //! The naive baseline this replaces (`str::matches("\"filePath\"").count()`,
-//! the current practice in `ToolCallAccumulator::accumulate_and_check`)
-//! miscounts: on `{"msg":"he said \"filePath"}` it returns 1 — the value's own
-//! closing quote completes a `"filePath"` substring — and on
+//! the practice in the `ToolCallAccumulator::accumulate_and_check` that task
+//! 29 deleted) miscounts: on `{"msg":"he said \"filePath"}` it returns 1 — the
+//! value's own closing quote completes a `"filePath"` substring — and on
 //! `{"meta":{"filePath":"/x"}}` it counts a nested-only key. The scanner
 //! returns 0 for both; see `key_appearance_inside_string_value_is_zero`.
 
@@ -79,6 +79,87 @@ pub(crate) fn top_level_key_count(json: &str, key: &str) -> usize {
 /// `preceding-comma..value.end` for every later span; see KeySpan.
 pub(crate) fn top_level_key_spans(json: &str, key: &str) -> Vec<KeySpan> {
     scan_spans(json, key).unwrap_or_default()
+}
+
+/// Every depth-1 key of the root object, decoded, in document order —
+/// duplicates included. `None` on the same structural failure discipline as
+/// [`top_level_key_spans`] (which is to say: only well-formed documents get a
+/// key list; a caller that already gate-checked `from_str::<Value>` always
+/// gets `Some`). Consumers compare lengths/counts to spot duplicate keys
+/// without re-parsing.
+pub(crate) fn depth1_keys(json: &str) -> Option<Vec<String>> {
+    let b = json.as_bytes();
+    let mut i = skip_ws(b, 0);
+    if b.get(i) != Some(&b'{') {
+        return None;
+    }
+    let mut out = Vec::new();
+    i = skip_ws(b, i + 1);
+    if *b.get(i)? == b'}' {
+        return Some(out);
+    }
+    loop {
+        let (key, after_entry) = scan_entry(b, json, i)?;
+        out.push(key);
+        i = skip_ws(b, after_entry);
+        match *b.get(i)? {
+            b',' => i = skip_ws(b, i + 1),
+            b'}' => return Some(out),
+            _ => return None,
+        }
+    }
+}
+
+/// Decoded depth-1 keys of the `,"key":value` entry sequence that starts at
+/// byte offset `from` — a position sitting immediately after some other
+/// depth-1 value. The walk stops at the closing `}` or at the first
+/// structural failure, and the keys proven before that point are returned:
+/// unlike [`top_level_key_spans`] a partial result is kept, because the
+/// caller's question is "is THIS key provably present after `from` in a
+/// document that is broken further on?" Nothing past the break is provable,
+/// and only complete `"key":value` entries are reported.
+pub(crate) fn keys_after(json: &str, from: usize) -> Vec<String> {
+    let b = json.as_bytes();
+    let mut out = Vec::new();
+    let mut i = from;
+    loop {
+        i = skip_ws(b, i);
+        if b.get(i) != Some(&b',') {
+            return out; // closing brace, end of input, or garbage
+        }
+        i = skip_ws(b, i + 1);
+        let Some((key, after_entry)) = scan_entry(b, json, i) else {
+            return out;
+        };
+        out.push(key);
+        i = after_entry;
+    }
+}
+
+/// One depth-1 entry at `b[i]` (which must be the key's opening quote):
+/// returns the decoded key plus the offset just past the value token. Fails
+/// unless the full `"key" : value` shape scans cleanly — a key whose colon or
+/// value is broken is NOT a proven entry.
+fn scan_entry(b: &[u8], json: &str, i: usize) -> Option<(String, usize)> {
+    if b.get(i) != Some(&b'"') {
+        return None;
+    }
+    let after_key = scan_string(b, i)?;
+    let mut j = skip_ws(b, after_key);
+    if b.get(j) != Some(&b':') {
+        return None;
+    }
+    j = skip_ws(b, j + 1);
+    let val_end = scan_value(b, j)?;
+    // Same decode discipline as scan_spans: escaped keys resolve via serde so
+    // `file\u0050ath` compares equal to `filePath`; plain tokens borrow raw.
+    let token = &json[i..after_key];
+    let key = if token[1..token.len() - 1].contains('\\') {
+        serde_json::from_str::<String>(token).ok()?
+    } else {
+        token[1..token.len() - 1].to_string()
+    };
+    Some((key, val_end))
 }
 
 fn skip_ws(b: &[u8], mut i: usize) -> usize {
@@ -421,5 +502,36 @@ mod tests {
         }
         out.push_str(&json[prev..]);
         out
+    }
+
+    // ---- BIG-FIX F12-R1: keys_after / depth1_keys (truncation + dup guards) ----
+
+    #[test]
+    fn keys_after_walks_full_and_partial_entry_sequences() {
+        // Given a clean tail: every entry after the offset is proven.
+        assert_eq!(keys_after(r#"{"a":1,"content":"body","b":2}"#, 6), ["content", "b"]);
+
+        // Given a tail that BREAKS at the malformed filePath entry: keys
+        // proven before the break are kept (unlike the all-or-nothing span
+        // walkers), the broken entry itself is not reported.
+        assert_eq!(keys_after(r#"{"a":1,"content":"body","filePath"/x"}"#, 6), ["content"]);
+
+        // Given nothing after the offset but the closing brace: empty.
+        assert_eq!(keys_after(r#"{"a":1}"#, 6), Vec::<String>::new());
+    }
+
+    #[test]
+    fn depth1_keys_lists_duplicates_in_document_order() {
+        // Duplicates included, in document order — the contract the
+        // foreign-duplicate guard compares against.
+        assert_eq!(
+            depth1_keys(r#"{"b":1,"a":2,"b":3}"#),
+            Some(vec!["b".to_string(), "a".to_string(), "b".to_string()])
+        );
+        assert_eq!(depth1_keys("{}"), Some(Vec::new()));
+        // Same all-or-nothing discipline as top_level_key_spans: a document
+        // that breaks mid-walk yields None, not a partial list.
+        assert_eq!(depth1_keys("garbage"), None);
+        assert_eq!(depth1_keys(r#"{"a":1,"filePath"/bad}"#), None);
     }
 }

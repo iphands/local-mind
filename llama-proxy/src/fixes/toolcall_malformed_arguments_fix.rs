@@ -686,6 +686,74 @@ mod tests {
         assert_eq!(spliced, r#"{"content":"data","path":"/tmp/a","mode":"hello"}"#);
     }
 
+    // ============================================================
+    // BIG-FIX F12-R1 (BLOCKER): the slot->schema-key bijection must
+    // run in the client's DECLARATION order. Under the default
+    // BTreeMap serde_json::Map, properties iterated ALPHABETICALLY
+    // and multi-slot assignments silently swapped values across keys
+    // (raw captured pre-fix in .omo/evidence/big-fix/f12-fix-r1.txt).
+    // ============================================================
+
+    #[test]
+    fn f12r1_extract_tool_schemas_follows_declaration_order() {
+        let request = write_request(&["file_path", "content"]);
+        let schemas = ToolcallMalformedArgumentsFix::extract_tool_schemas(&request);
+        assert_eq!(
+            schemas["write"],
+            ["file_path".to_string(), "content".to_string()],
+            "properties must iterate in client declaration order, not alphabetically"
+        );
+    }
+
+    #[test]
+    fn f12r1_serde_json_map_preserves_insertion_order() {
+        // The crate-wide invariant the fix above now relies on.
+        let value: Value = serde_json::from_str(r#"{"zebra":1,"alpha":2,"mango":3}"#).expect("fixture");
+        let keys: Vec<&str> = value.as_object().expect("object").keys().map(String::as_str).collect();
+        assert_eq!(keys, ["zebra", "alpha", "mango"]);
+    }
+
+    #[test]
+    fn f12r1_duplicate_key_parse_keeps_last_value_at_first_position() {
+        // Disclosed preserve_order side effect (IndexMap semantics): duplicate
+        // keys collapse to the LAST value at the FIRST position. Pinned so the
+        // Cargo.toml disclosure stays true and bad_filepath's foreign-dup
+        // refusal is known-needed, not speculative.
+        let value: Value = serde_json::from_str(r#"{"a":1,"b":2,"a":3}"#).expect("fixture");
+        let obj = value.as_object().expect("object");
+        let keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        assert_eq!(keys, ["a", "b"], "duplicate key keeps its first position");
+        assert_eq!(obj["a"], json!(3), "duplicate key keeps the last value");
+    }
+
+    #[test]
+    fn f12r1_two_slot_write_request_declaration_order_e2e() {
+        // Review BLOCKER shape through the public registry path: slots carry
+        // (path, body) in the schema's declaration order (file_path, content)
+        // — the pre-fix alphabetical order assigned them the other way.
+        let request = write_request(&["file_path", "content"]);
+        let response = json!({
+            "choices": [{
+                "index": 0,
+                "message": { "role": "assistant", "tool_calls": [{
+                    "id": "call_1", "type": "function",
+                    "function": { "name": "write", "arguments": r##"{{}":"/tmp/script.sh",{}":"#!/bin/bash\necho hi"}"## }
+                }] },
+                "finish_reason": "tool_calls"
+            }]
+        });
+        let result = registry_with_malformed_fix().apply_fixes_with_context(response, &request);
+        let args = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments stay a string");
+        let parsed: Value = serde_json::from_str(args).expect("fixed args must parse");
+        assert_eq!(parsed["file_path"], "/tmp/script.sh", "slot 0 must receive schema key 0");
+        assert_eq!(
+            parsed["content"], "#!/bin/bash\necho hi",
+            "slot 1 must receive schema key 1 — alphabetical iteration swapped these"
+        );
+    }
+
     // One slot with two candidate keys (path, mode) must Err: taking candidate[0]
     // is SUBSET SELECTION — the condemned guess class (adjudication concurs).
     // Splicer-level pin kept: one key spliced into one slot fills it.

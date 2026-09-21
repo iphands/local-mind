@@ -21,7 +21,15 @@ http-body-util = "0.1"
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# preserve_order is LOAD-BEARING, not cosmetics: the malformed-arguments fix
+# maps empty-key slots onto `tools[].function.parameters.properties` keys by
+# position, and that bijection is only sound in the client's DECLARATION order.
+# Without the feature serde_json::Map is a BTreeMap and iterates
+# alphabetically, silently assigning values to the wrong keys. Disclosed side
+# effects: re-serialized JSON keeps wire key order (closer to the proxy's
+# pass-through principle), and duplicate-key Value collapse becomes
+# last-value-at-first-position instead of sorted-position-last.
+serde_json = { version = "1", features = ["preserve_order"] }
 serde_yaml = "0.9"
 
 # Logging

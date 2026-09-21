@@ -32,8 +32,13 @@ pub(crate) fn truncate_snippet(s: &str, max: usize, limit: SnippetLimit) -> Stri
         SnippetLimit::Chars => {
             if s.chars().count() <= max {
                 s.to_string()
+            } else if max < 3 {
+                // The `...` marker alone would overshoot the budget here, so
+                // the honest clip is an unmarked prefix — a "clipped" snippet
+                // longer than its own max is a lie about the clip.
+                s.chars().take(max).collect()
             } else {
-                let kept: String = s.chars().take(max.saturating_sub(3)).collect();
+                let kept: String = s.chars().take(max - 3).collect();
                 format!("{}...", kept)
             }
         }
@@ -46,7 +51,11 @@ pub(crate) fn truncate_snippet(s: &str, max: usize, limit: SnippetLimit) -> Stri
                 while !s.is_char_boundary(end) {
                     end -= 1;
                 }
-                format!("{}...", &s[..end])
+                if max < 3 {
+                    s[..end].to_string()
+                } else {
+                    format!("{}...", &s[..end])
+                }
             }
         }
     }
@@ -288,39 +297,49 @@ impl FixRegistry {
     /// a fix named "toolcall_null_index_fix".
     ///
     /// The canonical fix name is used for internal tracking, regardless of which spelling
-    /// the user provides in the config.
+    /// the user provides in the config. When a config carries BOTH spellings for one fix,
+    /// the canonical (suffix-free) key wins — the same precedence
+    /// `create_registry_from_config` applies at construction.
     pub fn configure(&mut self, config: &HashMap<String, crate::config::FixModuleConfig>) {
-        for (name, module_config) in config {
-            // Normalize: strip trailing "_fix" for comparison
-            let normalized_name = name.strip_suffix("_fix").unwrap_or(name);
-            let mut matched = false;
+        // Driven from the REGISTERED FIXES, not the config HashMap: HashMap
+        // iteration order is randomized per process, so the old config-first
+        // loop resolved a both-spellings config by iteration luck — the same
+        // config map could enable and disable the same fix on different runs.
+        for fix in &self.fixes {
+            let base = fix.name().strip_suffix("_fix").unwrap_or(fix.name());
+            let suffixed = format!("{base}_fix");
+            // Canonical spelling FIRST: when both keys exist, `base` wins.
+            let Some(module_config) = config.get(base).or_else(|| config.get(&suffixed)) else {
+                continue;
+            };
+            let config_key = if config.contains_key(base) { base } else { suffixed.as_str() };
+            // Insert with canonical fix name for consistency
+            self.enabled.insert(fix.name().to_string(), module_config.enabled);
+            tracing::debug!(
+                config_key = %config_key,
+                fix_name = %fix.name(),
+                enabled = module_config.enabled,
+                "Configured fix (normalized config key)"
+            );
+        }
 
-            for fix in &self.fixes {
-                let fix_name = fix.name().strip_suffix("_fix").unwrap_or(fix.name());
-                if normalized_name == fix_name {
-                    // Insert with canonical fix name for consistency
-                    self.enabled.insert(fix.name().to_string(), module_config.enabled);
-                    tracing::debug!(
-                        config_key = %name,
-                        fix_name = %fix.name(),
-                        enabled = module_config.enabled,
-                        "Configured fix (normalized config key)"
-                    );
-                    matched = true;
-                    break;
-                }
+        // A key that matches nothing is almost always a typo. Silently ignoring it
+        // means a fix the operator believes they disabled stays enabled.
+        for name in config.keys() {
+            let normalized_name = name.strip_suffix("_fix").unwrap_or(name.as_str());
+            if self
+                .fixes
+                .iter()
+                .any(|f| f.name().strip_suffix("_fix").unwrap_or(f.name()) == normalized_name)
+            {
+                continue;
             }
-
-            // A key that matches nothing is almost always a typo. Silently ignoring it
-            // means a fix the operator believes they disabled stays enabled.
-            if !matched {
-                let known: Vec<&str> = self.fixes.iter().map(|f| f.name()).collect();
-                tracing::warn!(
-                    config_key = %name,
-                    known_fixes = ?known,
-                    "Unknown fix name in config - ignoring this entry (check for a typo)"
-                );
-            }
+            let known: Vec<&str> = self.fixes.iter().map(|f| f.name()).collect();
+            tracing::warn!(
+                config_key = %name,
+                known_fixes = ?known,
+                "Unknown fix name in config - ignoring this entry (check for a typo)"
+            );
         }
     }
 }
@@ -508,6 +527,52 @@ mod tests {
 
         registry.configure(&modules);
         assert!(!registry.is_enabled("toolcall_bad_filepath"));
+    }
+
+    #[test]
+    fn f12r1_configure_canonical_spelling_wins_when_both_present() {
+        // Both spellings in one map used to resolve by HashMap iteration luck
+        // (same config, different enable/disable across runs — raw in
+        // .omo/evidence/big-fix/f12-fix-r1.txt). Canonical now wins by lookup
+        // construction, deterministically.
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
+
+        let mut modules = HashMap::new();
+        modules.insert(
+            "toolcall_bad_filepath".to_string(),
+            crate::config::FixModuleConfig {
+                enabled: true,
+                options: HashMap::new(),
+            },
+        );
+        modules.insert(
+            "toolcall_bad_filepath_fix".to_string(),
+            crate::config::FixModuleConfig {
+                enabled: false,
+                options: HashMap::new(),
+            },
+        );
+
+        registry.configure(&modules);
+        assert!(
+            registry.is_enabled("toolcall_bad_filepath"),
+            "canonical (suffix-free) key must win regardless of iteration order"
+        );
+    }
+
+    #[test]
+    fn f12r1_truncate_snippet_fits_its_own_tiny_budget() {
+        // max < 3 cannot fit the `...` marker: the clip is an honest unmarked
+        // prefix — never a bare "..." (3 bytes) for max 0/1/2.
+        assert_eq!(truncate_snippet("abcdef", 0, SnippetLimit::Chars), "");
+        assert_eq!(truncate_snippet("abcdef", 1, SnippetLimit::Chars), "a");
+        assert_eq!(truncate_snippet("abcdef", 2, SnippetLimit::Chars), "ab");
+        assert_eq!(truncate_snippet("abcdef", 2, SnippetLimit::Bytes), "ab");
+        // Multibyte byte-clip walks down to a char boundary (0 here).
+        assert_eq!(truncate_snippet("日本語", 2, SnippetLimit::Bytes), "");
+        // max == 3 keeps the historical marker shape, exactly on budget.
+        assert_eq!(truncate_snippet("abcdef", 3, SnippetLimit::Chars), "...");
     }
 
     #[test]
