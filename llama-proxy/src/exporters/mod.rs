@@ -500,14 +500,15 @@ mod tests {
             assert_eq!(manager.exporters[0].name(), "influxdb");
         }
 
+        /// Task 81 made export() a queue hand-off: a live exporter always
+        /// accepts (Ok); delivery failures surface through the worker's
+        /// counters, never as a request-path error or a hang.
         #[tokio::test]
-        async fn export_really_talks_to_the_backend() {
+        async fn export_hands_off_to_the_queue_without_waiting() {
             let exporter = InfluxDbExporter::from_config(&app_influx_config(true)).unwrap();
-            let err = exporter
-                .export(&measurable_metrics())
-                .await
-                .expect_err("dead endpoint must surface a write error, not Ok");
-            assert!(matches!(err, ExportError::Write(_)), "got {err:?}");
+            exporter.export(&measurable_metrics()).await.unwrap();
+            assert_eq!(exporter.writer().dropped_total(), 0);
+            exporter.writer().shutdown();
         }
 
         #[test]
