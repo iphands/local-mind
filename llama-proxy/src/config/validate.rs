@@ -38,7 +38,7 @@ fn is_rfc1123_hostname(host: &str) -> bool {
 }
 
 /// Validate an http(s) URL with a host, for `label`-named config fields.
-pub(crate) fn validate_http_url(url: &str, label: &str) -> Result<(), ConfigError> {
+pub fn validate_http_url(url: &str, label: &str) -> Result<(), ConfigError> {
     let parsed = url::Url::parse(url).map_err(|e| ConfigError::Validation(format!("Invalid {label} URL '{url}': {e}")))?;
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {

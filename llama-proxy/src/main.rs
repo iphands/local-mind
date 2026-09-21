@@ -206,6 +206,13 @@ async fn run_proxy(
         tracing::info!(dump_path = %dump_path.display(), "Debug dump mode enabled");
     }
 
+    // F-M1/F-M2: validate the FINAL merged config. The loader checked the
+    // file; only what CLI overrides could have broken is re-checked here.
+    if let Err(e) = validate_final(&config) {
+        eprintln!("Error: {e}");
+        std::process::exit(1);
+    }
+
     // Build the fix registry honoring the `fixes:` config at startup: a module
     // with `enabled: false` is never constructed into the registry, so it
     // cannot run; each skip is named by a "not constructed" INFO line from
@@ -686,6 +693,29 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
     Ok(())
 }
 
+/// Validate the merged (file + CLI) config just before startup. The loader
+/// already validated the file; this covers only what CLI overrides can change:
+/// port, backend URL (single mode), and — as a cheap belt at the last gate —
+/// the augment URL. `--port 0` is rejected with an explicit message: binding
+/// an OS-ephemeral port is out of scope.
+fn validate_final(cfg: &AppConfig) -> Result<(), String> {
+    if cfg.server.port == 0 {
+        return Err(
+            "server port 0 is not supported (ephemeral-port bind is out of scope): pick a fixed port 1-65535".to_string(),
+        );
+    }
+    if let Some(backend) = cfg.backend.as_ref() {
+        if backend.url.trim().is_empty() {
+            return Err("backend url must not be empty".to_string());
+        }
+        llama_proxy::config::validate_http_url(&backend.url, "Backend").map_err(|e| e.to_string())?;
+    }
+    if let Some(augment) = cfg.augment_backend.as_ref() {
+        llama_proxy::config::validate_http_url(&augment.url, "Augment backend").map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 /// Load configuration or exit with error
 fn load_config_or_exit(config_path: &Path) -> AppConfig {
     match AppConfig::from_file(config_path) {
@@ -757,5 +787,44 @@ mod tests {
         let states = fix_module_states(&catalog, &create_registry_from_config(&fixes));
         assert_eq!(states.len(), 3);
         assert!(states.iter().all(|s| !s.enabled));
+    }
+
+    fn cfg(yaml: &str) -> llama_proxy::config::AppConfig {
+        serde_yaml::from_str(yaml).expect("test fixture must deserialize")
+    }
+
+    const VALID: &str = "server:\n  port: 8066\n  host: \"0.0.0.0\"\nbackend:\n  url: \"http://localhost:8080\"\n";
+
+    #[test]
+    fn t72_validate_final_rejects_port_zero_with_explicit_message() {
+        let c = cfg(&VALID.replace("port: 8066", "port: 0"));
+        let err = validate_final(&c).expect_err("--port 0 must be rejected");
+        assert!(err.contains("port 0") && err.contains("ephemeral"), "got {err}");
+    }
+
+    #[test]
+    fn t72_validate_final_rejects_unparseable_or_empty_backend_url() {
+        for bad in ["ftp://localhost:8080", "not-a-url", "", "   "] {
+            let c = cfg(&VALID.replace("url: \"http://localhost:8080\"", &format!("url: \"{bad}\"")));
+            assert!(validate_final(&c).is_err(), "url '{bad}' must be rejected");
+        }
+    }
+
+    #[test]
+    fn t72_validate_final_rejects_invalid_augment_url() {
+        let c = cfg(&format!(
+            "{VALID}augment-backend:\n  enabled: true\n  url: \"ftp://nope\"\n  model: \"f\"\n"
+        ));
+        let err = validate_final(&c).expect_err("ftp augment url must be rejected");
+        assert!(err.contains("Augment"), "got {err}");
+    }
+
+    #[test]
+    fn t72_validate_final_accepts_valid_and_backendless_configs() {
+        assert!(validate_final(&cfg(VALID)).is_ok());
+        assert!(
+            validate_final(&cfg("server:\n  port: 8066\n  host: \"0.0.0.0\"\n")).is_ok(),
+            "the F-H1 backendless (503-path) config must stay valid"
+        );
     }
 }

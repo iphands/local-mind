@@ -1,6 +1,8 @@
 mod loader;
 mod validate;
 
+pub use validate::validate_http_url;
+
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
