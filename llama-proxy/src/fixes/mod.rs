@@ -15,6 +15,25 @@ use std::sync::Arc;
 #[cfg(test)]
 use registry::{truncate_snippet, SnippetLimit};
 
+/// Install a global registry subscriber ONCE per test process.
+///
+/// tracing-core caches per-callsite Interest process-wide and REBUILDS it on
+/// every Dispatch::new (any `fmt().finish()` in any test) using the CALLING
+/// thread's current dispatcher (JustOne mode when <=1 dispatch is registered).
+/// A thread without a thread-local subscriber evaluates as NoSubscriber ->
+/// Interest::never, killing capture callsites that a guarded thread registered
+/// first (measured: WARN captured, ERROR from the SAME Failed arm dropped on
+/// the capturing thread itself). A global registry makes every thread's
+/// get_default return Interest::sometimes at worst, so `never` can never be
+/// re-cached, and each event is routed per-event to the thread's own guard.
+#[cfg(test)]
+pub(crate) fn pin_interest_cache_for_tests() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let _ = tracing::subscriber::set_global_default(tracing_subscriber::registry());
+    });
+}
+
 pub use registry::{AsAny, FixRegistry};
 pub use toolcall_bad_filepath_fix::ToolcallBadFilepathFix;
 pub use toolcall_malformed_arguments_fix::ToolcallMalformedArgumentsFix;

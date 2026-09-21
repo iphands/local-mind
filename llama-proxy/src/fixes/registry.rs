@@ -946,6 +946,7 @@ mod tests {
         let response = response_with_arguments(r#"{"content":"x",,"filePath":garbage}"#);
         let input_json = serde_json::to_string(&response).unwrap();
 
+        crate::fixes::pin_interest_cache_for_tests();
         let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)

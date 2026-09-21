@@ -1119,6 +1119,7 @@ mod tests {
     /// (hence flavor = "current_thread" on all of them), or the callsites die
     /// process-wide for all later tests, capture included.
     fn debug_capture_guard() -> (std::sync::Arc<std::sync::Mutex<Vec<u8>>>, tracing::subscriber::DefaultGuard) {
+        crate::fixes::pin_interest_cache_for_tests();
         let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let subscriber = tracing_subscriber::fmt()
             .with_ansi(false)
