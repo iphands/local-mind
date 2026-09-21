@@ -14,14 +14,15 @@ struct BackendGroup {
     balancer: Arc<dyn LoadBalancer>,
     /// Group name for logging
     name: String,
+    /// Opts this group out of being the no-catch-all fallback target (E-M6).
+    /// Config plumbing arrives with loader task 71 (W9-owned); until then
+    /// every group is a fallback candidate.
+    exclusive: bool,
 }
 
 impl BackendGroup {
-    /// Check if this group handles the given model
-    /// - If mappings is empty: this is a catch-all group (handles all models)
-    /// - If mappings contains the model: this group handles it
-    fn handles_model(&self, model: &str) -> bool {
-        self.mappings.is_empty() || self.mappings.contains(&model.to_string())
+    fn maps_model(&self, model: &str) -> bool {
+        self.mappings.iter().any(|m| m == model)
     }
 
     /// Check if this is a catch-all group (handles all models)
@@ -41,9 +42,12 @@ impl GroupedLoadBalancer {
     pub fn new(
         group_configs: std::collections::HashMap<String, BackendGroupConfig>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let mut groups = Vec::new();
+        let mut entries: Vec<(String, BackendGroupConfig)> = group_configs.into_iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(&b.0));
 
-        for (name, config) in group_configs {
+        let mut groups = Vec::with_capacity(entries.len());
+
+        for (name, config) in entries {
             // Build BackendNode instances for this group
             let mut nodes = Vec::with_capacity(config.nodes.len());
             for node_cfg in &config.nodes {
@@ -66,41 +70,42 @@ impl GroupedLoadBalancer {
                 mappings: config.mappings,
                 balancer,
                 name,
+                exclusive: false,
             });
         }
 
         Ok(Self { groups })
     }
 
-    /// Find a group that handles the given model
-    /// Returns the first matching group, or the catch-all if no specific match
+    /// Find a group for the given model, in priority order (E-M2, E-M6):
+    /// 1. first group (sorted by name) that specifically maps the model
+    /// 2. the catch-all group (empty mappings)
+    /// 3. the first non-exclusive group, with a warn — add a `mappings: []`
+    ///    catch-all to opt out of the positional fallback
+    ///
+    /// Groups are stored sorted, so every rung (and any duplicate mapping,
+    /// which loader task 71 will reject outright) resolves deterministically.
     fn find_group(&self, model: Option<&str>) -> Option<&BackendGroup> {
-        match model {
-            Some(model_str) => {
-                // First, look for a group with specific mapping for this model
-                for group in &self.groups {
-                    if !group.is_catch_all() && group.handles_model(model_str) {
-                        return Some(group);
-                    }
+        if let Some(model_str) = model {
+            for group in &self.groups {
+                if !group.is_catch_all() && group.maps_model(model_str) {
+                    return Some(group);
                 }
-                // Fall back to catch-all group
-                for group in &self.groups {
-                    if group.is_catch_all() {
-                        return Some(group);
-                    }
-                }
-                None
-            }
-            None => {
-                // No model specified - use catch-all group
-                for group in &self.groups {
-                    if group.is_catch_all() {
-                        return Some(group);
-                    }
-                }
-                None
             }
         }
+        for group in &self.groups {
+            if group.is_catch_all() {
+                return Some(group);
+            }
+        }
+        let fallback = self.groups.iter().find(|g| !g.exclusive)?;
+        tracing::warn!(
+            group = %fallback.name,
+            model = ?model,
+            "No catch-all group configured — routing unmatched request to first sorted group; \
+            add a group with 'mappings: []' to own unmatched traffic explicitly"
+        );
+        Some(fallback)
     }
 }
 
@@ -190,15 +195,12 @@ mod tests {
         let guard = balancer.select(Some("haiku")).unwrap();
         assert_eq!(guard.node.base_url(), "http://localhost:8081");
 
-        // Request for unknown model should fail (no catch-all)
-        let result = balancer.select(Some("unknown"));
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().requested_model, Some("unknown".to_string()));
+        // No catch-all: unmatched traffic falls back to the FIRST SORTED group ("haiku" < "opus")
+        let guard = balancer.select(Some("unknown")).unwrap();
+        assert_eq!(guard.node.base_url(), "http://localhost:8081");
 
-        // Request with no model should fail (no catch-all)
-        let result = balancer.select(None);
-        assert!(result.is_err());
-        assert!(result.unwrap_err().requested_model.is_none());
+        let guard = balancer.select(None).unwrap();
+        assert_eq!(guard.node.base_url(), "http://localhost:8081");
     }
 
     #[test]
@@ -314,5 +316,93 @@ mod tests {
         let balancer = GroupedLoadBalancer::new(groups).unwrap();
         let nodes = balancer.all_nodes();
         assert_eq!(nodes.len(), 2);
+    }
+
+    #[test]
+    fn duplicate_mapping_resolves_to_the_first_sorted_group() {
+        let mut groups = HashMap::new();
+        groups.insert(
+            "zeta".to_string(),
+            make_group_config(vec!["dup"], vec!["http://localhost:8080"]),
+        );
+        groups.insert(
+            "alpha".to_string(),
+            make_group_config(vec!["dup"], vec!["http://localhost:8081"]),
+        );
+
+        let balancer = GroupedLoadBalancer::new(groups).unwrap();
+        let guard = balancer.select(Some("dup")).unwrap();
+        assert_eq!(
+            guard.group_name.as_deref(),
+            Some("alpha"),
+            "loader task 71 will REJECT duplicate mappings; until then sorted-first wins deterministically"
+        );
+    }
+
+    #[test]
+    fn no_catch_all_falls_back_to_first_sorted_group() {
+        let mut groups = HashMap::new();
+        groups.insert(
+            "zulu".to_string(),
+            make_group_config(vec!["m1"], vec!["http://localhost:8080"]),
+        );
+        groups.insert(
+            "alpha".to_string(),
+            make_group_config(vec!["m2"], vec!["http://localhost:8081"]),
+        );
+
+        let balancer = GroupedLoadBalancer::new(groups).unwrap();
+        assert_eq!(balancer.select(Some("other")).unwrap().group_name.as_deref(), Some("alpha"));
+        assert_eq!(balancer.select(None).unwrap().group_name.as_deref(), Some("alpha"));
+        assert_eq!(balancer.select(Some("m2")).unwrap().group_name.as_deref(), Some("alpha"));
+        assert_eq!(balancer.select(Some("m1")).unwrap().group_name.as_deref(), Some("zulu"));
+    }
+
+    #[test]
+    fn catch_all_outranks_positional_fallback() {
+        let mut groups = HashMap::new();
+        groups.insert(
+            "aaa_specific".to_string(),
+            make_group_config(vec!["mine"], vec!["http://localhost:8080"]),
+        );
+        groups.insert(
+            "zzz_catch".to_string(),
+            make_group_config(vec![], vec!["http://localhost:8081"]),
+        );
+
+        let balancer = GroupedLoadBalancer::new(groups).unwrap();
+        assert_eq!(
+            balancer.select(Some("nope")).unwrap().group_name.as_deref(),
+            Some("zzz_catch"),
+            "an explicit catch-all beats positional fallback even when it sorts last"
+        );
+        assert_eq!(
+            balancer.select(Some("mine")).unwrap().group_name.as_deref(),
+            Some("aaa_specific")
+        );
+    }
+
+    #[test]
+    fn exclusive_groups_are_not_fallback_targets() {
+        let node =
+            Arc::new(BackendNode::from_config("http://localhost:8080".to_string(), 300, None, None, None, None, None).unwrap());
+        let lb = GroupedLoadBalancer {
+            groups: vec![BackendGroup {
+                mappings: vec!["m1".to_string()],
+                balancer: crate::backends::build_balancer_for_group(vec![node], "round_robin").unwrap(),
+                name: "solo".to_string(),
+                exclusive: true,
+            }],
+        };
+        assert_eq!(
+            lb.select(Some("m1")).unwrap().node.base_url(),
+            "http://localhost:8080",
+            "exclusive still serves its own mappings"
+        );
+        assert!(
+            lb.select(Some("other")).is_err(),
+            "exclusive opted out of positional fallback"
+        );
+        assert!(lb.select(None).is_err());
     }
 }
