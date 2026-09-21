@@ -1018,4 +1018,104 @@ mod tests {
         assert_eq!(out, response);
         assert!(matches!(action, FixAction::NotApplicable));
     }
+
+    // --- task 22: registry-level fail-safe acceptance (REAL fixer, log capture) ---
+
+    /// Minimal in-file tracing capture: collects every formatted event into a
+    /// shared byte buffer. tracing-subscriber is a regular dependency (Cargo.toml),
+    /// and no capture helper exists elsewhere in the repo, so this is the
+    /// dependency-free seam for "exactly one Failed log record" assertions.
+    #[derive(Clone)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = Self;
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn response_with_arguments(arguments: &str) -> Value {
+        serde_json::json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": { "name": "write", "arguments": arguments }
+                    }]
+                }
+            }]
+        })
+    }
+
+    #[test]
+    fn test_real_fixer_unparseable_payload_keeps_input_and_emits_exactly_one_failed() {
+        // Given: the REAL bad_filepath fixer (no mock) and a payload that
+        // triggers it (unparseable) but whose schema surgery is impossible.
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
+
+        let request = serde_json::json!({"model": "test"});
+        let response = response_with_arguments(r#"{"content":"x",,"filePath":garbage}"#);
+        let input_json = serde_json::to_string(&response).unwrap();
+
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(CaptureWriter(buf.clone()))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        // When: fixes run with request context.
+        let result = registry.apply_fixes_with_context(response.clone(), &request);
+
+        // Then: output is BYTE-IDENTICAL to input (not Value equality — that
+        // would forgive key reordering), and never the destructive "{}".
+        let output_json = serde_json::to_string(&result).unwrap();
+        assert_eq!(output_json, input_json);
+        let args_out = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert_eq!(args_out, r#"{"content":"x",,"filePath":garbage}"#);
+        assert_ne!(args_out, "{}");
+
+        // And: exactly ONE "Failed to fix malformed content" (ERROR) record, and
+        // no "Successfully fixed" success line — the baseline's misleading win.
+        let logs = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        let failed_records = logs.matches("Failed to fix malformed content").count();
+        let success_records = logs.matches("Successfully fixed malformed content").count();
+        assert_eq!(failed_records, 1, "expected exactly one Failed record, logs:\n{logs}");
+        assert_eq!(success_records, 0, "a failed fix must never log success, logs:\n{logs}");
+    }
+
+    #[test]
+    fn test_real_fixer_parseable_duplicate_payload_still_fixed_via_context() {
+        // Byte-identity guard for the OK path: a parseable duplicate-key
+        // payload must still come out normalized + valid through the override.
+        let mut registry = FixRegistry::new();
+        registry.register(Arc::new(ToolcallBadFilepathFix::new()));
+
+        let request = serde_json::json!({"model": "test"});
+        let response = response_with_arguments(r#"{"filePath":"/path1","filePath":"/path2"}"#);
+
+        let result = registry.apply_fixes_with_context(response, &request);
+
+        let args_out = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .unwrap();
+        assert!(serde_json::from_str::<Value>(args_out).is_ok(), "normalized args: {args_out}");
+        let parsed: Value = serde_json::from_str(args_out).unwrap();
+        assert_eq!(parsed["filePath"], "/path2");
+    }
 }

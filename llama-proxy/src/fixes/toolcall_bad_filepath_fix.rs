@@ -29,7 +29,7 @@
 
 use super::json_scan::top_level_key_count;
 use super::registry::{truncate_snippet, SnippetLimit};
-use super::{FixAction, ResponseFix, ToolCallAccumulator};
+use super::{FixAction, FixError, ResponseFix, ToolCallAccumulator};
 use serde_json::Value;
 
 /// Fix for malformed filePath in Qwen3-Coder tool calls
@@ -62,39 +62,53 @@ impl ToolcallBadFilepathFix {
     /// Key insight: Write tool schema has only 2 fields (content, filePath) with no
     /// additional properties allowed. Once we find the first complete "filePath":"value",
     /// everything after is garbage by definition.
-    fn fix_arguments(&self, args: &str) -> String {
+    ///
+    /// `Ok` guarantees valid JSON. `Err` means the arguments are unparseable and
+    /// no schema surgery can rebuild them — the old `"{}"` fallback destroyed the
+    /// whole payload here and was reported as Fixed (B-H1); the fixer now reports
+    /// the failure so callers keep the ORIGINAL arguments.
+    fn fix_arguments(&self, args: &str) -> Result<String, FixError> {
         // Valid JSON? Pass through (normalize it)
         if let Ok(json) = serde_json::from_str::<Value>(args) {
-            return serde_json::to_string(&json).unwrap_or_else(|_| args.to_string());
+            return serde_json::to_string(&json)
+                .map_err(|e| FixError::Rebuild(format!("re-serializing parsed arguments failed: {e}")));
         }
 
         // Invalid JSON - apply schema-based truncation
         // Find first "filePath":"value", truncate after, close with }
         let filepath_key = r#""filePath":"#;
-        if let Some(start) = args.find(filepath_key) {
-            let after_colon = &args[start + filepath_key.len()..];
+        let Some(start) = args.find(filepath_key) else {
+            return Err(FixError::Parse(format!(
+                "unparseable arguments carry no repairable \"filePath\":\"<value>\" pattern: {}",
+                truncate_snippet(args, 200, SnippetLimit::Chars)
+            )));
+        };
+        let after_colon = &args[start + filepath_key.len()..];
 
-            // Find the end of the string value (handles escapes correctly)
-            if let Some(value_end) = self.find_string_end(after_colon) {
-                let end_pos = start + filepath_key.len() + value_end;
-                let mut result = args[..end_pos].to_string();
+        // Find the end of the string value (handles escapes correctly)
+        let Some(value_end) = self.find_string_end(after_colon) else {
+            return Err(FixError::Parse(format!(
+                "first filePath value has no closing quote: {}",
+                truncate_snippet(args, 200, SnippetLimit::Chars)
+            )));
+        };
+        let end_pos = start + filepath_key.len() + value_end;
+        let mut result = args[..end_pos].to_string();
 
-                // Remove trailing comma if present (invalid before closing brace)
-                if result.trim_end().ends_with(',') {
-                    result = result.trim_end().trim_end_matches(',').to_string();
-                }
-
-                result.push('}');
-
-                // Validate and return
-                if self.is_valid_json(&result) {
-                    return result;
-                }
-            }
+        // Remove trailing comma if present (invalid before closing brace)
+        if result.trim_end().ends_with(',') {
+            result = result.trim_end().trim_end_matches(',').to_string();
         }
 
-        // Fallback: empty valid object
-        "{}".to_string()
+        result.push('}');
+
+        if self.is_valid_json(&result) {
+            return Ok(result);
+        }
+        Err(FixError::Rebuild(format!(
+            "schema-truncation candidate is still invalid JSON: {}",
+            truncate_snippet(&result, 200, SnippetLimit::Chars)
+        )))
     }
 
     /// Find the end of a JSON string value starting from position after colon.
@@ -209,6 +223,40 @@ impl ToolcallBadFilepathFix {
             "}".to_string()
         }
     }
+
+    /// Buffered repair, Result-typed: aborts with `Err` on the first malformed
+    /// call whose arguments cannot be rebuilt. A caller that receives `Err`
+    /// must DISCARD the returned-by-value response entirely (it may be
+    /// partially repaired) — which is why [`Self::apply`] keeps an original.
+    ///
+    /// [`Self::apply`]: ToolcallBadFilepathFix::apply
+    fn apply_checked(&self, mut response: Value) -> Result<(Value, FixAction), FixError> {
+        let mut overall_action = FixAction::NotApplicable;
+
+        if let Some(choices) = response.get_mut("choices").and_then(|c| c.as_array_mut()) {
+            for choice in choices {
+                if let Some(tool_calls) = choice
+                    .get_mut("message")
+                    .and_then(|m| m.get_mut("tool_calls"))
+                    .and_then(|tc| tc.as_array_mut())
+                {
+                    for call in tool_calls {
+                        if let Some(function) = call.get_mut("function") {
+                            if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
+                                if self.is_malformed(args) {
+                                    let original = args.to_string();
+                                    let fixed = self.fix_arguments(args)?;
+                                    function["arguments"] = Value::String(fixed.clone());
+                                    overall_action = FixAction::fixed(&original, &fixed);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        Ok((response, overall_action))
+    }
 }
 
 impl ResponseFix for ToolcallBadFilepathFix {
@@ -246,36 +294,31 @@ impl ResponseFix for ToolcallBadFilepathFix {
             .unwrap_or(false)
     }
 
-    fn apply(&self, mut response: Value) -> (Value, FixAction) {
-        let mut overall_action = FixAction::NotApplicable;
-
-        if let Some(choices) = response.get_mut("choices").and_then(|c| c.as_array_mut()) {
-            for choice in choices {
-                if let Some(tool_calls) = choice
-                    .get_mut("message")
-                    .and_then(|m| m.get_mut("tool_calls"))
-                    .and_then(|tc| tc.as_array_mut())
-                {
-                    for call in tool_calls {
-                        if let Some(function) = call.get_mut("function") {
-                            if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
-                                if self.is_malformed(args) {
-                                    let original = args.to_string();
-                                    let fixed = self.fix_arguments(args);
-                                    if self.is_valid_json(&fixed) {
-                                        function["arguments"] = Value::String(fixed.clone());
-                                        overall_action = FixAction::fixed(&original, &fixed);
-                                    } else {
-                                        overall_action = FixAction::failed(&original, &fixed);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
+    fn apply(&self, response: Value) -> (Value, FixAction) {
+        // Fail-safe mirror of apply_checked: FixError carries no response, so
+        // an original is kept to return when the fixer reports irreparable
+        // content. Callers therefore receive the ORIGINAL or a fully-fixed
+        // response — never partial repairs, never the destructive "{}".
+        // The clone is the fail-safe (task-31 precedent); apply() only runs
+        // once applies() matched.
+        let original = response.clone();
+        match self.apply_checked(response) {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                let snippet = truncate_snippet(&original.to_string(), 200, SnippetLimit::Chars);
+                (original, FixAction::failed(&snippet, &error.to_string()))
             }
         }
-        (response, overall_action)
+    }
+
+    /// Report the fixer's structural failure as `Err` so the registry records
+    /// a `FixAction::Failed` and forwards the ORIGINAL response untouched
+    /// (task-31 fail-safe interface). [`Self::apply`] stays the infallible
+    /// mirror for the context-free path.
+    ///
+    /// [`Self::apply`]: ResponseFix::apply
+    fn apply_with_context(&self, response: Value, _request: &Value) -> Result<(Value, FixAction), FixError> {
+        self.apply_checked(response)
     }
 
     fn apply_stream(&self, mut chunk: Value) -> (Value, FixAction) {
@@ -294,12 +337,16 @@ impl ResponseFix for ToolcallBadFilepathFix {
                             if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
                                 if self.is_malformed(args) {
                                     let original = args.to_string();
-                                    let fixed = self.fix_arguments(args);
-                                    if self.is_valid_json(&fixed) {
-                                        function["arguments"] = Value::String(fixed.clone());
-                                        overall_action = FixAction::fixed(&original, &fixed);
-                                    } else {
-                                        overall_action = FixAction::failed(&original, &fixed);
+                                    match self.fix_arguments(args) {
+                                        Ok(fixed) => {
+                                            function["arguments"] = Value::String(fixed.clone());
+                                            overall_action = FixAction::fixed(&original, &fixed);
+                                        }
+                                        // Fail-safe: an irreparable chunk keeps its ORIGINAL
+                                        // arguments; only the action reports the failure.
+                                        Err(error) => {
+                                            overall_action = FixAction::failed(&original, &error.to_string());
+                                        }
                                     }
                                 }
                             }
@@ -416,41 +463,45 @@ impl ResponseFix for ToolcallBadFilepathFix {
                                         );
 
                                         let original = accumulated.clone();
-                                        let fixed = self.fix_arguments(&accumulated);
-                                        if self.is_valid_json(&fixed) {
-                                            // Calculate the completion delta using extracted method
-                                            // This ensures we NEVER send full JSON to the client
-                                            let valid_completion =
-                                                self.calculate_completion_delta(&accumulated, chunk_args, index);
+                                        match self.fix_arguments(&accumulated) {
+                                            Ok(fixed) => {
+                                                // Calculate the completion delta using extracted method
+                                                // This ensures we NEVER send full JSON to the client
+                                                let valid_completion =
+                                                    self.calculate_completion_delta(&accumulated, chunk_args, index);
 
-                                            function["arguments"] = Value::String(valid_completion.clone());
-                                            // Mark this index as fixed so subsequent chunks are suppressed
-                                            accumulator.mark_fixed(index);
+                                                function["arguments"] = Value::String(valid_completion.clone());
+                                                // Mark this index as fixed so subsequent chunks are suppressed
+                                                accumulator.mark_fixed(index);
 
-                                            // Log success
-                                            tracing::info!(
-                                                fix_name = self.name(),
-                                                index = index,
-                                                sending_delta = &valid_completion,
-                                                original_accumulated = truncate_snippet(&original, 100, SnippetLimit::Bytes),
-                                                fixed_version = truncate_snippet(&fixed, 100, SnippetLimit::Bytes),
-                                                "FIX SUCCESSFUL: Sending completion delta to client"
-                                            );
+                                                // Log success
+                                                tracing::info!(
+                                                    fix_name = self.name(),
+                                                    index = index,
+                                                    sending_delta = &valid_completion,
+                                                    original_accumulated =
+                                                        truncate_snippet(&original, 100, SnippetLimit::Bytes),
+                                                    fixed_version = truncate_snippet(&fixed, 100, SnippetLimit::Bytes),
+                                                    "FIX SUCCESSFUL: Sending completion delta to client"
+                                                );
 
-                                            overall_action = FixAction::fixed(&original, &fixed);
-                                        } else {
-                                            // NEW: Log failure explicitly
-                                            tracing::error!(
-                                                fix_name = self.name(),
-                                                index = index,
-                                                original = truncate_snippet(&original, 100, SnippetLimit::Bytes),
-                                                attempted_fix = truncate_snippet(&fixed, 100, SnippetLimit::Bytes),
-                                                "FIX FAILED: Could not repair malformed filePath"
-                                            );
+                                                overall_action = FixAction::fixed(&original, &fixed);
+                                            }
+                                            Err(error) => {
+                                                // Fail-safe: the chunk keeps its ORIGINAL bytes and the
+                                                // index is NOT marked fixed — accumulate and try again.
+                                                tracing::error!(
+                                                    fix_name = self.name(),
+                                                    index = index,
+                                                    original = truncate_snippet(&original, 100, SnippetLimit::Bytes),
+                                                    attempted_fix = %error,
+                                                    "FIX FAILED: Could not repair malformed filePath"
+                                                );
 
-                                            overall_action = FixAction::failed(&original, &fixed);
+                                                overall_action = FixAction::failed(&original, &error.to_string());
+                                            }
                                         }
-                                        // If still invalid, keep accumulating
+                                        // If the fix failed, keep accumulating
                                     } else if self.is_valid_json(&accumulated) {
                                         // Valid JSON - clear accumulator, use as-is
                                         accumulator.clear(index);
@@ -478,7 +529,7 @@ mod tests {
         let malformed = r#"{"content":"code","filePath":"/path/to/file","filePath"/path/to/file"}"#;
         assert!(fix.is_malformed(malformed));
 
-        let fixed = fix.fix_arguments(malformed);
+        let fixed = fix.fix_arguments(malformed).expect("truncation must repair");
         assert!(fix.is_valid_json(&fixed));
     }
 
@@ -489,7 +540,7 @@ mod tests {
         let valid = r#"{"content":"code","filePath":"/path/to/file"}"#;
         assert!(!fix.is_malformed(valid));
 
-        let fixed = fix.fix_arguments(valid);
+        let fixed = fix.fix_arguments(valid).expect("valid JSON round-trips");
         assert_eq!(fixed, valid);
     }
 
@@ -523,7 +574,7 @@ mod tests {
         let fix = ToolcallBadFilepathFix::new();
 
         let empty = "{}";
-        let fixed = fix.fix_arguments(empty);
+        let fixed = fix.fix_arguments(empty).expect("valid JSON round-trips");
         assert_eq!(fixed, "{}");
     }
 
@@ -533,7 +584,7 @@ mod tests {
 
         // Non-ASCII path — previously would panic due to char/byte index mismatch
         let malformed = r#"{"filePath":"/日本語/file.txt","extra":"dropped","filePath":"/日本語/file.txt"}"#;
-        let fixed = fix.fix_arguments(malformed);
+        let fixed = fix.fix_arguments(malformed).expect("dup keys round-trip");
         assert!(
             fix.is_valid_json(&fixed),
             "fix_arguments panicked or produced invalid JSON for non-ASCII path: {fixed}"
@@ -541,7 +592,7 @@ mod tests {
 
         // German umlaut path
         let malformed2 = r#"{"filePath":"/über/lösung.rs","x":1,"filePath":"/über/lösung.rs"}"#;
-        let fixed2 = fix.fix_arguments(malformed2);
+        let fixed2 = fix.fix_arguments(malformed2).expect("dup keys round-trip");
         assert!(
             fix.is_valid_json(&fixed2),
             "fix_arguments panicked or produced invalid JSON for umlaut path: {fixed2}"
@@ -553,7 +604,7 @@ mod tests {
         let fix = ToolcallBadFilepathFix::new();
 
         let valid = r#"{"content":"some code","filePath":"/home/user/file.txt"}"#;
-        let fixed = fix.fix_arguments(valid);
+        let fixed = fix.fix_arguments(valid).expect("valid JSON round-trips");
         // Should return valid JSON (might be reformatted)
         assert!(fix.is_valid_json(&fixed));
     }
@@ -714,10 +765,15 @@ mod tests {
         let malformed = r#"{"key": "value" broken"#;
         assert!(fix.is_malformed(malformed), "invalid JSON is malformed");
 
-        let fixed = fix.fix_arguments(malformed);
+        // Task 22 (B-H1): the OLD shape of this test asserted a valid-JSON
+        // return, pinning the "{}" fallback that destroyed the payload while
+        // apply() reported it as Fixed. The behavior the test's comment always
+        // demanded ("still try to fix") now means: repair it or report Err —
+        // never fabricate content.
+        let outcome = fix.fix_arguments(malformed);
         assert!(
-            fix.is_valid_json(&fixed),
-            "fix_arguments must still return valid JSON for no-filePath garbage, got: {fixed}"
+            matches!(outcome, Err(FixError::Parse(_))),
+            "unparseable arguments without a repair pattern must Err, got: {outcome:?}"
         );
     }
 
@@ -725,12 +781,10 @@ mod tests {
     fn test_fix_keep_duplicate_mode() {
         let fix = ToolcallBadFilepathFix::new();
         let malformed = r#"{"filePath":"/path","filePath"/broken"}"#;
-        let fixed = fix.fix_arguments(malformed);
-        // Should still produce valid JSON (via aggressive fix if needed)
-        assert!(
-            fix.is_valid_json(&fixed) || fixed == "{}",
-            "Fixed output should be valid JSON or empty object"
-        );
+        let fixed = fix
+            .fix_arguments(malformed)
+            .expect("first filePath is intact, truncation must repair");
+        assert!(fix.is_valid_json(&fixed), "Fixed output should be valid JSON");
     }
 
     #[test]
@@ -782,7 +836,7 @@ mod tests {
         let valid = r#"{"content":"line1\nline2","filePath":"/path/to/file"}"#;
         assert!(!fix.is_malformed(valid));
 
-        let fixed = fix.fix_arguments(valid);
+        let fixed = fix.fix_arguments(valid).expect("valid JSON round-trips");
         assert!(fix.is_valid_json(&fixed));
     }
 
@@ -921,7 +975,7 @@ mod tests {
         assert!(fix.is_malformed(malformed), "Should detect malformed pattern");
 
         // Verify the fix produces valid JSON
-        let fixed = fix.fix_arguments(malformed);
+        let fixed = fix.fix_arguments(malformed).expect("truncation must repair");
         assert!(fix.is_valid_json(&fixed), "Fixed output should be valid JSON, got: {}", fixed);
 
         // Verify the fixed output contains the expected content
@@ -1008,7 +1062,7 @@ mod tests {
         assert!(fix.is_malformed(malformed), "Should detect as malformed");
 
         // Step 2: Apply the fix
-        let fixed = fix.fix_arguments(malformed);
+        let fixed = fix.fix_arguments(malformed).expect("truncation must repair");
         println!("Fixed result: {}", fixed);
 
         // Step 3: Verify the fixed version is valid JSON
@@ -1186,7 +1240,7 @@ mod tests {
                 description
             );
 
-            let fixed = fix.fix_arguments(malformed);
+            let fixed = fix.fix_arguments(malformed).expect("truncation must repair");
             println!("Fixed: {}", fixed);
 
             assert!(
@@ -1574,8 +1628,13 @@ mod tests {
         let fix = ToolcallBadFilepathFix::new();
         let mut accumulator = ToolCallAccumulator::new();
 
-        // Chunk 1: Start JSON
-        let chunk1 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"a\":"}}]}}]});
+        // Chunk 1: Start JSON. Task 22 note: the old fixture opened `{"a:`
+        // (an unterminated key), which is genuinely IRREPARABLE - its
+        // suppression only ever worked through the "{}" fake-fix. The fail-safe
+        // now reports Err and keeps accumulating, so the fixture uses a
+        // repairable prefix to keep pinning THIS test's actual subject:
+        // post-fix chunk suppression.
+        let chunk1 = serde_json::json!({"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"content\":\"x\","}}]}}]});
         let _ = fix.apply_stream_with_accumulation_default(chunk1, &mut accumulator);
 
         // Chunk 2: First filePath
@@ -1615,7 +1674,7 @@ mod tests {
         let malformed = r#"{"content":"code","filePath":"/path1","filePath}/path2"}"#;
         assert!(fix.is_malformed(malformed), "Should detect 'filePath}}' as malformed");
 
-        let fixed = fix.fix_arguments(malformed);
+        let fixed = fix.fix_arguments(malformed).expect("truncation must repair");
         assert!(
             fix.is_valid_json(&fixed),
             "Fixed version should be valid JSON, got: {}",
@@ -1631,7 +1690,7 @@ mod tests {
         let malformed = r#"{"content":"code","filePath":"/path1","filePath/path2"}"#;
         assert!(fix.is_malformed(malformed), "Should detect 'filePath/' as malformed");
 
-        let fixed = fix.fix_arguments(malformed);
+        let fixed = fix.fix_arguments(malformed).expect("truncation must repair");
         // Note: The aggressive fix may not always produce valid JSON for all patterns,
         // but we should at least not crash
         println!("Fixed output: {}", fixed);
@@ -2036,5 +2095,140 @@ mod tests {
             fix.is_malformed(escaped_content_dup),
             "escaped-quote content with real dups must trigger"
         );
+    }
+
+    // ============================================================
+    // TASK 22 (B-H1): fail-safe on fixer errors
+    // ============================================================
+    // An unparseable-but-triggering payload whose schema surgery is impossible
+    // must return Err (registry then logs Failed and forwards the ORIGINAL),
+    // never the destructive "{}" fallback.
+
+    fn fuzz_response(arguments: Option<&str>) -> Value {
+        let call = match arguments {
+            Some(args) => serde_json::json!({
+                "index": 0,
+                "function": { "name": "write", "arguments": args }
+            }),
+            None => serde_json::json!({
+                "index": 0,
+                "function": { "name": "write" }
+            }),
+        };
+        serde_json::json!({
+            "choices": [{
+                "message": { "tool_calls": [call] }
+            }]
+        })
+    }
+
+    #[test]
+    fn test_apply_with_context_unparseable_irreparable_returns_err() {
+        use super::ResponseFix;
+
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"content":"x",,"filePath":garbage}"#;
+        let response = fuzz_response(Some(args));
+        let request = serde_json::json!({});
+        assert!(fix.applies(&response), "payload must trigger the fix");
+
+        let outcome = fix.apply_with_context(response, &request);
+
+        assert!(outcome.is_err(), "irreparable payload must Err, got {outcome:?}");
+    }
+
+    #[test]
+    fn test_apply_unparseable_irreparable_keeps_original_arguments() {
+        let fix = ToolcallBadFilepathFix::new();
+        let args = r#"{"content":"x",,"filePath":garbage}"#;
+        let response = fuzz_response(Some(args));
+
+        let (result, action) = fix.apply(response);
+
+        let args_out = result["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
+            .as_str()
+            .expect("arguments must stay a string");
+        assert_eq!(args_out, args, "original arguments must be preserved verbatim");
+        assert_ne!(
+            args_out, "{}",
+            "the destructive empty-object fallback must never reach clients"
+        );
+        assert!(
+            matches!(action, FixAction::Failed { .. }),
+            "irreparable payload must report Failed, got {action:?}"
+        );
+    }
+
+    #[test]
+    fn test_fuzz_malformed_payloads_never_panic_and_keep_original_or_valid() {
+        let fix = ToolcallBadFilepathFix::new();
+        let cjk_base = r#"{"content":"中文测试内容","filePath":"/路径/文件.rs","filePath"/坏路径"}"#;
+        let cases: Vec<Option<&str>> = vec![
+            Some(r#"{"content":"x",,"filePath":garbage}"#),
+            Some(r#"{"content":"a"#),
+            Some(&cjk_base[..cjk_base.char_indices().nth(10).map(|(i, _)| i).unwrap_or(cjk_base.len())]),
+            Some(&cjk_base[..cjk_base.char_indices().nth(23).map(|(i, _)| i).unwrap_or(cjk_base.len())]),
+            Some(r#"{"filePath":"/x/\ud800","y":1"#),
+            Some(r#"{"file\u0050ath":"/a","filePath"/b"#),
+            Some(""),
+            Some("   {"),
+            Some(r#"{"filePath":"#),
+            None,
+        ];
+
+        for args in cases {
+            let response = fuzz_response(args);
+            let (result, _action) = fix.apply(response.clone());
+            let args_out = result["choices"][0]["message"]["tool_calls"][0]
+                .get("function")
+                .and_then(|f| f.get("arguments"))
+                .and_then(|a| a.as_str());
+            match (args, args_out) {
+                (None, None) => assert_eq!(result, response, "argument-less call must pass through"),
+                (Some(input), Some(out)) => assert!(
+                    out == input || fix.is_valid_json(out),
+                    "output must be the original or valid JSON, got: {out}"
+                ),
+                _ => panic!("tool call slot mutated shape for input {args:?}: {result}"),
+            }
+        }
+    }
+
+    #[test]
+    fn test_fix_arguments_candidate_invalid_reports_rebuild_error() {
+        let fix = ToolcallBadFilepathFix::new();
+        // Pattern found, value terminated, but the truncated candidate
+        // `[{"filePath":"/x"}` can never parse - the Rebuild failure class.
+        let args = r#"[{"filePath":"/x"}garbage"#;
+        let outcome = fix.fix_arguments(args);
+        assert!(
+            matches!(outcome, Err(FixError::Rebuild(_))),
+            "truncated candidate that stays invalid must Err(Rebuild), got {outcome:?}"
+        );
+    }
+
+    #[test]
+    fn test_apply_with_context_matches_apply_on_repairable_payloads() {
+        use super::ResponseFix;
+
+        let fix = ToolcallBadFilepathFix::new();
+        let request = serde_json::json!({});
+        for args in [
+            r#"{"filePath":"/path1","filePath":"/path2"}"#,
+            r#"{"content":"中文测试内容","filePath":"/x/中文/file.rs","filePath"/x/bad"}"#,
+            r#"{"content":"esc","filePath":"/x/\u4e2d/file.rs","filePath"/x/bad"}"#,
+        ] {
+            let response = fuzz_response(Some(args));
+            let (applied, apply_action) = fix.apply(response.clone());
+            let (contextual, ctx_action) = fix
+                .apply_with_context(response, &request)
+                .expect("repairable payload must be Ok");
+            assert_eq!(
+                serde_json::to_string(&applied).unwrap(),
+                serde_json::to_string(&contextual).unwrap(),
+                "apply() and apply_with_context() must agree byte-for-byte for: {args}"
+            );
+            assert_eq!(format!("{apply_action:?}"), format!("{ctx_action:?}"));
+        }
     }
 }
