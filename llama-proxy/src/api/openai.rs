@@ -21,25 +21,25 @@ where
 pub struct ChatCompletionRequest {
     pub model: String,
     pub messages: Vec<Message>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_tokens: Option<u32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stream: Option<bool>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tools: Option<Vec<Tool>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_choice: Option<ToolChoice>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop: Option<Vec<String>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f32>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user: Option<String>,
 
     // Opencode request extensions (pass-through to backend)
@@ -59,13 +59,13 @@ pub struct ChatCompletionRequest {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Message {
     pub role: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<MessageContent>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_calls: Option<Vec<ToolCall>>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_call_id: Option<String>,
 }
 
@@ -1532,5 +1532,74 @@ mod tests {
             }
             _ => panic!("Expected tool_result block"),
         }
+    }
+
+    #[test]
+    fn test_request_round_trip_emits_no_null_keys() {
+        // Given: a minimal request with only model + messages (one message with
+        // content, one assistant message without), parsed then re-serialized.
+        let json = r#"{"model":"m","messages":[{"role":"user","content":"Hi"},{"role":"assistant"}]}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let out = serde_json::to_string(&req).unwrap();
+
+        // Then: every Option-bearing field of ChatCompletionRequest and Message is
+        // omitted when None — no `"key":null` may survive the round trip.
+        let mut offenders: Vec<&str> = Vec::new();
+        for key in [
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "stream",
+            "tools",
+            "tool_choice",
+            "stop",
+            "frequency_penalty",
+            "presence_penalty",
+            "user",
+            "reasoning_effort",
+            "verbosity",
+            "thinking_budget",
+            "name",
+            "tool_calls",
+            "tool_call_id",
+        ] {
+            if out.contains(&format!("\"{key}\":null")) {
+                offenders.push(key);
+            }
+        }
+        // Message.content: None (assistant message) must not serialize as null.
+        // Count null occurrences: the user message legitimately carries "content":"Hi",
+        // so a null content can only come from the None assistant message.
+        if out.contains("\"content\":null") {
+            offenders.push("content");
+        }
+        assert!(
+            offenders.is_empty(),
+            "round-trip emitted null keys for Option fields: {offenders:?}\nserialized: {out}"
+        );
+        // Positive pins: mandatory data survives.
+        assert!(out.contains("\"model\":\"m\""));
+        assert!(out.contains("\"content\":\"Hi\""));
+    }
+
+    #[test]
+    fn test_message_content_string_and_array_round_trip_unchanged() {
+        // String content round-trips unchanged.
+        let json = r#"{"model":"m","messages":[{"role":"user","content":"Hi"}]}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let out = serde_json::to_string(&req).unwrap();
+        assert!(out.contains(r#""content":"Hi""#), "{out}");
+
+        // Array (content parts) content round-trips unchanged in shape:
+        // still an array with the part's type/text intact. (ContentPart's own
+        // Option fields are out of this task's scope, so no byte-exact pin here.)
+        let json = r#"{"model":"m","messages":[{"role":"user","content":[{"type":"text","text":"Hi"}]}]}"#;
+        let req: ChatCompletionRequest = serde_json::from_str(json).unwrap();
+        let out = serde_json::to_string(&req).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let content = &parsed["messages"][0]["content"];
+        assert!(content.is_array(), "content must stay an array: {out}");
+        assert_eq!(content[0]["type"], "text");
+        assert_eq!(content[0]["text"], "Hi");
     }
 }
