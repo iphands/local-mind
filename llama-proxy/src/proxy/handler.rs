@@ -201,6 +201,12 @@ enum Decompressed {
 
 /// Decompress response body based on Content-Encoding header
 fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<Decompressed, String> {
+    decode_body_bytes(body_bytes, content_encoding)
+}
+
+/// The synchronous codec chain. `decompress_body` owns where it runs; the chain
+/// itself is pure CPU so it can be off-loaded from the async reactor as a unit.
+fn decode_body_bytes(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<Decompressed, String> {
     let encoding = match content_encoding {
         Some(enc) => enc,
         None => return Ok(Decompressed::Passthrough(body_bytes.to_vec())), // No compression
@@ -222,18 +228,39 @@ fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<
             Ok(Decompressed::Decoded(decompressed))
         }
         "deflate" => {
-            use flate2::read::DeflateDecoder;
-            let mut decoder = DeflateDecoder::new(body_bytes);
-            let mut decompressed = Vec::new();
-            decoder
-                .read_to_end(&mut decompressed)
-                .map_err(|e| format!("deflate decompression failed: {}", e))?;
-            tracing::debug!(
-                original_size = body_bytes.len(),
-                decompressed_size = decompressed.len(),
-                "Decompressed deflate response"
-            );
-            Ok(Decompressed::Decoded(decompressed))
+            // RFC 9110 says the `deflate` token names zlib-format data; senders that
+            // mean raw deflate still send `deflate`. Try zlib first, retry raw. A raw
+            // stream that happened to pass the zlib decoder is already the bytes the
+            // client expects, so the attempt order only shapes the error path.
+            use flate2::read::{DeflateDecoder, ZlibDecoder};
+            let mut zlib_out = Vec::new();
+            match ZlibDecoder::new(body_bytes).read_to_end(&mut zlib_out) {
+                Ok(_) => {
+                    tracing::debug!(
+                        original_size = body_bytes.len(),
+                        decompressed_size = zlib_out.len(),
+                        "Decompressed deflate response (zlib format)"
+                    );
+                    Ok(Decompressed::Decoded(zlib_out))
+                }
+                Err(zlib_err) => {
+                    let mut raw_out = Vec::new();
+                    match DeflateDecoder::new(body_bytes).read_to_end(&mut raw_out) {
+                        Ok(_) => {
+                            tracing::debug!(
+                                original_size = body_bytes.len(),
+                                decompressed_size = raw_out.len(),
+                                zlib_error = %zlib_err,
+                                "deflate body rejected by the zlib decoder, decoded as raw deflate"
+                            );
+                            Ok(Decompressed::Decoded(raw_out))
+                        }
+                        Err(raw_err) => Err(format!(
+                            "deflate decompression failed: zlib: {zlib_err}; raw-deflate: {raw_err}"
+                        )),
+                    }
+                }
+            }
         }
         "br" => {
             let mut decompressed = Vec::new();
@@ -3066,7 +3093,7 @@ mod tests {
         let empty_gz = GzEncoder::new(Vec::new(), flate2::Compression::default())
             .finish()
             .expect("empty gzip stream must build");
-        match decompress_body(&empty_gz, Some("gzip")) {
+        match decode_body_bytes(&empty_gz, Some("gzip")) {
             Ok(Decompressed::Decoded(b)) => assert!(b.is_empty(), "decoded bytes must be exactly empty"),
             Ok(Decompressed::Passthrough(b)) => {
                 panic!(
@@ -3128,10 +3155,142 @@ mod tests {
     #[test]
     fn no_encoding_header_yields_passthrough_of_identical_bytes() {
         let raw = b"unchanged body bytes";
-        match decompress_body(raw, None) {
+        match decode_body_bytes(raw, None) {
             Ok(Decompressed::Passthrough(b)) => assert_eq!(b, raw),
             Ok(Decompressed::Decoded(_)) => panic!("no encoding means nothing was decoded"),
             Err(e) => panic!("no encoding cannot fail, got Err({e})"),
         }
+    }
+
+    // ---- big-fix task 8: the `deflate` token must accept zlib AND raw-deflate [C-M4] ----
+    //
+    // RFC 9110 defines Content-Encoding: deflate as ZLIB-format data, but senders mean
+    // raw deflate. The baseline arm carried ONLY the raw decoder: a zlib fixture failed
+    // with "corrupt deflate stream" (RED raw in .omo/evidence/big-fix/task8.txt).
+    // Chain-level tests run against the sync core so they survive the task-10 offload.
+
+    fn zlib_fixture(payload: &[u8]) -> Vec<u8> {
+        use flate2::read::ZlibEncoder;
+        let mut out = Vec::new();
+        ZlibEncoder::new(payload, flate2::Compression::default())
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+
+    fn raw_deflate_fixture(payload: &[u8]) -> Vec<u8> {
+        use flate2::read::DeflateEncoder;
+        let mut out = Vec::new();
+        DeflateEncoder::new(payload, flate2::Compression::default())
+            .read_to_end(&mut out)
+            .unwrap();
+        out
+    }
+
+    fn decoded_or_panic(bytes: &[u8], encoding: &str) -> Vec<u8> {
+        match decode_body_bytes(bytes, Some(encoding)) {
+            Ok(Decompressed::Decoded(b)) => b,
+            Ok(Decompressed::Passthrough(b)) => {
+                panic!("{encoding} input must decode, got Passthrough({} bytes)", b.len())
+            }
+            Err(e) => panic!("{encoding} input must decode, got Err({e})"),
+        }
+    }
+
+    #[test]
+    fn deflate_alias_decodes_zlib_wrapped_body() {
+        let payload = completion_json_body();
+        assert_eq!(decoded_or_panic(&zlib_fixture(&payload), "deflate"), payload);
+    }
+
+    #[test]
+    fn deflate_alias_decodes_raw_deflate_body() {
+        let payload = completion_json_body();
+        assert_eq!(decoded_or_panic(&raw_deflate_fixture(&payload), "deflate"), payload);
+    }
+
+    #[test]
+    fn deflate_alias_error_names_both_attempts_for_unusable_bytes() {
+        let junk = b"neither zlib nor raw deflate, definitely not deflate";
+        match decode_body_bytes(junk, Some("deflate")) {
+            Err(e) => {
+                assert!(
+                    e.contains("zlib:") && e.contains("raw-deflate:"),
+                    "both attempts must be reported, got: {e}"
+                );
+            }
+            Ok(other) => panic!(
+                "junk must not decode, got a {}-byte body",
+                match other {
+                    Decompressed::Decoded(b) | Decompressed::Passthrough(b) => b.len(),
+                }
+            ),
+        }
+    }
+
+    #[test]
+    fn gzip_branch_is_untouched_by_the_zlib_first_ordering() {
+        use flate2::write::GzEncoder;
+        use std::io::Write;
+        let payload = br#"{"gzip":"still gzip","digits":[1,2,3,4,5,6,7,8,9,0]}"#;
+        let mut enc = GzEncoder::new(Vec::new(), flate2::Compression::default());
+        enc.write_all(payload).unwrap();
+        let gz = enc.finish().unwrap();
+        assert_eq!(decoded_or_panic(&gz, "gzip"), payload);
+    }
+
+    #[tokio::test]
+    async fn deflate_zlib_backend_body_is_served_decoded_without_header() {
+        // End-to-end through the completion path: reqwest does not decode deflate, so
+        // the proxy's own alias runs. Baseline outcome was a 502 backend_decompress_error.
+        let plain = completion_json_body();
+        let compressed = zlib_fixture(&plain);
+        let len = compressed.len().to_string();
+        let response = raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json"),
+                ("content-encoding", "deflate"),
+                ("content-length", len.as_str()),
+            ],
+            &compressed,
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_eq!(res.status(), StatusCode::OK, "zlib-format deflate must not 502");
+        assert!(res.headers().get(header::CONTENT_ENCODING).is_none());
+        let parsed: serde_json::Value = serde_json::from_str(&body_text(res).await).expect("body must parse");
+        assert_eq!(parsed["id"], serde_json::json!("cmpl-1"));
+    }
+
+    #[tokio::test]
+    async fn deflate_raw_backend_body_still_served_decoded_without_header() {
+        // Green guard: the sender that meant raw deflate keeps working after the reorder.
+        let plain = completion_json_body();
+        let compressed = raw_deflate_fixture(&plain);
+        let len = compressed.len().to_string();
+        let response = raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json"),
+                ("content-encoding", "deflate"),
+                ("content-length", len.as_str()),
+            ],
+            &compressed,
+        );
+        let port = one_shot_backend(response).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert!(res.headers().get(header::CONTENT_ENCODING).is_none());
+        let parsed: serde_json::Value = serde_json::from_str(&body_text(res).await).expect("body must parse");
+        assert_eq!(parsed["id"], serde_json::json!("cmpl-1"));
     }
 }
