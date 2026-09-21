@@ -33,12 +33,13 @@ impl std::fmt::Display for LogLevel {
 
 use llama_proxy::{
     backends::BackendNode,
-    config::AppConfig,
+    config::{AppConfig, FixesConfig},
     create_default_registry,
     exporters::{ExporterManager, InfluxDbExporter},
-    fixes::create_registry_from_config,
+    fixes::{create_registry_from_config, FixRegistry},
     run_server,
 };
+use std::path::Path;
 
 #[derive(Parser)]
 #[command(name = "llama-proxy")]
@@ -142,7 +143,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .await?;
         }
         Commands::ListFixes { verbose } => {
-            list_fixes(verbose);
+            list_fixes(&cli.config, verbose);
         }
         Commands::CheckConfig => {
             check_config(cli.config)?;
@@ -380,25 +381,39 @@ fn log_config_settings(config: &AppConfig) {
     tracing::info!("=== End Configuration ===");
 }
 
-/// List all available fix modules
-fn list_fixes(verbose: bool) {
-    let registry = create_default_registry();
+/// List all known fix modules with their real enabled state.
+///
+/// The global `--config` flag defaults to "config.yaml". When that path is a
+/// file, its `fixes:` section decides what prints, through the same
+/// `create_registry_from_config` construction the server uses at startup
+/// (task 32) - a module disabled in config prints `[disabled]`; an invalid
+/// config file is a hard error (exit 1), same as check-config. When no file
+/// exists at the path, the default config applies: every module prints
+/// `[enabled]`, preceded by a note naming the missing path.
+fn list_fixes(config_path: &Path, verbose: bool) {
+    let fixes_cfg = if config_path.is_file() {
+        load_config_or_exit(config_path).fixes
+    } else {
+        println!(
+            "note: no config file at {} - showing default state (every module enabled)\n",
+            config_path.display()
+        );
+        FixesConfig::default()
+    };
+
+    let states = fix_module_states(&create_default_registry(), &create_registry_from_config(&fixes_cfg));
 
     println!("Available response fix modules:\n");
 
-    for fix in registry.list_fixes() {
+    for state in &states {
         if verbose {
-            println!("  {}:", fix.name());
-            println!("    {}", fix.description());
-            println!("    Enabled: {}", registry.is_enabled(fix.name()));
+            println!("  {}:", state.name);
+            println!("    {}", state.description);
+            println!("    Enabled: {}", state.enabled);
             println!();
         } else {
-            let status = if registry.is_enabled(fix.name()) {
-                "[enabled]"
-            } else {
-                "[disabled]"
-            };
-            println!("  {:30} {} - {}", fix.name(), status, fix.description());
+            let status = if state.enabled { "[enabled]" } else { "[disabled]" };
+            println!("  {:30} {} - {}", state.name, status, state.description);
         }
     }
 
@@ -411,6 +426,31 @@ fn list_fixes(verbose: bool) {
         println!("      enabled: true");
         println!("      remove_duplicate: true");
     }
+}
+
+/// One row of `list-fixes`: a known module and its real enabled state.
+struct FixModuleState {
+    name: String,
+    description: String,
+    enabled: bool,
+}
+
+/// Pure (disclosed extraction for testability): the enabled state of every
+/// known fix module, derived from the CONSTRUCTED registry - never from a
+/// hardcoded `true`. Task 32 removed config-disabled modules from
+/// construction entirely, so membership in `constructed` IS the enabled
+/// answer; `catalog` (the full default registry) supplies name, description,
+/// and row order for the modules the config skipped.
+fn fix_module_states(catalog: &FixRegistry, constructed: &FixRegistry) -> Vec<FixModuleState> {
+    catalog
+        .list_fixes()
+        .iter()
+        .map(|fix| FixModuleState {
+            name: fix.name().to_string(),
+            description: fix.description().to_string(),
+            enabled: constructed.is_enabled(fix.name()),
+        })
+        .collect()
 }
 
 /// Validate configuration file
@@ -635,7 +675,7 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
 }
 
 /// Load configuration or exit with error
-fn load_config_or_exit(config_path: &PathBuf) -> AppConfig {
+fn load_config_or_exit(config_path: &Path) -> AppConfig {
     match AppConfig::from_file(config_path) {
         Ok(config) => config,
         Err(e) => {
@@ -645,5 +685,65 @@ fn load_config_or_exit(config_path: &PathBuf) -> AppConfig {
             eprintln!("  cp config.yaml.default config.yaml");
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_fix_module_states_reports_config_disabled_module() {
+        // Given: a config that disables exactly one module
+        let mut modules = std::collections::HashMap::new();
+        modules.insert(
+            "toolcall_bad_filepath".to_string(),
+            llama_proxy::config::FixModuleConfig {
+                enabled: false,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        let fixes = FixesConfig { enabled: true, modules };
+
+        // When: rows are derived from the config-constructed registry
+        let catalog = create_default_registry();
+        let states = fix_module_states(&catalog, &create_registry_from_config(&fixes));
+
+        // Then: the disabled module reports false, the others true - all rows present
+        assert_eq!(states.len(), 3);
+        let enabled_of = |name: &str| states.iter().find(|s| s.name == name).map(|s| s.enabled);
+        assert_eq!(enabled_of("toolcall_bad_filepath"), Some(false));
+        assert_eq!(enabled_of("toolcall_null_index_fix"), Some(true));
+        assert_eq!(enabled_of("toolcall_malformed_arguments"), Some(true));
+    }
+
+    #[test]
+    fn test_fix_module_states_default_config_enables_everything() {
+        // Given: no config file at all -> FixesConfig::default()
+        // When/Then: every known module row is enabled (the no-config print)
+        let catalog = create_default_registry();
+        let states = fix_module_states(&catalog, &create_registry_from_config(&FixesConfig::default()));
+        assert_eq!(states.len(), 3);
+        assert!(states.iter().all(|s| s.enabled));
+    }
+
+    #[test]
+    fn test_fix_module_states_global_switch_disables_every_row() {
+        // Given: fixes.enabled=false globally, a module asking to be enabled
+        let mut modules = std::collections::HashMap::new();
+        modules.insert(
+            "toolcall_bad_filepath".to_string(),
+            llama_proxy::config::FixModuleConfig {
+                enabled: true,
+                options: std::collections::HashMap::new(),
+            },
+        );
+        let fixes = FixesConfig { enabled: false, modules };
+
+        // When/Then: no row is enabled
+        let catalog = create_default_registry();
+        let states = fix_module_states(&catalog, &create_registry_from_config(&fixes));
+        assert_eq!(states.len(), 3);
+        assert!(states.iter().all(|s| !s.enabled));
     }
 }
