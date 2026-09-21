@@ -177,7 +177,7 @@ fn synthesize_choice_chunks(
     }
     match message.get("content") {
         Some(Value::String(text)) if !text.is_empty() => {
-            for text_chunk in chunk_text(text, chunk_size_chars) {
+            for text_chunk in split_chars(text, chunk_size_chars) {
                 chunks.push(Ok(create_sse_event(&sse_envelope(meta, "content", json!(text_chunk), idx))));
             }
         }
@@ -269,16 +269,43 @@ fn map_openai_finish_to_stop(finish: &str) -> String {
     }
 }
 
-/// Convert a RAW OpenAI completion into the full Anthropic SSE event set.
+/// One pre-computed SSE frame of a synthesized stream: the SSE event name
+/// plus the already-assembled JSON payload. Building a frame is pure data
+/// assembly (pointer reads + `json!`), so the converter that produces these
+/// is INFALLIBLE - serializing a `Value` cannot fail and no I/O happens
+/// until the frames are paced out to the client.
+#[derive(Debug, Clone)]
+pub struct SseFrame {
+    event: &'static str,
+    data: Value,
+}
+
+impl SseFrame {
+    fn new(event: &'static str, data: Value) -> Self {
+        Self { event, data }
+    }
+
+    fn into_event(self) -> Event {
+        create_anthropic_sse_event(self.event, &self.data)
+    }
+}
+
+/// Convert a RAW OpenAI completion into the full Anthropic SSE frame set.
 ///
-/// `None` means the body is not a well-formed OpenAI completion (malformed
-/// KNOWN fields) - the /v1/messages caller then answers with the SSE error
-/// frame. Unknown top-level fields merge into `message_start.message` and
-/// unknown usage keys stay in the usage object, so they survive BY
-/// CONSTRUCTION - the typed `ChatCompletionResponse` round-trip is bypassed.
-/// Every choice is emitted with gap-free global block indices.
-pub fn convert_openai_to_claude_sse(raw: &Value, config: &SynthesisConfig) -> Option<Vec<Result<Event, Infallible>>> {
-    let parsed = parse_raw_completion(raw).ok()?;
+/// INFALLIBLE by design (plan 62: `Vec<SseFrame>`, no Result to fake):
+/// envelope construction is pure pointer-reads over the raw `Value` plus
+/// `json!` assembly. Malformed KNOWN fields (non-array/empty choices,
+/// missing message, `index: null`, non-string finish_reason) yield an EMPTY
+/// Vec - the honest rejection signal the /v1/messages caller turns into the
+/// SSE error frame. Unknown top-level fields merge into
+/// `message_start.message` and unknown usage keys stay in the usage object,
+/// so they survive BY CONSTRUCTION; every choice is emitted with gap-free
+/// global block indices.
+pub fn convert_openai_to_claude_sse(raw: &Value, config: &SynthesisConfig) -> Vec<SseFrame> {
+    let parsed = match parse_raw_completion(raw) {
+        Ok(parsed) => parsed,
+        Err(_) => return Vec::new(),
+    };
     let usage = match parsed.usage {
         Some(u) => {
             // Read first, then write - the mapped keys are known fields.
@@ -295,7 +322,11 @@ pub fn convert_openai_to_claude_sse(raw: &Value, config: &SynthesisConfig) -> Op
         }
         None => json!({"input_tokens": 0, "output_tokens": 0}),
     };
-    let first_msg = parsed.choices.first().and_then(|c| c.get("message"))?;
+    let first_msg = match parsed.choices.first().and_then(|c| c.get("message")) {
+        Some(m) => m,
+        // Validated upstream; an absent message can only mean malformed.
+        None => return Vec::new(),
+    };
     let role = first_msg.get("role").and_then(Value::as_str).unwrap_or("assistant");
     let mut message = json!({
         "id": parsed.meta.id, "type": "message", "role": role, "model": parsed.meta.model,
@@ -306,67 +337,59 @@ pub fn convert_openai_to_claude_sse(raw: &Value, config: &SynthesisConfig) -> Op
             message[k] = v.clone();
         }
     }
-    let mut chunks: Vec<Result<Event, Infallible>> = vec![Ok(create_anthropic_sse_event(
+    let mut frames: Vec<SseFrame> = vec![SseFrame::new(
         "message_start",
-        &json!({"type": "message_start", "message": message}),
-    ))];
+        json!({"type": "message_start", "message": message}),
+    )];
 
     let mut idx = 0usize;
     let mut has_tool_use = false;
     for choice in &parsed.choices {
-        let message = choice.get("message").and_then(Value::as_object)?;
+        let message = match choice.get("message").and_then(Value::as_object) {
+            Some(m) => m,
+            None => return Vec::new(),
+        };
         let mut emitted = false;
         if let Some(reasoning) = message.get("reasoning_text").and_then(Value::as_str) {
             if !reasoning.is_empty() {
-                chunks.push(Ok(create_anthropic_sse_event(
+                frames.push(SseFrame::new(
                     "content_block_start",
-                    &build_thinking_block_start_event(idx, None),
-                )));
-                for part in chunk_text(reasoning, config.chunk_size_chars) {
-                    chunks.push(Ok(create_anthropic_sse_event(
+                    build_thinking_block_start_event(idx, None),
+                ));
+                for part in split_chars(reasoning, config.chunk_size_chars) {
+                    frames.push(SseFrame::new(
                         "content_block_delta",
-                        &build_thinking_block_delta_event(idx, &part),
-                    )));
+                        build_thinking_block_delta_event(idx, &part),
+                    ));
                 }
-                chunks.push(Ok(create_anthropic_sse_event(
-                    "content_block_stop",
-                    &build_content_block_stop_event(idx),
-                )));
+                frames.push(SseFrame::new("content_block_stop", build_content_block_stop_event(idx)));
                 idx += 1;
                 emitted = true;
             }
         }
         match message.get("content") {
             Some(Value::String(text)) if !text.is_empty() => {
-                chunks.push(Ok(create_anthropic_sse_event(
+                frames.push(SseFrame::new(
                     "content_block_start",
-                    &build_content_block_start_event(idx, "text"),
-                )));
-                for part in chunk_text(text, config.chunk_size_chars) {
-                    chunks.push(Ok(create_anthropic_sse_event(
+                    build_content_block_start_event(idx, "text"),
+                ));
+                for part in split_chars(text, config.chunk_size_chars) {
+                    frames.push(SseFrame::new(
                         "content_block_delta",
-                        &build_content_block_delta_event(idx, "text_delta", part.as_str()),
-                    )));
+                        build_content_block_delta_event(idx, "text_delta", part.as_str()),
+                    ));
                 }
-                chunks.push(Ok(create_anthropic_sse_event(
-                    "content_block_stop",
-                    &build_content_block_stop_event(idx),
-                )));
+                frames.push(SseFrame::new("content_block_stop", build_content_block_stop_event(idx)));
                 idx += 1;
                 emitted = true;
             }
             // Non-string, non-null content: verbatim pass-through block.
             Some(other) if !other.is_null() && !other.is_string() => {
-                chunks.push(Ok(create_anthropic_sse_event(
+                frames.push(SseFrame::new(
                     "content_block_start",
-                    &json!({
-                        "type": "content_block_start", "index": idx, "content_block": other,
-                    }),
-                )));
-                chunks.push(Ok(create_anthropic_sse_event(
-                    "content_block_stop",
-                    &build_content_block_stop_event(idx),
-                )));
+                    json!({"type": "content_block_start", "index": idx, "content_block": other}),
+                ));
+                frames.push(SseFrame::new("content_block_stop", build_content_block_stop_event(idx)));
                 idx += 1;
                 emitted = true;
             }
@@ -389,20 +412,17 @@ pub fn convert_openai_to_claude_sse(raw: &Value, config: &SynthesisConfig) -> Op
                     .and_then(|f| f.get("arguments"))
                     .and_then(Value::as_str)
                     .unwrap_or("");
-                chunks.push(Ok(create_anthropic_sse_event(
+                frames.push(SseFrame::new(
                     "content_block_start",
-                    &build_tool_use_block_start_event(idx, &id, name),
-                )));
+                    build_tool_use_block_start_event(idx, &id, name),
+                ));
                 // The RAW arguments string rides partial_json verbatim - even
                 // if it is not valid JSON, rewriting it would lie.
-                chunks.push(Ok(create_anthropic_sse_event(
+                frames.push(SseFrame::new(
                     "content_block_delta",
-                    &build_tool_use_block_delta_event(idx, args),
-                )));
-                chunks.push(Ok(create_anthropic_sse_event(
-                    "content_block_stop",
-                    &build_content_block_stop_event(idx),
-                )));
+                    build_tool_use_block_delta_event(idx, args),
+                ));
+                frames.push(SseFrame::new("content_block_stop", build_content_block_stop_event(idx)));
                 idx += 1;
                 has_tool_use = true;
                 emitted = true;
@@ -410,14 +430,11 @@ pub fn convert_openai_to_claude_sse(raw: &Value, config: &SynthesisConfig) -> Op
         }
         if !emitted {
             // Anthropic requires at least one block; mirrors the From fallback.
-            chunks.push(Ok(create_anthropic_sse_event(
+            frames.push(SseFrame::new(
                 "content_block_start",
-                &build_content_block_start_event(idx, "text"),
-            )));
-            chunks.push(Ok(create_anthropic_sse_event(
-                "content_block_stop",
-                &build_content_block_stop_event(idx),
-            )));
+                build_content_block_start_event(idx, "text"),
+            ));
+            frames.push(SseFrame::new("content_block_stop", build_content_block_stop_event(idx)));
             idx += 1;
         }
     }
@@ -436,29 +453,34 @@ pub fn convert_openai_to_claude_sse(raw: &Value, config: &SynthesisConfig) -> Op
                 "end_turn".to_string()
             }
         });
-    chunks.push(Ok(create_anthropic_sse_event(
+    frames.push(SseFrame::new(
         "message_delta",
-        &json!({
-                "type": "message_delta",
+        json!({
+            "type": "message_delta",
             "delta": { "stop_reason": stop_reason, "stop_sequence": null },
             "usage": usage,
         }),
-    )));
-    chunks.push(Ok(create_anthropic_sse_event("message_stop", &build_message_stop_event())));
-    Some(chunks)
+    ));
+    frames.push(SseFrame::new("message_stop", build_message_stop_event()));
+    frames
 }
 
 /// Streaming-response entry for the /v1/messages OpenAI-format branch.
-/// `None` = malformed OpenAI body; the caller serves the SSE error frame.
+/// `None` = the converter's empty-Vec rejection; caller serves the SSE error frame.
 pub fn synthesize_anthropic_openai_format_response(raw: &Value, config: &SynthesisConfig) -> Option<Response> {
-    Some(stream_response(convert_openai_to_claude_sse(raw, config)?, config))
+    let frames = convert_openai_to_claude_sse(raw, config);
+    if frames.is_empty() {
+        return None;
+    }
+    let chunks = frames.into_iter().map(|f| Ok::<_, Infallible>(f.into_event())).collect();
+    Some(stream_response(chunks, config))
 }
 
 /// Split text into chunks of approximately max_size characters
 ///
 /// This creates the "streaming" effect for text content.
 /// Tries to split on whitespace boundaries when possible.
-fn chunk_text(text: &str, max_size: usize) -> Vec<String> {
+fn split_chars(text: &str, max_size: usize) -> Vec<String> {
     if text.len() <= max_size {
         return vec![text.to_string()];
     }
@@ -531,15 +553,10 @@ fn create_sse_event(json: &serde_json::Value) -> Event {
 /// - content_block_stop: End of content block
 /// - message_delta: Final metadata (stop_reason, usage)
 /// - message_stop: Stream terminator
-pub async fn synthesize_anthropic_streaming_response(
-    msg: AnthropicMessage,
-    config: &SynthesisConfig,
-) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
-    // Pre-compute all chunks, then pace the SSE response
-    Ok(stream_response(
-        synthesize_anthropic_chunks(msg, config.chunk_size_chars),
-        config,
-    ))
+pub async fn synthesize_anthropic_streaming_response(msg: AnthropicMessage, config: &SynthesisConfig) -> Response {
+    // Infallible by design (plan 62): every frame is pre-computed pure data -
+    // serializing a `Value` cannot fail and pacing performs no fallible I/O.
+    stream_response(synthesize_anthropic_chunks(msg, config.chunk_size_chars), config)
 }
 
 /// Generate the sequence of Anthropic SSE events from complete message
@@ -563,7 +580,7 @@ fn synthesize_anthropic_chunks(msg: AnthropicMessage, chunk_size_chars: usize) -
                 )));
 
                 // Send text as chunked deltas
-                for text_chunk in chunk_text(text, chunk_size_chars) {
+                for text_chunk in split_chars(text, chunk_size_chars) {
                     chunks.push(Ok(create_anthropic_sse_event(
                         "content_block_delta",
                         &build_content_block_delta_event(idx, "text_delta", &text_chunk),
@@ -584,7 +601,7 @@ fn synthesize_anthropic_chunks(msg: AnthropicMessage, chunk_size_chars: usize) -
                 )));
 
                 // Send thinking as chunked deltas
-                for thinking_chunk in chunk_text(thinking, chunk_size_chars) {
+                for thinking_chunk in split_chars(thinking, chunk_size_chars) {
                     chunks.push(Ok(create_anthropic_sse_event(
                         "content_block_delta",
                         &build_thinking_block_delta_event(idx, &thinking_chunk),
@@ -850,17 +867,17 @@ mod tests {
     use crate::config::SynthesisConfig;
 
     #[test]
-    fn test_chunk_text_short() {
+    fn test_split_chars_short() {
         let text = "Hello world";
-        let chunks = chunk_text(text, 50);
+        let chunks = split_chars(text, 50);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0], "Hello world");
     }
 
     #[test]
-    fn test_chunk_text_long() {
+    fn test_split_chars_long() {
         let text = "a".repeat(150);
-        let chunks = chunk_text(&text, 50);
+        let chunks = split_chars(&text, 50);
         assert!(chunks.len() >= 3);
 
         // Verify chunks reconstruct original
@@ -869,29 +886,29 @@ mod tests {
     }
 
     #[test]
-    fn test_chunk_text_multibyte_emoji() {
+    fn test_split_chars_multibyte_emoji() {
         // Emojis are 4 bytes each; a chunk boundary mid-emoji must not panic
         // "💡" is 4 bytes; 12 emojis = 48 bytes, chunk_size=50 puts end at byte 50 (inside emoji 13)
         let text = "💡".repeat(20); // 80 bytes total
-        let chunks = chunk_text(&text, 50);
+        let chunks = split_chars(&text, 50);
         // All chunks must be valid UTF-8 strings (no panic = pass)
         let reconstructed: String = chunks.concat();
         assert_eq!(reconstructed, text);
     }
 
     #[test]
-    fn test_chunk_text_mixed_emoji_ascii() {
+    fn test_split_chars_mixed_emoji_ascii() {
         // The actual crashing pattern from production logs
         let text = "👋 **Hello!** 😊\n\nHow can I assist you today? 🌱\n\nWhether you have a question 💬";
-        let chunks = chunk_text(text, 50);
+        let chunks = split_chars(text, 50);
         let reconstructed: String = chunks.concat();
         assert_eq!(reconstructed, text);
     }
 
     #[test]
-    fn test_chunk_text_splits_on_whitespace() {
+    fn test_split_chars_splits_on_whitespace() {
         let text = "Hello world this is a test of text chunking functionality";
-        let chunks = chunk_text(text, 20);
+        let chunks = split_chars(text, 20);
 
         // Should split on spaces, not mid-word
         for chunk in &chunks {
@@ -1014,16 +1031,16 @@ mod tests {
     }
 
     #[test]
-    fn test_chunk_text_empty() {
-        let chunks = chunk_text("", 50);
+    fn test_split_chars_empty() {
+        let chunks = split_chars("", 50);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0], "");
     }
 
     #[test]
-    fn test_chunk_text_exact_size() {
+    fn test_split_chars_exact_size() {
         let text = "a".repeat(50);
-        let chunks = chunk_text(&text, 50);
+        let chunks = split_chars(&text, 50);
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].len(), 50);
     }
@@ -1252,9 +1269,7 @@ mod tests {
             },
         };
 
-        let resp = synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
-            .await
-            .unwrap();
+        let resp = synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default()).await;
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let text = String::from_utf8(bytes.to_vec()).unwrap();
 
@@ -1330,14 +1345,10 @@ mod tests {
             },
         };
 
-        // Call the main synthesis function
+        // Call the main synthesis function (infallible since task 62)
         let response = synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default()).await;
 
-        // Verify we got a response
-        assert!(response.is_ok(), "Should synthesize response successfully");
-
         // The response should be an SSE stream
-        let response = response.unwrap();
         assert_eq!(response.status(), 200);
 
         // Verify content-type header is set for SSE
@@ -1497,7 +1508,7 @@ mod chunk_timing_tests {
                 output_tokens: 1,
             },
         };
-        let resp = synthesize_anthropic_streaming_response(msg, &cfg).await.unwrap();
+        let resp = synthesize_anthropic_streaming_response(msg, &cfg).await;
         let marks = timed_body(resp, 2).await;
         let delta = marks[1].0 - marks[0].0;
         assert!(
@@ -1555,7 +1566,6 @@ mod envelope_factory_tests {
         // chunk, choices[1] now streams at index 1, and usage carries llama_extra
         // verbatim. Disclosed behavior change - baseline drops these (task61 capture).
         const BASELINE_BYTES: &str = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_text\":\"Hmm, let me think.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Answer here.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\",\"name\":\"lookup\"},\"id\":\"call_1\",\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\",\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null,\"index\":1}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"SECOND CHOICE\"},\"finish_reason\":null,\"index\":1}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":1}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"usage\":{\"completion_tokens\":7,\"llama_extra\":{\"k\":1},\"prompt_tokens\":5,\"total_tokens\":12},\"x_top_unknown\":{\"alpha\":true}}\n\ndata: [DONE]\n\n";
-
 
         let raw = serde_json::json!({
             "id": "cmpl-probe", "object": "chat.completion", "created": 171, "model": "qwen3",
@@ -1659,12 +1669,7 @@ mod order_finish_reason_tests {
                 output_tokens: 1,
             },
         };
-        let b = body(
-            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
-                .await
-                .unwrap(),
-        )
-        .await;
+        let b = body(synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default()).await).await;
         assert!(
             b.contains("\"stop_reason\":\"tool_use\""),
             "baseline emits null => RED, got:\n{b}"
@@ -1686,12 +1691,7 @@ mod order_finish_reason_tests {
                 output_tokens: 1,
             },
         };
-        let b = body(
-            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
-                .await
-                .unwrap(),
-        )
-        .await;
+        let b = body(synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default()).await).await;
         assert!(
             b.contains("\"stop_reason\":\"end_turn\""),
             "baseline emits null => RED, got:\n{b}"
@@ -1715,12 +1715,7 @@ mod order_finish_reason_tests {
                 output_tokens: 1,
             },
         };
-        let b = body(
-            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
-                .await
-                .unwrap(),
-        )
-        .await;
+        let b = body(synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default()).await).await;
         assert!(b.contains("\"stop_reason\":\"max_tokens\""));
     }
 }
@@ -1761,12 +1756,7 @@ mod tool_result_signature_tests {
             thinking: "deep".to_string(),
             signature: Some("sig_abc".to_string()),
         }]);
-        let b = body(
-            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
-                .await
-                .unwrap(),
-        )
-        .await;
+        let b = body(synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default()).await).await;
         assert!(
             b.contains("\"type\":\"signature_delta\""),
             "signature_delta missing => RED:\n{b}"
@@ -1780,12 +1770,7 @@ mod tool_result_signature_tests {
             thinking: "deep".to_string(),
             signature: None,
         }]);
-        let b = body(
-            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
-                .await
-                .unwrap(),
-        )
-        .await;
+        let b = body(synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default()).await).await;
         assert!(!b.contains("signature_delta"));
     }
 
@@ -1804,12 +1789,7 @@ mod tool_result_signature_tests {
                 is_error: Some(true),
             },
         ]);
-        let b = body(
-            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
-                .await
-                .unwrap(),
-        )
-        .await;
+        let b = body(synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default()).await).await;
         assert!(
             b.contains("\"type\":\"tool_result\""),
             "tool_result block missing => RED:\n{b}"
@@ -1837,12 +1817,7 @@ mod tool_result_signature_tests {
             content: json!("TR-STRING"),
             is_error: None,
         }]);
-        let b = body(
-            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
-                .await
-                .unwrap(),
-        )
-        .await;
+        let b = body(synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default()).await).await;
         assert!(
             b.contains("\"type\":\"tool_result\""),
             "string ToolResult must be a tool_result block => RED:\n{b}"
@@ -1878,12 +1853,7 @@ mod tool_result_signature_tests {
                 is_error: None,
             },
         ]);
-        let b = body(
-            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
-                .await
-                .unwrap(),
-        )
-        .await;
+        let b = body(synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default()).await).await;
         for i in 0..5 {
             assert!(b.contains(&format!("\"index\":{i}")), "index {i} missing => gap => RED");
         }
@@ -1992,7 +1962,10 @@ mod raw_choice_unknown_preservation_tests {
             json!({"id": "i", "model": "m", "choices": [{"index": 0, "finish_reason": 7, "message": {"role": "assistant", "content": "x"}}]}),
         ];
         for b in bad {
-            assert!(convert_openai_to_claude_sse(&b, &cfg).is_none(), "convert must reject {b}");
+            assert!(
+                convert_openai_to_claude_sse(&b, &cfg).is_empty(),
+                "convert must reject (empty Vec) {b}"
+            );
             assert!(parse_raw_completion(&b).is_err(), "parse must reject {b}");
         }
     }

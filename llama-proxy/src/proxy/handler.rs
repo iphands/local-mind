@@ -1412,13 +1412,8 @@ impl ProxyHandler {
                     match serde_json::from_value::<AnthropicMessage>(json.clone()) {
                         Ok(anthropic_msg) => {
                             tracing::debug!("Backend returned Anthropic format, synthesizing streaming response");
-                            match synthesize_anthropic_streaming_response(anthropic_msg, &self.state.config.synthesis).await {
-                                Ok(response) => return response,
-                                Err(e) => {
-                                    tracing::error!(error = %e, "Failed to synthesize Anthropic streaming response, ending the stream with an SSE error frame");
-                                    return anthropic_sse_error_response();
-                                }
-                            }
+                            // Infallible since task 62 - no failure arm to route.
+                            return synthesize_anthropic_streaming_response(anthropic_msg, &self.state.config.synthesis).await;
                         }
                         Err(_) => {
                             // Backend returned OpenAI format - convert from the RAW buffered
