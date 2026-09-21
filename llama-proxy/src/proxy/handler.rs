@@ -1560,7 +1560,7 @@ mod tests {
     use super::*;
     use crate::augment::AugmentBackend;
     use crate::backends::{BackendNode, GroupedLoadBalancer, LoadBalancer, RoundRobinBalancer};
-    use crate::config::{AppConfig, BackendConfig, StreamingConfig};
+    use crate::config::{AppConfig, BackendConfig, StreamingMode};
     use crate::exporters::ExporterManager;
     use crate::fixes::FixRegistry;
     use std::collections::HashMap;
@@ -1568,7 +1568,7 @@ mod tests {
     use std::time::Duration;
 
     #[allow(dead_code)]
-    fn create_test_handler_with_streaming(streaming_config: StreamingConfig) -> ProxyHandler {
+    fn create_test_handler_with_streaming(streaming_config: StreamingMode) -> ProxyHandler {
         let config = AppConfig {
             server: crate::config::ServerConfig {
                 port: 8066,
@@ -1584,7 +1584,6 @@ mod tests {
             stats: crate::config::StatsConfig {
                 enabled: false,
                 format: crate::config::StatsFormat::Pretty,
-                log_interval: 1,
             },
             exporters: crate::config::ExportersConfig {
                 influxdb: crate::config::InfluxDbConfig {
@@ -1597,7 +1596,6 @@ mod tests {
                     flush_interval_seconds: 1,
                 },
             },
-            detection: crate::config::DetectionConfig::default(),
             streaming: streaming_config,
             synthesis: crate::config::SynthesisConfig::default(),
             augment_backend: None,
@@ -1797,7 +1795,7 @@ mod tests {
     fn handler_with_balancer(
         load_balancer: Arc<dyn LoadBalancer>,
         augment_backend: Option<Arc<AugmentBackend>>,
-        streaming: StreamingConfig,
+        streaming: StreamingMode,
     ) -> ProxyHandler {
         let config = AppConfig {
             server: crate::config::ServerConfig {
@@ -1814,7 +1812,6 @@ mod tests {
             stats: crate::config::StatsConfig {
                 enabled: false,
                 format: crate::config::StatsFormat::Pretty,
-                log_interval: 1,
             },
             exporters: crate::config::ExportersConfig {
                 influxdb: crate::config::InfluxDbConfig {
@@ -1827,7 +1824,6 @@ mod tests {
                     flush_interval_seconds: 1,
                 },
             },
-            detection: crate::config::DetectionConfig::default(),
             streaming,
             synthesis: crate::config::SynthesisConfig::default(),
             augment_backend: None,
@@ -1882,7 +1878,7 @@ mod tests {
         // NoMatchingBackend, the exact state of a proxy started without a backend.
         let empty_groups: HashMap<String, crate::config::BackendGroupConfig> = HashMap::new();
         let balancer = Arc::new(GroupedLoadBalancer::new(empty_groups).expect("empty group map must build"));
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -1916,7 +1912,7 @@ mod tests {
             http_client: reqwest::Client::new(),
         };
         let balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(bare_node(None))]).unwrap());
-        let handler = handler_with_balancer(balancer, Some(Arc::new(dead_augment)), StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, Some(Arc::new(dead_augment)), StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -2035,7 +2031,7 @@ mod tests {
     async fn unreadable_request_body_answers_400_with_error_envelope() {
         // Body read fails before the balancer hands out a node; node url is never contacted.
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(Method::POST, "/v1/chat/completions", exploding_body()))
@@ -2057,7 +2053,7 @@ mod tests {
         // handle() pre-buffers the body before rebuilding monitoring passthroughs,
         // so this site is only exercisable at the method boundary.
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
         let node = node_at_port(1);
 
         let res = handler
@@ -2071,7 +2067,7 @@ mod tests {
     async fn backend_connect_failure_answers_502_with_error_envelope() {
         // Port 1: connect is refused instantly, deterministic without any listener.
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -2088,7 +2084,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -2106,7 +2102,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -2117,7 +2113,7 @@ mod tests {
     async fn passthrough_connect_failure_answers_502_with_error_envelope() {
         // GET /v1/health takes the monitoring pass-through arm inside handle().
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
@@ -2135,7 +2131,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
@@ -2153,7 +2149,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
@@ -2192,7 +2188,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -2239,7 +2235,7 @@ mod tests {
         // is called directly because handle() pre-buffers with the 100 MiB
         // main cap before rebuilding passthrough requests (task 5 learning).
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
         let node = node_at_port(1);
 
         let res = handler
@@ -2263,7 +2259,7 @@ mod tests {
         // (4 MiB of frames, then the stream dies) must stay 400 with the
         // unreadable-text verbatim - the 413 branch must not swallow it.
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(
@@ -2375,7 +2371,7 @@ mod tests {
         let (port, _release) = held_open_sse_backend(b"data: a\n\n", b"data: [DONE]\n\n").await;
         let node = node_at_port(port);
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -2395,7 +2391,7 @@ mod tests {
         let (port, release) = held_open_sse_backend(b"data: a\n\n", b"data: [DONE]\n\n").await;
         let node = node_at_port(port);
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
         release.send(()).expect("backend task must still be listening");
@@ -2419,7 +2415,7 @@ mod tests {
         let (port, _release) = held_open_sse_backend(b"data: a\n\n", b"data: [DONE]\n\n").await;
         let node = node_at_port(port);
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -2548,7 +2544,7 @@ mod tests {
         let (port, rx) = recording_backend(completion_response_bytes()).await;
         let node = prefixed_node(port, "/completions", None);
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let body = serde_json::json!({
             "model": "test-model",
@@ -2592,7 +2588,7 @@ mod tests {
         // forwards the requested path verbatim.
         let (port, rx) = recording_backend(completion_response_bytes()).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
         assert_eq!(handler.state.anthropic_buffered_responses_total.load(Ordering::Relaxed), 0);
 
         let res = handler.handle(completion_request_streaming()).await;
@@ -2634,7 +2630,7 @@ mod tests {
         let (port, rx) = recording_backend(completion_response_bytes()).await;
         let node = prefixed_node(port, "/v1", None);
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -2663,7 +2659,7 @@ mod tests {
         .await;
         let node = prefixed_node(port, "/completions", Some("renamed"));
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(Method::GET, "/completions/props", Body::from(&body[..])))
@@ -2694,7 +2690,7 @@ mod tests {
             ..bare_node(None)
         });
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::Passthrough);
+        let handler = handler_with_balancer(balancer, None, StreamingMode::Passthrough);
 
         let res = handler
             .handle(request_with_body(
@@ -2722,7 +2718,7 @@ mod tests {
             ..bare_node(None)
         });
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::Passthrough);
+        let handler = handler_with_balancer(balancer, None, StreamingMode::Passthrough);
 
         let res = handler
             .handle(request_with_body(
@@ -2748,7 +2744,7 @@ mod tests {
             ..bare_node(None)
         });
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::Passthrough);
+        let handler = handler_with_balancer(balancer, None, StreamingMode::Passthrough);
 
         let res = handler
             .handle(request_with_body(
@@ -2772,7 +2768,7 @@ mod tests {
         .await;
         let node = node_at_port(port);
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -2797,7 +2793,7 @@ mod tests {
         .await;
         let node = node_at_port(port);
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -2812,7 +2808,7 @@ mod tests {
     async fn backend_connect_failure_marks_the_node_into_cooldown() {
         let node = node_at_port(1);
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -2833,7 +2829,7 @@ mod tests {
         assert!(node.in_cooldown(Instant::now()), "precondition: node starts cooled");
 
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -2894,7 +2890,7 @@ mod tests {
         ))
         .await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![override_node(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(Method::POST, "/tokenize", Body::from(&client_body[..])))
@@ -2916,7 +2912,7 @@ mod tests {
         // above could be "fixed" by deleting the injection code entirely.
         let (port, rx) = recording_backend(completion_response_bytes()).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![override_node(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -3080,7 +3076,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -3117,7 +3113,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
@@ -3154,7 +3150,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -3185,7 +3181,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
@@ -3229,7 +3225,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
@@ -3253,7 +3249,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
@@ -3373,7 +3369,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -3400,7 +3396,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -3434,7 +3430,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler
             .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
@@ -3479,7 +3475,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -3610,7 +3606,7 @@ mod tests {
         ))
         .await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let started = std::time::Instant::now();
         let res = handler.handle(completion_request()).await;
@@ -3663,7 +3659,7 @@ mod tests {
         ))
         .await;
         let bal_h = Arc::new(RoundRobinBalancer::new(vec![node_at_port(heavy_port)]).unwrap());
-        let h_h = handler_with_balancer(bal_h, None, StreamingConfig::default());
+        let h_h = handler_with_balancer(bal_h, None, StreamingMode::default());
         let o = order.clone();
         let heavy = tokio::spawn(async move {
             let res = h_h.handle(completion_request()).await;
@@ -3682,7 +3678,7 @@ mod tests {
         ))
         .await;
         let bal_l = Arc::new(RoundRobinBalancer::new(vec![node_at_port(light_port)]).unwrap());
-        let h_l = handler_with_balancer(bal_l, None, StreamingConfig::default());
+        let h_l = handler_with_balancer(bal_l, None, StreamingMode::default());
         let o = order.clone();
         let light = tokio::spawn(async move {
             let res = h_l.handle(request_with_body(Method::GET, "/v1/health", Body::empty())).await;
@@ -3744,7 +3740,7 @@ mod tests {
         ))
         .await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(anthropic_stream_request()).await;
 
@@ -3800,7 +3796,7 @@ mod tests {
         // Anthropic stream (message_start event) with no error frame anywhere.
         let port = one_shot_backend(completion_response_bytes()).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let res = handler.handle(anthropic_stream_request()).await;
 
@@ -3832,7 +3828,7 @@ mod tests {
         ))
         .await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
         let req = Request::builder()
             .method(Method::POST)
@@ -3902,7 +3898,7 @@ mod tests {
         ))
         .await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let mut handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let mut handler = handler_with_balancer(balancer, None, StreamingMode::default());
         handler.state.dump_path = Some(Arc::new(dir.path().to_path_buf()));
 
         let res = handler.handle(completion_request()).await;
@@ -3982,7 +3978,7 @@ mod tests {
         let dir = tempfile::tempdir().expect("temp dump dir");
         let port = one_shot_backend(completion_response_bytes()).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let mut handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let mut handler = handler_with_balancer(balancer, None, StreamingMode::default());
         handler.state.dump_path = Some(Arc::new(dir.path().to_path_buf()));
 
         let res = handler.handle(completion_request()).await;
@@ -4027,7 +4023,7 @@ mod tests {
         // Ephemeral 127.0.0.1:0, in-process serve, abort teardown - zero fixed ports,
         // zero sleeps. The dead node at 127.0.0.1:1 answers connect instantly-refused.
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
         let state = handler.state.clone();
 
         async fn proxy_hop(

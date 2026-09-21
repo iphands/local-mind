@@ -28,9 +28,7 @@ pub struct AppConfig {
     #[serde(default)]
     pub exporters: ExportersConfig,
     #[serde(default)]
-    pub detection: DetectionConfig,
-    #[serde(default)]
-    pub streaming: StreamingConfig,
+    pub streaming: StreamingMode,
     #[serde(default)]
     pub synthesis: SynthesisConfig,
     #[serde(default, rename = "augment-backend")]
@@ -269,16 +267,10 @@ pub struct StatsConfig {
     pub enabled: bool,
     #[serde(default)]
     pub format: StatsFormat,
-    #[serde(default = "default_log_interval")]
-    pub log_interval: u32,
 }
 
 fn default_stats_enabled() -> bool {
     true
-}
-
-fn default_log_interval() -> u32 {
-    1
 }
 
 impl Default for StatsConfig {
@@ -286,7 +278,6 @@ impl Default for StatsConfig {
         Self {
             enabled: default_stats_enabled(),
             format: StatsFormat::default(),
-            log_interval: default_log_interval(),
         }
     }
 }
@@ -299,36 +290,6 @@ pub enum StatsFormat {
     Pretty,
     Json,
     Compact,
-}
-
-/// Pre-parse detection configuration
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct DetectionConfig {
-    /// Enable pre-parse malformed pattern detection
-    /// This runs BEFORE JSON parsing and logs warnings immediately
-    #[serde(default = "default_detection_enabled")]
-    pub enabled: bool,
-
-    /// Log level for detections: "warn" | "error" | "info"
-    #[serde(default = "default_log_level")]
-    pub log_level: String,
-}
-
-fn default_detection_enabled() -> bool {
-    true
-}
-
-fn default_log_level() -> String {
-    "warn".to_string()
-}
-
-impl Default for DetectionConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_detection_enabled(),
-            log_level: default_log_level(),
-        }
-    }
 }
 
 /// Streaming mode configuration
@@ -422,9 +383,6 @@ impl StreamingMode {
         }
     }
 }
-
-// Keep StreamingConfig as an alias for backward compatibility, but it's now just the enum
-pub type StreamingConfig = StreamingMode;
 
 /// Streaming-synthesis chunk timing configuration (`synthesis:` section).
 ///
@@ -901,11 +859,9 @@ mod tests {
         let config = StatsConfig {
             enabled: true,
             format: StatsFormat::Json,
-            log_interval: 5,
         };
         assert!(config.enabled);
         assert!(matches!(config.format, StatsFormat::Json));
-        assert_eq!(config.log_interval, 5);
     }
 
     #[test]

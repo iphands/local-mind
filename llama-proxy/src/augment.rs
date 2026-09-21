@@ -3,7 +3,6 @@
 //! Enriches incoming user requests by calling a fast LLM backend
 //! to generate additional context before forwarding to the main backend.
 
-use crate::api::{Message, MessageContent};
 use crate::config::AugmentBackendConfig;
 use crate::prompt_cache::{self, Refresh};
 use std::path::Path;
@@ -195,36 +194,6 @@ pub fn extract_user_content_from_json(req_json: &serde_json::Value) -> String {
     parts.join("\n")
 }
 
-/// Extract text content from OpenAI messages where role == "user"
-pub fn extract_user_content(messages: &[Message]) -> Vec<String> {
-    messages
-        .iter()
-        .filter(|m| m.role == "user")
-        .filter_map(|m| match &m.content {
-            Some(MessageContent::Text(text)) => Some(text.clone()),
-            Some(MessageContent::Parts(parts)) => {
-                let text: String = parts
-                    .iter()
-                    .filter_map(|part| {
-                        if part.content_type == "text" {
-                            part.text.clone()
-                        } else {
-                            None
-                        }
-                    })
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if text.is_empty() {
-                    None
-                } else {
-                    Some(text)
-                }
-            }
-            None => None,
-        })
-        .collect()
-}
-
 /// Inject an augmentation block into a raw JSON chat-completion request with
 /// `serde_json::Value` surgery - no typed `ChatCompletionRequest` round-trip.
 ///
@@ -412,20 +381,6 @@ mod tests {
             tool_calls: None,
             tool_call_id: None,
         }
-    }
-
-    #[test]
-    fn test_extract_user_content_simple() {
-        let msgs = vec![user_msg("Hello"), assistant_msg("Hi"), user_msg("World")];
-        let result = extract_user_content(&msgs);
-        assert_eq!(result, vec!["Hello", "World"]);
-    }
-
-    #[test]
-    fn test_extract_user_content_empty() {
-        let msgs: Vec<Message> = vec![];
-        let result = extract_user_content(&msgs);
-        assert!(result.is_empty());
     }
 
     #[test]

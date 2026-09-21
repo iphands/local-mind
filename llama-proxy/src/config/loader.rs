@@ -193,7 +193,6 @@ fixes:
 stats:
   enabled: true
   format: "pretty"
-  log_interval: 1
 
 exporters:
   influxdb:
@@ -245,7 +244,6 @@ fixes:
 stats:
   enabled: true
   format: "json"
-  log_interval: 1
 
 exporters:
   influxdb:
@@ -295,7 +293,6 @@ fixes:
 stats:
   enabled: true
   format: "json"
-  log_interval: 1
 
 exporters:
   influxdb:
@@ -436,7 +433,6 @@ fixes:
 stats:
   enabled: true
   format: "json"
-  log_interval: 1
 
 exporters:
   influxdb:
@@ -478,7 +474,6 @@ fixes:
 stats:
   enabled: true
   format: "json"
-  log_interval: 1
 exporters:
   influxdb:
     enabled: false
@@ -538,7 +533,6 @@ fixes:
 stats:
   enabled: true
   format: "json"
-  log_interval: 1
 
 exporters:
   influxdb:
@@ -583,7 +577,6 @@ fixes:
 stats:
   enabled: true
   format: "json"
-  log_interval: 1
 
 exporters:
   influxdb:

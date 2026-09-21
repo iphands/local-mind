@@ -322,13 +322,6 @@ fn log_config_settings(config: &AppConfig) {
         );
     }
 
-    // Detection
-    tracing::info!(
-        enabled = config.detection.enabled,
-        log_level = %config.detection.log_level,
-        "Detection"
-    );
-
     // Streaming
     tracing::info!(
         mode = %config.streaming,
@@ -376,7 +369,6 @@ fn log_config_settings(config: &AppConfig) {
     tracing::info!(
         enabled = config.stats.enabled,
         format = ?config.stats.format,
-        log_interval = config.stats.log_interval,
         "Stats"
     );
 

@@ -122,11 +122,6 @@ backend:
 #     toolcall_malformed_arguments:
 #       enabled: true
 
-# Pre-parse detection (default: enabled with warn level)
-# detection:
-#   enabled: true
-#   log_level: "warn"
-
 # Streaming mode (default: fake).  CLI --streaming-mode overrides this file.
 #   fake        - ONE JSON from the backend, SSE synthesized to the client.  Fixes run,
 #                 reprompt runs.  Pick this when you want the proxy to repair output.
@@ -152,7 +147,6 @@ backend:
 # stats:
 #   enabled: true
 #   format: "pretty"
-#   log_interval: 1
 
 # Remote exporters (default: all disabled)
 # exporters:
