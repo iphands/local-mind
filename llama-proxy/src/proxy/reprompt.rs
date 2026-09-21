@@ -40,6 +40,8 @@ pub struct RepromptEngine {
     /// Re-read the file on each trigger if mtime changed (default: true)
     dynamic_prompt: bool,
     pub max_retries: u32,
+    /// Wall-clock budget for the whole loop; see RepromptConfig::max_total_ms
+    max_total_ms: u64,
     pub done_sentinels: Vec<String>,
     log_stop_responses: bool,
     /// Skip the whole engine for requests that expose no file-mutating tools
@@ -86,6 +88,7 @@ impl RepromptEngine {
             prompt_file,
             dynamic_prompt: config.dynamic_prompt,
             max_retries: config.max_retries,
+            max_total_ms: config.max_total_ms,
             done_sentinels: config.done_sentinels.clone(),
             log_stop_responses: config.log_stop_responses,
             skip_read_only_requests: config.skip_read_only_requests,
@@ -343,17 +346,36 @@ impl RepromptEngine {
         let mut collected: Vec<String> = Vec::new();
         Self::push_text(&mut collected, Self::extract_assistant_text(&original_response));
         let mut current = original_response;
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(self.max_total_ms);
 
         for attempt in 0..self.max_retries {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                tracing::debug!(
+                    attempt,
+                    max_total_ms = self.max_total_ms,
+                    "Reprompt time budget exhausted before round, returning collected text"
+                );
+                return self.finish(clean_stop, collected, "time budget");
+            }
+
             tracing::debug!(attempt, "Sending reprompt follow-up");
 
             let follow_up_req = Self::build_follow_up(&prompt, original_request, &current, backend);
 
-            let new_resp = match Self::send_follow_up(&follow_up_req, backend).await {
-                Ok(r) => r,
-                Err(e) => {
+            let new_resp = match tokio::time::timeout(remaining, Self::send_follow_up(&follow_up_req, backend)).await {
+                Ok(Ok(r)) => r,
+                Ok(Err(e)) => {
                     tracing::warn!(attempt, error = %e, "Reprompt request failed, returning collected text");
                     return self.finish(clean_stop, collected, "request failed");
+                }
+                Err(_elapsed) => {
+                    tracing::debug!(
+                        attempt,
+                        max_total_ms = self.max_total_ms,
+                        "Reprompt follow-up exceeded the time budget, returning collected text"
+                    );
+                    return self.finish(clean_stop, collected, "time budget");
                 }
             };
 
@@ -432,6 +454,7 @@ mod tests {
             prompt_file: None,
             dynamic_prompt: false,
             max_retries: 3,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
             skip_read_only_requests: true,
@@ -572,6 +595,7 @@ mod tests {
             prompt_file: None,
             prompt: Some("Continue or DONE.".into()),
             max_retries: 2,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE".into()],
             dynamic_prompt: false,
             log_stop_responses: false,
@@ -588,6 +612,7 @@ mod tests {
             prompt_file: None,
             prompt: None,
             max_retries: 3,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE".into()],
             dynamic_prompt: false,
             log_stop_responses: false,
@@ -603,6 +628,7 @@ mod tests {
             prompt_file: None,
             prompt: Some("   ".into()),
             max_retries: 3,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE".into()],
             dynamic_prompt: false,
             log_stop_responses: false,
@@ -637,6 +663,7 @@ mod tests {
             prompt_file: None,
             dynamic_prompt: true,
             max_retries: 3,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
             skip_read_only_requests: true,
@@ -656,6 +683,7 @@ mod tests {
             prompt_file: Some(path),
             dynamic_prompt: true,
             max_retries: 3,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
             skip_read_only_requests: true,
@@ -682,6 +710,7 @@ mod tests {
             prompt_file: Some(path),
             dynamic_prompt: true,
             max_retries: 3,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
             skip_read_only_requests: true,
@@ -847,6 +876,7 @@ mod tests {
             prompt_file: None,
             dynamic_prompt: false,
             max_retries,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE_NO_MORE_PROXY_REPROMPT".into()],
             log_stop_responses: false,
             skip_read_only_requests: true,
@@ -937,6 +967,7 @@ mod tests {
             prompt_file: Some(path),
             dynamic_prompt: true,
             max_retries: 3,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
             skip_read_only_requests: true,
@@ -957,6 +988,7 @@ mod tests {
             prompt_file: Some(std::env::temp_dir().join("task47-no-such-reprompt-prompt-4c1d.md")),
             dynamic_prompt: true,
             max_retries: 3,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
             skip_read_only_requests: true,
@@ -986,6 +1018,7 @@ mod tests {
             prompt_file: Some(path),
             dynamic_prompt: true,
             max_retries: 3,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
             skip_read_only_requests: true,
@@ -1014,6 +1047,7 @@ mod tests {
             prompt_file: Some(path.clone()),
             dynamic_prompt: true,
             max_retries: 3,
+            max_total_ms: 30_000,
             done_sentinels: vec!["DONE".into()],
             log_stop_responses: false,
             skip_read_only_requests: true,
@@ -1036,5 +1070,66 @@ mod tests {
 
         std::fs::write(&path, "V3").unwrap();
         assert_eq!(e.resolve_prompt().await, "V3", "the trigger after the last write converges");
+    }
+
+    // --- task 64: wall-clock budget on the reprompt loop [C-M3] ---
+
+    #[tokio::test]
+    async fn test_budget_zero_skips_every_round() {
+        // Deterministic: the round check fires before any POST, so the serving
+        // backend's queued continuation is never requested, never merged.
+        let url = spawn_backend(vec![tool_call_resp()]).await;
+        let mut e = write_capable_engine(2);
+        e.max_total_ms = 0;
+        let result = e
+            .maybe_reprompt(
+                stop_resp("answer before the budget"),
+                &req_with_tools(&["read", "write"]),
+                &node_at(url).await,
+            )
+            .await;
+        assert_eq!(
+            result["choices"][0]["finish_reason"], "stop",
+            "the queued tool_call must not be fetched"
+        );
+        assert_eq!(result["choices"][0]["message"]["content"], "answer before the budget");
+    }
+
+    #[tokio::test]
+    async fn test_stalled_backend_returns_within_budget() {
+        // Backend sleeps 5000ms; budget 200ms. The timeout fires at ~200ms; the
+        // wall assertion (3000ms) keeps 15x headroom over the budget and stays
+        // 1.67x under the stall, separating budgeted from unbounded by 66x/1.67x.
+        use axum::{routing::post, Json, Router};
+        let app = Router::new().route(
+            "/v1/chat/completions",
+            post(|| async {
+                tokio::time::sleep(std::time::Duration::from_millis(5000)).await;
+                Json(stop_resp("too late"))
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let mut e = write_capable_engine(3);
+        e.max_total_ms = 200;
+        let mut node = test_node();
+        node.url = format!("http://{addr}");
+
+        let start = std::time::Instant::now();
+        let result = e
+            .maybe_reprompt(
+                stop_resp("the answer that must arrive fast"),
+                &req_with_tools(&["read", "write"]),
+                &std::sync::Arc::new(node),
+            )
+            .await;
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(3000),
+            "budget ignored: {elapsed:?}"
+        );
+        assert_eq!(result["choices"][0]["message"]["content"], "the answer that must arrive fast");
     }
 }

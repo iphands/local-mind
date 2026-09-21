@@ -531,6 +531,11 @@ pub struct RepromptConfig {
     /// resume, so the continue-prompt only pushes them into more searching and delays their answer.
     #[serde(default = "default_reprompt_skip_read_only")]
     pub skip_read_only_requests: bool,
+    /// Wall-clock budget for the whole reprompt loop (default: 30_000 ms). Checked before
+    /// each round and wrapped around every follow-up POST; on expiry the engine returns the
+    /// collected turn instead of waiting. 0 exhausts the budget before round one.
+    #[serde(default = "default_reprompt_max_total_ms")]
+    pub max_total_ms: u64,
 }
 
 fn default_reprompt_max_retries() -> u32 {
@@ -547,6 +552,10 @@ fn default_reprompt_done_sentinels() -> Vec<String> {
 
 fn default_reprompt_dynamic_prompt() -> bool {
     true
+}
+
+fn default_reprompt_max_total_ms() -> u64 {
+    30_000
 }
 
 fn deserialize_string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
@@ -585,6 +594,7 @@ impl Default for RepromptConfig {
             dynamic_prompt: default_reprompt_dynamic_prompt(),
             log_stop_responses: false,
             skip_read_only_requests: default_reprompt_skip_read_only(),
+            max_total_ms: default_reprompt_max_total_ms(),
         }
     }
 }
