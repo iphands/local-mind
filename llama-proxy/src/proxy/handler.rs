@@ -194,38 +194,72 @@ fn json_preview(value: &serde_json::Value) -> String {
 /// backend's Content-Encoding transform. Only `Decoded` bodies may have the
 /// header stripped; anything handed on unchanged must keep its header, or the
 /// client is told to expect a transform that has already been applied [C-H2].
+#[derive(Debug)]
 enum Decompressed {
     Passthrough(Vec<u8>),
     Decoded(Vec<u8>),
 }
 
-/// Decompress response body based on Content-Encoding header
-fn decompress_body(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<Decompressed, String> {
-    decode_body_bytes(body_bytes, content_encoding)
+/// A compressed backend body may legitimately expand by orders of magnitude;
+/// this is the ceiling the proxy is willing to materialize for one response.
+/// 64 MiB is far above any real llama.cpp completion and far below what a
+/// zip-bomb-class payload demands, so crossing it is itself the refusal signal.
+const MAX_DECOMPRESSED_BYTES: usize = 64 * 1024 * 1024;
+
+/// Why a compressed body could not be turned into bytes. The causes answer the
+/// client differently (502 vs 413), so they stay separate variants rather than
+/// a formatted string callers would have to pattern-match on text.
+#[derive(Debug)]
+enum DecompressError {
+    /// The bytes are not (or no longer) a valid stream in the claimed encoding.
+    Decode(String),
+    /// The stream decoded but expanded past `MAX_DECOMPRESSED_BYTES`.
+    PayloadTooLarge { limit_bytes: usize },
 }
 
-/// The synchronous codec chain. `decompress_body` owns where it runs; the chain
-/// itself is pure CPU so it can be off-loaded from the async reactor as a unit.
-fn decode_body_bytes(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<Decompressed, String> {
+impl std::fmt::Display for DecompressError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            DecompressError::Decode(message) => f.write_str(message),
+            DecompressError::PayloadTooLarge { limit_bytes } => {
+                write!(f, "decompressed body exceeds the {limit_bytes}-byte cap")
+            }
+        }
+    }
+}
+
+/// Decompress response body based on Content-Encoding header. The codec chain is
+/// pure CPU, so it runs on the blocking pool: a cap-sized brotli decode costs on
+/// the order of a few hundred milliseconds, and inline on an async worker that
+/// stalls every other connection pinned to the same thread [C-M5].
+async fn decompress_body(body_bytes: Vec<u8>, content_encoding: Option<String>) -> Result<Decompressed, DecompressError> {
+    tokio::task::spawn_blocking(move || decode_body_bytes(&body_bytes, content_encoding.as_deref()))
+        .await
+        .map_err(|e| DecompressError::Decode(format!("decompression worker task failed: {e}")))?
+}
+
+/// The synchronous codec core; unit tests pin this directly so the chain contract
+/// survives the async wrapper. Every codec reads through a `take(cap + 1)` seam:
+/// an over-cap stream stops at the cap plus one byte — enough to prove the breach
+/// without ever materializing the full expansion — and codecs that error on the
+/// resulting truncation are caught by the partial-buffer length on the error path.
+fn decode_body_bytes(body_bytes: &[u8], content_encoding: Option<&str>) -> Result<Decompressed, DecompressError> {
     let encoding = match content_encoding {
         Some(enc) => enc,
         None => return Ok(Decompressed::Passthrough(body_bytes.to_vec())), // No compression
     };
+    // +1 so a body exactly at the cap still decodes; only a true breach trips.
+    let read_limit = MAX_DECOMPRESSED_BYTES as u64 + 1;
 
     match encoding.to_lowercase().as_str() {
         "gzip" => {
             use flate2::read::GzDecoder;
-            let mut decoder = GzDecoder::new(body_bytes);
             let mut decompressed = Vec::new();
-            decoder
-                .read_to_end(&mut decompressed)
-                .map_err(|e| format!("gzip decompression failed: {}", e))?;
-            tracing::debug!(
-                original_size = body_bytes.len(),
-                decompressed_size = decompressed.len(),
-                "Decompressed gzip response"
-            );
-            Ok(Decompressed::Decoded(decompressed))
+            match GzDecoder::new(body_bytes).take(read_limit).read_to_end(&mut decompressed) {
+                Ok(_) => decoded_within_cap(body_bytes.len(), decompressed, "gzip"),
+                Err(_) if decompressed.len() > MAX_DECOMPRESSED_BYTES => Err(cap_breached()),
+                Err(e) => Err(DecompressError::Decode(format!("gzip decompression failed: {e}"))),
+            }
         }
         "deflate" => {
             // RFC 9110 says the `deflate` token names zlib-format data; senders that
@@ -234,57 +268,116 @@ fn decode_body_bytes(body_bytes: &[u8], content_encoding: Option<&str>) -> Resul
             // client expects, so the attempt order only shapes the error path.
             use flate2::read::{DeflateDecoder, ZlibDecoder};
             let mut zlib_out = Vec::new();
-            match ZlibDecoder::new(body_bytes).read_to_end(&mut zlib_out) {
-                Ok(_) => {
-                    tracing::debug!(
-                        original_size = body_bytes.len(),
-                        decompressed_size = zlib_out.len(),
-                        "Decompressed deflate response (zlib format)"
-                    );
-                    Ok(Decompressed::Decoded(zlib_out))
-                }
+            match ZlibDecoder::new(body_bytes).take(read_limit).read_to_end(&mut zlib_out) {
+                Ok(_) => decoded_within_cap(body_bytes.len(), zlib_out, "deflate (zlib format)"),
+                Err(_) if zlib_out.len() > MAX_DECOMPRESSED_BYTES => Err(cap_breached()),
                 Err(zlib_err) => {
                     let mut raw_out = Vec::new();
-                    match DeflateDecoder::new(body_bytes).read_to_end(&mut raw_out) {
+                    match DeflateDecoder::new(body_bytes).take(read_limit).read_to_end(&mut raw_out) {
                         Ok(_) => {
                             tracing::debug!(
                                 original_size = body_bytes.len(),
-                                decompressed_size = raw_out.len(),
                                 zlib_error = %zlib_err,
                                 "deflate body rejected by the zlib decoder, decoded as raw deflate"
                             );
-                            Ok(Decompressed::Decoded(raw_out))
+                            decoded_within_cap(body_bytes.len(), raw_out, "deflate (raw)")
                         }
-                        Err(raw_err) => Err(format!(
+                        Err(_) if raw_out.len() > MAX_DECOMPRESSED_BYTES => Err(cap_breached()),
+                        Err(raw_err) => Err(DecompressError::Decode(format!(
                             "deflate decompression failed: zlib: {zlib_err}; raw-deflate: {raw_err}"
-                        )),
+                        ))),
                     }
                 }
             }
         }
         "br" => {
+            // Decompressor is the reader-shaped brotli entry point; the one-shot
+            // BrotliDecompress writes straight into a Vec, leaving nowhere to mount
+            // the take() seam the cap needs.
             let mut decompressed = Vec::new();
-            brotli::BrotliDecompress(&mut std::io::Cursor::new(body_bytes), &mut decompressed)
-                .map_err(|e| format!("brotli decompression failed: {}", e))?;
-            tracing::debug!(
-                original_size = body_bytes.len(),
-                decompressed_size = decompressed.len(),
-                "Decompressed brotli response"
-            );
-            Ok(Decompressed::Decoded(decompressed))
+            match brotli::Decompressor::new(std::io::Cursor::new(body_bytes), 4096)
+                .take(read_limit)
+                .read_to_end(&mut decompressed)
+            {
+                Ok(_) => decoded_within_cap(body_bytes.len(), decompressed, "brotli"),
+                Err(_) if decompressed.len() > MAX_DECOMPRESSED_BYTES => Err(cap_breached()),
+                Err(e) => Err(DecompressError::Decode(format!("brotli decompression failed: {e}"))),
+            }
         }
         "zstd" => {
-            let decompressed = zstd::decode_all(body_bytes).map_err(|e| format!("zstd decompression failed: {}", e))?;
-            tracing::debug!(
-                original_size = body_bytes.len(),
-                decompressed_size = decompressed.len(),
-                "Decompressed zstd response"
-            );
-            Ok(Decompressed::Decoded(decompressed))
+            // Same reason as brotli: zstd::decode_all has no reader seam, the
+            // streaming Decoder does — and it still rejects bogus frame headers at
+            // construction, which is where the junk-body 502 path surfaces.
+            let mut decompressed = Vec::new();
+            match zstd::stream::read::Decoder::new(body_bytes) {
+                Ok(decoder) => match decoder.take(read_limit).read_to_end(&mut decompressed) {
+                    Ok(_) => decoded_within_cap(body_bytes.len(), decompressed, "zstd"),
+                    Err(_) if decompressed.len() > MAX_DECOMPRESSED_BYTES => Err(cap_breached()),
+                    Err(e) => Err(DecompressError::Decode(format!("zstd decompression failed: {e}"))),
+                },
+                Err(e) => Err(DecompressError::Decode(format!("zstd decompression failed: {e}"))),
+            }
         }
         other => {
             tracing::warn!(encoding = other, "Unsupported Content-Encoding, returning original body");
             Ok(Decompressed::Passthrough(body_bytes.to_vec()))
+        }
+    }
+}
+
+/// Shared cap gate for every successful decode: a stream that stops exactly at the
+/// `take` limit yields cap+1 bytes with no codec error, so the length check — not
+/// the codec — owns the refusal. Passthrough bodies are NOT gated: nothing is
+/// decoded there, and the request path already caps what the proxy will buffer.
+fn decoded_within_cap(original_size: usize, decoded: Vec<u8>, codec: &str) -> Result<Decompressed, DecompressError> {
+    if decoded.len() > MAX_DECOMPRESSED_BYTES {
+        return Err(cap_breached());
+    }
+    tracing::debug!(
+        original_size,
+        decompressed_size = decoded.len(),
+        codec,
+        "Decompressed response body"
+    );
+    Ok(Decompressed::Decoded(decoded))
+}
+
+fn cap_breached() -> DecompressError {
+    DecompressError::PayloadTooLarge {
+        limit_bytes: MAX_DECOMPRESSED_BYTES,
+    }
+}
+
+/// One error response for both decompression call sites: an over-cap expansion is a
+/// deterministic property of the backend's payload (413, mirroring the request-side
+/// body cap), corrupt bytes are a backend fault (502) — both in the standard
+/// error envelope.
+fn decompress_error_response(error: DecompressError, context: &str) -> Response {
+    match error {
+        DecompressError::PayloadTooLarge { limit_bytes } => {
+            tracing::error!(limit_bytes, context, "Backend response exceeds the decompression cap");
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                Json(err_envelope(
+                    "backend_payload_too_large",
+                    format!(
+                        "Backend response expands beyond the {} MiB decompression cap",
+                        limit_bytes / (1024 * 1024)
+                    ),
+                )),
+            )
+                .into_response()
+        }
+        DecompressError::Decode(message) => {
+            tracing::error!(error = %message, context, "Failed to decompress backend response");
+            (
+                StatusCode::BAD_GATEWAY,
+                Json(err_envelope(
+                    "backend_decompress_error",
+                    format!("Failed to decompress response: {message}"),
+                )),
+            )
+                .into_response()
         }
     }
 }
@@ -1067,25 +1160,12 @@ impl ProxyHandler {
         // Check for Content-Encoding and decompress if needed
         let content_encoding = headers.get(header::CONTENT_ENCODING).and_then(|ce| ce.to_str().ok());
 
-        let (body_bytes, body_decoded) = match decompress_body(&raw_body_bytes, content_encoding) {
-            Ok(Decompressed::Decoded(decompressed)) => (decompressed, true),
-            Ok(Decompressed::Passthrough(body)) => (body, false),
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    content_encoding = ?content_encoding,
-                    "Failed to decompress response body"
-                );
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(err_envelope(
-                        "backend_decompress_error",
-                        format!("Failed to decompress response: {}", e),
-                    )),
-                )
-                    .into_response();
-            }
-        };
+        let (body_bytes, body_decoded) =
+            match decompress_body(raw_body_bytes.to_vec(), content_encoding.map(str::to_string)).await {
+                Ok(Decompressed::Decoded(decompressed)) => (decompressed, true),
+                Ok(Decompressed::Passthrough(body)) => (body, false),
+                Err(error) => return decompress_error_response(error, "completion"),
+            };
 
         // If error status, log the full response body for debugging
         if status.is_client_error() || status.is_server_error() {
@@ -1433,24 +1513,10 @@ impl ProxyHandler {
         // Check for Content-Encoding and decompress if needed
         let content_encoding = headers.get(header::CONTENT_ENCODING).and_then(|ce| ce.to_str().ok());
 
-        let (body, body_decoded) = match decompress_body(&raw_body, content_encoding) {
+        let (body, body_decoded) = match decompress_body(raw_body.to_vec(), content_encoding.map(str::to_string)).await {
             Ok(Decompressed::Decoded(decompressed)) => (decompressed, true),
             Ok(Decompressed::Passthrough(unchanged)) => (unchanged, false),
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    content_encoding = ?content_encoding,
-                    "Failed to decompress pass-through response"
-                );
-                return (
-                    StatusCode::BAD_GATEWAY,
-                    Json(err_envelope(
-                        "backend_decompress_error",
-                        format!("Failed to decompress response: {}", e),
-                    )),
-                )
-                    .into_response();
-            }
+            Err(error) => return decompress_error_response(error, "pass-through"),
         };
 
         forward_response(status, &headers, body, body_decoded)
@@ -3214,12 +3280,13 @@ mod tests {
     fn deflate_alias_error_names_both_attempts_for_unusable_bytes() {
         let junk = b"neither zlib nor raw deflate, definitely not deflate";
         match decode_body_bytes(junk, Some("deflate")) {
-            Err(e) => {
+            Err(DecompressError::Decode(e)) => {
                 assert!(
                     e.contains("zlib:") && e.contains("raw-deflate:"),
                     "both attempts must be reported, got: {e}"
                 );
             }
+            Err(DecompressError::PayloadTooLarge { .. }) => panic!("junk cannot be over the cap"),
             Ok(other) => panic!(
                 "junk must not decode, got a {}-byte body",
                 match other {
@@ -3401,5 +3468,183 @@ mod tests {
                 "{name} must not live in the hop-by-hop predicate"
             );
         }
+    }
+
+    // ---- big-fix task 10: decompression cap + blocking-pool offload ----
+
+    fn compress_with(codec: &str, data: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        match codec {
+            "gzip" => {
+                use flate2::read::GzEncoder;
+                GzEncoder::new(data, flate2::Compression::default())
+                    .read_to_end(&mut out)
+                    .unwrap();
+            }
+            "deflate" => {
+                use flate2::read::ZlibEncoder;
+                ZlibEncoder::new(data, flate2::Compression::default())
+                    .read_to_end(&mut out)
+                    .unwrap();
+            }
+            "br" => {
+                brotli::CompressorReader::new(data, 4096, 5, 22)
+                    .read_to_end(&mut out)
+                    .unwrap();
+            }
+            "zstd" => out = zstd::encode_all(data, 9).unwrap(),
+            other => unreachable!("no codec fixture for {other}"),
+        }
+        out
+    }
+
+    fn bomb_payload(codec: &str) -> Vec<u8> {
+        // Zip-bomb shape: the fixture is ~100 KB compressed, the decode demands 70 MiB.
+        let big = vec![b'x'; 70 * 1024 * 1024];
+        compress_with(codec, &big)
+    }
+
+    #[test]
+    fn every_codec_refuses_payloads_expanding_over_the_cap() {
+        for codec in ["gzip", "deflate", "br", "zstd"] {
+            let bomb = bomb_payload(codec);
+            assert!(bomb.len() < 1024 * 1024, "{codec} bomb fixture must stay small");
+            match decode_body_bytes(&bomb, Some(codec)) {
+                Err(DecompressError::PayloadTooLarge { limit_bytes }) => {
+                    assert_eq!(limit_bytes, MAX_DECOMPRESSED_BYTES, "{codec} cap value");
+                }
+                Ok(Decompressed::Decoded(b)) | Ok(Decompressed::Passthrough(b)) => {
+                    panic!("{codec}: {} decoded bytes slipped past the cap", b.len());
+                }
+                Err(DecompressError::Decode(e)) => {
+                    panic!("{codec}: over-cap payload must be PayloadTooLarge, got Decode({e})");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn under_cap_payloads_still_decode_byte_intact() {
+        let payload = completion_json_body();
+        for codec in ["gzip", "deflate", "br", "zstd"] {
+            let fixture = compress_with(codec, &payload);
+            assert_eq!(decoded_or_panic(&fixture, codec), payload, "{codec} under cap");
+        }
+    }
+
+    #[test]
+    fn bodies_that_are_never_decoded_are_not_capped() {
+        let big = vec![b'q'; MAX_DECOMPRESSED_BYTES + 1];
+        match decode_body_bytes(&big, Some("banana")) {
+            Ok(Decompressed::Passthrough(b)) => assert_eq!(b.len(), big.len()),
+            other => panic!("unsupported encoding must pass through, got {:?}", other),
+        }
+    }
+
+    #[tokio::test]
+    async fn brotli_bomb_expanding_over_cap_answers_413_backend_payload_too_large() {
+        // Brotli, not gzip, for the end-to-end fixture: reqwest's gzip feature
+        // transparently decodes gzip backends upstream of the proxy (task-7
+        // finding), so only br reliably reaches the proxy's own decoder — the code
+        // path the cap guards. gzip/zstd/deflate get decoder-level coverage above.
+        let bomb = bomb_payload("br");
+        let len = bomb.len().to_string();
+        let port = one_shot_backend(raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json"),
+                ("content-encoding", "br"),
+                ("content-length", len.as_str()),
+            ],
+            &bomb,
+        ))
+        .await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let started = std::time::Instant::now();
+        let res = handler.handle(completion_request()).await;
+        let elapsed = started.elapsed();
+        // hung_commands attestation: the refusal must be prompt — the decode stops at
+        // cap+1 instead of expanding. Bound is generous: 20 s vs sub-second actual.
+        println!("task10 e2e bomb: {} compressed bytes refused in {:?}", bomb.len(), elapsed);
+        assert!(elapsed < std::time::Duration::from_secs(20), "bomb refusal took {elapsed:?}");
+
+        let envelope = assert_error_envelope(res, StatusCode::PAYLOAD_TOO_LARGE, "backend_payload_too_large").await;
+        assert!(
+            envelope["error"]["message"].as_str().unwrap_or_default().contains("64 MiB"),
+            "message should name the cap: {envelope}"
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn light_request_completes_while_heavy_decode_runs_off_reactor() {
+        // Ordering, not timing, is the assertion. On a single-threaded runtime the
+        // heavy request is spawned FIRST, so any inline decode — the baseline
+        // behavior, captured red as ["heavy","light"] over a ~350 ms window — forces
+        // heavy to finish first. Margins (documented, no sleeps): baseline gap
+        // ~350 ms decode vs ~2 ms light path; post-fix the light path (~1-5 ms
+        // including its own loopback round trip) races a spawn_blocking dispatch of
+        // ~10 µs plus the heavy request's multi-second body streaming — three
+        // orders of magnitude of headroom either way.
+        let order: Arc<std::sync::Mutex<Vec<&'static str>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let filler = "x".repeat(60 * 1024 * 1024);
+        let heavy_json = serde_json::json!({
+            "id": "chatcmpl-heavy",
+            "object": "chat.completion",
+            "created": 0,
+            "model": "test-model",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": filler}, "finish_reason": "stop"}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        })
+        .to_string();
+        let heavy_len = heavy_json.len();
+        let heavy_payload = compress_with("br", heavy_json.as_bytes());
+        let len = heavy_payload.len().to_string();
+        let heavy_port = one_shot_backend(raw_http_response(
+            "200 OK",
+            &[
+                ("content-type", "application/json"),
+                ("content-encoding", "br"),
+                ("content-length", len.as_str()),
+            ],
+            &heavy_payload,
+        ))
+        .await;
+        let bal_h = Arc::new(RoundRobinBalancer::new(vec![node_at_port(heavy_port)]).unwrap());
+        let h_h = handler_with_balancer(bal_h, None, StreamingConfig::default());
+        let o = order.clone();
+        let heavy = tokio::spawn(async move {
+            let res = h_h.handle(completion_request()).await;
+            assert_eq!(res.status(), StatusCode::OK, "under-cap body must still succeed");
+            let bytes = to_bytes(res.into_body(), 256 * 1024 * 1024)
+                .await
+                .expect("heavy body must be readable");
+            assert_eq!(bytes.len(), heavy_len, "offload must not truncate the body");
+            o.lock().unwrap().push("heavy");
+        });
+
+        let light_port = one_shot_backend(raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json")],
+            br#"{"ok":true}"#,
+        ))
+        .await;
+        let bal_l = Arc::new(RoundRobinBalancer::new(vec![node_at_port(light_port)]).unwrap());
+        let h_l = handler_with_balancer(bal_l, None, StreamingConfig::default());
+        let o = order.clone();
+        let light = tokio::spawn(async move {
+            let res = h_l.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+            assert_eq!(res.status(), StatusCode::OK);
+            let _ = to_bytes(res.into_body(), 1024 * 1024).await.expect("light body");
+            o.lock().unwrap().push("light");
+        });
+
+        let (h_res, l_res) = tokio::join!(heavy, light);
+        h_res.expect("heavy task");
+        l_res.expect("light task");
+        let done = order.lock().unwrap().clone();
+        assert_eq!(done, vec!["light", "heavy"], "light request must not queue behind the decode");
     }
 }
