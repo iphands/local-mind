@@ -38,7 +38,11 @@ pub struct GroupedLoadBalancer {
 }
 
 impl GroupedLoadBalancer {
-    /// Create a new grouped load balancer from group configurations
+    /// Create a new grouped load balancer from group configurations.
+    /// An empty map builds (server.rs boots a placeholder through this path);
+    /// loader task 71 (W9-owned) adds the check-config-time rejection of empty
+    /// `backends:`. Until then every select on an empty map is an honest
+    /// NoMatchingBackend error — never a panic (pinned in tests, E-L10).
     pub fn new(
         group_configs: std::collections::HashMap<String, BackendGroupConfig>,
     ) -> Result<Self, Box<dyn std::error::Error>> {
@@ -251,11 +255,13 @@ mod tests {
     #[test]
     fn test_grouped_balancer_empty_groups() {
         let groups: HashMap<String, BackendGroupConfig> = HashMap::new();
-        let balancer = GroupedLoadBalancer::new(groups).unwrap();
+        let balancer = GroupedLoadBalancer::new(groups)
+            .expect("empty map must still BUILD — server placeholder path and loader-71 own the rejection");
 
-        // Should fail - no backends configured
         let result = balancer.select(Some("anything"));
-        assert!(result.is_err());
+        assert!(result.is_err(), "select on empty groups is an honest error, not a panic");
+        assert!(balancer.select(None).is_err());
+        assert!(balancer.all_nodes().is_empty());
     }
 
     #[test]
