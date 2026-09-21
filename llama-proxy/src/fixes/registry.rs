@@ -20,7 +20,7 @@ pub(crate) enum SnippetLimit {
     /// down to the nearest char boundary. Faithful to the historical
     /// byte-slicing helpers it replaces (which panicked on mid-sequence cuts).
     /// Test-only constructor since task 29 deleted the streaming call sites.
-    #[allow(dead_code)]
+    #[allow(dead_code)] // constructed only under cfg(test); removal breaks the non-test lib build (audited task 98)
     Bytes,
 }
 

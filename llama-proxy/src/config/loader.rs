@@ -201,7 +201,6 @@ fixes:
   modules:
     toolcall_bad_filepath:
       enabled: true
-      remove_duplicate: true
 
 stats:
   enabled: true

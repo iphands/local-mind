@@ -1774,80 +1774,6 @@ mod tests {
     use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
-    #[allow(dead_code)]
-    fn create_test_handler_with_streaming(streaming_config: StreamingMode) -> ProxyHandler {
-        let config = AppConfig {
-            server: crate::config::ServerConfig {
-                port: 8066,
-                host: "0.0.0.0".to_string(),
-                max_concurrent_requests: crate::config::default_max_concurrent(),
-                allowed_origins: None,
-            },
-            backend: Some(BackendConfig::default()),
-            backends: None,
-            fixes: crate::config::FixesConfig {
-                enabled: false,
-                modules: HashMap::new(),
-            },
-            stats: crate::config::StatsConfig {
-                enabled: false,
-                format: crate::config::StatsFormat::Pretty,
-            },
-            exporters: crate::config::ExportersConfig {
-                influxdb: crate::config::InfluxDbConfig {
-                    enabled: false,
-                    url: "http://localhost:8086".to_string(),
-                    org: "test".to_string(),
-                    bucket: "test".to_string(),
-                    token: "test".to_string(),
-                    batch_size: 1,
-                    flush_interval_seconds: 1,
-                },
-            },
-            streaming: streaming_config,
-            synthesis: crate::config::SynthesisConfig::default(),
-            augment_backend: None,
-            reprompt: None,
-            dump: crate::config::DumpConfig::default(),
-        };
-
-        let default_node = BackendNode {
-            url: "http://localhost:8080".to_string(),
-            model: None,
-            api_key: None,
-            timeout_seconds: 300,
-            http_client: reqwest::Client::new(),
-            active_requests: Arc::new(AtomicUsize::new(0)),
-            strip_path_prefix: None,
-            temperature: None,
-            healthy: std::sync::atomic::AtomicBool::new(true),
-            cooldown_until: std::sync::Mutex::new(std::time::Instant::now()),
-        };
-        let load_balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(default_node)]).unwrap());
-        let fix_registry = FixRegistry::new();
-        let exporter_manager = ExporterManager::new();
-
-        ProxyHandler::new(ProxyState {
-            config: std::sync::Arc::new(config),
-            load_balancer,
-            fix_registry: std::sync::Arc::new(fix_registry),
-            exporter_manager: std::sync::Arc::new(exporter_manager),
-            augment_backend: None,
-            reprompt_engine: None,
-            hide_requests: false,
-            log_augmented_request_text: false,
-            dump_path: None,
-            concurrent_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            backend_streaming_fallback_hits: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            openai_stream_passthrough_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            backend_nonsse_when_streamed_for: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            anthropic_buffered_responses_total: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            anthropic_buffered_notice_once: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            rejected_requests: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-            concurrent_semaphore: Some(std::sync::Arc::new(tokio::sync::Semaphore::new(100))),
-        })
-    }
-
     // REMOVED: Tests for should_stream() method
     // The method has been removed since we now always force non-streaming backend requests
     // and synthesize streaming responses when clients request them.
@@ -2023,7 +1949,7 @@ mod tests {
     }
 
     /// Build a handler with an arbitrary balancer, augment backend, and streaming mode,
-    /// everything else at the same inert settings as `create_test_handler_with_streaming`
+    /// everything else at inert settings
     /// (no fixes, no stats, no exporters). Nothing talks to a real backend in these tests.
     fn handler_with_balancer(
         load_balancer: Arc<dyn LoadBalancer>,
@@ -2054,8 +1980,6 @@ mod tests {
                     org: "test".to_string(),
                     bucket: "test".to_string(),
                     token: "test".to_string(),
-                    batch_size: 1,
-                    flush_interval_seconds: 1,
                 },
             },
             streaming,
@@ -2379,8 +2303,6 @@ mod tests {
                     org: "test".to_string(),
                     bucket: "test".to_string(),
                     token: "test".to_string(),
-                    batch_size: 1,
-                    flush_interval_seconds: 1,
                 },
             },
             streaming: StreamingMode::default(),
@@ -4689,8 +4611,6 @@ mod tests {
                     org: "test".to_string(),
                     bucket: "test".to_string(),
                     token: "test".to_string(),
-                    batch_size: 1,
-                    flush_interval_seconds: 1,
                 },
             },
             streaming: StreamingMode::Fake,

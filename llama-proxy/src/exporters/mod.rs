@@ -423,9 +423,6 @@ mod tests {
             org: "test".to_string(),
             bucket: "test".to_string(),
             token: "test".to_string(),
-            // D2 carriers (task 84): never deserialized, configure nothing -
-            // Default fills them; this test is about enabled/disabled, not them.
-            ..Default::default()
         }
     }
 

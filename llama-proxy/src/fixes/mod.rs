@@ -160,21 +160,6 @@ impl std::fmt::Display for FixError {
     }
 }
 
-/// Coarse outcome a fixer reports for a response.
-///
-/// Forward-declared for the logging consolidation that B-M3 closed: the
-/// consolidation landed on the full [`FixAction`] payload
-/// ([`FixAction::aggregate_repairs`]), so this enum was never needed and has
-/// no consumer. Pub API kept; removal belongs to the dead-code sweep task.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[allow(dead_code)] // unconsumed pub API (B-M3 closed on FixAction itself)
-pub enum FixOutcome {
-    /// Content was fine or the fixer does not handle it.
-    NotApplicable,
-    /// Malformed content was detected and successfully fixed.
-    Fixed,
-}
-
 /// Trait for response fix modules
 ///
 /// Fixes run on complete JSON responses (`apply()` / `apply_with_context()`):

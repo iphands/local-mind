@@ -29,9 +29,6 @@ fn feature_off_error() -> ExportError {
 
 /// InfluxDB v2 metrics exporter
 pub struct InfluxDbExporter {
-    #[cfg(not(feature = "influxdb"))]
-    #[allow(dead_code)] // constructed by from_config even when compiled out
-    config: InfluxDbConfig,
     #[cfg(feature = "influxdb")]
     queue: WriterQueue,
     #[cfg(not(feature = "influxdb"))]
@@ -64,8 +61,8 @@ impl InfluxDbExporter {
     }
 
     #[cfg(not(feature = "influxdb"))]
-    pub fn new(config: InfluxDbConfig) -> Result<Self, ExportError> {
-        Ok(Self { config, _phantom: () })
+    pub fn new(_config: InfluxDbConfig) -> Result<Self, ExportError> {
+        Ok(Self { _phantom: () })
     }
 
     /// The queue/worker behind this exporter: counters and lifecycle. Public

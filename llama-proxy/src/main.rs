@@ -354,13 +354,11 @@ fn render_config_summary(config: &AppConfig) -> Vec<String> {
         config.stats.enabled, config.stats.format
     ));
     lines.push(format!(
-        "InfluxDB exporter: enabled={} url={} org={} bucket={} batch_size={} flush_interval_seconds={}",
+        "InfluxDB exporter: enabled={} url={} org={} bucket={}",
         config.exporters.influxdb.enabled,
         config.exporters.influxdb.url,
         config.exporters.influxdb.org,
-        config.exporters.influxdb.bucket,
-        config.exporters.influxdb.batch_size,
-        config.exporters.influxdb.flush_interval_seconds
+        config.exporters.influxdb.bucket
     ));
     lines
 }
@@ -453,7 +451,6 @@ fn list_fixes(config_path: &Path, verbose: bool) {
         println!("  modules:");
         println!("    toolcall_bad_filepath:");
         println!("      enabled: true");
-        println!("      remove_duplicate: true");
     }
 }
 

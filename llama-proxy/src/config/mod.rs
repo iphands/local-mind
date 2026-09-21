@@ -635,18 +635,6 @@ pub struct InfluxDbConfig {
     pub bucket: String,
     #[serde(default)]
     pub token: String,
-    /// REMOVED key (D2, task 84): the proxy never batched - a sample is a
-    /// single write through the bounded queue (task 81). `batch_size` in YAML
-    /// is now an UNKNOWN field and rejected. This field exists ONLY because
-    /// `main.rs`'s startup log and `handler.rs` test literals (owned by other
-    /// workers) still name it; it is never deserialized and nothing else
-    /// reads it. Delete it with those call sites.
-    #[serde(skip, default = "default_batch_size")]
-    pub batch_size: usize,
-    /// Same as `batch_size`: removed key, rejected by `deny_unknown_fields`,
-    /// carrier kept only for the unowned startup-log/test call sites.
-    #[serde(skip, default = "default_flush_interval")]
-    pub flush_interval_seconds: u64,
 }
 
 fn default_influxdb_url() -> String {
@@ -661,17 +649,6 @@ fn default_influxdb_bucket() -> String {
     "llama-metrics".to_string()
 }
 
-/// Legacy constant for the skipped `batch_size` carrier (see field docs):
-/// the values only keep the unowned startup log compiling, they configure
-/// nothing.
-fn default_batch_size() -> usize {
-    10
-}
-
-fn default_flush_interval() -> u64 {
-    5
-}
-
 impl Default for InfluxDbConfig {
     fn default() -> Self {
         Self {
@@ -680,8 +657,6 @@ impl Default for InfluxDbConfig {
             org: default_influxdb_org(),
             bucket: default_influxdb_bucket(),
             token: String::new(),
-            batch_size: default_batch_size(),
-            flush_interval_seconds: default_flush_interval(),
         }
     }
 }
@@ -861,12 +836,14 @@ mod tests {
 
     #[test]
     fn test_fix_module_config_with_options() {
+        // options is a FREE-FORM map: every documented option key that no
+        // fixer consumed was purged (task 98), the map itself accepts anything.
         let mut options = HashMap::new();
-        options.insert("remove_duplicate".to_string(), serde_yaml::Value::Bool(true));
+        options.insert("arbitrary_key".to_string(), serde_yaml::Value::Bool(true));
 
         let config = FixModuleConfig { enabled: false, options };
         assert!(!config.enabled);
-        assert!(config.options.contains_key("remove_duplicate"));
+        assert!(config.options.contains_key("arbitrary_key"));
     }
 
     #[test]
@@ -913,12 +890,9 @@ mod tests {
             org: "my-org".to_string(),
             bucket: "metrics".to_string(),
             token: "secret".to_string(),
-            batch_size: 10,
-            flush_interval_seconds: 5,
         };
         assert!(config.enabled);
         assert_eq!(config.url, "http://localhost:8086");
-        assert_eq!(config.batch_size, 10);
     }
 
     #[test]
