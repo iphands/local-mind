@@ -104,6 +104,18 @@ impl FixRegistry {
     }
 
     /// Apply fixes to a streaming chunk, with centralized logging
+    ///
+    /// Applies-gate note [B-L5]: this and the chunk methods below skip
+    /// `applies()` because a partial delta chunk can never satisfy the
+    /// whole-response predicates the [`ResponseFix`] contract evaluates
+    /// them on; the buffered paths (`apply_fixes`,
+    /// `apply_fixes_with_context`, `detect_fixes`) do gate on it, per that
+    /// contract. The historical asymmetry - streamed fixes bypassing the
+    /// gate - is resolved: default `fake` streaming buffers the complete
+    /// response and runs it through the gated buffered path, and
+    /// `passthrough` only detects via [`Self::detect_fixes`], which gates
+    /// too. The chunk family below survives only on the legacy streaming
+    /// fallback.
     pub fn apply_fixes_stream(&self, chunk: Value) -> Value {
         let mut result = chunk;
 
