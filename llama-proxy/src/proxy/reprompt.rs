@@ -2,9 +2,11 @@
 //!
 //! When finish_reason="stop" with no tool_calls, the engine injects a follow-up
 //! user message (loaded from config) and re-sends the request to the backend.
-//! - If the response contains any done_sentinel → return the original clean stop.
 //! - If the response has tool_calls or a non-stop finish_reason → return it, with every
-//!   assistant text seen so far merged into its content.
+//!   assistant text seen so far merged into its content — even when its text also mentions
+//!   a done sentinel: a continuation outranks the sentinel (big-fix 65).
+//! - Otherwise, if the response contains any done_sentinel → close the loop on the stopped
+//!   turn, keeping the sentinel turn's text in the answer, sentinel intact.
 //! - After max_retries exhaustion → return the original stop, with every assistant text
 //!   seen so far merged into its content.
 //!
@@ -381,12 +383,8 @@ impl RepromptEngine {
 
             let new_text = Self::extract_assistant_text(&new_resp);
 
-            if let Some(matched) = self.done_sentinels.iter().find(|s| new_text.contains(s.as_str())) {
-                tracing::info!(attempt, sentinel = %matched, "Reprompt: done sentinel found, returning original stop");
-                // The sentinel turn is bookkeeping, not content — drop it and keep what we had.
-                return self.finish(clean_stop, collected, "done sentinel");
-            }
-
+            // Continuation outranks the sentinel (big-fix 65): a follow-up carrying
+            // tool_calls or a non-stop finish must survive its text mentioning a sentinel.
             if Self::has_continuation(&new_resp) {
                 tracing::info!(attempt, "Reprompt: continuation found, returning new response");
                 Self::push_text(&mut collected, new_text);
@@ -404,6 +402,14 @@ impl RepromptEngine {
                     );
                 }
                 return merged;
+            }
+
+            if let Some(matched) = self.done_sentinels.iter().find(|s| new_text.contains(s.as_str())) {
+                tracing::info!(attempt, sentinel = %matched, "Reprompt: done sentinel without continuation, closing the loop");
+                // The sentinel turn stays in the returned text, sentinel intact: it can carry
+                // the model's closing summary, and dropping it is the consumed-then-lost bug.
+                Self::push_text(&mut collected, new_text);
+                return self.finish(clean_stop, collected, "done sentinel");
             }
 
             tracing::debug!(
@@ -927,7 +933,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_done_sentinel_returns_original_without_sentinel() {
+    async fn test_done_sentinel_keeps_turn_with_sentinel() {
+        // Retargeted (big-fix 65): the old pin (test_done_sentinel_returns_original_without_
+        // sentinel) asserted the sentinel turn was dropped from the answer - exactly the
+        // consumed-then-lost behavior plan 65 condemns. New contract: the non-continuation
+        // sentinel response keeps its text, sentinel intact.
         let url = spawn_backend(vec![stop_resp("DONE_NO_MORE_PROXY_REPROMPT")]).await;
         let e = write_capable_engine(2);
         let original = stop_resp("the complete review");
@@ -936,8 +946,49 @@ mod tests {
             .await;
 
         let content = result["choices"][0]["message"]["content"].as_str().unwrap();
-        assert_eq!(content, "the complete review");
-        assert!(!content.contains("DONE_NO_MORE_PROXY_REPROMPT"));
+        assert_eq!(content, "the complete review\n\nDONE_NO_MORE_PROXY_REPROMPT");
+        assert_eq!(result["choices"][0]["finish_reason"], "stop");
+    }
+
+    #[tokio::test]
+    async fn test_continuation_with_sentinel_still_merges() {
+        let body = serde_json::json!({"choices":[{"finish_reason":"tool_calls","message":{"role":"assistant","content":"DONE_NO_MORE_PROXY_REPROMPT then I edit","tool_calls":[{"id":"c9","type":"function","function":{"name":"write","arguments":"{}"}}]}}]});
+        let url = spawn_backend(vec![body]).await;
+        let e = write_capable_engine(2);
+        let result = e
+            .maybe_reprompt(stop_resp("half"), &req_with_tools(&["read", "write"]), &node_at(url).await)
+            .await;
+        assert_eq!(
+            result["choices"][0]["finish_reason"], "tool_calls",
+            "continuation outranks the sentinel"
+        );
+        assert_eq!(result["choices"][0]["message"]["tool_calls"][0]["id"], "c9");
+        let content = result["choices"][0]["message"]["content"].as_str().unwrap();
+        assert!(
+            content.contains("half") && content.contains("DONE_NO_MORE_PROXY_REPROMPT"),
+            "got: {content}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_sentinel_mid_text_keeps_whole_turn() {
+        let url = spawn_backend(vec![stop_resp(
+            "closing remarks: DONE_NO_MORE_PROXY_REPROMPT — nothing further.",
+        )])
+        .await;
+        let e = write_capable_engine(2);
+        let result = e
+            .maybe_reprompt(
+                stop_resp("first half"),
+                &req_with_tools(&["read", "write"]),
+                &node_at(url).await,
+            )
+            .await;
+        let content = result["choices"][0]["message"]["content"].as_str().unwrap();
+        assert_eq!(
+            content,
+            "first half\n\nclosing remarks: DONE_NO_MORE_PROXY_REPROMPT — nothing further."
+        );
     }
 
     #[tokio::test]
