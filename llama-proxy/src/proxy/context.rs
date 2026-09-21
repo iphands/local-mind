@@ -29,14 +29,18 @@ static WARNED_BACKENDS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
 /// The cache is permanent for the lifetime of the application since context
 /// size is a static server configuration.
 ///
+/// Monitoring always targets the backend-native `/props` and `/v1/models`
+/// paths; a configured request-path prefix must not alter these endpoints.
+///
 /// # Arguments
 /// * `client` - The HTTP client to use for the request
 /// * `backend_url` - The base URL of the backend server
+/// * `_strip_path_prefix` - Accepted for caller compatibility, ignored
 ///
 /// # Returns
 /// * `Some(u64)` - The context size if successfully fetched
 /// * `None` - If all fetch attempts failed or responses were malformed
-pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str, strip_path_prefix: Option<&str>) -> Option<u64> {
+pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str, _strip_path_prefix: Option<&str>) -> Option<u64> {
     let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
 
     // Check cache first
@@ -48,13 +52,13 @@ pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str, st
     }
 
     // Try llama.cpp /props endpoint first
-    if let Some(n_ctx) = fetch_from_props(client, backend_url, strip_path_prefix).await {
+    if let Some(n_ctx) = fetch_from_props(client, backend_url).await {
         cache_result(cache, backend_url, n_ctx, BackendType::LlamaCpp);
         return Some(n_ctx);
     }
 
     // Fallback to vLLM/OpenAI-compatible /v1/models endpoint
-    if let Some(max_model_len) = fetch_from_models(client, backend_url, strip_path_prefix).await {
+    if let Some(max_model_len) = fetch_from_models(client, backend_url).await {
         cache_result(cache, backend_url, max_model_len, BackendType::Vllm);
         return Some(max_model_len);
     }
@@ -73,7 +77,7 @@ pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str, st
 pub async fn cache_context_from_preflight(
     client: &reqwest::Client,
     backend_url: &str,
-    strip_path_prefix: Option<&str>,
+    _strip_path_prefix: Option<&str>,
     is_llama_cpp: bool,
     max_model_len: Option<u64>,
 ) -> Option<u64> {
@@ -89,7 +93,7 @@ pub async fn cache_context_from_preflight(
 
     if is_llama_cpp {
         // Need /props for the actual runtime n_ctx (distinct from model's n_ctx_train)
-        if let Some(n_ctx) = fetch_from_props(client, backend_url, strip_path_prefix).await {
+        if let Some(n_ctx) = fetch_from_props(client, backend_url).await {
             cache_result(cache, backend_url, n_ctx, BackendType::LlamaCpp);
             return Some(n_ctx);
         }
@@ -103,13 +107,8 @@ pub async fn cache_context_from_preflight(
 }
 
 /// Fetch context size from llama.cpp `/props` endpoint
-async fn fetch_from_props(client: &reqwest::Client, backend_url: &str, strip_path_prefix: Option<&str>) -> Option<u64> {
-    let path = if let Some(prefix) = strip_path_prefix {
-        "/props".strip_prefix(prefix).unwrap_or("/props")
-    } else {
-        "/props"
-    };
-    let props_url = format!("{}{}", backend_url, path);
+async fn fetch_from_props(client: &reqwest::Client, backend_url: &str) -> Option<u64> {
+    let props_url = format!("{}/props", backend_url);
     match client.get(&props_url).send().await {
         Ok(resp) => {
             if let Ok(props) = resp.json::<serde_json::Value>().await {
@@ -133,13 +132,8 @@ async fn fetch_from_props(client: &reqwest::Client, backend_url: &str, strip_pat
 }
 
 /// Fetch context size from vLLM/OpenAI-compatible `/v1/models` endpoint
-async fn fetch_from_models(client: &reqwest::Client, backend_url: &str, strip_path_prefix: Option<&str>) -> Option<u64> {
-    let path = if let Some(prefix) = strip_path_prefix {
-        "/v1/models".strip_prefix(prefix).unwrap_or("/v1/models")
-    } else {
-        "/v1/models"
-    };
-    let models_url = format!("{}{}", backend_url, path);
+async fn fetch_from_models(client: &reqwest::Client, backend_url: &str) -> Option<u64> {
+    let models_url = format!("{}/v1/models", backend_url);
     match client.get(&models_url).send().await {
         Ok(resp) => {
             if let Ok(models) = resp.json::<serde_json::Value>().await {
@@ -210,6 +204,122 @@ pub async fn warn_context_fetch_failed_once(backend_url: &str, model: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+    use tokio::sync::mpsc;
+
+    const PROPS_BODY: &str = r#"{"default_generation_settings":{"n_ctx":4096}}"#;
+    const MODELS_BODY: &str = r#"{"data":[{"max_model_len":8192}]}"#;
+
+    /// Spawn a minimal HTTP/1.1 listener on an ephemeral 127.0.0.1 port that records
+    /// every request URI and answers with the JSON body the monitoring fetch expects.
+    ///
+    /// - `serve_props = true`:  `/props` -> 200 props JSON, anything else -> 404
+    /// - `serve_props = false`: `/props` -> 404 (force `/v1/models` fallback), anything else -> 200 models JSON
+    ///
+    /// Returns (base_url, uri_receiver, task handle). Caller aborts the handle to shut down.
+    async fn spawn_monitor_listener(serve_props: bool) -> (String, mpsc::Receiver<String>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let (tx, rx) = mpsc::channel::<String>(16);
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let mut head: Vec<u8> = Vec::new();
+                let mut tmp = [0u8; 512];
+                loop {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            head.extend_from_slice(&tmp[..n]);
+                            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).to_string();
+                let uri = text
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split(' ').nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                if tx.send(uri.clone()).await.is_err() {
+                    break;
+                }
+                let (status, body): (u16, String) = if uri == "/props" {
+                    if serve_props {
+                        (200, PROPS_BODY.to_string())
+                    } else {
+                        (404, "{}".to_string())
+                    }
+                } else if serve_props {
+                    (404, "{}".to_string())
+                } else {
+                    (200, MODELS_BODY.to_string())
+                };
+                let reason = if status == 200 { "OK" } else { "NOT FOUND" };
+                let resp = format!(
+                    "HTTP/1.1 {status} {reason}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), rx, handle)
+    }
+
+    /// Bounded recv so a missing request fails the test instead of hanging it.
+    async fn next_uri(rx: &mut mpsc::Receiver<String>) -> String {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("listener request within 5s")
+            .expect("uri channel open")
+    }
+
+    #[tokio::test]
+    async fn test_monitoring_fetch_uses_backend_native_props_with_path_prefix() {
+        let (base, mut rx, server) = spawn_monitor_listener(true).await;
+        let client = reqwest::Client::new();
+
+        let ctx = fetch_context_total(&client, &base, Some("/completions")).await;
+
+        assert_eq!(ctx, Some(4096));
+        let uri = next_uri(&mut rx).await;
+        assert_eq!(
+            uri, "/props",
+            "monitoring must request backend-native /props even when path_prefix is configured"
+        );
+        server.abort();
+
+        // Adversarial edge: trailing-slash prefix must not alter the monitoring path either.
+        let (base2, mut rx2, server2) = spawn_monitor_listener(true).await;
+        let ctx2 = fetch_context_total(&client, &base2, Some("/completions/")).await;
+        assert_eq!(ctx2, Some(4096));
+        assert_eq!(next_uri(&mut rx2).await, "/props");
+        server2.abort();
+    }
+
+    #[tokio::test]
+    async fn test_monitoring_fetch_uses_backend_native_v1_models_with_v1_prefix() {
+        let (base, mut rx, server) = spawn_monitor_listener(false).await;
+        let client = reqwest::Client::new();
+
+        let ctx = fetch_context_total(&client, &base, Some("/v1")).await;
+
+        assert_eq!(ctx, Some(8192), "/v1/models fallback must succeed");
+        assert_eq!(next_uri(&mut rx).await, "/props", "props is tried first");
+        let models_uri = next_uri(&mut rx).await;
+        assert_eq!(
+            models_uri, "/v1/models",
+            "monitoring must request backend-native /v1/models, not the prefix-stripped path"
+        );
+        server.abort();
+    }
 
     #[tokio::test]
     async fn test_fetch_context_total_caching() {
