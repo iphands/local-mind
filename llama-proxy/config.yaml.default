@@ -118,7 +118,6 @@ backend:
 #       enabled: true
 #     toolcall_bad_filepath:
 #       enabled: true
-#       remove_duplicate: true
 #     toolcall_malformed_arguments:
 #       enabled: true
 

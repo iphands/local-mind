@@ -114,7 +114,8 @@ cp config.yaml.default config.yaml
 
 **exporters/** - Remote metrics export
 - `mod.rs`: `ExporterManager` with pluggable exporter trait
-- `influxdb.rs`: InfluxDB v2 exporter with batching
+- `influxdb.rs`: InfluxDB v2 exporter (bounded writer queue; one write per
+  sample since tasks 81/84 - there is no batching)
 - Exporters run async after request completes
 
 **api/** - Type definitions
@@ -204,7 +205,10 @@ The proxy requires `config.yaml` (copy from `config.yaml.default`). Key settings
 1. Create `src/fixes/my_fix.rs` implementing `ResponseFix` trait
 2. Register in `create_default_registry()` in `src/fixes/mod.rs`
 3. Add config section to `config.yaml.default`
-4. Implement both `apply()` for non-streaming and `apply_stream()` for streaming
+4. Implement `apply()` on the complete JSON response. There is no per-chunk
+   streaming API to implement: the legacy `apply_stream()` machinery was deleted
+   (21f0548); `fake` mode synthesizes SSE after the fix layer ran, `passthrough`
+   forwards backend bytes untouched.
 
 **New Exporter**:
 1. Create `src/exporters/my_exporter.rs` implementing `MetricsExporter` trait
