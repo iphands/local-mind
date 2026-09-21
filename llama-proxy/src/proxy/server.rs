@@ -6,9 +6,11 @@ use axum::{
     routing::{any, get},
     Router,
 };
+use std::future::Future;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::Semaphore;
 
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
@@ -224,7 +226,16 @@ pub async fn run_server(
 
     tracing::info!("llama-proxy listening on {}", addr);
 
-    Ok(axum::serve(listener, app).await?)
+    GracefulServe {
+        listener,
+        app,
+        shutdown: shutdown_signal(),
+        grace: GRACEFUL_SHUTDOWN_GRACE,
+        drain_started: None,
+    }
+    .run()
+    .await;
+    Ok(())
 }
 
 /// Health check endpoint
@@ -248,6 +259,151 @@ fn resolve_bind_addr(host: &str, port: u16) -> Result<SocketAddr, std::net::Addr
         Err(_) => bare.to_string(),
     };
     format!("{bracketed}:{port}").parse()
+}
+
+/// Cap on the post-signal drain (D11). A hung client cannot extend it: when
+/// the grace expires the remaining connections are force-closed, so the
+/// process exits within `grace` of the signal, always.
+pub(crate) const GRACEFUL_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+
+/// The serve loop with task 78's three-tier shutdown:
+/// 1. signal → stop accepting; the listener is dropped, so new connections are
+///    REFUSED (backlog RST, later SYNs refused), not merely unanswered;
+/// 2. every live connection is asked to stop after its current response
+///    (hyper graceful: in-flight bodies COMPLETE, idle keep-alives close now);
+/// 3. when the grace expires the stragglers are force-closed.
+///
+/// This replaces a bare `axum::serve`, whose SIGTERM behavior was instant
+/// process death: a streamed client died mid-body (RED: curl exit 18).
+struct GracefulServe<S> {
+    listener: tokio::net::TcpListener,
+    app: Router,
+    shutdown: S,
+    grace: Duration,
+    /// Fired once the listener has stopped accepting. Test seam for observing
+    /// drain-start without sleeps; production passes `None`.
+    drain_started: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+impl<S: Future<Output = ()>> GracefulServe<S> {
+    async fn run(self) {
+        let Self {
+            listener,
+            app,
+            shutdown,
+            grace,
+            drain_started,
+        } = self;
+        tokio::pin!(shutdown);
+        // Live connections learn the drain started when the sender is dropped.
+        let (drain_tx, drain_rx) = tokio::sync::watch::channel(());
+        let mut conns: tokio::task::JoinSet<()> = tokio::task::JoinSet::new();
+
+        loop {
+            tokio::select! {
+                biased;
+                _ = &mut shutdown => break,
+                Some(_) = conns.join_next(), if !conns.is_empty() => {}
+                accepted = listener.accept() => match accepted {
+                    Ok((sock, peer)) => {
+                        let app = app.clone();
+                        let mut drained = drain_rx.clone();
+                        conns.spawn(async move {
+                            let svc = hyper::service::service_fn(move |req: hyper::Request<hyper::body::Incoming>| {
+                                let router = app.clone();
+                                async move {
+                                    tower::ServiceExt::oneshot(router, req.map(axum::body::Body::new)).await
+                                }
+                            });
+                            let builder = hyper_util::server::conn::auto::Builder::new(hyper_util::rt::TokioExecutor::new());
+                            let conn = builder.serve_connection_with_upgrades(hyper_util::rt::TokioIo::new(sock), svc);
+                            tokio::pin!(conn);
+                            tokio::select! {
+                                biased;
+                                r = &mut conn => {
+                                    if let Err(e) = r {
+                                        tracing::debug!(%peer, error = %e, "connection ended with error");
+                                    }
+                                }
+                                _ = drained.changed() => {
+                                    conn.as_mut().graceful_shutdown();
+                                    if let Err(e) = conn.await {
+                                        tracing::debug!(%peer, error = %e, "connection closed during drain");
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    Err(e) => tracing::warn!(error = %e, "accept failed; continuing"),
+                }
+            }
+        }
+
+        // Drain mode: refusing new connections starts HERE, synchronously.
+        drop(listener);
+        // In-flight bodies finish; idle keep-alive connections close now.
+        drop(drain_tx);
+        if let Some(tx) = drain_started {
+            let _ = tx.send(());
+        }
+        if conns.is_empty() {
+            return;
+        }
+        tracing::info!(
+            connections = conns.len(),
+            ?grace,
+            "shutdown signal: draining in-flight connections"
+        );
+        let deadline = tokio::time::sleep(grace);
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                biased;
+                Some(_) = conns.join_next() => {
+                    if conns.is_empty() {
+                        tracing::info!("all in-flight connections drained");
+                        return;
+                    }
+                }
+                _ = &mut deadline => {
+                    tracing::warn!(remaining = conns.len(), "grace exhausted: force-closing the remaining in-flight connections");
+                    drop(conns);
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Waits for the deploy-stop signal: SIGTERM (systemd/docker stop) or Ctrl-C.
+/// A handler that could not be installed is reported and degrades to the
+/// remaining signals instead of pretending shutdown will work.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::error!(error = %e, "Ctrl-C handler unavailable; Ctrl-C will not shut down");
+            std::future::pending::<()>().await;
+        }
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut sig) => {
+                sig.recv().await;
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "SIGTERM handler unavailable; SIGTERM will not shut down");
+                std::future::pending::<()>().await;
+            }
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => tracing::info!("Ctrl-C received"),
+        _ = terminate => tracing::info!("SIGTERM received"),
+    }
 }
 
 /// Build the CORS layer from `server.allowed_origins`.
@@ -507,5 +663,180 @@ mod tests {
             .expect("connect ::1 (no hang)")
             .expect("TCP accept");
         drop(stream);
+    }
+
+    use futures::StreamExt;
+
+    /// `/stream` emits `data: one`, blocks on the semaphore (acquire queues, so
+    /// a later `add_permits` always wakes it - no lost-wakeup race), then emits
+    /// the tail + `[DONE]`. A zero-permit semaphore that nobody ever releases
+    /// is the hung client.
+    fn drain_app(gate: Arc<tokio::sync::Semaphore>) -> Router {
+        Router::new()
+            .route(
+                "/stream",
+                get(move || {
+                    let gate = Arc::clone(&gate);
+                    async move {
+                        axum::body::Body::from_stream(futures::stream::unfold(0u8, move |st| {
+                            let gate = Arc::clone(&gate);
+                            async move {
+                                match st {
+                                    0 => Some((Ok::<_, std::io::Error>(bytes::Bytes::from_static(b"data: one\n\n")), 1)),
+                                    1 => {
+                                        let Ok(_permit) = gate.acquire().await else { return None };
+                                        drop(_permit);
+                                        Some((Ok(bytes::Bytes::from_static(b"data: two\n\ndata: [DONE]\n\n")), 2))
+                                    }
+                                    _ => None,
+                                }
+                            }
+                        }))
+                    }
+                }),
+            )
+            .route("/health", get(health_handler))
+    }
+
+    #[tokio::test]
+    async fn t78_stream_in_flight_completes_and_new_connections_are_refused_during_drain() {
+        // Given: a stream mid-body (chunk one already delivered to the client)
+        let gate = Arc::new(tokio::sync::Semaphore::new(0));
+        let (trigger_tx, trigger_rx) = tokio::sync::oneshot::channel::<()>();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let app = drain_app(Arc::clone(&gate));
+        let server = tokio::spawn(async move {
+            GracefulServe {
+                listener,
+                app,
+                shutdown: async {
+                    trigger_rx.await.ok();
+                },
+                grace: std::time::Duration::from_secs(60),
+                drain_started: Some(started_tx),
+            }
+            .run()
+            .await;
+        });
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/stream"))
+            .send()
+            .await
+            .expect("stream request");
+        let mut body = resp.bytes_stream();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+            .await
+            .expect("chunk one (no hang)")
+            .expect("stream alive")
+            .expect("chunk ok");
+        assert_eq!(first, b"data: one\n\n" as &[u8]);
+
+        // When: shutdown is signalled and drain-start is OBSERVED (channel, not sleep)
+        trigger_tx.send(()).expect("trigger");
+        tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await
+            .expect("drain starts (no hang)")
+            .expect("hook sender alive");
+
+        // Then 1: a NEW connection during the drain is refused at TCP level.
+        let refused = tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::TcpStream::connect(addr))
+            .await
+            .expect("connect attempt resolves (no hang)");
+        assert!(
+            refused.is_err(),
+            "new connections must be refused during drain, got {refused:?}"
+        );
+
+        // Then 2: the IN-FLIGHT stream still completes end to end.
+        gate.add_permits(1);
+        let second = tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+            .await
+            .expect("tail chunk arrives after drain signal (survives!)")
+            .expect("stream alive")
+            .expect("tail ok");
+        assert_eq!(second, b"data: two\n\ndata: [DONE]\n\n" as &[u8]);
+        assert!(tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+            .await
+            .expect("stream end (no hang)")
+            .is_none());
+
+        // Then 3: with everything drained, the server returns without burning the 60s grace.
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("serve returns promptly once drained")
+            .expect("serve task ok");
+
+        // Then 4: after the server is gone, connects stay refused.
+        assert!(tokio::net::TcpStream::connect(addr).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn t78_hung_stream_cannot_block_shutdown_past_the_grace() {
+        // Given: a client whose body can never finish (gate never releases)
+        let (trigger_tx, trigger_rx) = tokio::sync::oneshot::channel::<()>();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel::<()>();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let app = drain_app(Arc::new(tokio::sync::Semaphore::new(0)));
+        let grace = std::time::Duration::from_millis(300);
+        let server = tokio::spawn(async move {
+            GracefulServe {
+                listener,
+                app,
+                shutdown: async {
+                    trigger_rx.await.ok();
+                },
+                grace,
+                drain_started: Some(started_tx),
+            }
+            .run()
+            .await;
+        });
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("http://{addr}/stream"))
+            .send()
+            .await
+            .expect("stream request");
+        let mut body = resp.bytes_stream();
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+            .await
+            .expect("chunk one")
+            .expect("stream alive")
+            .expect("chunk ok");
+        assert_eq!(first, b"data: one\n\n" as &[u8]);
+
+        // When/Then: the hung connection cannot hold the process open - the
+        // grace force-close terminates BOTH the client body and the serve loop.
+        trigger_tx.send(()).expect("trigger");
+        tokio::time::timeout(std::time::Duration::from_secs(5), started_rx)
+            .await
+            .expect("drain starts")
+            .expect("hook sender alive");
+        let hung_read = tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
+            .await
+            .expect("hung body MUST terminate (force-close), not hang forever");
+        match hung_read {
+            None | Some(Err(_)) => {}
+            Some(Ok(bytes)) => panic!("hung stream must be truncated, got extra body {bytes:?}"),
+        }
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("serve must return at the grace cap, never later")
+            .expect("serve task ok");
+    }
+
+    #[test]
+    fn t78_production_grace_is_bounded() {
+        // The D11 cap is a CONTRACT (deploys size their stop-timeout on it):
+        // long enough for real generations to finish, finite so no client can
+        // make it infinite.
+        assert!(
+            GRACEFUL_SHUTDOWN_GRACE >= Duration::from_secs(5) && GRACEFUL_SHUTDOWN_GRACE <= Duration::from_secs(120),
+            "grace {GRACEFUL_SHUTDOWN_GRACE:?} must stay in the 5s..=120s deploy band"
+        );
     }
 }
