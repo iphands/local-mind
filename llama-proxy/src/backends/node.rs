@@ -5,6 +5,9 @@ use std::time::Duration;
 
 use crate::config::TlsConfig;
 
+/// TCP connect timeout applied to every backend-node HTTP client (big-fix E-M7)
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// A single backend node with its own HTTP client
 #[derive(Debug)]
 pub struct BackendNode {
@@ -62,6 +65,7 @@ impl BackendNode {
 fn build_node_client(timeout_seconds: u64, tls: Option<&TlsConfig>) -> Result<reqwest::Client, Box<dyn std::error::Error>> {
     let mut client_builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_seconds))
+        .connect_timeout(CONNECT_TIMEOUT)
         .pool_max_idle_per_host(10);
 
     if let Some(tls) = tls {
@@ -87,4 +91,33 @@ fn build_node_client(timeout_seconds: u64, tls: Option<&TlsConfig>) -> Result<re
     }
 
     Ok(client_builder.build()?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Instant;
+
+    #[test]
+    fn connect_timeout_is_five_seconds() {
+        assert_eq!(CONNECT_TIMEOUT, Duration::from_secs(5));
+    }
+
+    /// Wiring proof: a client produced by `build_node_client` must abort a blackholed
+    /// connect at the connect timeout (~5s), NOT at its 1h request timeout.
+    /// 192.0.2.1 is RFC 5737 TEST-NET-1: unroutable, SYNs are silently dropped
+    /// (verified on this host). Requires no HTTP proxy env vars to be set.
+    #[tokio::test]
+    async fn build_node_client_applies_connect_timeout() {
+        let client = build_node_client(3600, None).expect("builder must produce a client");
+        let start = Instant::now();
+        let outcome = tokio::time::timeout(CONNECT_TIMEOUT * 6, client.get("http://192.0.2.1/").send()).await;
+        let elapsed = start.elapsed();
+        let result = outcome.expect("reqwest must surface the 5s connect timeout, not outlive the 30s cap");
+        assert!(result.is_err(), "blackholed connect to TEST-NET-1 must fail, got Ok");
+        assert!(
+            elapsed >= CONNECT_TIMEOUT - Duration::from_secs(1),
+            "connect failed after {elapsed:?}, too fast for the ~{CONNECT_TIMEOUT:?} connect timeout to have applied"
+        );
+    }
 }
