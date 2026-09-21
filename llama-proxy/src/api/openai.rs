@@ -358,12 +358,14 @@ pub struct AnthropicMessage {
     #[serde(rename = "type")]
     pub message_type: String, // "message"
     pub role: String,
+    #[serde(default)]
     pub content: Vec<AnthropicContentBlock>,
     pub model: String,
     #[serde(default)]
     pub stop_reason: Option<String>,
     #[serde(default)]
     pub stop_sequence: Option<String>,
+    #[serde(default)]
     pub usage: AnthropicUsage,
 }
 
@@ -395,9 +397,11 @@ pub enum AnthropicContentBlock {
 }
 
 /// Anthropic usage (different field names than OpenAI)
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct AnthropicUsage {
+    #[serde(default)]
     pub input_tokens: u64,
+    #[serde(default)]
     pub output_tokens: u64,
 }
 
@@ -1848,5 +1852,88 @@ mod tests {
             .expect_err("null element inside choices must not silently become a default Choice");
         let msg = err.to_string();
         assert!(msg.contains("invalid type"), "{msg}");
+    }
+
+    // ============================================================================
+    // Task 38: Anthropic leniency (report A M5) - absent usage/content parse,
+    // tokens default to 0
+    // ============================================================================
+
+    #[test]
+    fn test_anthropic_message_without_usage_parses() {
+        // Given: a real-shaped Anthropic message with NO usage block (A-M5:
+        // required usage aborted the whole parse when absent)
+        // Then: it parses and both tokens read as 0 (pinned 0-vs-None decision:
+        // spec defaults the TOKENS themselves -> 0, never None)
+        let json = serde_json::json!({
+            "id": "msg-789",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "Done."}],
+            "model": "test-model",
+            "stop_reason": "end_turn"
+        });
+        let msg: AnthropicMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.id, "msg-789");
+        assert_eq!(msg.usage.input_tokens, 0);
+        assert_eq!(msg.usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn test_anthropic_message_without_content_parses() {
+        // Given: a message with no content array
+        // Then: content defaults to empty vec, and the From-conversion path
+        // treats it as no-content (message.content None), not a panic
+        let json = serde_json::json!({
+            "id": "msg-no-content",
+            "type": "message",
+            "role": "assistant",
+            "model": "test-model",
+            "usage": {"input_tokens": 3, "output_tokens": 1}
+        });
+        let msg: AnthropicMessage = serde_json::from_value(json).unwrap();
+        assert!(msg.content.is_empty());
+
+        let resp: ChatCompletionResponse = msg.into();
+        assert_eq!(
+            resp.choices[0].message.as_ref().unwrap().content,
+            None,
+            "empty content vec must convert to None content, not Some(\"\")"
+        );
+    }
+
+    #[test]
+    fn test_anthropic_usage_empty_object_tokens_default_zero() {
+        // Given: usage present but both token fields absent
+        // Then: each token field individually defaults to 0
+        let json = serde_json::json!({
+            "id": "msg-tokens",
+            "type": "message",
+            "role": "assistant",
+            "content": [],
+            "model": "test-model",
+            "usage": {}
+        });
+        let msg: AnthropicMessage = serde_json::from_value(json).unwrap();
+        assert_eq!(msg.usage.input_tokens, 0);
+        assert_eq!(msg.usage.output_tokens, 0);
+    }
+
+    #[test]
+    fn test_absent_usage_converts_to_zeroed_openai_usage() {
+        // Consumer seam (pinned, NOT changed): the From impl reads msg.usage
+        // fields directly, so absent usage flows through as Some(Usage{0,0,0})
+        // handler.rs sums input+output -> 0; synthesis emits zeroed usage JSON.
+        let json = serde_json::json!({
+            "id": "msg-zero",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "model": "m"
+        });
+        let msg: AnthropicMessage = serde_json::from_value(json).unwrap();
+        let resp: ChatCompletionResponse = msg.into();
+        let usage = resp.usage.unwrap();
+        assert_eq!((usage.prompt_tokens, usage.completion_tokens, usage.total_tokens), (0, 0, 0));
     }
 }
