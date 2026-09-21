@@ -21,7 +21,7 @@ impl AugmentBackend {
     /// Create from config
     pub fn from_config(config: &AugmentBackendConfig) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(60))
+            .timeout(std::time::Duration::from_secs(config.timeout_secs))
             .build()?;
 
         Ok(Self {
@@ -70,7 +70,8 @@ impl AugmentBackend {
         if !response.status().is_success() {
             let status = response.status();
             let body = response.text().await.unwrap_or_default();
-            return Err(format!("Augment backend returned {}: {}", status, body).into());
+            tracing::debug!(status = %status, body = %body, "Augment backend returned non-success response");
+            return Err(format!("Augment backend returned {}: {}", status, clip_error_body(&body)).into());
         }
 
         let body: serde_json::Value = response.json().await?;
@@ -93,6 +94,21 @@ impl AugmentBackend {
                 String::new()
             }
         }
+    }
+}
+
+/// First 300 CHARS (not bytes - CJK-safe) of an augment backend error body,
+/// with the repo's `...` truncation marker. Errors from this module are
+/// embedded into client-facing 502 envelopes at handler.rs, so an unbounded
+/// backend body must never ride along. Full body goes to `tracing::debug!`.
+fn clip_error_body(body: &str) -> String {
+    const MAX_CHARS: usize = 300;
+    let mut chars = body.chars();
+    let kept: String = chars.by_ref().take(MAX_CHARS).collect();
+    if chars.next().is_some() {
+        format!("{kept}...")
+    } else {
+        kept
     }
 }
 
@@ -126,7 +142,12 @@ fn extract_response_text(body: &serde_json::Value) -> Result<String, Box<dyn std
         }
     }
 
-    Err(format!("Could not extract text from augment backend response: {}", body).into())
+    tracing::debug!(body = %body, "Could not extract text from augment backend response");
+    Err(format!(
+        "Could not extract text from augment backend response: {}",
+        clip_error_body(&body.to_string())
+    )
+    .into())
 }
 
 /// Extract user content text directly from a raw JSON request body.
@@ -1104,6 +1125,149 @@ mod tests {
             "\n\nHI",
             "the fallback sends an empty backend prompt joined to the user content by \
              two newlines, exactly as the baseline's empty-string fallback did"
+        );
+    }
+
+    // --- task 48 / F-L7, F-L8: bounded error detail + configurable timeout ---
+
+    #[derive(Clone)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = Self;
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    async fn spawn_status_augment_backend(status: u16, body: &'static str) -> String {
+        use tokio::io::AsyncWriteExt;
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            while let Ok((mut sock, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    let response = format!(
+                        "HTTP/1.1 {status} ERR\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                        body.len()
+                    );
+                    let _ = sock.write_all(response.as_bytes()).await;
+                    let _ = sock.shutdown().await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn backend_at(url: String) -> AugmentBackend {
+        AugmentBackend {
+            url,
+            model: "fast".to_string(),
+            prompt_file: String::new(),
+            request_prompt_file: String::new(),
+            http_client: reqwest::Client::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn task48_error_carries_status_and_first_300_chars_with_truncation_marker() {
+        let body: &'static str = Box::leak(format!("{}{}", "X".repeat(300), "TAILMARK".repeat(50)).into_boxed_str());
+        let backend = backend_at(spawn_status_augment_backend(500, body).await);
+
+        let err = backend.get_augmentation("q").await.expect_err("500 must surface an error");
+
+        let text = err.to_string();
+        assert!(text.contains("500"), "status must be carried: {text}");
+        assert!(text.contains(&"X".repeat(300)), "first 300 chars must be carried");
+        assert!(text.contains("..."), "truncation marker must follow the clip");
+        assert!(
+            !text.contains("TAILMARK"),
+            "char 301+ must NOT leak into the error (it reaches client 502 envelopes via handler.rs): {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn task48_cjk_error_clip_counts_chars_not_bytes() {
+        let cjk_body: &'static str = Box::leak(format!("{}{}", "中".repeat(300), "禁".repeat(10)).into_boxed_str());
+        let backend = backend_at(spawn_status_augment_backend(400, cjk_body).await);
+
+        let err = backend.get_augmentation("q").await.expect_err("400 must surface an error");
+        let text = err.to_string();
+
+        assert!(
+            text.contains(&"中".repeat(300)),
+            "300 CJK chars (900 UTF-8 bytes) must ALL survive the clip - byte-based \
+             clipping at 300 would keep only 100"
+        );
+        assert!(!text.contains("禁"), "char 301+ must not leak: {text}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn task48_full_error_body_reaches_debug_level_log() {
+        let body: &'static str = Box::leak(format!("{}{}", "D".repeat(300), "FULLBODYMARKER-π-🚀").into_boxed_str());
+        let backend = backend_at(spawn_status_augment_backend(503, body).await);
+
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::DEBUG)
+            .with_writer(CaptureWriter(buf.clone()))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let err = backend.get_augmentation("q").await.expect_err("503 must surface an error");
+
+        let captured = String::from_utf8_lossy(&buf.lock().unwrap().clone()).to_string();
+        assert!(
+            captured.contains(body),
+            "the FULL body (clip tail included) must be visible at debug!; err was: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn task48_from_config_honors_timeout_secs_against_stalled_backend() {
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (sock, _) = listener.accept().await.unwrap();
+            // The socket must stay OPEN and silent: dropping it would hand reqwest a
+            // connection-closed error instantly and the timing assert would prove nothing.
+            let _held = sock;
+            std::future::pending::<()>().await;
+        });
+
+        let config = crate::config::AugmentBackendConfig {
+            url: format!("http://{addr}"),
+            model: "fast".to_string(),
+            prompt_file: String::new(),
+            request_prompt_file: String::new(),
+            timeout_secs: 1,
+            ..Default::default()
+        };
+        let backend = AugmentBackend::from_config(&config).unwrap();
+
+        let started = std::time::Instant::now();
+        let result = backend.get_augmentation("hello").await;
+        let elapsed = started.elapsed();
+
+        assert!(result.is_err(), "a stalled backend must surface an error, got {result:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "timeout_secs: 1 must abort in ~1s, not the old hard-coded 60s (took {elapsed:?})"
         );
     }
 }

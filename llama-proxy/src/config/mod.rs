@@ -423,10 +423,17 @@ pub struct AugmentBackendConfig {
     /// Path to request prompt file injected into enriched user message (defaults to "./augmenter/request_prompt.md")
     #[serde(default = "default_request_prompt_file")]
     pub request_prompt_file: String,
+    /// HTTP timeout in seconds for calls to the augment backend (default: 15)
+    #[serde(default = "default_augment_timeout_secs")]
+    pub timeout_secs: u64,
 }
 
 fn default_augment_enabled() -> bool {
     false
+}
+
+fn default_augment_timeout_secs() -> u64 {
+    15
 }
 
 fn default_prompt_file() -> String {
@@ -445,6 +452,7 @@ impl Default for AugmentBackendConfig {
             model: String::new(),
             prompt_file: default_prompt_file(),
             request_prompt_file: default_request_prompt_file(),
+            timeout_secs: default_augment_timeout_secs(),
         }
     }
 }
@@ -1168,5 +1176,34 @@ model: "fast-model"
             !AugmentBackendConfig::default().enabled,
             "the Default impl must not re-introduce the old default-true"
         );
+    }
+
+    #[test]
+    fn test_augment_backend_timeout_secs_absent_defaults_15() {
+        let yaml = r#"
+url: "http://localhost:8701"
+model: "fast-model"
+"#;
+        let cfg: AugmentBackendConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            cfg.timeout_secs, 15,
+            "F-L8: absent timeout_secs must deserialize to 15, not the old hard-coded 60"
+        );
+    }
+
+    #[test]
+    fn test_augment_backend_timeout_secs_explicit_is_honored() {
+        let yaml = r#"
+url: "http://localhost:8701"
+model: "fast-model"
+timeout_secs: 42
+"#;
+        let cfg: AugmentBackendConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.timeout_secs, 42);
+    }
+
+    #[test]
+    fn test_augment_backend_default_impl_timeout_is_15() {
+        assert_eq!(AugmentBackendConfig::default().timeout_secs, 15);
     }
 }

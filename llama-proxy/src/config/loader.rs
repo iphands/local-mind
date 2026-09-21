@@ -630,4 +630,33 @@ augment-backend:
 
         let _ = std::fs::remove_file(&temp_file);
     }
+
+    #[test]
+    fn test_augment_backend_timeout_secs_absent_defaults_15_via_loader() {
+        let temp_file = std::env::temp_dir().join("test_augment_timeout_default_config.yaml");
+        let config_content = r#"
+server:
+  port: 8066
+  host: "0.0.0.0"
+
+backend:
+  url: "http://localhost:8080"
+  timeout_seconds: 300
+
+augment-backend:
+  enabled: true
+  url: "http://localhost:8701"
+  model: "fast-model"
+"#;
+        std::fs::write(&temp_file, config_content).unwrap();
+
+        let config = load_config(&temp_file).unwrap();
+        let augment = config.augment_backend.expect("section parsed");
+        assert_eq!(
+            augment.timeout_secs, 15,
+            "F-L8: a real config file without timeout_secs must get 15s, not the old hard-coded 60"
+        );
+
+        let _ = std::fs::remove_file(&temp_file);
+    }
 }
