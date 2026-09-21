@@ -89,8 +89,8 @@ fn normalize_whitespace(s: &str) -> String {
 }
 
 /// Truncate message according to rules:
-/// - If <= 100 chars: show all
-/// - If > 100 chars: first 25 + " ... " + last 75
+/// - If <= 100 bytes: show all
+/// - If > 100 bytes: first ~25 + " ... " + last ~75, split on char boundaries
 fn truncate_message(s: &str) -> String {
     const MAX_TOTAL: usize = 100;
     const PREFIX_LEN: usize = 25;
@@ -101,11 +101,27 @@ fn truncate_message(s: &str) -> String {
         return s.to_string();
     }
 
-    let prefix = &s[..PREFIX_LEN.min(s.len())];
-    let suffix_start = s.len().saturating_sub(SUFFIX_LEN);
-    let suffix = &s[suffix_start..];
+    // Largest char boundary <= PREFIX_LEN
+    let mut head_end = 0;
+    for (i, _) in s.char_indices() {
+        if i > PREFIX_LEN {
+            break;
+        }
+        head_end = i;
+    }
 
-    format!("{}{}{}", prefix, ELLIPSIS, suffix)
+    // Smallest char boundary >= len - SUFFIX_LEN
+    let tail_threshold = s.len() - SUFFIX_LEN;
+    let mut tail_start = s.len();
+    for (i, _) in s.char_indices().rev() {
+        if i >= tail_threshold {
+            tail_start = i;
+        } else {
+            break;
+        }
+    }
+
+    format!("{}{}{}", &s[..head_end], ELLIPSIS, &s[tail_start..])
 }
 
 #[cfg(test)]
@@ -211,5 +227,48 @@ mod tests {
         let truncated = truncate_message(msg);
         assert_eq!(truncated.len(), 105);
         assert!(truncated.contains(" ... "));
+    }
+
+    /// Assert the truncated output is built strictly from char boundaries of `msg`:
+    /// the part before " ... " is a prefix of `msg` ending on a boundary, the part
+    /// after is a suffix of `msg` starting on a boundary.
+    fn assert_split_on_char_boundaries(msg: &str, truncated: &str) {
+        assert!(truncated.is_char_boundary(0) && truncated.is_char_boundary(truncated.len()));
+        let ellipsis_pos = truncated.find(" ... ").expect("truncated output must contain the ellipsis");
+        let head = &truncated[..ellipsis_pos];
+        let tail = &truncated[ellipsis_pos + " ... ".len()..];
+        assert!(msg.starts_with(head));
+        assert!(msg.is_char_boundary(head.len()));
+        let tail_start = msg.len() - tail.len();
+        assert!(msg.is_char_boundary(tail_start));
+        assert_eq!(&msg[tail_start..], tail);
+    }
+
+    #[test]
+    fn truncate_message_cjk_no_panic() {
+        // 12x U+4E00 (3 bytes each = 36 bytes) + 200 ASCII bytes.
+        // Byte 25 lands mid-char (boundaries at 24 and 27), so naive &s[..25] panics.
+        let cjk_msg = "一".repeat(12) + &"A".repeat(200);
+        assert_eq!(cjk_msg.len(), 236);
+        assert!(!cjk_msg.is_char_boundary(25));
+        let truncated = truncate_message(&cjk_msg);
+        assert!(truncated.contains(" ... "));
+        assert_split_on_char_boundaries(&cjk_msg, &truncated);
+
+        // Adversarial probe: 4-byte emoji (U+1F600). 10 emoji = 40 bytes;
+        // byte 25 lands mid-emoji (boundaries at 24 and 28).
+        let emoji_msg = "😀".repeat(10) + &"B".repeat(200);
+        assert_eq!(emoji_msg.len(), 240);
+        assert!(!emoji_msg.is_char_boundary(25));
+        let truncated = truncate_message(&emoji_msg);
+        assert!(truncated.contains(" ... "));
+        assert_split_on_char_boundaries(&emoji_msg, &truncated);
+
+        // Adversarial probe: mixed CJK/ASCII alternating payload (9 bytes/unit x 40).
+        let mixed_msg = "漢字abc".repeat(40);
+        assert_eq!(mixed_msg.len(), 360);
+        let truncated = truncate_message(&mixed_msg);
+        assert!(truncated.contains(" ... "));
+        assert_split_on_char_boundaries(&mixed_msg, &truncated);
     }
 }
