@@ -216,9 +216,12 @@ pub fn extract_user_content(messages: &[Message]) -> Vec<String> {
 ///   request. Non-string `stop` values (array, number, absent) are untouched.
 /// - Repeat injection is NOT idempotent: each call appends another block.
 ///   There is no begin/end marker and no replace semantics today; pinned as-is.
-/// - No user message and non-empty `messages`: falls back to appending the
-///   block onto `messages[0]` when it holds a string, warns otherwise (typed
-///   behavior, preserved here; task 44 replaces this fallback).
+/// - No user message and non-empty `messages`: a NEW
+///   `{"role":"system","content":<block>}` message is pushed at the tail;
+///   `messages[0]` is never written to (the typed implementation appended the
+///   block onto `messages[0]` instead, destroying the user's own system prompt
+///   when it sat there). An empty `messages: []` stays a no-op - no system
+///   message is invented for a conversation with no turns.
 /// - `messages` missing, non-array, or a non-object body: `Err` - the typed
 ///   gate rejected those too, and callers treat `Err` as "forward the
 ///   original bytes unchanged".
@@ -253,21 +256,13 @@ pub fn inject_augmentation_value(
     {
         append_block_to_message(&mut messages[idx], &block)?;
     } else if !messages.is_empty() {
-        // No user message: preserved typed fallback (task 44 replaces it with a
-        // pushed system message).
-        let first = &mut messages[0];
-        if !first.is_object() {
-            return Err("augment injection: messages[0] is not a JSON object".into());
-        }
-        match first.get_mut("content") {
-            Some(serde_json::Value::String(s)) => s.push_str(&block),
-            None | Some(serde_json::Value::Null) | Some(serde_json::Value::Array(_)) => {
-                tracing::warn!("Could not find a user message to inject augmentation into");
-            }
-            Some(other) => {
-                return Err(format!("augment injection: unsupported content type on messages[0]: {other}").into());
-            }
-        }
+        // No user message: the typed implementation appended the block onto
+        // messages[0], destroying the user's own system prompt when that first
+        // message held it. The block now always lands in a NEW system message
+        // pushed at the tail; messages[0] is never written to here and the
+        // block is never dropped, whatever messages[0] holds.
+        tracing::warn!("No user message to inject augmentation into; augmentation pushed as a new system message");
+        messages.push(serde_json::json!({ "role": "system", "content": block }));
     }
 
     Ok(request)
@@ -730,8 +725,8 @@ mod tests {
             "object content was rejected by the typed gate"
         );
         assert!(
-            inject(serde_json::json!({"model": "m", "messages": [[42]]})).is_err(),
-            "fallback onto a non-object messages[0] was rejected by the typed gate"
+            inject(serde_json::json!({"model": "m", "messages": ["str", {"role": "user", "content": {"n": 1}}]})).is_err(),
+            "last-user path still rejects object content the typed gate rejected"
         );
     }
 
@@ -743,20 +738,75 @@ mod tests {
     }
 
     #[test]
-    fn fallback_no_user_string_content_appends_to_first_message_current_behavior() {
-        let output = inject(serde_json::json!({
+    fn no_user_message_pushes_system_message_and_never_touches_messages_zero() {
+        let input = serde_json::json!({
             "model": "m",
             "messages": [
                 {"role": "system", "content": "IMPORTANT USER PROMPT"},
                 {"role": "assistant", "content": "prior turn"}
             ]
+        });
+
+        let output = inject(input.clone()).unwrap();
+
+        assert_eq!(
+            serde_json::to_vec(&output["messages"][0]).unwrap(),
+            serde_json::to_vec(&input["messages"][0]).unwrap(),
+            "the user's system prompt at messages[0] must survive byte-identical"
+        );
+        let msgs = output["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 3, "augmentation goes into a NEW pushed system message");
+        assert_eq!(
+            msgs[2],
+            serde_json::json!({"role": "system", "content": "\n\nREQ_PROMPT\n\nAUG_TEXT"}),
+            "pushed at the tail with the same block string the append paths use"
+        );
+    }
+
+    #[test]
+    fn no_user_with_non_string_first_content_pushes_system_instead_of_dropping_block() {
+        let output = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "assistant", "content": [{"type": "text", "text": "fine"}]}]
+        }))
+        .unwrap();
+
+        assert_eq!(output["messages"][0]["content"][0]["text"], "fine", "first message untouched");
+        let msgs = output["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2);
+        assert_eq!(
+            msgs[1],
+            serde_json::json!({"role": "system", "content": "\n\nREQ_PROMPT\n\nAUG_TEXT"})
+        );
+    }
+
+    #[test]
+    fn user_message_at_index_zero_remains_the_injection_target_contract() {
+        let output = inject(serde_json::json!({
+            "model": "m",
+            "messages": [{"role": "user", "content": "IMPORTANT USER PROMPT"}]
         }))
         .unwrap();
 
         assert_eq!(
             output["messages"][0]["content"], "IMPORTANT USER PROMPT\n\nREQ_PROMPT\n\nAUG_TEXT",
-            "task 43 preserves the typed fallback verbatim; task 44 replaces it"
+            "last-user injection is the shipped contract (baseline-D parity): a user \
+             message at index 0 is the TARGET, not a clobber victim"
         );
-        assert_eq!(output["messages"].as_array().unwrap().len(), 2);
+        assert_eq!(output["messages"].as_array().unwrap().len(), 1, "no system message pushed");
+    }
+
+    #[test]
+    fn no_user_and_empty_messages_stays_noop_without_inventing_system_message() {
+        let input = serde_json::json!({"model": "m", "messages": []});
+        assert_eq!(inject(input.clone()).unwrap(), input);
+    }
+
+    #[test]
+    fn fallback_no_longer_rejects_non_object_first_message_it_pushes_instead() {
+        let output = inject(serde_json::json!({"model": "m", "messages": [[42]]})).unwrap();
+        let msgs = output["messages"].as_array().unwrap();
+        assert_eq!(msgs.len(), 2, "fallback never reads messages[0] any more");
+        assert_eq!(msgs[1]["role"], "system");
     }
 }
