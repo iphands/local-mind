@@ -104,6 +104,18 @@ impl BackendNode {
     }
 }
 
+/// Attach the node's `Authorization: Bearer` header to a request builder.
+///
+/// The ONE auth builder (big-fix E-M3): every request that must carry a node's
+/// api_key goes through here, so no call site can silently drop auth and get a
+/// "successful connection, 401 body" miss.
+pub(crate) fn with_auth(req: reqwest::RequestBuilder, api_key: Option<&str>) -> reqwest::RequestBuilder {
+    match api_key {
+        Some(key) => req.header(reqwest::header::AUTHORIZATION, format!("Bearer {}", key)),
+        None => req,
+    }
+}
+
 /// The node whose failure cooldown expires earliest; ties go to the lowest index
 /// (`min_by_key` keeps the first minimum). Callers pass a node set where every node
 /// is cooled; balancers reject empty node lists at construction, so the non-empty
@@ -116,8 +128,15 @@ pub(crate) fn soonest_recovering_node(nodes: &[Arc<BackendNode>]) -> Arc<Backend
         .expect("at least one candidate")
 }
 
-/// Build an HTTP client for a single backend node
-fn build_node_client(timeout_seconds: u64, tls: Option<&TlsConfig>) -> Result<reqwest::Client, Box<dyn std::error::Error>> {
+/// Build an HTTP client for a single backend node.
+///
+/// The ONE client factory for backend traffic: forwarding (via `from_config`) and
+/// startup preflight probes (big-fix E-M5) must not drift on TLS handling or
+/// timeouts, so preflight calls this instead of hand-rolling a builder.
+pub(crate) fn build_node_client(
+    timeout_seconds: u64,
+    tls: Option<&TlsConfig>,
+) -> Result<reqwest::Client, Box<dyn std::error::Error>> {
     let mut client_builder = reqwest::Client::builder()
         .timeout(Duration::from_secs(timeout_seconds))
         .connect_timeout(CONNECT_TIMEOUT)

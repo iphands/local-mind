@@ -8,6 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
+use crate::backends::preflight::ContextProbe;
+use crate::backends::with_auth;
+
 // Global cache: backend_url -> (context_size, backend_type)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum BackendType {
@@ -52,7 +55,7 @@ pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str, _s
     }
 
     // Try llama.cpp /props endpoint first
-    if let Some(n_ctx) = fetch_from_props(client, backend_url).await {
+    if let Some(n_ctx) = fetch_from_props(client, backend_url, None).await {
         cache_result(cache, backend_url, n_ctx, BackendType::LlamaCpp);
         return Some(n_ctx);
     }
@@ -69,47 +72,44 @@ pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str, _s
 /// Cache context size from preflight data, avoiding redundant HTTP calls.
 ///
 /// Called by preflight after it has already fetched /v1/models and inspected
-/// the `Server` response header to determine backend type.
+/// the `Server` response header to determine backend type. The probe carries
+/// the node's api_key: llama.cpp `/props` is fetched WITH auth, so auth'd
+/// backends stop 401-ing the fetch into a silent miss (big-fix E-M3).
 ///
 /// - llama.cpp (`is_llama_cpp = true`): fetches `/props` for the actual configured n_ctx
 ///   (max_model_len from /v1/models is the training context, not the server's -c setting)
 /// - Other backends: uses `max_model_len` already extracted from the /v1/models response
-pub async fn cache_context_from_preflight(
-    client: &reqwest::Client,
-    backend_url: &str,
-    _strip_path_prefix: Option<&str>,
-    is_llama_cpp: bool,
-    max_model_len: Option<u64>,
-) -> Option<u64> {
+pub async fn cache_context_from_preflight(client: &reqwest::Client, probe: &ContextProbe) -> Option<u64> {
     let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
 
     // Check cache first (shouldn't be populated yet during preflight, but be safe)
     {
         let read_guard = cache.read().await;
-        if let Some(&(ctx, _)) = read_guard.get(backend_url) {
+        if let Some(&(ctx, _)) = read_guard.get(&probe.base_url) {
             return Some(ctx);
         }
     }
 
-    if is_llama_cpp {
+    if probe.is_llama_cpp {
         // Need /props for the actual runtime n_ctx (distinct from model's n_ctx_train)
-        if let Some(n_ctx) = fetch_from_props(client, backend_url).await {
-            cache_result(cache, backend_url, n_ctx, BackendType::LlamaCpp);
+        if let Some(n_ctx) = fetch_from_props(client, &probe.base_url, probe.api_key.as_deref()).await {
+            cache_result(cache, &probe.base_url, n_ctx, BackendType::LlamaCpp);
             return Some(n_ctx);
         }
         None
-    } else if let Some(ctx) = max_model_len {
-        cache_result(cache, backend_url, ctx, BackendType::Vllm);
+    } else if let Some(ctx) = probe.max_model_len {
+        cache_result(cache, &probe.base_url, ctx, BackendType::Vllm);
         Some(ctx)
     } else {
         None
     }
 }
 
-/// Fetch context size from llama.cpp `/props` endpoint
-async fn fetch_from_props(client: &reqwest::Client, backend_url: &str) -> Option<u64> {
+/// Fetch context size from llama.cpp `/props` endpoint.
+/// `api_key` is presented when the caller's backend requires auth (E-M3).
+async fn fetch_from_props(client: &reqwest::Client, backend_url: &str, api_key: Option<&str>) -> Option<u64> {
     let props_url = format!("{}/props", backend_url);
-    match client.get(&props_url).send().await {
+    match with_auth(client.get(&props_url), api_key).send().await {
         Ok(resp) => {
             if let Ok(props) = resp.json::<serde_json::Value>().await {
                 if let Some(n_ctx) = props
@@ -317,6 +317,109 @@ mod tests {
         assert_eq!(
             models_uri, "/v1/models",
             "monitoring must request backend-native /v1/models, not the prefix-stripped path"
+        );
+        server.abort();
+    }
+
+    /// Auth-gated listener: /props answers 401 without `Authorization: Bearer secret`,
+    /// 200 props JSON with it. Records (uri, authed) per request.
+    async fn spawn_auth_props_listener() -> (String, mpsc::Receiver<(String, bool)>, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let (tx, rx) = mpsc::channel::<(String, bool)>(16);
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let mut head: Vec<u8> = Vec::new();
+                let mut tmp = [0u8; 512];
+                loop {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            head.extend_from_slice(&tmp[..n]);
+                            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).to_string();
+                let uri = text
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split(' ').nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                let authed = text.to_ascii_lowercase().contains("authorization: bearer secret");
+                if tx.send((uri.clone(), authed)).await.is_err() {
+                    break;
+                }
+                let props_ok = uri == "/props" && authed;
+                let (status, body): (&str, &str) = if props_ok {
+                    ("200 OK", PROPS_BODY)
+                } else if uri == "/props" {
+                    ("401 UNAUTHORIZED", r#"{"error":"unauthorized"}"#)
+                } else {
+                    ("404 NOT FOUND", "{}")
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), rx, handle)
+    }
+
+    async fn next_recorded(rx: &mut mpsc::Receiver<(String, bool)>) -> (String, bool) {
+        tokio::time::timeout(Duration::from_secs(5), rx.recv())
+            .await
+            .expect("listener request within 5s")
+            .expect("record channel open")
+    }
+
+    #[tokio::test]
+    async fn preflight_props_fetch_presents_the_nodes_api_key() {
+        let (base, mut rx, server) = spawn_auth_props_listener().await;
+        let client = reqwest::Client::new();
+        let probe = ContextProbe {
+            base_url: base.clone(),
+            is_llama_cpp: true,
+            max_model_len: None,
+            api_key: Some("secret".to_string()),
+        };
+
+        let ctx = cache_context_from_preflight(&client, &probe).await;
+
+        assert_eq!(ctx, Some(4096), "an auth'd backend's /props must not be a silent miss");
+        let (uri, authed) = next_recorded(&mut rx).await;
+        assert_eq!(uri, "/props");
+        assert!(authed, "the /props request must carry the node's bearer token (E-M3)");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn auth_required_props_without_a_key_is_a_clean_miss() {
+        let (base, mut rx, server) = spawn_auth_props_listener().await;
+        let client = reqwest::Client::new();
+        let probe = ContextProbe {
+            base_url: base.clone(),
+            is_llama_cpp: true,
+            max_model_len: None,
+            api_key: None,
+        };
+
+        let ctx = cache_context_from_preflight(&client, &probe).await;
+
+        assert_eq!(ctx, None, "a 401 /props must degrade to None, not panic");
+        let (uri, authed) = next_recorded(&mut rx).await;
+        assert_eq!(
+            (uri.as_str(), authed),
+            ("/props", false),
+            "no key configured -> no header sent"
         );
         server.abort();
     }
