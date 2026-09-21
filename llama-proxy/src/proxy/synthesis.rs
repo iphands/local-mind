@@ -348,6 +348,15 @@ fn synthesize_anthropic_chunks(msg: AnthropicMessage, chunk_size_chars: usize) -
                     )));
                 }
 
+                // A backend-provided signature rides a faithful signature_delta
+                // frame before the block closes (Anthropic's own stream shape).
+                if let Some(sig) = signature {
+                    chunks.push(Ok(create_anthropic_sse_event(
+                        "content_block_delta",
+                        &build_signature_delta_event(idx, sig),
+                    )));
+                }
+
                 // Stop thinking block
                 chunks.push(Ok(create_anthropic_sse_event(
                     "content_block_stop",
@@ -374,27 +383,35 @@ fn synthesize_anthropic_chunks(msg: AnthropicMessage, chunk_size_chars: usize) -
                     &build_content_block_stop_event(idx),
                 )));
             }
-            AnthropicContentBlock::ToolResult { content, .. } => {
-                // Tool results are typically in user messages, not assistant responses
-                // If they appear in responses, treat as text for now
-                if let Some(text) = content.as_str() {
-                    chunks.push(Ok(create_anthropic_sse_event(
-                        "content_block_start",
-                        &build_content_block_start_event(idx, "text"),
-                    )));
-
-                    for text_chunk in chunk_text(text, chunk_size_chars) {
-                        chunks.push(Ok(create_anthropic_sse_event(
-                            "content_block_delta",
-                            &build_content_block_delta_event(idx, "text_delta", &text_chunk),
-                        )));
-                    }
-
-                    chunks.push(Ok(create_anthropic_sse_event(
-                        "content_block_stop",
-                        &build_content_block_stop_event(idx),
-                    )));
+            AnthropicContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
+                // Honest tool_result block: the raw (UNTRUSTED) content passes
+                // through verbatim in content_block_start - never reinterpreted
+                // as a text block, never dropped (array shapes included).
+                // No deltas: chunking an opaque tool-result payload would rewrite it.
+                let mut block = json!({
+                    "type": "tool_result",
+                    "tool_use_id": tool_use_id,
+                    "content": content,
+                });
+                if let Some(e) = is_error {
+                    block["is_error"] = json!(e);
                 }
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_start",
+                    &json!({
+                        "type": "content_block_start",
+                        "index": idx,
+                        "content_block": block,
+                    }),
+                )));
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_stop",
+                    &build_content_block_stop_event(idx),
+                )));
             }
             AnthropicContentBlock::Other(value) => {
                 // Verbatim pass-through: content_block_start carries the raw
@@ -484,6 +501,19 @@ fn build_thinking_block_start_event(index: usize, signature: Option<&str>) -> se
 }
 
 /// Build content_block_delta event for text
+/// Anthropic signature_delta frame - carries the backend's thinking signature
+/// verbatim (absent signatures never fabricate one).
+fn build_signature_delta_event(index: usize, signature: &str) -> serde_json::Value {
+    json!({
+        "type": "content_block_delta",
+        "index": index,
+        "delta": {
+            "type": "signature_delta",
+            "signature": signature
+        }
+    })
+}
+
 fn build_content_block_delta_event(index: usize, delta_type: &str, text: &str) -> serde_json::Value {
     json!({
         "type": "content_block_delta",
@@ -952,8 +982,11 @@ mod tests {
 
         let chunks = synthesize_anthropic_chunks(msg, 50);
 
-        // Expected: message_start, content_block_start, content_block_delta, content_block_stop, message_delta, message_stop
-        assert_eq!(chunks.len(), 6);
+        // Expected: message_start, content_block_start, content_block_delta,
+        // signature_delta (task 60 - backend signature now rides its own frame;
+        // frame CONTENT is asserted end-to-end in tool_result_signature_tests),
+        // content_block_stop, message_delta, message_stop
+        assert_eq!(chunks.len(), 7);
 
         // All chunks should be Ok
         for chunk in &chunks {
@@ -1492,5 +1525,175 @@ mod order_finish_reason_tests {
         )
         .await;
         assert!(b.contains("\"stop_reason\":\"max_tokens\""));
+    }
+}
+
+#[cfg(test)]
+mod tool_result_signature_tests {
+    use super::*;
+    use crate::api::AnthropicUsage;
+
+    async fn body(resp: Response) -> String {
+        let b = axum::body::to_bytes(resp.into_body(), 10_000_000).await.unwrap();
+        String::from_utf8(b.to_vec()).unwrap()
+    }
+
+    fn msg_with(blocks: Vec<AnthropicContentBlock>) -> AnthropicMessage {
+        AnthropicMessage {
+            id: "m60".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: blocks,
+            model: "m".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        }
+    }
+
+    #[tokio::test]
+    async fn thinking_with_signature_emits_signature_delta() {
+        // Given: thinking block carrying a signature
+        // When: Anthropic streaming synthesis
+        // Then: a {"type":"signature_delta"} frame exists (baseline: NONE - signature only
+        //       in content_block_start; capture task60 evidence)
+        let msg = msg_with(vec![AnthropicContentBlock::Thinking {
+            thinking: "deep".to_string(),
+            signature: Some("sig_abc".to_string()),
+        }]);
+        let b = body(
+            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            b.contains("\"type\":\"signature_delta\""),
+            "signature_delta missing => RED:\n{b}"
+        );
+        assert!(b.contains("\"signature\":\"sig_abc\""));
+    }
+
+    #[tokio::test]
+    async fn thinking_without_signature_emits_no_signature_delta() {
+        let msg = msg_with(vec![AnthropicContentBlock::Thinking {
+            thinking: "deep".to_string(),
+            signature: None,
+        }]);
+        let b = body(
+            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(!b.contains("signature_delta"));
+    }
+
+    #[tokio::test]
+    async fn tool_result_array_content_emits_tool_result_block_gap_free() {
+        // Given: [Text, ToolResult(array content)]
+        // Then: index 1 emits a content_block_start whose block type is tool_result with the
+        //       raw content array VERBATIM, plus content_block_stop at index 1 (baseline emitted
+        //       ZERO frames for this block -> gap 0,2)
+        let content = json!([{"type": "text", "text": "TR-ARRAY"}]);
+        let msg = msg_with(vec![
+            AnthropicContentBlock::Text { text: "T".to_string() },
+            AnthropicContentBlock::ToolResult {
+                tool_use_id: "toolu_9".to_string(),
+                content: content.clone(),
+                is_error: Some(true),
+            },
+        ]);
+        let b = body(
+            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            b.contains("\"type\":\"tool_result\""),
+            "tool_result block missing => RED:\n{b}"
+        );
+        assert!(b.contains("\"tool_use_id\":\"toolu_9\""));
+        assert!(b.contains("\"is_error\":true"));
+        assert!(
+            b.contains("TR-ARRAY"),
+            "raw content must ride verbatim (untrusted pass-through)"
+        );
+        let start1 = b.find("\"index\":1").expect("start frame at index 1");
+        let stop1 = rfind_index(&b, 1);
+        assert!(start1 < stop1, "start before stop at index 1");
+        assert!(
+            b.contains("\"index\":1,\"type\":\"content_block_stop\""),
+            "gap-free: stop at index 1"
+        );
+    }
+
+    #[tokio::test]
+    async fn tool_result_string_content_is_tool_result_not_text() {
+        // Baseline LIE: string-shaped ToolResult was emitted as a "text" block
+        let msg = msg_with(vec![AnthropicContentBlock::ToolResult {
+            tool_use_id: "toolu_2".to_string(),
+            content: json!("TR-STRING"),
+            is_error: None,
+        }]);
+        let b = body(
+            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert!(
+            b.contains("\"type\":\"tool_result\""),
+            "string ToolResult must be a tool_result block => RED:\n{b}"
+        );
+        assert!(b.contains("\"content\":\"TR-STRING\""));
+        assert!(!b.contains("\"type\":\"text\""), "no more text-block lie");
+        assert!(!b.contains("\"is_error\""), "absent is_error must not be fabricated");
+    }
+
+    #[tokio::test]
+    async fn full_block_sweep_indices_are_gap_free() {
+        // Given: five blocks incl. both ToolResult shapes (the baseline gap fixture)
+        // Then: content_block_start indices form 0,1,2,3,4 with no skips
+        let msg = msg_with(vec![
+            AnthropicContentBlock::Thinking {
+                thinking: "d".to_string(),
+                signature: Some("s".to_string()),
+            },
+            AnthropicContentBlock::Text { text: "v".to_string() },
+            AnthropicContentBlock::ToolUse {
+                id: "t".to_string(),
+                name: "f".to_string(),
+                input: json!({"a":1}),
+            },
+            AnthropicContentBlock::ToolResult {
+                tool_use_id: "u1".to_string(),
+                content: json!([{"type":"text","text":"A"}]),
+                is_error: Some(false),
+            },
+            AnthropicContentBlock::ToolResult {
+                tool_use_id: "u2".to_string(),
+                content: json!("B"),
+                is_error: None,
+            },
+        ]);
+        let b = body(
+            synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        for i in 0..5 {
+            assert!(b.contains(&format!("\"index\":{i}")), "index {i} missing => gap => RED");
+        }
+    }
+
+    fn rfind_index(b: &str, idx: usize) -> usize {
+        let pat = format!("\"index\":{idx},\"type\":\"content_block_stop\"");
+        b.rfind(&pat).expect("stop frame present")
     }
 }
