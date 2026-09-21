@@ -437,6 +437,312 @@ fn detect_and_signal_completion(bytes: &[u8], completion_tx: &mut Option<tokio::
     false
 }
 
+/// Everything the end-of-stream observer task needs beyond the channels and
+/// the accumulated bytes. Built once per pass-through stream when something
+/// can consume the analysis (stats or dump), then moved into the spawned task.
+/// [D-M7] decomposition: this replaced a 240-line inline `async move` closure;
+/// each named member is one responsibility, edit them independently.
+struct StreamObserver {
+    completion_rx: tokio::sync::oneshot::Receiver<StreamEnd>,
+    activity_rx: tokio::sync::watch::Receiver<()>,
+    accumulated: Arc<std::sync::Mutex<Vec<u8>>>,
+    start: Instant,
+    fix_registry: Arc<FixRegistry>,
+    request_json: Option<serde_json::Value>,
+    stats_enabled: bool,
+    stats_format: StatsFormat,
+    streaming_mode: crate::config::StreamingMode,
+    group_name: Option<String>,
+    concurrent_requests: usize,
+    exporter_manager: Arc<ExporterManager>,
+    http_client: reqwest::Client,
+    backend_url: String,
+    strip_path_prefix: Option<String>,
+    dump: Option<StreamDump>,
+}
+
+/// A streamed response that can be dumped: exists only when every input the
+/// dump needs (path, method, URI, parsed request) is present.
+struct StreamDump {
+    path: Arc<std::path::PathBuf>,
+    response_headers: axum::http::HeaderMap,
+    method: String,
+    uri: String,
+    request_json: serde_json::Value,
+    backend_request_body: Option<Vec<u8>>,
+    status: u16,
+}
+
+impl StreamObserver {
+    /// Await the end, tally it, analyze the accumulated bytes exactly once.
+    async fn run(mut self) {
+        let end = self.await_end().await;
+        Self::tally_end(end, self.start);
+        // The operator's question is "did the client get a whole answer?",
+        // which a stalled stream also failed to deliver. Which counter it
+        // landed in is diagnosis, and that is what stream_end is for.
+        let stream_incomplete = match end {
+            StreamEnd::Completed | StreamEnd::ClientGone => false,
+            StreamEnd::BackendClosed | StreamEnd::BackendError | StreamEnd::Stalled => true,
+        };
+        let stream_end = end.as_str();
+
+        // Copy out and release: the std MutexGuard must not be held across
+        // the awaits below, and by now the stream is finished, so the
+        // accumulated bytes are immutable.
+        let acc = self.accumulated.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        tracing::trace!("Accumulated SSE data length: {} bytes", acc.len());
+        if acc.is_empty() {
+            return;
+        }
+        let acc_text = String::from_utf8_lossy(&acc);
+        let preview: String = acc_text.chars().take(1000).collect();
+        tracing::trace!("Accumulated SSE preview:\n{}", preview);
+
+        Self::scan_unparsed_events(&acc_text);
+
+        match parse_accumulated_sse(&acc_text) {
+            Some(final_event) => {
+                self.note_unrepaired_fixes(&final_event);
+                tracing::trace!(
+                    "Successfully merged SSE events into final response with keys: {:?}",
+                    final_event.as_object().map(|o| o.keys().collect::<Vec<_>>())
+                );
+                self.spawn_dump(&final_event);
+                if self.stats_enabled {
+                    self.publish_stats(&final_event, stream_incomplete, stream_end).await;
+                }
+            }
+            None => {
+                tracing::trace!(
+                    duration_ms = self.start.elapsed().as_millis() as u64,
+                    "Streaming completed (unable to parse final event)"
+                );
+            }
+        }
+    }
+
+    /// Wait for the end reason: completion signal, activity channel closing,
+    /// or the inactivity timeout.
+    async fn await_end(&mut self) -> StreamEnd {
+        // Reset on each chunk. There is deliberately no absolute cap: a stream that
+        // keeps producing is not stalled however long it runs, and its total length
+        // is already bounded by the backend client's timeout_seconds, which ends the
+        // body with an error (BackendError) rather than leaving this task waiting.
+        const ACTIVITY_TIMEOUT_SECS: u64 = 90;
+
+        let end_reason = loop {
+            // Create fresh activity timeout each iteration (resets on activity)
+            let activity_timeout_sleep = tokio::time::sleep(tokio::time::Duration::from_secs(ACTIVITY_TIMEOUT_SECS));
+            tokio::pin!(activity_timeout_sleep);
+
+            tokio::select! {
+                // End reason from the stream (see StreamEnd for the contract)
+                result = &mut self.completion_rx => {
+                    match result {
+                        Ok(reason) => break reason,
+                        Err(_) => break StreamEnd::ClientGone,
+                    }
+                }
+
+                // Activity detected - reset the activity timeout by continuing loop
+                res = self.activity_rx.changed() => {
+                    if res.is_ok() {
+                        tracing::trace!("Stream activity detected, resetting timeout");
+                        // Continue loop with fresh timers
+                        continue;
+                    } else {
+                        // All senders dropped: the body stream is gone.
+                        // Waiting further would idle until the inactivity
+                        // timeout and log a spurious warning.
+                        tracing::trace!("Activity channel closed, stream ended");
+                        break StreamEnd::ClientGone;
+                    }
+                }
+
+                // 90s inactivity timeout
+                _ = &mut activity_timeout_sleep => {
+                    tracing::warn!(
+                        "Stream inactivity timeout ({}s since last chunk), extracting metrics",
+                        ACTIVITY_TIMEOUT_SECS
+                    );
+                    break StreamEnd::Stalled;
+                }
+            }
+        };
+
+        // select! resolves ready branches at random, so on a fast local
+        // stream the timeout/activity branch can win a tie against a
+        // completion that already fired. A sent value survives sender drop
+        // in a oneshot, so drain it: the real end reason beats the branch
+        // that happened to be polled.
+        self.completion_rx.try_recv().unwrap_or(end_reason)
+    }
+
+    /// Map the end reason onto the process-wide end-class counters.
+    fn tally_end(end: StreamEnd, start: Instant) {
+        match end {
+            StreamEnd::Completed => {
+                tracing::trace!(duration_ms = start.elapsed().as_millis() as u64, "Stream completed normally");
+            }
+            StreamEnd::BackendClosed | StreamEnd::BackendError => {
+                STREAM_TRUNCATED_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            StreamEnd::Stalled => {
+                STREAM_STALLED_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+            }
+            StreamEnd::ClientGone => {
+                STREAM_CLIENT_GONE_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+                tracing::debug!("Stream ended by client disconnect before completion");
+            }
+        }
+    }
+
+    /// Detect-only pass (this path never repairs): per-event JSON parse
+    /// failures are counted against the verbatim-forwarding denominator.
+    fn scan_unparsed_events(acc_text: &str) {
+        let mut unparsed_events = 0u64;
+        let mut unparsed_preview: Option<String> = None;
+        for raw_event in acc_text.split("\n\n") {
+            let (_event_type, payloads) = split_event(raw_event.as_bytes());
+            let bad = count_unparsed_payloads(&payloads);
+            if bad > 0 {
+                unparsed_events += 1;
+                if unparsed_preview.is_none() {
+                    if let Some(p) = payloads
+                        .iter()
+                        .find(|p| serde_json::from_str::<serde_json::Value>(p.trim()).is_err())
+                    {
+                        let snippet: String = p.chars().take(120).collect();
+                        unparsed_preview = Some(snippet);
+                    }
+                }
+            }
+        }
+        if unparsed_events > 0 {
+            SSE_UNPARSED_EVENTS_TOTAL.fetch_add(unparsed_events, AtomicOrdering::Relaxed);
+            tracing::warn!(
+                unparsed_events = unparsed_events,
+                example = %unparsed_preview.unwrap_or_default(),
+                "streaming_pass_through: {} SSE event payload(s) were not valid JSON - forwarded verbatim, unanalyzed",
+                unparsed_events
+            );
+        }
+    }
+
+    /// Fix predicates run against the merged response so operators see what
+    /// the client got unmodified. Runs before merging succeeds or fails - a
+    /// stream we can't merge is exactly the malformed case to surface.
+    fn note_unrepaired_fixes(&self, final_event: &serde_json::Value) {
+        let detected = self
+            .fix_registry
+            .detect_fixes(final_event, self.request_json.as_ref(), "passthrough_forwards_verbatim");
+        if detected.is_empty() {
+            return;
+        }
+        let n = FIX_UNREPAIRED_TOTAL.fetch_add(detected.len() as u64, AtomicOrdering::Relaxed) + 1;
+        // A model that reliably emits the defect would WARN on
+        // 100% of requests and bury everything else; the counter
+        // stays exact, the log is sampled.
+        if n == 1 || n.is_multiple_of(100) {
+            tracing::warn!(
+                fixes = %detected.join(","),
+                total_unrepaired = n,
+                mode = %self.streaming_mode,
+                "streaming_pass_through: detected, NOT repaired (SSE forwarded bytes verbatim; per-chunk repair corrupts partial deltas) - client received them as-is"
+            );
+        }
+    }
+
+    /// Hand the dump to its own task; the inputs move in (they exist for this
+    /// one use), only `final_event` is cloned because stats still needs it.
+    fn spawn_dump(&mut self, final_event: &serde_json::Value) {
+        let Some(StreamDump {
+            path,
+            response_headers,
+            method,
+            uri,
+            request_json,
+            backend_request_body,
+            status,
+        }) = self.dump.take()
+        else {
+            return;
+        };
+        let final_event = final_event.clone();
+
+        tokio::spawn(async move {
+            // Prefer the bytes actually sent; the parsed request_json
+            // predates the proxy's own stream/stream_options edits.
+            let request_body = backend_request_body.unwrap_or_else(|| serde_json::to_vec(&request_json).unwrap_or_default());
+            let response_body = serde_json::to_vec(&final_event).unwrap_or_default();
+            let req_content_type = Some("application/json");
+            let res_content_type = response_headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
+
+            if let Err(e) = dump::dump_request_response(
+                &path,
+                &method,
+                &uri,
+                &request_body,
+                req_content_type,
+                status,
+                &response_body,
+                res_content_type,
+            )
+            .await
+            {
+                tracing::warn!(error = %e, "Failed to dump streaming request/response pair");
+            }
+        });
+    }
+
+    /// Assemble the sample, enrich it with context usage, log and export.
+    async fn publish_stats(&mut self, final_event: &serde_json::Value, stream_incomplete: bool, stream_end: &'static str) {
+        let Some(req_json) = self.request_json.as_ref() else {
+            tracing::trace!(
+                duration_ms = self.start.elapsed().as_millis() as u64,
+                "Streaming completed (no request JSON)"
+            );
+            return;
+        };
+        let mut metrics = RequestMetrics::from_response(
+            final_event,
+            req_json,
+            true, // streaming
+            self.start.elapsed().as_millis() as f64,
+        );
+        // Set group name if we're in multi-backend mode
+        metrics.group_name = self.group_name.take();
+        metrics.concurrent_requests = Some(self.concurrent_requests);
+        metrics.stream_incomplete = stream_incomplete;
+        metrics.stream_end = Some(stream_end);
+
+        // A sample with no throughput signal has no token count
+        // either, so nothing can be done with context_percent -
+        // skip the /slots round-trip it would be wasted on.
+        if metrics.has_throughput_signal() {
+            match fetch_context_total(&self.http_client, &self.backend_url, self.strip_path_prefix.as_deref()).await {
+                Some(ctx_total) => {
+                    metrics.context_total = Some(ctx_total);
+                    metrics.calculate_context_percent();
+                }
+                None => {
+                    // Warn once per backend URL, not per request
+                    crate::proxy::warn_context_fetch_failed_once(&self.backend_url, &metrics.model).await;
+                    // Continue without context metrics - the request still succeeds
+                }
+            }
+        }
+
+        // The gate logs the sample and decides whether it is fit
+        // to export.
+        if crate::exporters::log_sample_and_should_export(&metrics, self.stats_format) {
+            // Export to remote systems
+            self.exporter_manager.export_all(&metrics).await;
+        }
+    }
+}
+
 /// Dump utilities for request/response debugging
 pub mod dump {
     use std::path::PathBuf;
@@ -630,258 +936,43 @@ pub async fn handle_streaming_response(
 
     // Spawn task to collect stats and/or dump after stream completes
     if let Some(accumulated) = accumulated_out {
-        // [D-M6] Moves, not clones: after the spawn block this fn reads only
-        // headers/status/stream, so nothing below has a second reader outside
-        // the task. The single surviving deep clone is dump-gated; the default
-        // (no --dump) path clones nothing. Do not re-clone (regression [D]M6).
-        let request_json_for_dump = dump_path.as_ref().map(|_| request_json.clone());
-        // The dump block is the only second consumer of the exact bytes sent to
-        // the backend; with no dump the buffer is dropped, never copied.
-        let backend_request_body = if dump_path.is_some() { backend_request_body } else { None };
-
-        tokio::spawn(async move {
-            // Reset on each chunk. There is deliberately no absolute cap: a stream that
-            // keeps producing is not stalled however long it runs, and its total length
-            // is already bounded by the backend client's timeout_seconds, which ends the
-            // body with an error (BackendError) rather than leaving this task waiting.
-            const ACTIVITY_TIMEOUT_SECS: u64 = 90;
-
-            let mut completion_rx = completion_rx;
-            let mut activity_rx = activity_rx;
-            let end_reason = loop {
-                // Create fresh activity timeout each iteration (resets on activity)
-                let activity_timeout_sleep = tokio::time::sleep(tokio::time::Duration::from_secs(ACTIVITY_TIMEOUT_SECS));
-                tokio::pin!(activity_timeout_sleep);
-
-                tokio::select! {
-                    // End reason from the stream (see StreamEnd for the contract)
-                    result = &mut completion_rx => {
-                        match result {
-                            Ok(reason) => break reason,
-                            Err(_) => break StreamEnd::ClientGone,
-                        }
-                    }
-
-                    // Activity detected - reset the activity timeout by continuing loop
-                    res = activity_rx.changed() => {
-                        if res.is_ok() {
-                            tracing::trace!("Stream activity detected, resetting timeout");
-                            // Continue loop with fresh timers
-                            continue;
-                        } else {
-                            // All senders dropped: the body stream is gone.
-                            // Waiting further would idle until the inactivity
-                            // timeout and log a spurious warning.
-                            tracing::trace!("Activity channel closed, stream ended");
-                            break StreamEnd::ClientGone;
-                        }
-                    }
-
-                    // 90s inactivity timeout
-                    _ = &mut activity_timeout_sleep => {
-                        tracing::warn!(
-                            "Stream inactivity timeout ({}s since last chunk), extracting metrics",
-                            ACTIVITY_TIMEOUT_SECS
-                        );
-                        break StreamEnd::Stalled;
-                    }
-                }
-            };
-
-            // select! resolves ready branches at random, so on a fast local
-            // stream the timeout/activity branch can win a tie against a
-            // completion that already fired. A sent value survives sender drop
-            // in a oneshot, so drain it: the real end reason beats the branch
-            // that happened to be polled.
-            let end = completion_rx.try_recv().unwrap_or(end_reason);
-
-            match end {
-                StreamEnd::Completed => {
-                    tracing::trace!(duration_ms = start.elapsed().as_millis() as u64, "Stream completed normally");
-                }
-                StreamEnd::BackendClosed | StreamEnd::BackendError => {
-                    STREAM_TRUNCATED_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
-                }
-                StreamEnd::Stalled => {
-                    STREAM_STALLED_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
-                }
-                StreamEnd::ClientGone => {
-                    STREAM_CLIENT_GONE_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
-                    tracing::debug!("Stream ended by client disconnect before completion");
-                }
-            }
-            // The operator's question is "did the client get a whole answer?",
-            // which a stalled stream also failed to deliver. Which counter it
-            // landed in is diagnosis, and that is what stream_end is for.
-            let stream_incomplete = match end {
-                StreamEnd::Completed | StreamEnd::ClientGone => false,
-                StreamEnd::BackendClosed | StreamEnd::BackendError | StreamEnd::Stalled => true,
-            };
-            let stream_end = end.as_str();
-
-            // Copy out and release: the std MutexGuard must not be held across
-            // the awaits below, and by now the stream is finished, so the
-            // accumulated bytes are immutable. None when accumulation was
-            // skipped (stats off + no dump) - then there is nothing to analyze.
-            let acc = accumulated.lock().unwrap_or_else(|e| e.into_inner()).clone();
-            tracing::trace!("Accumulated SSE data length: {} bytes", acc.len());
-            if !acc.is_empty() {
-                let acc_text = String::from_utf8_lossy(&acc);
-                let preview: String = acc_text.chars().take(1000).collect();
-                tracing::trace!("Accumulated SSE preview:\n{}", preview);
-
-                // Detect-only pass (this path never repairs): per-event JSON
-                // parse failures are counted, and fix predicates run against
-                // the merged response so operators see what the client got
-                // unmodified. Runs before merging succeeds or fails - a stream
-                // we can't merge is exactly the malformed case to surface.
-                let mut unparsed_events = 0u64;
-                let mut unparsed_preview: Option<String> = None;
-                for raw_event in acc_text.split("\n\n") {
-                    let (_event_type, payloads) = split_event(raw_event.as_bytes());
-                    let bad = count_unparsed_payloads(&payloads);
-                    if bad > 0 {
-                        unparsed_events += 1;
-                        if unparsed_preview.is_none() {
-                            if let Some(p) = payloads
-                                .iter()
-                                .find(|p| serde_json::from_str::<serde_json::Value>(p.trim()).is_err())
-                            {
-                                let snippet: String = p.chars().take(120).collect();
-                                unparsed_preview = Some(snippet);
-                            }
-                        }
-                    }
-                }
-                if unparsed_events > 0 {
-                    SSE_UNPARSED_EVENTS_TOTAL.fetch_add(unparsed_events, AtomicOrdering::Relaxed);
-                    tracing::warn!(
-                        unparsed_events = unparsed_events,
-                        example = %unparsed_preview.unwrap_or_default(),
-                        "streaming_pass_through: {} SSE event payload(s) were not valid JSON - forwarded verbatim, unanalyzed",
-                        unparsed_events
-                    );
-                }
-
-                let final_event = parse_accumulated_sse(&acc_text);
-
-                if let Some(ref final_event) = final_event {
-                    let detected =
-                        fix_registry.detect_fixes(final_event, request_json.as_ref(), "passthrough_forwards_verbatim");
-                    if !detected.is_empty() {
-                        let n = FIX_UNREPAIRED_TOTAL.fetch_add(detected.len() as u64, AtomicOrdering::Relaxed) + 1;
-                        // A model that reliably emits the defect would WARN on
-                        // 100% of requests and bury everything else; the counter
-                        // stays exact, the log is sampled.
-                        if n == 1 || n.is_multiple_of(100) {
-                            tracing::warn!(
-                                fixes = %detected.join(","),
-                                total_unrepaired = n,
-                                mode = %streaming_mode,
-                                "streaming_pass_through: detected, NOT repaired (SSE forwarded bytes verbatim; per-chunk repair corrupts partial deltas) - client received them as-is"
-                            );
-                        }
-                    }
-                }
-
-                if let Some(final_event) = final_event {
-                    tracing::trace!(
-                        "Successfully merged SSE events into final response with keys: {:?}",
-                        final_event.as_object().map(|o| o.keys().collect::<Vec<_>>())
-                    );
-
-                    // Dump request/response if dump mode is enabled (independent of stats)
-                    if let Some(ref dump_path) = dump_path {
-                        if let (Some(req_method), Some(req_uri), Some(req_json)) =
-                            (request_method, request_uri, request_json_for_dump)
-                        {
-                            let dump_path_clone = dump_path.clone();
-                            let response_headers = response_headers.clone();
-                            let req_json_clone = req_json.clone();
-                            let final_event_clone = final_event.clone();
-
-                            tokio::spawn(async move {
-                                // Prefer the bytes actually sent; the parsed request_json
-                                // predates the proxy's own stream/stream_options edits.
-                                let request_body = backend_request_body
-                                    .unwrap_or_else(|| serde_json::to_vec(&req_json_clone).unwrap_or_default());
-                                let response_body = serde_json::to_vec(&final_event_clone).unwrap_or_default();
-                                let req_content_type = Some("application/json");
-                                let res_content_type = response_headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
-
-                                if let Err(e) = dump::dump_request_response(
-                                    &dump_path_clone,
-                                    &req_method,
-                                    &req_uri,
-                                    &request_body,
-                                    req_content_type,
-                                    response_status,
-                                    &response_body,
-                                    res_content_type,
-                                )
-                                .await
-                                {
-                                    tracing::warn!(error = %e, "Failed to dump streaming request/response pair");
-                                }
-                            });
-                        }
-                    }
-
-                    // Extract metrics from final event
-                    if stats_enabled {
-                        let mut metrics = if let Some(ref req_json) = request_json {
-                            let mut m = RequestMetrics::from_response(
-                                &final_event,
-                                req_json,
-                                true, // streaming
-                                start.elapsed().as_millis() as f64,
-                            );
-                            // Set group name if we're in multi-backend mode
-                            m.group_name = group_name;
-                            m.concurrent_requests = Some(concurrent_requests);
-                            m.stream_incomplete = stream_incomplete;
-                            m.stream_end = Some(stream_end);
-                            m
-                        } else {
-                            tracing::trace!(
-                                duration_ms = start.elapsed().as_millis() as u64,
-                                "Streaming completed (no request JSON)"
-                            );
-                            return;
-                        };
-
-                        // A sample with no throughput signal has no token count
-                        // either, so nothing can be done with context_percent -
-                        // skip the /slots round-trip it would be wasted on.
-                        if metrics.has_throughput_signal() {
-                            match fetch_context_total(&http_client, &backend_url, strip_path_prefix.as_deref()).await {
-                                Some(ctx_total) => {
-                                    metrics.context_total = Some(ctx_total);
-                                    metrics.calculate_context_percent();
-                                }
-                                None => {
-                                    // Warn once per backend URL, not per request
-                                    crate::proxy::warn_context_fetch_failed_once(&backend_url, &metrics.model).await;
-                                    // Continue without context metrics - the request still succeeds
-                                }
-                            }
-                        }
-
-                        // The gate logs the sample and decides whether it is fit
-                        // to export.
-                        if crate::exporters::log_sample_and_should_export(&metrics, stats_format) {
-                            // Export to remote systems
-                            exporter_manager.export_all(&metrics).await;
-                        }
-                    }
-                } else {
-                    tracing::trace!(
-                        duration_ms = start.elapsed().as_millis() as u64,
-                        "Streaming completed (unable to parse final event)"
-                    );
-                }
-            }
-        });
+        // [D-M6] Moves, not clones: after this block the fn reads only
+        // headers/status/stream, so every binding below moves into the task.
+        // The single surviving deep clone is dump-gated; the default (no
+        // --dump) path clones nothing. Do not re-clone (regression [D]M6).
+        let dump = match (dump_path, request_method, request_uri, request_json.as_ref()) {
+            (Some(path), Some(method), Some(uri), Some(parsed)) => Some(StreamDump {
+                path,
+                response_headers,
+                method,
+                uri,
+                request_json: parsed.clone(),
+                // The dump is the only second consumer of the exact bytes sent
+                // to the backend; with no dump the buffer is dropped, not copied.
+                backend_request_body,
+                status: response_status,
+            }),
+            _ => None,
+        };
+        let observer = StreamObserver {
+            completion_rx,
+            activity_rx,
+            accumulated,
+            start,
+            fix_registry,
+            request_json,
+            stats_enabled,
+            stats_format,
+            streaming_mode,
+            group_name,
+            concurrent_requests,
+            exporter_manager,
+            http_client,
+            backend_url,
+            strip_path_prefix,
+            dump,
+        };
+        tokio::spawn(observer.run());
     }
 
     // Build streaming response
