@@ -631,7 +631,10 @@ impl ProxyHandler {
             Prepared::Ready(prepared) => prepared,
             Prepared::Failed(resp) => return resp,
         };
-        let PreparedRequest { body_bytes, request_json } = prepared;
+        let PreparedRequest {
+            body_bytes,
+            request_json,
+        } = prepared;
 
         // Extract model for routing BEFORE selecting backend
         let requested_model = request_json.as_ref().and_then(|j| j.get("model")).and_then(|m| m.as_str());
@@ -678,7 +681,14 @@ impl ProxyHandler {
         // Route specific endpoints to simple pass-through [C-L11]: the match moved
         // verbatim into route(); the forward arm moves the body back out untouched.
         let body_bytes = match self
-            .route(&method, &uri, &headers, body_bytes, &backend.node, backend.group_name.as_deref())
+            .route(
+                &method,
+                &uri,
+                &headers,
+                body_bytes,
+                &backend.node,
+                backend.group_name.as_deref(),
+            )
             .await
         {
             RouteDecision::Handled(resp) => return resp,
@@ -1149,14 +1159,15 @@ impl ProxyHandler {
                      crate::proxy::context::context_cache_stale_skips(),
                  );
 
-                RouteDecision::Handled((StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response())
+                RouteDecision::Handled(
+                    (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response(),
+                )
             }
 
             // All other routes continue with existing logic
             _ => RouteDecision::Forward { body_bytes },
         }
     }
-
 
     /// Body-read + JSON classification, moved verbatim out of `handle` (big-fix 95
     /// [C-L11]). The 100 MiB cap and the [C-L9] unparseable-attribution debug keep their
@@ -1189,7 +1200,10 @@ impl ProxyHandler {
             }
         };
 
-        Prepared::Ready(PreparedRequest { body_bytes, request_json })
+        Prepared::Ready(PreparedRequest {
+            body_bytes,
+            request_json,
+        })
     }
 
     /// Client headers that must not reach the backend. `Accept-Encoding` is the client's
@@ -1453,7 +1467,8 @@ impl ProxyHandler {
             } else {
                 tracing::debug!("No fixes applied to response");
             }
-            self.emit_metrics(Some(&json), &request_json, start, backend, group_name).await;
+            self.emit_metrics(Some(&json), &request_json, start, backend, group_name)
+                .await;
             Some(json)
         } else {
             self.emit_metrics(None, &request_json, start, backend, group_name).await;
@@ -2260,7 +2275,10 @@ mod tests {
             log.contains("Augmentation injection skipped"),
             "the typed-parse bypass must be named at debug level, captured:\n{log}"
         );
-        assert!(log.contains("ChatCompletionRequest"), "the log must name what failed to parse:\n{log}");
+        assert!(
+            log.contains("ChatCompletionRequest"),
+            "the log must name what failed to parse:\n{log}"
+        );
     }
 
     /// big-fix 95 [C-L11] PIN (pre-split): backend selection happens BEFORE the
@@ -2271,17 +2289,20 @@ mod tests {
     async fn monitoring_get_consumes_a_round_robin_slot_before_answering() {
         let (port_a, rx_a) = recording_backend(completion_response_bytes()).await;
         let (port_b, rx_b) = recording_backend(completion_response_bytes()).await;
-        let balancer =
-            Arc::new(RoundRobinBalancer::new(vec![node_at_port(port_a), node_at_port(port_b)]).unwrap());
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port_a), node_at_port(port_b)]).unwrap());
         let handler = handler_with_balancer(balancer, None, StreamingMode::default());
 
-        let res = handler
-            .handle(request_with_body(Method::GET, "/props", Body::empty()))
-            .await;
+        let res = handler.handle(request_with_body(Method::GET, "/props", Body::empty())).await;
         assert_eq!(res.status(), StatusCode::OK);
-        assert!(body_text(res).await.contains("cmpl-1"), "passthrough body must arrive verbatim");
+        assert!(
+            body_text(res).await.contains("cmpl-1"),
+            "passthrough body must arrive verbatim"
+        );
         let a_raw = recorded_raw(rx_a).await;
-        assert!(a_raw.contains("GET /props"), "node A must have served the monitoring GET:\n{a_raw}");
+        assert!(
+            a_raw.contains("GET /props"),
+            "node A must have served the monitoring GET:\n{a_raw}"
+        );
 
         let res = handler.handle(completion_request()).await;
         assert_eq!(res.status(), StatusCode::OK);

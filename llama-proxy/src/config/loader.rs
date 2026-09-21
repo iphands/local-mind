@@ -834,7 +834,10 @@ augment-backend:
             .expect_err("dump enabled with empty path must be rejected");
         assert!(err.to_string().contains("dump path"), "got {err}");
         assert!(loaded(
-            &format!("{BASE}dump:\n  enabled: true\n  path: \"{}\"\n", scratch("t71-dumps").display()),
+            &format!(
+                "{BASE}dump:\n  enabled: true\n  path: \"{}\"\n",
+                scratch("t71-dumps").display()
+            ),
             "dump_ok"
         )
         .is_ok());
