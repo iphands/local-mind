@@ -16,6 +16,7 @@ use crate::fixes::FixRegistry;
 use crate::proxy::fetch_context_total;
 use crate::stats::RequestMetrics;
 use axum::http::header;
+use axum::http::StatusCode;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::task::Poll;
 
@@ -264,7 +265,15 @@ fn verbatim_passthrough(
             }
         }
     }
-    builder.body(Body::from_stream(byte_stream)).unwrap().into_response()
+    builder
+        .body(Body::from_stream(byte_stream))
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to assemble pass-through streaming response; serving an empty 502");
+            let mut resp = Response::new(Body::empty());
+            *resp.status_mut() = StatusCode::BAD_GATEWAY;
+            resp
+        })
+        .into_response()
 }
 
 /// Consume the backend SSE stream: frame complete events, pass them through
@@ -469,6 +478,22 @@ impl StreamEnd {
     }
 }
 
+/// The completion signal wins when it fired. select! resolves ready branches
+/// at random, so a timeout that won a tie against a completion that already
+/// fired must not misreport the stream: a sent value survives sender drop in
+/// a oneshot and is drained here. A CLOSED channel means the body (and with
+/// it the client) is gone: a Stalled read at that point is a client that
+/// left while the backend looked idle, and the departure is the truth.
+fn resolve_end_reason(end_reason: StreamEnd, completion_rx: &mut tokio::sync::oneshot::Receiver<StreamEnd>) -> StreamEnd {
+    match completion_rx.try_recv() {
+        Ok(reason) => reason,
+        Err(tokio::sync::oneshot::error::TryRecvError::Closed) if matches!(end_reason, StreamEnd::Stalled) => {
+            StreamEnd::ClientGone
+        }
+        _ => end_reason,
+    }
+}
+
 fn signal_end(completion_tx: &mut Option<tokio::sync::oneshot::Sender<StreamEnd>>, reason: StreamEnd) {
     if let Some(tx) = completion_tx.take() {
         let _ = tx.send(reason);
@@ -532,7 +557,10 @@ struct StreamObserver {
 /// dump needs (path, method, URI, parsed request) is present.
 struct StreamDump {
     path: Arc<std::path::PathBuf>,
-    response_headers: axum::http::HeaderMap,
+    // The dump consumes exactly one header value; carrying the whole map
+    // meant a full HeaderMap clone per response on a path that reads a
+    // string.
+    response_content_type: Option<String>,
     method: String,
     uri: String,
     request_json: serde_json::Value,
@@ -560,6 +588,15 @@ impl StreamObserver {
         let acc = self.accumulated.lock().unwrap_or_else(|e| e.into_inner()).clone();
         tracing::trace!("Accumulated SSE data length: {} bytes", acc.len());
         if acc.is_empty() {
+            // Nothing was ever forwarded. Only a client that left on its own
+            // makes that unremarkable; every other end on an empty body is
+            // the failure the operator is looking for.
+            match end {
+                StreamEnd::ClientGone => {
+                    tracing::debug!("Stream ended with nothing forwarded; client disconnected")
+                }
+                other => tracing::warn!(stream_end = other.as_str(), "Stream ended with nothing forwarded"),
+            }
             return;
         }
         let acc_text = String::from_utf8_lossy(&acc);
@@ -581,7 +618,10 @@ impl StreamObserver {
                 }
             }
             None => {
-                tracing::trace!(
+                // A swallowed error by every definition: bytes arrived that
+                // no longer form a response. debug! so a broken model is
+                // findable without a TRACE rebuild.
+                tracing::debug!(
                     duration_ms = self.start.elapsed().as_millis() as u64,
                     "Streaming completed (unable to parse final event)"
                 );
@@ -638,12 +678,7 @@ impl StreamObserver {
             }
         };
 
-        // select! resolves ready branches at random, so on a fast local
-        // stream the timeout/activity branch can win a tie against a
-        // completion that already fired. A sent value survives sender drop
-        // in a oneshot, so drain it: the real end reason beats the branch
-        // that happened to be polled.
-        self.completion_rx.try_recv().unwrap_or(end_reason)
+        resolve_end_reason(end_reason, &mut self.completion_rx)
     }
 
     /// Map the end reason onto the process-wide end-class counters.
@@ -726,7 +761,7 @@ impl StreamObserver {
     fn spawn_dump(&mut self, final_event: &serde_json::Value) {
         let Some(StreamDump {
             path,
-            response_headers,
+            response_content_type,
             method,
             uri,
             request_json,
@@ -741,10 +776,18 @@ impl StreamObserver {
         tokio::spawn(async move {
             // Prefer the bytes actually sent; the parsed request_json
             // predates the proxy's own stream/stream_options edits.
-            let request_body = backend_request_body.unwrap_or_else(|| serde_json::to_vec(&request_json).unwrap_or_default());
-            let response_body = serde_json::to_vec(&final_event).unwrap_or_default();
+            let request_body = backend_request_body.unwrap_or_else(|| {
+                serde_json::to_vec(&request_json).unwrap_or_else(|e| {
+                    tracing::warn!(error = %e, "dump: request JSON not serializable; dumping empty body");
+                    Vec::new()
+                })
+            });
+            let response_body = serde_json::to_vec(&final_event).unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "dump: response JSON not serializable; dumping empty body");
+                Vec::new()
+            });
             let req_content_type = Some("application/json");
-            let res_content_type = response_headers.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok());
+            let res_content_type = response_content_type.as_deref();
 
             if let Err(e) = dump::dump_request_response(
                 &path,
@@ -766,7 +809,7 @@ impl StreamObserver {
     /// Assemble the sample, enrich it with context usage, log and export.
     async fn publish_stats(&mut self, final_event: &serde_json::Value, stream_incomplete: bool, stream_end: &'static str) {
         let Some(req_json) = self.request_json.as_ref() else {
-            tracing::trace!(
+            tracing::debug!(
                 duration_ms = self.start.elapsed().as_millis() as u64,
                 "Streaming completed (no request JSON)"
             );
@@ -933,7 +976,6 @@ pub async fn handle_streaming_response(
     let status = backend_response.status();
     let headers = backend_response.headers().clone();
     let response_status = status.as_u16();
-    let response_headers = headers.clone();
 
     // A body we cannot safely newline-split (unknown Content-Encoding surviving
     // reqwest's transparent decoding) must not be framed at all: forward every
@@ -1010,7 +1052,10 @@ pub async fn handle_streaming_response(
         let dump = match (dump_path, request_method, request_uri, request_json.as_ref()) {
             (Some(path), Some(method), Some(uri), Some(parsed)) => Some(StreamDump {
                 path,
-                response_headers,
+                response_content_type: headers
+                    .get(header::CONTENT_TYPE)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_string),
                 method,
                 uri,
                 request_json: parsed.clone(),
@@ -1055,7 +1100,15 @@ pub async fn handle_streaming_response(
     }
 
     let body = Body::from_stream(processed_stream);
-    response.body(body).unwrap().into_response()
+    response
+        .body(body)
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "failed to assemble processed streaming response; serving an empty 502");
+            let mut resp = Response::new(Body::empty());
+            *resp.status_mut() = StatusCode::BAD_GATEWAY;
+            resp
+        })
+        .into_response()
 }
 
 /// API format detected from SSE stream
@@ -2321,6 +2374,29 @@ mod framing_tests {
         expected.extend_from_slice(b"\n\n");
         expected.extend_from_slice(b"\n\ndata: x\n\n");
         assert_eq!(out, expected, "no byte may be lost across a force flush");
+    }
+
+    #[test]
+    fn resolve_end_reason_beats_a_tied_timeout_with_the_truth() {
+        use tokio::sync::oneshot;
+        // A completion that already fired beats a Stalled read (select! tie).
+        let (tx, mut rx) = oneshot::channel::<StreamEnd>();
+        tx.send(StreamEnd::Completed).unwrap();
+        assert_eq!(resolve_end_reason(StreamEnd::Stalled, &mut rx), StreamEnd::Completed);
+
+        // Channel closed (client's body dropped the sender): a Stalled read is
+        // really a client that left while the backend looked idle.
+        let (tx, mut rx) = oneshot::channel::<StreamEnd>();
+        drop(tx);
+        assert_eq!(resolve_end_reason(StreamEnd::Stalled, &mut rx), StreamEnd::ClientGone);
+
+        // A genuine backend-side end is never rewritten to client_gone.
+        let (tx, mut rx) = oneshot::channel::<StreamEnd>();
+        drop(tx);
+        assert_eq!(
+            resolve_end_reason(StreamEnd::BackendClosed, &mut rx),
+            StreamEnd::BackendClosed
+        );
     }
 
     #[tokio::test]
