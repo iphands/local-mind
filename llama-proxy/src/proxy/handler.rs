@@ -636,7 +636,6 @@ impl ProxyHandler {
             // llama.cpp monitoring/status endpoints (simple pass-through)
             (&Method::GET, "/props")
             | (&Method::GET, "/slots")
-            | (&Method::GET, "/health")
             | (&Method::GET, "/v1/health")
             | (&Method::GET, "/v1/models")
             | (&Method::GET, "/metrics") => {
@@ -1487,7 +1486,7 @@ impl ProxyHandler {
     }
 
     /// Simple pass-through with no fix application or stats collection
-    /// Used for monitoring endpoints like /props, /slots, /health
+    /// Used for monitoring endpoints like /props, /slots, /v1/health
     async fn proxy_passthrough(&self, req: Request<Body>, backend: &Arc<BackendNode>, group_name: Option<&str>) -> Response {
         let method = req.method().clone();
         let uri = req.uri().clone();
@@ -2136,11 +2135,13 @@ mod tests {
 
     #[tokio::test]
     async fn passthrough_connect_failure_answers_502_with_error_envelope() {
-        // GET /health takes the monitoring pass-through arm inside handle().
+        // GET /v1/health takes the monitoring pass-through arm inside handle().
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
         let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
-        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+        let res = handler
+            .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
+            .await;
 
         assert_error_envelope(res, StatusCode::BAD_GATEWAY, "backend_connect_error").await;
     }
@@ -2156,7 +2157,9 @@ mod tests {
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
         let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
-        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+        let res = handler
+            .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
+            .await;
 
         assert_error_envelope(res, StatusCode::BAD_GATEWAY, "backend_read_error").await;
     }
@@ -2172,7 +2175,9 @@ mod tests {
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
         let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
-        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+        let res = handler
+            .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
+            .await;
 
         assert_error_envelope(res, StatusCode::BAD_GATEWAY, "backend_decompress_error").await;
     }
@@ -3134,7 +3139,9 @@ mod tests {
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
         let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
-        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+        let res = handler
+            .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
+            .await;
 
         assert_eq!(res.status(), StatusCode::OK);
         assert!(
@@ -3200,7 +3207,9 @@ mod tests {
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
         let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
-        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+        let res = handler
+            .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
+            .await;
 
         assert!(
             res.headers().get(header::CONTENT_ENCODING).is_none(),
@@ -3242,7 +3251,9 @@ mod tests {
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
         let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
-        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+        let res = handler
+            .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
+            .await;
 
         assert_eq!(
             res.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
@@ -3264,7 +3275,9 @@ mod tests {
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
         let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
-        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+        let res = handler
+            .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
+            .await;
 
         assert_eq!(
             res.headers().get(header::CONTENT_ENCODING).and_then(|v| v.to_str().ok()),
@@ -3443,7 +3456,9 @@ mod tests {
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
         let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
-        let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+        let res = handler
+            .handle(request_with_body(Method::GET, "/v1/health", Body::empty()))
+            .await;
 
         for h in [
             "connection",
@@ -3690,7 +3705,7 @@ mod tests {
         let h_l = handler_with_balancer(bal_l, None, StreamingConfig::default());
         let o = order.clone();
         let light = tokio::spawn(async move {
-            let res = h_l.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
+            let res = h_l.handle(request_with_body(Method::GET, "/v1/health", Body::empty())).await;
             assert_eq!(res.status(), StatusCode::OK);
             let _ = to_bytes(res.into_body(), 1024 * 1024).await.expect("light body");
             o.lock().unwrap().push("light");
@@ -4006,5 +4021,76 @@ mod tests {
         let dumped = std::fs::read_to_string(req_dir.join("res.json")).expect("res.json");
         let parsed: serde_json::Value = serde_json::from_str(&dumped).expect("pretty JSON");
         assert_eq!(parsed["id"], serde_json::json!("cmpl-1"));
+    }
+
+    // ---- big-fix task 16: the /health match arm in handle() is dead at the server
+    //      level and gets deleted [C-L1] ----
+    //
+    // Dead-at-baseline proof, structural: server.rs registers
+    //     .route("/health", get(health_handler))        // server.rs:203
+    // AHEAD of the wildcard catch-alls
+    //     .route("/*path", any(proxy_handler))          // server.rs:206
+    // matchit binds a static segment before a wildcard capture, so EVERY request to
+    // /health lands on the static node: GET answers health_handler's body, any other
+    // method gets the router's own 405 (only get() was mounted there).
+    // ProxyHandler::handle never observes "/health", so the arm
+    //     | (&Method::GET, "/health")                   // fcec6c8 handler.rs:596
+    // could not fire. The smoke test pins that shadowing behaviorally - green before
+    // AND after the deletion (it is the shadow proof, not a red-then-green pin; the
+    // deletion's correctness is the still-green suite). The route table below mirrors
+    // server.rs run_server (server.rs is READ-ONLY for this task, so it is mirrored,
+    // not imported); the "OK" body is pinned verbatim from health_handler,
+    // server.rs:221-223.
+
+    #[tokio::test]
+    async fn server_route_table_shadows_health_and_keeps_v1_health_live() {
+        // Ephemeral 127.0.0.1:0, in-process serve, abort teardown - zero fixed ports,
+        // zero sleeps. The dead node at 127.0.0.1:1 answers connect instantly-refused.
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        let state = handler.state.clone();
+
+        async fn proxy_hop(
+            axum::extract::State(st): axum::extract::State<ProxyState>,
+            req: axum::extract::Request,
+        ) -> axum::response::Response {
+            ProxyHandler::new(st).handle(req).await
+        }
+
+        let app = axum::Router::new()
+            .route("/health", axum::routing::get(|| async { "OK" }))
+            .route("/v1/*path", axum::routing::any(proxy_hop))
+            .route("/*path", axum::routing::any(proxy_hop))
+            .fallback(proxy_hop)
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("smoke listener");
+        let addr = listener.local_addr().expect("smoke addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("smoke server");
+        });
+
+        let client = reqwest::Client::new();
+        let base = format!("http://{addr}");
+
+        // GET /health: the SERVER body ("OK", server.rs:221-223). The proxy handler
+        // behind this state could only ever answer 502 with an error envelope - any
+        // shadowing failure would show up as exactly that.
+        let health = client.get(format!("{base}/health")).send().await.expect("GET /health");
+        assert_eq!(health.status(), StatusCode::OK);
+        assert_eq!(health.text().await.expect("health body"), "OK");
+
+        // POST /health: the router's own 405 (only get() is mounted on the static
+        // node) - proof not even a non-GET method falls through to the proxy.
+        let post = client.post(format!("{base}/health")).send().await.expect("POST /health");
+        assert_eq!(post.status(), StatusCode::METHOD_NOT_ALLOWED);
+
+        // GET /v1/health: the wildcard still delivers to ProxyHandler - the arm that
+        // survives the deletion answers with the dead-backend 502 envelope.
+        let v1 = client.get(format!("{base}/v1/health")).send().await.expect("GET /v1/health");
+        assert_eq!(v1.status(), StatusCode::BAD_GATEWAY);
+        let body: serde_json::Value = v1.json().await.expect("502 envelope JSON");
+        assert_eq!(body["error"]["type"], serde_json::json!("backend_connect_error"));
+
+        server.abort();
     }
 }
