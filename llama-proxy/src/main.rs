@@ -33,7 +33,7 @@ impl std::fmt::Display for LogLevel {
 
 use llama_proxy::{
     backends::BackendNode,
-    config::{AppConfig, FixesConfig},
+    config::{AppConfig, BackendConfig, FixesConfig},
     create_default_registry,
     exporters::{ExporterManager, InfluxDbExporter},
     fixes::{create_registry_from_config, FixRegistry},
@@ -176,8 +176,13 @@ async fn run_proxy(
     if let Some(url) = backend_url_override {
         if config.backends.is_some() {
             tracing::warn!("--backend-url ignored: multi-backend 'backends:' config is active");
+        } else if let Some(b) = config.backend.as_mut() {
+            b.url = url;
         } else {
-            config.backend.url = url;
+            config.backend = Some(BackendConfig {
+                url,
+                ..BackendConfig::default()
+            });
         }
     }
     // Streaming mode precedence: CLI switch > config file > default (fake)
@@ -277,14 +282,14 @@ fn log_config_settings(config: &AppConfig) {
                 "Backend group"
             );
         }
-    } else {
+    } else if let Some(ref backend) = config.backend {
         // Single backend mode
         tracing::info!(
-            url = %config.backend.base_url(),
-            timeout_seconds = config.backend.timeout_seconds,
+            url = %backend.base_url(),
+            timeout_seconds = backend.timeout_seconds,
             "Backend"
         );
-        if let Some(ref tls) = config.backend.tls {
+        if let Some(ref tls) = backend.tls {
             tracing::info!(
                 accept_invalid_certs = tls.accept_invalid_certs,
                 ca_cert = tls.ca_cert_path.as_deref().unwrap_or("none"),
@@ -292,6 +297,8 @@ fn log_config_settings(config: &AppConfig) {
                 "Backend TLS"
             );
         }
+    } else {
+        tracing::info!("Backend: none configured — completion requests answer 503");
     }
 
     // Fixes
@@ -479,10 +486,13 @@ fn check_config(config_path: PathBuf) -> Result<(), Box<dyn std::error::Error>> 
                         println!("      Node [{}]: {}", i, node.url.trim_end_matches('/'));
                     }
                 }
-            } else {
+            } else if let Some(ref backend) = config.backend {
                 println!("  Mode: single");
-                println!("  URL: {}", config.backend.base_url());
-                println!("  Timeout: {}s", config.backend.timeout_seconds);
+                println!("  URL: {}", backend.base_url());
+                println!("  Timeout: {}s", backend.timeout_seconds);
+            } else {
+                println!("  Mode: none");
+                println!("  No backend configured - completion requests answer 503");
             }
 
             println!("\nFixes:");
@@ -606,17 +616,17 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
                 println!();
             }
         }
-    } else {
+    } else if let Some(ref backend) = config.backend {
         // Single backend mode
         println!("Testing single backend...\n");
 
         let node = BackendNode::from_config(
-            config.backend.url.clone(),
+            backend.url.clone(),
             5, // short timeout for test
-            config.backend.tls.as_ref(),
-            config.backend.model.clone(),
-            config.backend.api_key.clone(),
-            config.backend.strip_path_prefix.clone(),
+            backend.tls.as_ref(),
+            backend.model.clone(),
+            backend.api_key.clone(),
+            backend.strip_path_prefix.clone(),
             None, // single-backend mode has no temperature override
         )?;
 
@@ -669,6 +679,8 @@ async fn test_backend(config_path: PathBuf) -> Result<(), Box<dyn std::error::Er
                 println!("  /v1/models error: {}", e);
             }
         }
+    } else {
+        println!("No backend configured — nothing to test.");
     }
 
     Ok(())

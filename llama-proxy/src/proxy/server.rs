@@ -16,7 +16,7 @@ use tower_http::trace::TraceLayer;
 use super::handler::ProxyHandler;
 use super::reprompt::RepromptEngine;
 use crate::augment::AugmentBackend;
-use crate::backends::{build_balancer_from_groups, build_balancer_from_single, preflight, LoadBalancer};
+use crate::backends::{build_balancer_from_groups, build_balancer_from_single, preflight, GroupedLoadBalancer, LoadBalancer};
 use crate::config::AppConfig;
 use crate::exporters::ExporterManager;
 use crate::fixes::FixRegistry;
@@ -96,24 +96,33 @@ pub async fn run_server(
         preflight::run_preflight_multi(backends).await;
 
         build_balancer_from_groups(backends.clone())?
-    } else {
+    } else if let Some(ref backend) = config.backend {
         // Single backend mode (backward compatibility)
         tracing::info!(
-            url = %config.backend.base_url(),
-            timeout_seconds = config.backend.timeout_seconds,
+            url = %backend.base_url(),
+            timeout_seconds = backend.timeout_seconds,
             "Using single backend mode"
         );
 
-        preflight::run_preflight_single(&config.backend).await;
+        preflight::run_preflight_single(backend).await;
 
         build_balancer_from_single(
-            config.backend.url.clone(),
-            config.backend.timeout_seconds,
-            config.backend.tls.as_ref(),
-            config.backend.model.clone(),
-            config.backend.api_key.clone(),
-            config.backend.strip_path_prefix.clone(),
+            backend.url.clone(),
+            backend.timeout_seconds,
+            backend.tls.as_ref(),
+            backend.model.clone(),
+            backend.api_key.clone(),
+            backend.strip_path_prefix.clone(),
         )?
+    } else {
+        // F-H1: neither `backend:` nor `backends:` — start with a zero-group
+        // grouped balancer so every completion request hits the task-4
+        // NoMatchingBackend → 503 envelope instead of failing at startup.
+        tracing::warn!(
+            "No backend configured — every completion request will answer 503 \
+             until `backend:` or `backends:` is set"
+        );
+        Arc::new(GroupedLoadBalancer::new(std::collections::HashMap::new())?)
     };
 
     tracing::info!(strategy = %load_balancer.strategy_name(), "Load balancing strategy");

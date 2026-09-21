@@ -56,11 +56,13 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
                 }
             }
         }
-    } else {
+    } else if let Some(ref backend) = config.backend {
         // Single backend mode
-        validate_backend_config(&config.backend)?;
-        validate_backend_url(&config.backend.url)?;
+        validate_backend_config(backend)?;
+        validate_backend_url(&backend.url)?;
     }
+    // backend: None + backends: None is loadable by design (F-H1): the proxy
+    // starts and every completion request answers the task-4 503 path.
 
     Ok(config)
 }
@@ -181,7 +183,8 @@ exporters:
         let config = result.unwrap();
         assert_eq!(config.server.port, 8066);
         assert_eq!(config.server.host, "0.0.0.0");
-        assert_eq!(config.backend.url, "http://localhost:8080");
+        let backend = config.backend.expect("single backend section");
+        assert_eq!(backend.url, "http://localhost:8080");
         assert!(config.fixes.enabled);
         assert!(config.stats.enabled);
 
@@ -230,10 +233,11 @@ exporters:
         assert!(result.is_ok());
 
         let config = result.unwrap();
-        assert_eq!(config.backend.url, "https://example.com:4234");
-        assert!(config.backend.is_tls());
-        assert!(config.backend.tls.is_some());
-        assert!(config.backend.tls.unwrap().accept_invalid_certs);
+        let backend = config.backend.expect("single backend section");
+        assert_eq!(backend.url, "https://example.com:4234");
+        assert!(backend.is_tls());
+        let tls = backend.tls.expect("tls section");
+        assert!(tls.accept_invalid_certs);
 
         // Cleanup
         let _ = std::fs::remove_file(&temp_file);
@@ -570,6 +574,45 @@ exporters:
         assert!(err.to_string().contains("timeout"));
 
         // Cleanup
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_load_config_nodes_only_without_backend_section() {
+        // F-H1: a config with ONLY `backends:` groups must load; `backend:` is optional.
+        // With no single backend, startup proceeds and requests take the task-4 503 path.
+        let temp_file = std::env::temp_dir().join("test_t69_nodes_only.yaml");
+        let config_content = r#"
+server:
+  port: 8066
+  host: "0.0.0.0"
+
+backends:
+  main:
+    mappings: []
+    nodes:
+      - url: "http://localhost:8080"
+"#;
+        std::fs::write(&temp_file, config_content).unwrap();
+
+        let config = load_config(&temp_file).expect("backends-only config must load");
+        assert!(config.backend.is_none(), "`backend:` absent must deserialize to None");
+        assert!(config.backends.is_some());
+
+        let _ = std::fs::remove_file(&temp_file);
+    }
+
+    #[test]
+    fn test_load_config_no_backend_at_all_loads_for_503_path() {
+        // F-H1: neither `backend:` nor `backends:` must load — the proxy starts and
+        // every completion request answers the task-4 503 envelope (NoMatchingBackend).
+        let temp_file = std::env::temp_dir().join("test_t69_no_backend.yaml");
+        std::fs::write(&temp_file, "server:\n  port: 8066\n  host: \"0.0.0.0\"\n").unwrap();
+
+        let config = load_config(&temp_file).expect("backend-less config must load (503 path)");
+        assert!(config.backend.is_none());
+        assert!(config.backends.is_none());
+
         let _ = std::fs::remove_file(&temp_file);
     }
 

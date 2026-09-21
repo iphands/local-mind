@@ -10,7 +10,11 @@ pub use loader::load_config;
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AppConfig {
     pub server: ServerConfig,
-    pub backend: BackendConfig,
+    /// Optional single backend. Absent + `backends:` present → group routing.
+    /// Absent + absent → the proxy still starts; every completion request
+    /// answers the task-4 503 envelope (NoMatchingBackend).
+    #[serde(default)]
+    pub backend: Option<BackendConfig>,
     #[serde(default)]
     pub backends: Option<BackendsConfig>,
     #[serde(default)]

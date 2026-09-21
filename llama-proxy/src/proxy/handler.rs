@@ -1575,7 +1575,7 @@ mod tests {
                 host: "0.0.0.0".to_string(),
                 max_concurrent_requests: crate::config::default_max_concurrent(),
             },
-            backend: BackendConfig::default(),
+            backend: Some(BackendConfig::default()),
             backends: None,
             fixes: crate::config::FixesConfig {
                 enabled: false,
@@ -1805,7 +1805,7 @@ mod tests {
                 host: "0.0.0.0".to_string(),
                 max_concurrent_requests: crate::config::default_max_concurrent(),
             },
-            backend: BackendConfig::default(),
+            backend: Some(BackendConfig::default()),
             backends: None,
             fixes: crate::config::FixesConfig {
                 enabled: false,
