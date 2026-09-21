@@ -11,14 +11,42 @@ pub struct FixRegistry {
     enabled: HashMap<String, bool>,
 }
 
+/// How [`truncate_snippet`] counts its clip budget.
+#[derive(Clone, Copy)]
+pub(crate) enum SnippetLimit {
+    /// Budget counts characters; the clip keeps `max - 3` chars + `...`.
+    Chars,
+    /// Budget counts bytes; the clip keeps up to `max` bytes + `...`, widened
+    /// down to the nearest char boundary. Faithful to the historical
+    /// byte-slicing helpers it replaces (which panicked on mid-sequence cuts).
+    Bytes,
+}
+
 /// Clip a snippet for a log field, marking that it was clipped. Char-safe:
-/// model output routinely contains multibyte sequences.
-fn truncate_snippet(s: &str, max_chars: usize) -> String {
-    if s.chars().count() <= max_chars {
-        s.to_string()
-    } else {
-        let kept: String = s.chars().take(max_chars.saturating_sub(3)).collect();
-        format!("{}...", kept)
+/// model output routinely contains multibyte sequences. The single truncator
+/// shared by all `fixes/` modules.
+pub(crate) fn truncate_snippet(s: &str, max: usize, limit: SnippetLimit) -> String {
+    match limit {
+        SnippetLimit::Chars => {
+            if s.chars().count() <= max {
+                s.to_string()
+            } else {
+                let kept: String = s.chars().take(max.saturating_sub(3)).collect();
+                format!("{}...", kept)
+            }
+        }
+        SnippetLimit::Bytes => {
+            if s.len() <= max {
+                s.to_string()
+            } else {
+                // is_char_boundary(0) is always true, so the scan terminates.
+                let mut end = max;
+                while !s.is_char_boundary(end) {
+                    end -= 1;
+                }
+                format!("{}...", &s[..end])
+            }
+        }
     }
 }
 
@@ -195,7 +223,7 @@ impl FixRegistry {
                     FixAction::Failed { original_snippet, .. } => original_snippet.clone(),
                     FixAction::NotApplicable => String::new(),
                 };
-                let snippet = truncate_snippet(&snippet, 200);
+                let snippet = truncate_snippet(&snippet, 200, SnippetLimit::Chars);
                 tracing::debug!(
                     fix_name = fix.name(),
                     reason = reason,
@@ -750,5 +778,20 @@ mod tests {
 
         // Should be valid JSON after fix (old fix should have been applied)
         assert!(serde_json::from_str::<serde_json::Value>(args).is_ok());
+    }
+
+    #[test]
+    fn test_truncate_snippet_multibyte_is_char_safe() {
+        // CJK + emoji: the byte-budget mode must never panic on a mid-sequence cut.
+        let s = "ファイル🔧".repeat(40);
+
+        let clipped = truncate_snippet(&s, 10, SnippetLimit::Bytes);
+        assert!(clipped.ends_with("..."));
+        assert!(clipped.len() <= 13);
+        assert!(s.starts_with(clipped.trim_end_matches("...")));
+
+        let clipped = truncate_snippet(&s, 10, SnippetLimit::Chars);
+        assert!(clipped.ends_with("..."));
+        assert_eq!(clipped.chars().count(), 10);
     }
 }

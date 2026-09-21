@@ -27,6 +27,7 @@
 //! `}` or `"_":null}`), NOT the full fixed JSON. Clients accumulate deltas, so
 //! sending full JSON would duplicate content. See `calculate_completion_delta()`.
 
+use super::registry::{truncate_snippet, SnippetLimit};
 use super::{FixAction, ResponseFix, ToolCallAccumulator};
 use serde_json::Value;
 
@@ -65,15 +66,6 @@ impl ToolcallBadFilepathFix {
     /// Check if a string is valid JSON
     fn is_valid_json(&self, s: &str) -> bool {
         serde_json::from_str::<Value>(s).is_ok()
-    }
-
-    /// Create a snippet for logging (static method)
-    fn create_snippet_static(text: &str, max_len: usize) -> String {
-        if text.len() > max_len {
-            format!("{}...", &text[..max_len])
-        } else {
-            text.to_string()
-        }
     }
 
     /// Attempt to fix malformed arguments string using schema-based truncation
@@ -377,7 +369,7 @@ impl ResponseFix for ToolcallBadFilepathFix {
                                         fix_name = self.name(),
                                         index = index,
                                         chunk_args_len = chunk_args.len(),
-                                        chunk_args_snippet = Self::create_snippet_static(chunk_args, 50),
+                                        chunk_args_snippet = truncate_snippet(chunk_args, 50, SnippetLimit::Bytes),
                                         "POST-FIX CHUNK SUPPRESSED: Index already fixed, suppressing chunk"
                                     );
                                     // Suppress this chunk - replace arguments with empty string
@@ -429,7 +421,7 @@ impl ResponseFix for ToolcallBadFilepathFix {
                                             index = index,
                                             accumulated_length = accumulated.len(),
                                             filepath_count = accumulated.matches(r#""filePath""#).count(),
-                                            original = Self::create_snippet_static(&accumulated, 200),
+                                            original = truncate_snippet(&accumulated, 200, SnippetLimit::Bytes),
                                             "ATTEMPTING FIX: Malformed filePath detected in complete arguments"
                                         );
 
@@ -450,8 +442,8 @@ impl ResponseFix for ToolcallBadFilepathFix {
                                                 fix_name = self.name(),
                                                 index = index,
                                                 sending_delta = &valid_completion,
-                                                original_accumulated = Self::create_snippet_static(&original, 100),
-                                                fixed_version = Self::create_snippet_static(&fixed, 100),
+                                                original_accumulated = truncate_snippet(&original, 100, SnippetLimit::Bytes),
+                                                fixed_version = truncate_snippet(&fixed, 100, SnippetLimit::Bytes),
                                                 "FIX SUCCESSFUL: Sending completion delta to client"
                                             );
 
@@ -461,8 +453,8 @@ impl ResponseFix for ToolcallBadFilepathFix {
                                             tracing::error!(
                                                 fix_name = self.name(),
                                                 index = index,
-                                                original = Self::create_snippet_static(&original, 100),
-                                                attempted_fix = Self::create_snippet_static(&fixed, 100),
+                                                original = truncate_snippet(&original, 100, SnippetLimit::Bytes),
+                                                attempted_fix = truncate_snippet(&fixed, 100, SnippetLimit::Bytes),
                                                 "FIX FAILED: Could not repair malformed filePath"
                                             );
 

@@ -6,6 +6,7 @@ mod toolcall_malformed_arguments_fix;
 mod toolcall_null_index_fix;
 
 use async_trait::async_trait;
+use registry::{truncate_snippet, SnippetLimit};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -115,7 +116,7 @@ impl ToolCallAccumulator {
                 index = index,
                 filepath_count = filepath_count,
                 accumulated_length = accumulated_str.len(),
-                snippet = Self::create_snippet(&accumulated_str, 100),
+                snippet = truncate_snippet(&accumulated_str, 100, SnippetLimit::Bytes),
                 "DETECTED: Duplicate filePath in accumulated arguments"
             );
         }
@@ -131,14 +132,6 @@ impl ToolCallAccumulator {
         );
 
         accumulated_str
-    }
-
-    fn create_snippet(text: &str, max_len: usize) -> String {
-        if text.len() > max_len {
-            format!("{}...", &text[..max_len])
-        } else {
-            text.to_string()
-        }
     }
 
     /// Clear accumulated arguments for a tool call (after sending fixed version)
@@ -302,18 +295,18 @@ mod tests {
     }
 
     #[test]
-    fn test_create_snippet_truncates_long_text() {
+    fn test_truncate_snippet_bytes_truncates_long_text() {
         let long_text = "a".repeat(200);
-        let snippet = ToolCallAccumulator::create_snippet(&long_text, 100);
+        let snippet = truncate_snippet(&long_text, 100, SnippetLimit::Bytes);
 
         assert!(snippet.len() <= 103); // 100 + "..."
         assert!(snippet.ends_with("..."));
     }
 
     #[test]
-    fn test_create_snippet_preserves_short_text() {
+    fn test_truncate_snippet_bytes_preserves_short_text() {
         let short_text = "short text";
-        let snippet = ToolCallAccumulator::create_snippet(short_text, 100);
+        let snippet = truncate_snippet(short_text, 100, SnippetLimit::Bytes);
 
         assert_eq!(snippet, short_text);
         assert!(!snippet.ends_with("..."));
