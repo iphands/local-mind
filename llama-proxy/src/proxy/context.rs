@@ -13,14 +13,9 @@ use crate::backends::node_url;
 use crate::backends::preflight::ContextProbe;
 use crate::backends::with_auth;
 
-// Global cache: backend_url -> (context_size, backend_type)
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum BackendType {
-    LlamaCpp,
-    Vllm,
-}
-
-static CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, (u64, BackendType)>>> = OnceLock::new();
+// Global cache: backend_url -> context_size. The (value, BackendType) tuple stored a
+// source tag that no reader ever consulted - big-fix 93 [C-L10] deleted the write-only enum.
+static CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, u64>>> = OnceLock::new();
 
 // Track which backends we've already warned about to avoid log spam
 static WARNED_BACKENDS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
@@ -67,20 +62,20 @@ pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str, _s
     // Check cache first
     {
         let read_guard = cache.read().await;
-        if let Some(&(ctx, _)) = read_guard.get(backend_url) {
+        if let Some(&ctx) = read_guard.get(backend_url) {
             return Some(ctx);
         }
     }
 
     // Try llama.cpp /props endpoint first
     if let Some(n_ctx) = fetch_from_props(client, backend_url, None).await {
-        cache_result(cache, backend_url, n_ctx, BackendType::LlamaCpp);
+        cache_result(cache, backend_url, n_ctx);
         return Some(n_ctx);
     }
 
     // Fallback to vLLM/OpenAI-compatible /v1/models endpoint
     if let Some(max_model_len) = fetch_from_models(client, backend_url).await {
-        cache_result(cache, backend_url, max_model_len, BackendType::Vllm);
+        cache_result(cache, backend_url, max_model_len);
         return Some(max_model_len);
     }
 
@@ -103,7 +98,7 @@ pub async fn cache_context_from_preflight(client: &reqwest::Client, probe: &Cont
     // Check cache first (shouldn't be populated yet during preflight, but be safe)
     {
         let read_guard = cache.read().await;
-        if let Some(&(ctx, _)) = read_guard.get(&probe.base_url) {
+        if let Some(&ctx) = read_guard.get(&probe.base_url) {
             return Some(ctx);
         }
     }
@@ -111,12 +106,12 @@ pub async fn cache_context_from_preflight(client: &reqwest::Client, probe: &Cont
     if probe.is_llama_cpp {
         // Need /props for the actual runtime n_ctx (distinct from model's n_ctx_train)
         if let Some(n_ctx) = fetch_from_props(client, &probe.base_url, probe.api_key.as_deref()).await {
-            cache_result(cache, &probe.base_url, n_ctx, BackendType::LlamaCpp);
+            cache_result(cache, &probe.base_url, n_ctx);
             return Some(n_ctx);
         }
         None
     } else if let Some(ctx) = probe.max_model_len {
-        cache_result(cache, &probe.base_url, ctx, BackendType::Vllm);
+        cache_result(cache, &probe.base_url, ctx);
         Some(ctx)
     } else {
         None
@@ -192,9 +187,9 @@ async fn fetch_from_models(client: &reqwest::Client, backend_url: &str) -> Optio
 /// lost policy-wise - the next cache-miss fetch re-attempts it, and the first `try_write`
 /// that lands (lock free, as in the common case) installs the fresh value and closes the
 /// window.
-fn cache_result(cache: &RwLock<HashMap<String, (u64, BackendType)>>, backend_url: &str, value: u64, backend_type: BackendType) {
+fn cache_result(cache: &RwLock<HashMap<String, u64>>, backend_url: &str, value: u64) {
     if let Ok(mut write_guard) = cache.try_write() {
-        write_guard.insert(backend_url.to_string(), (value, backend_type));
+        write_guard.insert(backend_url.to_string(), value);
     } else {
         let stale_skips_total = CONTEXT_CACHE_STALE_SKIPS.fetch_add(1, Ordering::Relaxed) + 1;
         tracing::debug!(
@@ -594,7 +589,7 @@ mod tests {
         // create contention for this callsite in the whole suite.
         {
             let _warm_reader = cache.read().await;
-            cache_result(cache, "http://prewarm.contention.test", 1, BackendType::LlamaCpp);
+            cache_result(cache, "http://prewarm.contention.test", 1);
         }
         let before = context_cache_stale_skips();
 
@@ -658,7 +653,7 @@ mod tests {
         }
         assert_eq!(
             cache.read().await.get(&base),
-            Some(&(4096, BackendType::LlamaCpp)),
+            Some(&4096),
             "one successful refresh within the window must end it"
         );
         server.abort();
@@ -673,7 +668,7 @@ mod tests {
         let (base, mut rx, server) = spawn_monitor_listener(false).await; // live backend: 8192 via /v1/models
         let client = reqwest::Client::new();
         let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
-        cache.write().await.insert(base.clone(), (4096, BackendType::LlamaCpp));
+        cache.write().await.insert(base.clone(), 4096);
 
         let served = fetch_context_total(&client, &base, None).await;
         assert_eq!(
@@ -701,7 +696,7 @@ mod tests {
             let served2 = fetch_context_total(&client, &base, None).await;
             assert_eq!(served2, Some(8192), "the retried in-window fetch must serve the fresh value");
         }
-        assert_eq!(cache.read().await.get(&base), Some(&(8192, BackendType::Vllm)));
+        assert_eq!(cache.read().await.get(&base), Some(&8192));
         server.abort();
     }
 
@@ -777,7 +772,7 @@ mod tests {
         }
         assert_eq!(
             cache.read().await.get(&base),
-            Some(&(8192, BackendType::Vllm)),
+            Some(&8192),
             "only the parsed value is cached - never a zero or the malformed shape"
         );
         server.abort();
@@ -812,13 +807,13 @@ mod tests {
         // Pre-populate cache
         {
             let mut write_guard = cache.write().await;
-            write_guard.insert("http://test".to_string(), (4096, BackendType::LlamaCpp));
+            write_guard.insert("http://test".to_string(), 4096);
         }
 
         // Verify cache read works
         {
             let read_guard = cache.read().await;
-            assert_eq!(read_guard.get("http://test"), Some(&(4096, BackendType::LlamaCpp)));
+            assert_eq!(read_guard.get("http://test"), Some(&4096));
         }
     }
 }

@@ -434,7 +434,12 @@ fn forward_response(status: StatusCode, headers: &HeaderMap, body: Vec<u8>, body
         }
         response = response.header(name.clone(), value.clone());
     }
-    response.body(Body::from(body)).unwrap().into_response()
+    // Builder error is unreachable: header names/values come from an already-parsed
+    // HeaderMap (validation happened at parse) and Body::from accepts any Vec [C-L7].
+    response
+        .body(Body::from(body))
+        .expect("status + parsed-header values + Vec body are always a valid Response")
+        .into_response()
 }
 
 /// [C-L8] Termination of a /v1/messages stream whose translation failed. The client
@@ -457,10 +462,19 @@ fn anthropic_sse_error_response() -> Response {
         .status(StatusCode::OK)
         .header(header::CONTENT_TYPE, "text/event-stream")
         .body(Body::from(frame))
-        .unwrap()
+        // Static, built once per failure: constant status, constant literal header,
+        // constant body - the builder cannot reject this combination [C-L7].
+        .expect("static SSE error frame is a valid response by construction")
         .into_response()
 }
 
+/// RAII decrement for the `concurrent_requests` gauge, incremented at the top of
+/// `handle`. Semantics [C-L14]: the gauge counts requests whose handler is executing -
+/// from body-read until `handle()` RETURNS, which for a stream means headers-ready, not
+/// body-done. A streamed generation keeps running after this guard drops; the capacity
+/// permit and the balancer's busy claim deliberately ride the response body for that
+/// window (big-fix 18), so gauge > 0 does NOT mean every permit is held. `/proxy/metrics`
+/// renders the gauge minus its own in-flight scrape, so an idle proxy reports 0.
 struct ConcurrentGuard(Arc<std::sync::atomic::AtomicUsize>);
 impl Drop for ConcurrentGuard {
     fn drop(&mut self) {
@@ -482,10 +496,21 @@ impl ProxyHandler {
     // We now ALWAYS force non-streaming backend requests and synthesize streaming responses
     // when clients request them. This simplifies fix application significantly.
 
-    /// Check if Content-Type indicates JSON response
+    /// Check if Content-Type indicates a JSON document.
+    ///
+    /// The media type is everything before the first ';' - parameters (charset, q=, even a
+    /// JSON-looking one) never change classification [C-L9]. A type is JSON when it is
+    /// `application/json` or carries the RFC 6839 `+json` structured suffix (this covers
+    /// the vendor types the old `vnd.` check existed for: vnd.api+json, geo+json,
+    /// json-patch+json). Substring matching was the bug: application/json-seq and
+    /// application/jsonpath CONTAIN "application/json" and are not JSON documents.
     fn is_json_content_type(content_type: &str) -> bool {
-        let ct_lower = content_type.to_lowercase();
-        ct_lower.contains("application/json") || ct_lower.contains("application/vnd.") && ct_lower.contains("+json")
+        let media_type = content_type
+            .split_once(';')
+            .map_or(content_type, |(media, _params)| media)
+            .trim()
+            .to_ascii_lowercase();
+        media_type == "application/json" || media_type.ends_with("+json")
     }
 
     /// Inject augmentation into Anthropic messages
@@ -588,8 +613,23 @@ impl ProxyHandler {
             }
         };
 
-        // Parse request for model extraction and stats (if JSON)
-        let request_json: Option<serde_json::Value> = serde_json::from_slice(&body_bytes).ok();
+        // Parse request for model extraction and stats (if JSON). A malformed body is a
+        // legitimate class (GETs, opaque payloads), but when bytes were present and
+        // unparseable the downstream consequences (no model routing signal, no stats,
+        // augmentation silently skipped) must be attributable [C-L9].
+        let request_json: Option<serde_json::Value> = match serde_json::from_slice(&body_bytes) {
+            Ok(json) => Some(json),
+            Err(e) => {
+                if !body_bytes.is_empty() {
+                    tracing::debug!(
+                        error = %e,
+                        body_size = body_bytes.len(),
+                        "Request body is not valid JSON: model routing, stats and augmentation run without a parsed body"
+                    );
+                }
+                None
+            }
+        };
 
         // Extract model for routing BEFORE selecting backend
         let requested_model = request_json.as_ref().and_then(|j| j.get("model")).and_then(|m| m.as_str());
@@ -646,7 +686,9 @@ impl ProxyHandler {
                     .method(method)
                     .uri(uri)
                     .body(Body::from(body_bytes))
-                    .unwrap();
+                    // method/uri were accepted by the router from this same parsed
+                    // request, and Body::from accepts Bytes unconditionally [C-L7].
+                    .expect("method+uri of the request being handled are valid by construction");
                 // Add headers back
                 let mut req = req;
                 for (name, value) in headers.iter() {
@@ -821,31 +863,57 @@ impl ProxyHandler {
 
         // Inject augmentation into request if we got one
         let enriched_body_bytes = if let Some((ref aug, ref request_prompt, _)) = augmentation {
-            if let Some(req_json) = request_json.clone() {
-                let is_anthropic_format = is_anthropic_api;
-
-                if is_anthropic_format {
+            if let Some(req_json) = request_json.as_ref() {
+                if is_anthropic_api {
                     // Inject into Anthropic format
-                    if let Ok(mut anthropic_req) =
-                        serde_json::from_value::<crate::api::AnthropicMessageRequest>(req_json.clone())
-                    {
-                        Self::inject_into_anthropic(&mut anthropic_req, request_prompt, aug);
-                        serde_json::to_vec(&anthropic_req).unwrap_or(body_bytes.to_vec()).into()
-                    } else {
-                        body_bytes.clone()
+                    match serde_json::from_value::<crate::api::AnthropicMessageRequest>(req_json.clone()) {
+                        Ok(mut anthropic_req) => {
+                            Self::inject_into_anthropic(&mut anthropic_req, request_prompt, aug);
+                            match serde_json::to_vec(&anthropic_req) {
+                                Ok(bytes) => bytes.into(),
+                                Err(e) => {
+                                    tracing::debug!(
+                                        error = %e,
+                                        "Augmentation discarded: injected Anthropic body could not be re-serialized, forwarding the original request bytes"
+                                    );
+                                    body_bytes.clone()
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            tracing::debug!(
+                                error = %e,
+                                "Augmentation injection skipped: request body is not an AnthropicMessageRequest, forwarding the original request bytes"
+                            );
+                            body_bytes.clone()
+                        }
                     }
                 } else {
                     // Inject into OpenAI format
-                    if let Ok(openai_req) = serde_json::from_value::<ChatCompletionRequest>(req_json.clone()) {
-                        match inject_augmentation(openai_req, request_prompt, aug) {
-                            Ok(enriched) => serde_json::to_vec(&enriched).unwrap_or(body_bytes.to_vec()).into(),
+                    match serde_json::from_value::<ChatCompletionRequest>(req_json.clone()) {
+                        Ok(openai_req) => match inject_augmentation(openai_req, request_prompt, aug) {
+                            Ok(enriched) => match serde_json::to_vec(&enriched) {
+                                Ok(bytes) => bytes.into(),
+                                Err(e) => {
+                                    tracing::debug!(
+                                        error = %e,
+                                        "Augmentation discarded: injected body could not be re-serialized, forwarding the original request bytes"
+                                    );
+                                    body_bytes.clone()
+                                }
+                            },
                             Err(e) => {
                                 tracing::error!(error = %e, "Failed to inject augmentation");
                                 body_bytes.clone()
                             }
+                        },
+                        Err(e) => {
+                            tracing::debug!(
+                                error = %e,
+                                "Augmentation injection skipped: request body is not a ChatCompletionRequest, forwarding the original request bytes"
+                            );
+                            body_bytes.clone()
                         }
-                    } else {
-                        body_bytes.clone()
                     }
                 }
             } else {
@@ -884,11 +952,10 @@ impl ProxyHandler {
             "Building backend request"
         );
 
-        // Create request with complete URL (query string included)
-        let mut backend_req = backend
-            .node
-            .http_client
-            .request(Method::from_bytes(method.as_str().as_bytes()).unwrap(), &backend_url);
+        // Create request with complete URL (query string included). `method` was already
+        // validated by the router's match on this same request, so clone it instead of
+        // re-parsing the bytes and panicking on a theoretically-impossible re-reject [C-L7].
+        let mut backend_req = backend.node.http_client.request(method.clone(), &backend_url);
 
         for (name, value) in headers.iter() {
             if !Self::forwards_to_backend(name) {
@@ -922,12 +989,12 @@ impl ProxyHandler {
             }
         }
 
-        // Use enriched_body_bytes if augmentation was injected, otherwise use original body
-        let (final_body_bytes, sent_stream_true) = if enriched_body_bytes != body_bytes {
-            Self::apply_backend_overrides_bytes(&enriched_body_bytes, &backend.node, allow_stream, path)
-        } else {
-            Self::apply_backend_overrides_bytes(&body_bytes, &backend.node, allow_stream, path)
-        };
+        // One call, always on enriched_body_bytes: in every non-injection path
+        // enriched_body_bytes is a Bytes refcount-clone of body_bytes - identical content -
+        // so the old `!=` branch compared two copies then fed the same bytes to the same
+        // function either way [C-L12].
+        let (final_body_bytes, sent_stream_true) =
+            Self::apply_backend_overrides_bytes(&enriched_body_bytes, &backend.node, allow_stream, path);
         // The router must dispatch on what was actually sent, not on what the client
         // asked for - augmentation or a backend override could change it.
         let expected_streaming = allow_stream && sent_stream_true;
@@ -935,8 +1002,12 @@ impl ProxyHandler {
             self.state.openai_stream_passthrough_total.fetch_add(1, Ordering::Relaxed);
         }
 
-        backend_req = backend_req.body(final_body_bytes.clone());
-        let backend_request_for_dump = Some(final_body_bytes);
+        // Refcount-clone for the request body instead of a deep clone; the dump copy is a
+        // deep copy only when a dump path is actually set - the old code paid a full
+        // second copy on every request regardless [C-L12].
+        let final_body = bytes::Bytes::from(final_body_bytes);
+        backend_req = backend_req.body(final_body.clone());
+        let backend_request_for_dump = self.state.dump_path.is_some().then(|| final_body.to_vec());
 
         let backend_response = match backend_req.send().await {
             Ok(resp) => resp,
@@ -999,13 +1070,15 @@ impl ProxyHandler {
             }
 
             let concurrent_snapshot = self.state.concurrent_requests.load(Ordering::Relaxed);
+            // Streaming and buffered arms are exclusive and this is the arm's tail -
+            // request_json can move here exactly like the else arm below moves it [C-L12].
             handle_streaming_response(
                 backend_response,
                 self.state.fix_registry.clone(),
                 self.state.config.stats.enabled,
                 self.state.config.stats.format,
                 self.state.exporter_manager.clone(),
-                request_json.clone(),
+                request_json,
                 start,
                 backend.node.http_client.clone(),
                 backend.node.base_url().to_string(),
@@ -1107,6 +1180,15 @@ impl ProxyHandler {
     /// synthesized SSE built from one complete JSON body.
     fn apply_backend_overrides_bytes(body: &[u8], backend: &BackendNode, allow_stream: bool, path: &str) -> (Vec<u8>, bool) {
         let Ok(mut json) = serde_json::from_slice::<serde_json::Value>(body) else {
+            // A completion-shaped route carrying an unparseable body gets verbatim
+            // forwarding: legitimate for GETs and opaque payloads, but on a completion
+            // route it must be attributable - the stream rewrite silently didn't happen [C-L9].
+            if !body.is_empty() {
+                tracing::debug!(
+                    body_size = body.len(),
+                    "Request rewrites skipped: completion-shaped request body is not valid JSON, forwarding it verbatim"
+                );
+            }
             return (body.to_vec(), false);
         };
         if !Self::looks_like_completion_request(&json, backend.effective_path(path)) {
@@ -1134,7 +1216,13 @@ impl ProxyHandler {
             json["temperature"] = serde_json::Value::from(temp);
         }
 
-        (serde_json::to_vec(&json).unwrap_or_else(|_| body.to_vec()), keep_stream)
+        let rewritten = serde_json::to_vec(&json).unwrap_or_else(|e| {
+            // Unreachable in practice (a Value from a parse round-trips); if it ever fires,
+            // the client's stream flag rode the ORIGINAL bytes and this names why [C-L9].
+            tracing::debug!(error = %e, "Rewritten request body failed to re-serialize; forwarding the original bytes");
+            body.to_vec()
+        });
+        (rewritten, keep_stream)
     }
 
     /// A stream carries no `usage` block unless the backend is told to emit one, so
@@ -1373,7 +1461,13 @@ impl ProxyHandler {
 
         // Compute final body (used for dump and non-streaming return)
         let final_body = if let Some(ref json) = json_value {
-            serde_json::to_vec(json).unwrap_or_else(|_| body_bytes.to_vec())
+            serde_json::to_vec(json).unwrap_or_else(|e| {
+                // json_value is Some only for a parsed-and-fixed Value, which always
+                // re-serializes; if it somehow did not, the client gets the backend's
+                // ORIGINAL bytes and this names the divergence [C-L9].
+                tracing::debug!(error = %e, "Fixed response body failed to re-serialize; forwarding the original backend bytes");
+                body_bytes.to_vec()
+            })
         } else {
             body_bytes.to_vec()
         };
@@ -1397,7 +1491,12 @@ impl ProxyHandler {
 
             tokio::spawn(async move {
                 if let Some(req_json) = request_json_clone {
-                    let req_bytes = serde_json::to_vec(&req_json).unwrap_or_default();
+                    let req_bytes = serde_json::to_vec(&req_json).unwrap_or_else(|e| {
+                        // A parsed Value re-serializes; but an empty request file WITH this
+                        // line beats the old silent empty file [C-L9].
+                        tracing::debug!(error = %e, "Dump: request JSON failed to serialize; writing an empty request body");
+                        Vec::new()
+                    });
                     if let Err(e) = dump::dump_request_response(
                         &dump_path_clone,
                         &request_method_str,
@@ -1510,10 +1609,9 @@ impl ProxyHandler {
             "Building pass-through request"
         );
 
-        // Create request with complete URL (query string included)
-        let mut backend_req = backend
-            .http_client
-            .request(Method::from_bytes(method.as_str().as_bytes()).unwrap(), &backend_url);
+        // The router matched this method before dispatching here, so clone the validated
+        // Method instead of re-parsing its bytes and panicking on a re-reject [C-L7].
+        let mut backend_req = backend.http_client.request(method.clone(), &backend_url);
 
         // Copy headers (skip Host and Authorization as we'll set those explicitly)
         for (name, value) in headers.iter() {
@@ -1689,6 +1787,31 @@ mod tests {
         assert!(!ProxyHandler::is_json_content_type("image/jpeg"));
         assert!(!ProxyHandler::is_json_content_type("text/css"));
         assert!(!ProxyHandler::is_json_content_type("application/octet-stream"));
+
+        // big-fix 93 [C-L9]: the media type is what precedes the first ';'. Parameters must
+        // never change the classification - in either direction. These two stay JSON:
+        assert!(ProxyHandler::is_json_content_type("application/json;"));
+        assert!(ProxyHandler::is_json_content_type("application/json;q=1;chrome=1"));
+        // RED [C-L9]: the substring class the parameter strip removes. These are NOT JSON
+        // documents: application/json-seq (RFC 7464 text sequences) and application/jsonpath
+        // (RFC 9535) are real IANA types that merely CONTAIN "application/json"; a JSON-looking
+        // parameter on a non-JSON type is likewise not JSON.
+        assert!(
+            !ProxyHandler::is_json_content_type("application/json-seq"),
+            "json-seq is not a JSON document"
+        );
+        assert!(
+            !ProxyHandler::is_json_content_type("application/jsonpath"),
+            "jsonpath is not a JSON document"
+        );
+        assert!(
+            !ProxyHandler::is_json_content_type("x-application/json"),
+            "an unregistered type that happens to contain the substring is not JSON"
+        );
+        assert!(
+            !ProxyHandler::is_json_content_type("text/plain; charset=\"application/json\""),
+            "a parameter must not turn a text body into JSON"
+        );
     }
 
     fn bare_node(model: Option<&str>) -> BackendNode {
@@ -1950,6 +2073,116 @@ mod tests {
             body["error"]["message"].as_str().is_some_and(|m| !m.is_empty()),
             "envelope must carry a non-empty message, got: {body}"
         );
+    }
+
+    /// Capture writer (repo convention, 4th instance: fixes/registry.rs, augment.rs,
+    /// proxy/context.rs): thread-local `set_default` + `current_thread` +
+    /// `pin_interest_cache_for_tests` per the flake-family protocol.
+    #[derive(Clone)]
+    struct HandlerCaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+    impl std::io::Write for HandlerCaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("capture lock").extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for HandlerCaptureWriter {
+        type Writer = Self;
+        fn make_writer(&self) -> Self {
+            self.clone()
+        }
+    }
+
+    /// big-fix 93 [C-L9] RED: the augment pipeline fetches a real augmentation, but the
+    /// request body fails the typed from_value parse, so injection is SKIPPED and the
+    /// original bytes are forwarded. Baseline swallows the parse error silently - the log
+    /// reads like augmentation ran. The skip must be named at debug level.
+    #[tokio::test(flavor = "current_thread")]
+    async fn augmentation_typed_parse_bypass_is_logged_not_silent() {
+        crate::fixes::pin_interest_cache_for_tests();
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _sub = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(HandlerCaptureWriter(buf.clone()))
+                .finish(),
+        );
+
+        // Fake augment backend: answers the augmentation call with content "AUG".
+        let augment_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("augment bind");
+        let augment_port = augment_listener.local_addr().expect("augment addr").port();
+        tokio::spawn(async move {
+            let accepted = tokio::time::timeout(std::time::Duration::from_secs(5), augment_listener.accept()).await;
+            let Ok(Ok((mut sock, _))) = accepted else { return };
+            {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut head: Vec<u8> = Vec::new();
+                let mut tmp = [0u8; 1024];
+                loop {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) | Err(_) => break,
+                        Ok(n) => {
+                            head.extend_from_slice(&tmp[..n]);
+                            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let body = r#"{"choices":[{"message":{"role":"assistant","content":"AUG"}}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            }
+        });
+
+        let augment = AugmentBackend {
+            url: format!("http://127.0.0.1:{augment_port}"),
+            model: "augment-model".to_string(),
+            prompt_file: "task93-no-such-augment-prompt.md".to_string(),
+            request_prompt_file: "task93-no-such-request-prompt.md".to_string(),
+            http_client: reqwest::Client::new(),
+        };
+
+        let (port, rx) = recording_backend(completion_response_bytes()).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, Some(Arc::new(augment)), StreamingMode::default());
+
+        // Well-formed JSON whose model is a NUMBER: extract_user_content_from_json still
+        // finds "hi" (raw walker), so the augmentation is fetched; but the typed
+        // ChatCompletionRequest parse fails and the injection must be bypassed.
+        let body = serde_json::json!({"model": 123, "messages": [{"role": "user", "content": "hi"}]});
+        let res = handler
+            .handle(request_with_body(
+                Method::POST,
+                "/v1/chat/completions",
+                Body::from(body.to_string()),
+            ))
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "a bypassed injection is still a served request");
+
+        let wire = recorded_raw(rx).await;
+        assert!(
+            wire.contains("\"model\":123"),
+            "the ORIGINAL request must reach the backend (override re-serializes the untouched Value):\n{wire}"
+        );
+        assert!(
+            !wire.contains("AUG"),
+            "the fetched augmentation must NOT be injected into an unparseable body:\n{wire}"
+        );
+
+        let log = String::from_utf8_lossy(&buf.lock().expect("capture lock").clone()).to_string();
+        assert!(
+            log.contains("Augmentation injection skipped"),
+            "the typed-parse bypass must be named at debug level, captured:\n{log}"
+        );
+        assert!(log.contains("ChatCompletionRequest"), "the log must name what failed to parse:\n{log}");
     }
 
     #[test]
