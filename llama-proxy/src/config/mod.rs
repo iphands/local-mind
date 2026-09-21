@@ -23,6 +23,8 @@ pub struct AppConfig {
     pub detection: DetectionConfig,
     #[serde(default)]
     pub streaming: StreamingConfig,
+    #[serde(default)]
+    pub synthesis: SynthesisConfig,
     #[serde(default, rename = "augment-backend")]
     pub augment_backend: Option<AugmentBackendConfig>,
     #[serde(default)]
@@ -406,6 +408,36 @@ impl StreamingMode {
 
 // Keep StreamingConfig as an alias for backward compatibility, but it's now just the enum
 pub type StreamingConfig = StreamingMode;
+
+/// Streaming-synthesis chunk timing configuration (`synthesis:` section).
+///
+/// Controls how fake-mode synthesis paces and splits its synthesized SSE
+/// stream. The `streaming:` key remains a plain mode string; this section is
+/// purely additive to [`AppConfig`].
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
+pub struct SynthesisConfig {
+    /// Delay inserted between synthesized SSE chunks, in milliseconds.
+    /// 0 (default) emits every chunk without an artificial sleep.
+    #[serde(default)]
+    pub chunk_delay_ms: u64,
+    /// Maximum characters per synthesized text chunk. CHAR-based, matching
+    /// the emoji-aware splitter (`split_chars`), never bytes.
+    #[serde(default = "default_synthesis_chunk_size_chars")]
+    pub chunk_size_chars: usize,
+}
+
+fn default_synthesis_chunk_size_chars() -> usize {
+    2000
+}
+
+impl Default for SynthesisConfig {
+    fn default() -> Self {
+        Self {
+            chunk_delay_ms: 0,
+            chunk_size_chars: default_synthesis_chunk_size_chars(),
+        }
+    }
+}
 
 /// Augment backend configuration - experimental feature for enriching requests
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1205,5 +1237,36 @@ timeout_secs: 42
     #[test]
     fn test_augment_backend_default_impl_timeout_is_15() {
         assert_eq!(AugmentBackendConfig::default().timeout_secs, 15);
+    }
+}
+
+#[cfg(test)]
+mod synthesis_section_tests {
+    use super::*;
+
+    #[test]
+    fn synthesis_section_absent_yields_defaults() {
+        let yaml = "server:\n  host: 0.0.0.0\n  port: 8066\nbackend:\n  url: http://localhost:8080\n";
+        let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.synthesis, SynthesisConfig::default());
+        assert_eq!(cfg.synthesis.chunk_delay_ms, 0);
+        assert_eq!(cfg.synthesis.chunk_size_chars, 2000);
+    }
+
+    #[test]
+    fn synthesis_section_parses_both_keys() {
+        let yaml = "server:\n  host: 0.0.0.0\n  port: 8066\nbackend:\n  url: http://localhost:8080\nstreaming: fake\nsynthesis:\n  chunk_delay_ms: 25\n  chunk_size_chars: 512\n";
+        let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.synthesis.chunk_delay_ms, 25);
+        assert_eq!(cfg.synthesis.chunk_size_chars, 512);
+        assert_eq!(cfg.streaming, StreamingMode::Fake);
+    }
+
+    #[test]
+    fn synthesis_section_partial_keys_default_the_missing_one() {
+        let yaml = "server:\n  host: 0.0.0.0\n  port: 8066\nbackend:\n  url: http://localhost:8080\nsynthesis:\n  chunk_delay_ms: 10\n";
+        let cfg: AppConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.synthesis.chunk_delay_ms, 10);
+        assert_eq!(cfg.synthesis.chunk_size_chars, 2000);
     }
 }

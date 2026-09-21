@@ -18,14 +18,7 @@ use serde_json::json;
 use std::convert::Infallible;
 
 use crate::api::{AnthropicContentBlock, AnthropicMessage, ChatCompletionResponse, Timings, ToolCall, Usage};
-
-/// Default text chunk size (chars per SSE chunk when synthesizing)
-/// Can be configured via config in the future
-const DEFAULT_CHUNK_SIZE: usize = 50;
-
-/// Default delay between SSE chunks (milliseconds)
-/// Set to 0 for instant streaming, or positive value to simulate realistic pace
-const DEFAULT_CHUNK_DELAY_MS: u64 = 50; // 50ms between chunks
+use crate::config::SynthesisConfig;
 
 /// Synthesize a streaming SSE response from a complete ChatCompletionResponse
 ///
@@ -33,8 +26,12 @@ const DEFAULT_CHUNK_DELAY_MS: u64 = 50; // 50ms between chunks
 /// Takes a complete JSON response and creates an SSE stream that looks like real streaming.
 ///
 /// Tool calls are sent as a single complete chunk (not incrementally).
-/// Text content is chunked into pieces of DEFAULT_CHUNK_SIZE characters.
-pub async fn synthesize_streaming_response(response: ChatCompletionResponse) -> Result<Response, String> {
+/// Text content is chunked into pieces of at most `config.chunk_size_chars`
+/// characters, paced by `config.chunk_delay_ms` (0 = no artificial delay).
+pub async fn synthesize_streaming_response(
+    response: ChatCompletionResponse,
+    config: &SynthesisConfig,
+) -> Result<Response, String> {
     // Extract data from the complete response
     let model = response.model.clone();
     let id = response.id.clone();
@@ -45,7 +42,7 @@ pub async fn synthesize_streaming_response(response: ChatCompletionResponse) -> 
 
     let message = choice.message.as_ref().ok_or_else(|| "Choice has no message".to_string())?;
 
-    let content = message.content.clone();
+    let content_chunks = message.content.clone().map(|text| chunk_text(&text, config.chunk_size_chars));
     let tool_calls = message.tool_calls.clone();
     let reasoning_text = message.reasoning_text.clone();
     let reasoning_opaque = message.reasoning_opaque.clone();
@@ -60,7 +57,7 @@ pub async fn synthesize_streaming_response(response: ChatCompletionResponse) -> 
         id,
         model,
         created,
-        content,
+        content_chunks,
         tool_calls,
         reasoning_text,
         reasoning_opaque,
@@ -70,9 +67,10 @@ pub async fn synthesize_streaming_response(response: ChatCompletionResponse) -> 
     );
 
     // Wrap in async stream with delays between chunks
-    let stream = stream::iter(chunks).then(|chunk| async move {
-        if DEFAULT_CHUNK_DELAY_MS > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(DEFAULT_CHUNK_DELAY_MS)).await;
+    let chunk_delay_ms = config.chunk_delay_ms;
+    let stream = stream::iter(chunks).then(move |chunk| async move {
+        if chunk_delay_ms > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(chunk_delay_ms)).await;
         }
         chunk
     });
@@ -88,7 +86,7 @@ fn synthesize_chunks(
     id: String,
     model: String,
     created: i64,
-    content: Option<String>,
+    content_chunks: Option<Vec<String>>,
     tool_calls: Option<Vec<ToolCall>>,
     reasoning_text: Option<String>,
     reasoning_opaque: Option<String>,
@@ -167,8 +165,8 @@ fn synthesize_chunks(
     }
 
     // Stream text content in chunks (if present)
-    if let Some(text) = content {
-        for text_chunk in chunk_text(&text, DEFAULT_CHUNK_SIZE) {
+    if let Some(text_chunks) = content_chunks {
+        for text_chunk in text_chunks {
             chunks.push(Ok(create_sse_event(&json!({
                 "id": id,
                 "object": "chat.completion.chunk",
@@ -295,14 +293,16 @@ fn create_sse_event(json: &serde_json::Value) -> Event {
 /// - message_stop: Stream terminator
 pub async fn synthesize_anthropic_streaming_response(
     msg: AnthropicMessage,
+    config: &SynthesisConfig,
 ) -> Result<Response, Box<dyn std::error::Error + Send + Sync>> {
     // Pre-compute all chunks
-    let chunks = synthesize_anthropic_chunks(msg);
+    let chunks = synthesize_anthropic_chunks(msg, config.chunk_size_chars);
 
     // Wrap in async stream with delays between chunks
-    let stream = stream::iter(chunks).then(|chunk| async move {
-        if DEFAULT_CHUNK_DELAY_MS > 0 {
-            tokio::time::sleep(tokio::time::Duration::from_millis(DEFAULT_CHUNK_DELAY_MS)).await;
+    let chunk_delay_ms = config.chunk_delay_ms;
+    let stream = stream::iter(chunks).then(move |chunk| async move {
+        if chunk_delay_ms > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_millis(chunk_delay_ms)).await;
         }
         chunk
     });
@@ -312,7 +312,7 @@ pub async fn synthesize_anthropic_streaming_response(
 }
 
 /// Generate the sequence of Anthropic SSE events from complete message
-fn synthesize_anthropic_chunks(msg: AnthropicMessage) -> Vec<Result<Event, Infallible>> {
+fn synthesize_anthropic_chunks(msg: AnthropicMessage, chunk_size_chars: usize) -> Vec<Result<Event, Infallible>> {
     let mut chunks = Vec::new();
 
     // Event 1: message_start
@@ -332,7 +332,7 @@ fn synthesize_anthropic_chunks(msg: AnthropicMessage) -> Vec<Result<Event, Infal
                 )));
 
                 // Send text as chunked deltas
-                for text_chunk in chunk_text(text, DEFAULT_CHUNK_SIZE) {
+                for text_chunk in chunk_text(text, chunk_size_chars) {
                     chunks.push(Ok(create_anthropic_sse_event(
                         "content_block_delta",
                         &build_content_block_delta_event(idx, "text_delta", &text_chunk),
@@ -353,7 +353,7 @@ fn synthesize_anthropic_chunks(msg: AnthropicMessage) -> Vec<Result<Event, Infal
                 )));
 
                 // Send thinking as chunked deltas
-                for thinking_chunk in chunk_text(thinking, DEFAULT_CHUNK_SIZE) {
+                for thinking_chunk in chunk_text(thinking, chunk_size_chars) {
                     chunks.push(Ok(create_anthropic_sse_event(
                         "content_block_delta",
                         &build_thinking_block_delta_event(idx, &thinking_chunk),
@@ -395,7 +395,7 @@ fn synthesize_anthropic_chunks(msg: AnthropicMessage) -> Vec<Result<Event, Infal
                         &build_content_block_start_event(idx, "text"),
                     )));
 
-                    for text_chunk in chunk_text(text, DEFAULT_CHUNK_SIZE) {
+                    for text_chunk in chunk_text(text, chunk_size_chars) {
                         chunks.push(Ok(create_anthropic_sse_event(
                             "content_block_delta",
                             &build_content_block_delta_event(idx, "text_delta", &text_chunk),
@@ -576,6 +576,7 @@ fn build_tool_use_block_delta_event(index: usize, partial_json: &str) -> serde_j
 mod tests {
     use super::*;
     use crate::api::{FunctionCall, Timings, ToolCall, Usage};
+    use crate::config::SynthesisConfig;
 
     #[test]
     fn test_chunk_text_short() {
@@ -681,7 +682,7 @@ mod tests {
             "test-id".to_string(),
             "test-model".to_string(),
             1234567890,
-            Some("Hello world".to_string()),
+            Some(vec!["Hello world".to_string()]),
             None,
             None,
             None,
@@ -705,7 +706,7 @@ mod tests {
             "test-id".to_string(),
             "test-model".to_string(),
             1234567890,
-            Some("Answer".to_string()),
+            Some(vec!["Answer".to_string()]),
             None,
             Some("Thinking steps".to_string()),
             Some("state_blob".to_string()),
@@ -748,7 +749,7 @@ mod tests {
             "test-id".to_string(),
             "test-model".to_string(),
             1234567890,
-            Some("Test".to_string()),
+            Some(vec!["Test".to_string()]),
             None,
             None,
             None,
@@ -772,7 +773,7 @@ mod tests {
             "test-id".to_string(),
             "test-model".to_string(),
             1234567890,
-            Some("Test".to_string()),
+            Some(vec!["Test".to_string()]),
             None,
             None,
             None,
@@ -920,7 +921,7 @@ mod tests {
             },
         };
 
-        let chunks = synthesize_anthropic_chunks(msg);
+        let chunks = synthesize_anthropic_chunks(msg, 50);
 
         // Expected: message_start, content_block_start, content_block_delta, content_block_stop, message_delta, message_stop
         assert_eq!(chunks.len(), 6);
@@ -950,7 +951,7 @@ mod tests {
             },
         };
 
-        let chunks = synthesize_anthropic_chunks(msg);
+        let chunks = synthesize_anthropic_chunks(msg, 50);
 
         // Expected: message_start, content_block_start, content_block_delta, content_block_stop, message_delta, message_stop
         assert_eq!(chunks.len(), 6);
@@ -985,7 +986,7 @@ mod tests {
             },
         };
 
-        let chunks = synthesize_anthropic_chunks(msg);
+        let chunks = synthesize_anthropic_chunks(msg, 50);
 
         // Expected:
         // - message_start (1)
@@ -1022,7 +1023,9 @@ mod tests {
             },
         };
 
-        let resp = synthesize_anthropic_streaming_response(msg).await.unwrap();
+        let resp = synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default())
+            .await
+            .unwrap();
         let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
         let text = String::from_utf8(bytes.to_vec()).unwrap();
 
@@ -1068,7 +1071,7 @@ mod tests {
             },
         };
 
-        let chunks = synthesize_anthropic_chunks(msg);
+        let chunks = synthesize_anthropic_chunks(msg, 50);
 
         // Expected: message_start, message_delta, message_stop
         assert_eq!(chunks.len(), 3);
@@ -1099,7 +1102,7 @@ mod tests {
         };
 
         // Call the main synthesis function
-        let response = synthesize_anthropic_streaming_response(msg).await;
+        let response = synthesize_anthropic_streaming_response(msg, &SynthesisConfig::default()).await;
 
         // Verify we got a response
         assert!(response.is_ok(), "Should synthesize response successfully");
@@ -1132,7 +1135,7 @@ mod tests {
             },
         };
 
-        let chunks = synthesize_anthropic_chunks(msg);
+        let chunks = synthesize_anthropic_chunks(msg, 50);
 
         // Verify minimum expected sequence:
         // 1. message_start
@@ -1148,5 +1151,130 @@ mod tests {
         for chunk in &chunks {
             assert!(chunk.is_ok(), "All chunks should be Ok");
         }
+    }
+}
+
+#[cfg(test)]
+mod chunk_timing_tests {
+    use super::*;
+    use crate::api::AnthropicUsage;
+    use crate::config::SynthesisConfig;
+    use futures::StreamExt;
+
+    async fn timed_body(resp: Response, n: usize) -> Vec<(std::time::Duration, String)> {
+        let started = std::time::Instant::now();
+        let mut stream = resp.into_body().into_data_stream();
+        let mut out = Vec::new();
+        for _ in 0..n {
+            match tokio::time::timeout(std::time::Duration::from_secs(5), stream.next()).await {
+                Ok(Some(Ok(b))) => out.push((started.elapsed(), String::from_utf8_lossy(&b).to_string())),
+                _ => break,
+            }
+        }
+        out
+    }
+
+    fn resp_with_text(text: &str) -> ChatCompletionResponse {
+        let raw = serde_json::json!({
+            "id": "cmpl-t57", "created": 1, "model": "m",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": text}}]
+        });
+        serde_json::from_value(raw).unwrap()
+    }
+
+    #[tokio::test]
+    async fn default_config_inter_chunk_delta_under_5ms() {
+        // Given: default SynthesisConfig (chunk_delay_ms = 0)
+        // When: synthesizing a 3000-char text (two content chunks)
+        // Then: plan acceptance - delta between the first two body chunks < 5 ms
+        //       (baseline slept 50 ms per chunk => RED)
+        let cfg = SynthesisConfig::default();
+        assert_eq!(cfg.chunk_delay_ms, 0);
+        assert_eq!(cfg.chunk_size_chars, 2000);
+        let text = "x".repeat(3000);
+        let resp = synthesize_streaming_response(resp_with_text(&text), &cfg).await.unwrap();
+        let marks = timed_body(resp, 2).await;
+        assert!(marks.len() >= 2, "expected at least two body chunks");
+        let delta = marks[1].0 - marks[0].0;
+        assert!(
+            delta < std::time::Duration::from_millis(5),
+            "inter-chunk delta {delta:?} must be < 5 ms at delay 0"
+        );
+    }
+
+    #[tokio::test]
+    async fn configured_chunk_delay_is_observable() {
+        // Given: chunk_delay_ms = 400 (baseline ignores config and slept 50 ms)
+        // When: synthesizing two content chunks
+        // Then: first->second delta >= 200 ms - a generous half-margin that can
+        //       only fail if the configured sleep is skipped, never by slowness
+        let cfg = SynthesisConfig {
+            chunk_delay_ms: 400,
+            chunk_size_chars: 2000,
+        };
+        let text = "x".repeat(3000);
+        let resp = synthesize_streaming_response(resp_with_text(&text), &cfg).await.unwrap();
+        let marks = timed_body(resp, 2).await;
+        assert!(marks.len() >= 2);
+        let delta = marks[1].0 - marks[0].0;
+        assert!(
+            delta >= std::time::Duration::from_millis(200),
+            "configured 400 ms delay not honored: delta {delta:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn chunk_size_chars_default_splits_3000_chars_into_two() {
+        // Given: default chunk_size_chars = 2000, whitespace-free 3000-char text
+        // When: OpenAI synthesis
+        // Then: exactly two content delta chunks of 2000 and 1000 chars
+        //       (baseline: hard-coded 50 => 60 chunks => RED)
+        let cfg = SynthesisConfig::default();
+        let text = "x".repeat(3000);
+        let resp = synthesize_streaming_response(resp_with_text(&text), &cfg).await.unwrap();
+        let body = axum::body::to_bytes(resp.into_body(), 10_000_000).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        let content_chunks: Vec<&str> = body
+            .lines()
+            .filter(|l| l.contains("\"content\":"))
+            .map(|l| l.split_once("\"content\":\"").unwrap().1.split_once("\"}").unwrap().0)
+            .collect();
+        assert_eq!(
+            content_chunks.len(),
+            2,
+            "expected 2 content deltas, got {}",
+            content_chunks.len()
+        );
+        assert_eq!(content_chunks[0].chars().count(), 2000);
+        assert_eq!(content_chunks[1].chars().count(), 1000);
+    }
+
+    #[tokio::test]
+    async fn anthropic_path_uses_configured_chunk_size_and_zero_delay() {
+        // Given: default config on the Anthropic streaming path
+        // When: a 3000-char text block is synthesized
+        // Then: first two frames arrive < 5 ms apart (delay 0) and the block splits
+        //       into exactly two text_delta frames
+        let cfg = SynthesisConfig::default();
+        let msg = AnthropicMessage {
+            id: "msg-t57".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![AnthropicContentBlock::Text { text: "x".repeat(3000) }],
+            model: "m".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+        let resp = synthesize_anthropic_streaming_response(msg, &cfg).await.unwrap();
+        let marks = timed_body(resp, 2).await;
+        let delta = marks[1].0 - marks[0].0;
+        assert!(
+            delta < std::time::Duration::from_millis(5),
+            "anthropic delta {delta:?} must be < 5 ms at delay 0"
+        );
     }
 }

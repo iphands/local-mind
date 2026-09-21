@@ -144,6 +144,12 @@ fixes:
 #   disabled    - reserved; behaves like fake until enforced
 # streaming: fake
 
+# Streaming synthesis chunk timing (fake mode only). Chunking is CHAR-based
+# (emoji-aware), never bytes.
+# synthesis:
+#   chunk_delay_ms: 0      # sleep inserted between synthesized SSE chunks (0 = instant)
+#   chunk_size_chars: 2000 # max characters per synthesized text chunk
+
 # Metrics logging
 stats:
   enabled: true

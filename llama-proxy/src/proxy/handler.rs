@@ -1410,7 +1410,7 @@ impl ProxyHandler {
                     match serde_json::from_value::<AnthropicMessage>(json.clone()) {
                         Ok(anthropic_msg) => {
                             tracing::debug!("Backend returned Anthropic format, synthesizing streaming response");
-                            match synthesize_anthropic_streaming_response(anthropic_msg).await {
+                            match synthesize_anthropic_streaming_response(anthropic_msg, &self.state.config.synthesis).await {
                                 Ok(response) => return response,
                                 Err(e) => {
                                     tracing::error!(error = %e, "Failed to synthesize Anthropic streaming response, ending the stream with an SSE error frame");
@@ -1430,7 +1430,9 @@ impl ProxyHandler {
                                         content_blocks = anthropic_msg.content.len(),
                                         "Converted OpenAI response to Anthropic format"
                                     );
-                                    match synthesize_anthropic_streaming_response(anthropic_msg).await {
+                                    match synthesize_anthropic_streaming_response(anthropic_msg, &self.state.config.synthesis)
+                                        .await
+                                    {
                                         Ok(response) => return response,
                                         Err(e) => {
                                             tracing::error!(error = %e, "Failed to synthesize after OpenAI→Anthropic conversion, ending the stream with an SSE error frame");
@@ -1454,7 +1456,7 @@ impl ProxyHandler {
                     match serde_json::from_value::<ChatCompletionResponse>(json.clone()) {
                         Ok(response) => {
                             tracing::debug!("Synthesizing OpenAI streaming response from complete JSON");
-                            match synthesize_streaming_response(response).await {
+                            match synthesize_streaming_response(response, &self.state.config.synthesis).await {
                                 Ok(response) => return response,
                                 Err(e) => {
                                     tracing::error!(error = %e, "Failed to synthesize OpenAI streaming response");
@@ -1621,6 +1623,7 @@ mod tests {
             },
             detection: crate::config::DetectionConfig::default(),
             streaming: streaming_config,
+            synthesis: crate::config::SynthesisConfig::default(),
             augment_backend: None,
             reprompt: None,
             dump: crate::config::DumpConfig::default(),
@@ -1850,6 +1853,7 @@ mod tests {
             },
             detection: crate::config::DetectionConfig::default(),
             streaming,
+            synthesis: crate::config::SynthesisConfig::default(),
             augment_backend: None,
             reprompt: None,
             dump: crate::config::DumpConfig::default(),
