@@ -146,7 +146,6 @@ backend:
 #                 the buffered generation in fake mode: a stream still running at the
 #                 deadline is aborted mid-body.
 #   disabled    - reserved; behaves identically to fake until enforced in the request path.
-#   accumulator - deprecated alias for passthrough.
 # streaming: fake
 
 # Stats logging (default: enabled, pretty format, log every request)

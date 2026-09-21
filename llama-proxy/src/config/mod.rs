@@ -239,6 +239,10 @@ fn default_fixes_enabled() -> bool {
     true
 }
 
+fn always_true() -> bool {
+    true
+}
+
 impl Default for FixesConfig {
     fn default() -> Self {
         Self {
@@ -251,6 +255,7 @@ impl Default for FixesConfig {
 /// Individual fix module configuration
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct FixModuleConfig {
+    #[serde(default = "always_true")]
     pub enabled: bool,
     #[serde(flatten)]
     pub options: HashMap<String, serde_yaml::Value>,
@@ -349,8 +354,6 @@ pub enum StreamingMode {
     #[default]
     Fake,
     /// Backend SSE copied verbatim, stats computed from accumulated raw bytes.
-    /// Accepts the legacy name `accumulator` as an alias.
-    #[serde(alias = "accumulator")]
     Passthrough,
 }
 
@@ -395,13 +398,12 @@ impl StreamingMode {
     }
 
     /// Parse a mode from a CLI string (case-insensitive).
-    /// Returns None for unknown values. `accumulator` is accepted as a
-    /// deprecated alias for `passthrough`.
+    /// Returns None for unknown values.
     pub fn from_str_mode(s: &str) -> Option<Self> {
         match s.to_lowercase().as_str() {
             "disabled" => Some(StreamingMode::Disabled),
             "fake" => Some(StreamingMode::Fake),
-            "passthrough" | "accumulator" => Some(StreamingMode::Passthrough),
+            "passthrough" => Some(StreamingMode::Passthrough),
             _ => None,
         }
     }
@@ -493,19 +495,6 @@ fn default_request_prompt_file() -> String {
     "./augmenter/request_prompt.md".to_string()
 }
 
-impl Default for AugmentBackendConfig {
-    fn default() -> Self {
-        Self {
-            enabled: default_augment_enabled(),
-            url: String::new(),
-            model: String::new(),
-            prompt_file: default_prompt_file(),
-            request_prompt_file: default_request_prompt_file(),
-            timeout_secs: default_augment_timeout_secs(),
-        }
-    }
-}
-
 /// Error when augment-backend is configured but not properly set up
 #[derive(Debug, Clone)]
 pub struct AugmentBackendError {
@@ -519,6 +508,22 @@ impl std::fmt::Display for AugmentBackendError {
 }
 
 impl std::error::Error for AugmentBackendError {}
+
+// NOTE: the Default impl stays until augment.rs's test fixture (1272) drops
+// its `..Default::default()` struct-update — that file is off-limits to this
+// task; see big-fix 73 DONECLAIM (blocked items).
+impl Default for AugmentBackendConfig {
+    fn default() -> Self {
+        Self {
+            enabled: default_augment_enabled(),
+            url: String::new(),
+            model: String::new(),
+            prompt_file: default_prompt_file(),
+            request_prompt_file: default_request_prompt_file(),
+            timeout_secs: default_augment_timeout_secs(),
+        }
+    }
+}
 
 /// Reprompt engine configuration — silently re-prompts on premature stop
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -689,25 +694,6 @@ impl AppConfig {
         load_config(path)
     }
 
-    /// Load configuration with fallback to default path
-    pub fn load_or_default(config_path: Option<&Path>) -> Result<Self, ConfigError> {
-        match config_path {
-            Some(path) => Self::from_file(path),
-            None => {
-                // Try default locations
-                let default_paths = ["config.yaml", "config.yml", "./config/config.yaml"];
-                for p in default_paths {
-                    let path = Path::new(p);
-                    if path.exists() {
-                        return Self::from_file(path);
-                    }
-                }
-                Err(ConfigError::NotFound(
-                    "No config file found. Tried: config.yaml, config.yml, ./config/config.yaml".to_string(),
-                ))
-            }
-        }
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -899,24 +885,6 @@ mod tests {
     }
 
     #[test]
-    fn test_load_or_default_none() {
-        // Create a temporary directory without config files to test error case
-        let temp_dir = tempfile::TempDir::new().unwrap();
-        let _ = std::env::set_current_dir(temp_dir.path());
-
-        // When no path is provided and no default files exist, should return NotFound error
-        let result = AppConfig::load_or_default(None);
-        assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), ConfigError::NotFound(_)));
-    }
-
-    #[test]
-    fn test_load_or_default_with_path() {
-        let result = AppConfig::load_or_default(Some(Path::new("/nonexistent/config.yaml")));
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn test_server_config() {
         let config = ServerConfig {
             port: 8066,
@@ -1015,12 +983,10 @@ mod tests {
         let disabled: StreamingMode = serde_json::from_str("\"disabled\"").unwrap();
         let fake: StreamingMode = serde_json::from_str("\"fake\"").unwrap();
         let passthrough: StreamingMode = serde_json::from_str("\"passthrough\"").unwrap();
-        let legacy: StreamingMode = serde_json::from_str("\"accumulator\"").unwrap();
 
         assert_eq!(disabled, StreamingMode::Disabled);
         assert_eq!(fake, StreamingMode::Fake);
         assert_eq!(passthrough, StreamingMode::Passthrough);
-        assert_eq!(legacy, StreamingMode::Passthrough);
     }
 
     #[test]
@@ -1028,7 +994,7 @@ mod tests {
         assert_eq!(StreamingMode::from_str_mode("disabled"), Some(StreamingMode::Disabled));
         assert_eq!(StreamingMode::from_str_mode("FAKE"), Some(StreamingMode::Fake));
         assert_eq!(StreamingMode::from_str_mode("Passthrough"), Some(StreamingMode::Passthrough));
-        assert_eq!(StreamingMode::from_str_mode("accumulator"), Some(StreamingMode::Passthrough));
+        assert_eq!(StreamingMode::from_str_mode("accumulator"), None, "the legacy alias is deleted (D2)");
         assert_eq!(StreamingMode::from_str_mode("bogus"), None);
     }
 
@@ -1230,6 +1196,11 @@ model: "fast-model"
     }
 
     #[test]
+    fn test_augment_backend_default_impl_timeout_is_15() {
+        assert_eq!(AugmentBackendConfig::default().timeout_secs, 15);
+    }
+
+    #[test]
     fn test_augment_backend_timeout_secs_absent_defaults_15() {
         let yaml = r#"
 url: "http://localhost:8701"
@@ -1253,10 +1224,6 @@ timeout_secs: 42
         assert_eq!(cfg.timeout_secs, 42);
     }
 
-    #[test]
-    fn test_augment_backend_default_impl_timeout_is_15() {
-        assert_eq!(AugmentBackendConfig::default().timeout_secs, 15);
-    }
 }
 
 #[cfg(test)]
@@ -1381,5 +1348,23 @@ mod deny_unknown_fields_tests {
         let cfg: RepromptConfig =
             serde_yaml::from_str("enabled: true\nprompt: \"x\"\ndone_sentinel: \"FINISH\"\n").expect("alias key must load");
         assert_eq!(cfg.done_sentinels, vec!["FINISH".to_string()]);
+    }
+}
+
+#[cfg(test)]
+mod dead_surface_tests {
+    use super::*;
+
+    #[test]
+    fn fix_module_without_enabled_key_defaults_enabled() {
+        let cfg: FixModuleConfig = serde_yaml::from_str("{}").expect("bare module must parse");
+        assert!(cfg.enabled, "a bare module entry must mean enabled");
+    }
+
+    #[test]
+    fn deleted_accumulator_alias_is_now_unknown() {
+        let err = serde_yaml::from_str::<StreamingMode>("accumulator")
+            .expect_err("the legacy accumulator spelling must be gone (D2)");
+        assert!(err.to_string().contains("accumulator"), "got {err}");
     }
 }
