@@ -51,16 +51,22 @@ pub static PASSTHROUGH_STREAMS_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// grow pending without bound. On breach we release pending verbatim.
 const PENDING_HIGH_WATER: usize = 1024 * 1024;
 
-/// Byte-accurate SSE framing: splits a raw byte stream into complete
+/// Byte-framed SSE: splits a raw byte stream into complete
 /// `\n\n`-terminated events, holding an unterminated tail until it completes.
 /// Operates on raw bytes; never decodes, reparses, or reserializes on the hot
-/// path, so events reach the client byte-for-byte as the backend sent them.
+/// path. Line endings are normalized to LF before the scan ([D-M1]: the SSE
+/// spec allows LF, CRLF, or lone CR as line terminators, and a `\r\n\r\n`
+/// blank line must dispatch an event exactly like `\n\n`); apart from that
+/// normalization events reach the client as the backend sent them.
 struct FramingState {
     pending: Vec<u8>,
     // Unscanned frontier: bytes before it were already scanned for
     // terminators, except the very last one (a terminator's two \n may
     // straddle a chunk boundary). Keeps total scanning O(total bytes).
     scan_from: usize,
+    // A CR ended the last push: whether it was CRLF (one LF) or a lone CR
+    // line terminator (also one LF) needs the next push's first byte.
+    cr_held: bool,
 }
 
 enum Framed {
@@ -79,11 +85,37 @@ impl FramingState {
         Self {
             pending: Vec::new(),
             scan_from: 0,
+            cr_held: false,
         }
     }
 
     fn push(&mut self, bytes: &[u8]) {
-        self.pending.extend_from_slice(bytes);
+        let mut rest = bytes;
+        if self.cr_held {
+            self.cr_held = false;
+            // The held CR is one line break either way; an LF starting this
+            // push is that break's tail and is swallowed by it.
+            self.pending.push(b'\n');
+            if rest.first() == Some(&b'\n') {
+                rest = &rest[1..];
+            }
+        }
+        // Normalize before the pending scan: CRLF and lone CR (both legal SSE
+        // line terminators) each become exactly one LF; a CR as the very last
+        // byte stays undecided until the next push.
+        let mut cursor = 0;
+        while let Some(rel) = rest[cursor..].iter().position(|&b| b == b'\r') {
+            let idx = cursor + rel;
+            self.pending.extend_from_slice(&rest[cursor..idx]);
+            if idx + 1 < rest.len() {
+                self.pending.push(b'\n');
+                cursor = if rest[idx + 1] == b'\n' { idx + 2 } else { idx + 1 };
+            } else {
+                self.cr_held = true;
+                cursor = idx + 1;
+            }
+        }
+        self.pending.extend_from_slice(&rest[cursor..]);
     }
 
     /// Release all complete events as one byte block, or signal a forced flush.
@@ -115,7 +147,13 @@ impl FramingState {
                     pending_bytes = self.pending.len(),
                     "SSE framer exceeded high-water mark without an event terminator; flushing verbatim"
                 );
-                let out = std::mem::take(&mut self.pending);
+                let out = {
+                    if self.cr_held {
+                        self.cr_held = false;
+                        self.pending.push(b'\n');
+                    }
+                    std::mem::take(&mut self.pending)
+                };
                 self.scan_from = 0;
                 Framed::ForceFlush(out)
             } else {
@@ -127,6 +165,10 @@ impl FramingState {
     /// Release any unterminated tail verbatim (stream end or client disconnect)
     fn finish(&mut self) -> Option<Vec<u8>> {
         self.scan_from = 0;
+        if self.cr_held {
+            self.cr_held = false;
+            self.pending.push(b'\n');
+        }
         if self.pending.is_empty() {
             None
         } else {
@@ -1700,9 +1742,112 @@ mod framing_tests {
     }
 
     #[test]
-    fn crlf_not_a_terminator_but_high_water_flushes() {
-        // CRLF framing is NOT treated as a terminator: bytes must still reach
-        // the client eventually via the high-water flush or stream end.
+    fn crlf_events_frame_exactly() {
+        // Plan acceptance: "data: x\r\n\r\ndata: y\r\n\r\n" yields exactly two
+        // events. Baseline framed zero (Framed::Nothing, both events stuck in
+        // pending - captured raw in task52 evidence).
+        let (emitted, st) = frame_all(&[b"data: x\r\n\r\ndata: y\r\n\r\n"]);
+        assert_eq!(emitted, b"data: x\n\ndata: y\n\n".to_vec());
+        assert!(st.pending.is_empty());
+        assert_eq!(count_double_newlines(&emitted), 2);
+    }
+
+    #[test]
+    fn crlf_terminator_split_across_chunks() {
+        // The CR arrives at the end of one chunk, its LF in the next; the
+        // event must still frame, exactly once, with exactly one LF pair.
+        let (emitted, st) = frame_all(&[b"data: x\r", b"\n\r", b"\ndata: y\r\n\r\n"]);
+        assert_eq!(emitted, b"data: x\n\ndata: y\n\n".to_vec());
+        assert!(st.pending.is_empty());
+    }
+
+    #[test]
+    fn mixed_crlf_and_lf_frame() {
+        let (emitted, mut st) = frame_all(&[b"data: a\r\n\ndata: b\n\r"]);
+        // The trailing CR is held, not yet a break; the first event is out.
+        assert_eq!(emitted, b"data: a\n\n".to_vec());
+        assert_eq!(st.finish().unwrap(), b"data: b\n\n".to_vec());
+    }
+
+    #[test]
+    fn lone_cr_is_a_line_break() {
+        // SSE spec: a lone CR is a line terminator, so \r\r is a blank line.
+        let (emitted, mut st) = frame_all(&[b"data: x\r\rdata: y\r\r"]);
+        assert_eq!(emitted, b"data: x\n\n".to_vec());
+        // The corpus's final CR is still held at stream end; finish() completes
+        // the second event's blank line.
+        let mut emitted = emitted;
+        emitted.extend_from_slice(&st.finish().unwrap());
+        assert_eq!(emitted, b"data: x\n\ndata: y\n\n".to_vec());
+    }
+
+    #[test]
+    fn crlf_done_frames_and_signals_completion() {
+        // A CRLF-framed [DONE] now reaches the completion detector as a framed
+        // block (baseline: framing never emitted it, so detection never ran).
+        let mut st = FramingState::new();
+        st.push(b"data: [DONE]\r\n\r\n");
+        let out = match st.take_framed() {
+            Framed::Events(b) => b,
+            other => panic!("expected framed event, got {:?}", std::mem::discriminant(&other)),
+        };
+        let mut tx = Some(tokio::sync::oneshot::channel::<StreamEnd>().0);
+        assert!(detect_and_signal_completion(&out, &mut tx));
+        assert!(tx.is_none());
+    }
+
+    #[test]
+    fn held_cr_flushes_at_stream_end() {
+        let mut st = FramingState::new();
+        st.push(b"data: tail\r");
+        assert!(matches!(st.take_framed(), Framed::Nothing));
+        assert_eq!(st.finish().unwrap(), b"data: tail\n".to_vec());
+        assert!(st.finish().is_none());
+    }
+
+    #[test]
+    fn bom_passes_through_framing() {
+        // No interpretation beyond framing: a UTF-8 BOM rides the bytes and
+        // must not disturb the CRLF terminator.
+        let (emitted, st) = frame_all(&[b"\xEF\xBB\xBFdata: x\r\n\r\n"]);
+        assert_eq!(emitted, b"\xEF\xBB\xBFdata: x\n\n".to_vec());
+        assert!(st.pending.is_empty());
+    }
+
+    #[test]
+    fn crlf_corpus_reassembles_normalized() {
+        // Property: any 2-way split of a CRLF corpus reassembles (modulo the
+        // documented line-ending normalization) with no byte lost or added.
+        fn normalize(v: &[u8]) -> Vec<u8> {
+            let mut out = Vec::with_capacity(v.len());
+            let mut i = 0;
+            while i < v.len() {
+                if v[i] == b'\r' {
+                    out.push(b'\n');
+                    i += if v.get(i + 1) == Some(&b'\n') { 2 } else { 1 };
+                } else {
+                    out.push(v[i]);
+                    i += 1;
+                }
+            }
+            out
+        }
+        let corpus: Vec<u8> =
+            b"data: {\"a\":1}\r\n\r\nevent: message_stop\rdata: {\"type\":\"message_stop\"}\r\n\r\n\r\n: ping\r\n\r\n".to_vec();
+        let expected = normalize(&corpus);
+        for i in 1..corpus.len() {
+            let (mut emitted, mut st) = frame_all(&[&corpus[..i], &corpus[i..]]);
+            if let Some(tail) = st.finish() {
+                emitted.extend_from_slice(&tail);
+            }
+            assert_eq!(emitted, expected, "2-way CRLF split at {}", i);
+        }
+    }
+
+    #[test]
+    fn high_water_flush_without_terminator() {
+        // (retargeted from crlf_not_a_terminator_but_high_water_flushes: its
+        // fixture never contained a CR; CRLF now frames, this pins high-water.)
         let mut st = FramingState::new();
         let big = vec![b'a'; PENDING_HIGH_WATER + 10];
         st.push(&big);
