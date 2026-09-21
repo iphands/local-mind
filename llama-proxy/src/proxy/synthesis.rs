@@ -476,63 +476,43 @@ pub fn synthesize_anthropic_openai_format_response(raw: &Value, config: &Synthes
     Some(stream_response(chunks, config))
 }
 
-/// Split text into chunks of approximately max_size characters
+/// Split text into chunks of AT MOST `max_size` Unicode scalars (chars).
 ///
-/// This creates the "streaming" effect for text content.
+/// The budget is CHARACTERS, not bytes: `chunk_size_chars` (config/README)
+/// promises chars, so a CJK payload gets the promised char count per chunk
+/// rather than ~1/3 of it (a byte budget). Every cut sits on a char boundary
+/// BY CONSTRUCTION - `char_indices` only ever yields boundary offsets, so no
+/// budget can split a multi-byte scalar.
 /// Tries to split on whitespace boundaries when possible.
 fn split_chars(text: &str, max_size: usize) -> Vec<String> {
-    if text.len() <= max_size {
+    if text.chars().count() <= max_size {
         return vec![text.to_string()];
     }
 
     let mut chunks = Vec::new();
-    let mut start = 0;
-
-    while start < text.len() {
-        let raw_end = (start + max_size).min(text.len());
-        // Align raw_end backward to a char boundary (avoids panic on multi-byte chars like emojis)
-        let end = floor_char_boundary(text, raw_end);
-        // Guarantee at least one char of progress to prevent an infinite loop
-        let end = if end <= start {
-            text[start..]
-                .char_indices()
-                .nth(1)
-                .map(|(i, _)| start + i)
-                .unwrap_or(text.len())
-        } else {
-            end
-        };
-
-        // Try to split on whitespace if not at the end
-        let chunk_end = if end < text.len() {
-            // Use char_indices so the advance past the whitespace char is always correct
-            text[start..end]
+    let mut rest = text;
+    while !rest.is_empty() {
+        // Byte offset just past the max_size-th char == the window end.
+        // `max_size.max(1)` guarantees at least one char of progress when
+        // max_size is 0 (prevents an infinite loop).
+        let window = rest.char_indices().nth(max_size.max(1)).map_or(rest.len(), |(i, _)| i);
+        // Prefer ending the chunk just after the last whitespace inside the
+        // window (word-friendly); both offsets are char boundaries anyway.
+        let cut = if window < rest.len() {
+            rest[..window]
                 .char_indices()
                 .rev()
                 .find(|(_, c)| c.is_whitespace())
-                .map(|(i, c)| start + i + c.len_utf8())
-                .unwrap_or(end)
+                .map_or(window, |(i, c)| i + c.len_utf8())
         } else {
-            end
+            window
         };
 
-        chunks.push(text[start..chunk_end].to_string());
-        start = chunk_end;
+        chunks.push(rest[..cut].to_string());
+        rest = &rest[cut..];
     }
 
     chunks
-}
-
-/// Return the largest index ≤ `index` that is a UTF-8 char boundary.
-fn floor_char_boundary(s: &str, index: usize) -> usize {
-    if index >= s.len() {
-        return s.len();
-    }
-    let mut i = index;
-    while i > 0 && !s.is_char_boundary(i) {
-        i -= 1;
-    }
-    i
 }
 
 /// Create an SSE Event from JSON
@@ -887,8 +867,11 @@ mod tests {
 
     #[test]
     fn test_split_chars_multibyte_emoji() {
-        // Emojis are 4 bytes each; a chunk boundary mid-emoji must not panic
-        // "💡" is 4 bytes; 12 emojis = 48 bytes, chunk_size=50 puts end at byte 50 (inside emoji 13)
+        // Lossless-reconstruction pin for 4-byte scalars. Since F12-R6 the budget
+        // is counted in chars, so no budget can land mid-emoji (char_indices cuts
+        // are boundary-safe by construction); mid-string emoji splitting with an
+        // exact per-chunk char count is pinned by
+        // test_split_chars_budget_counts_chars_not_bytes.
         let text = "💡".repeat(20); // 80 bytes total
         let chunks = split_chars(&text, 50);
         // All chunks must be valid UTF-8 strings (no panic = pass)
@@ -1039,10 +1022,38 @@ mod tests {
 
     #[test]
     fn test_split_chars_exact_size() {
-        let text = "a".repeat(50);
+        // F12-R6 retarget (sole sanctioned synthesis retarget): this pinned the OLD
+        // byte budget - ASCII made bytes==chars so it never told the two apart.
+        // The budget is CHARS (Unicode scalars): 50 CJK chars (150 bytes) at
+        // budget 50 is exactly one chunk. Pre-fix this split into 4 chunks of
+        // <=50 BYTES (~16 chars) - RED raw in f12-fix-r6 evidence.
+        let text = "中".repeat(50);
         let chunks = split_chars(&text, 50);
         assert_eq!(chunks.len(), 1);
-        assert_eq!(chunks[0].len(), 50);
+        assert_eq!(chunks[0].chars().count(), 50);
+    }
+
+    #[test]
+    fn test_split_chars_budget_counts_chars_not_bytes() {
+        // F12-R6: chunk_size_chars must hold N Unicode SCALARS per chunk
+        // regardless of byte width. The byte budget gave CJK ~N/3 chars and
+        // emoji ~N/4 (RED pre-fix: 90 CJK at budget 30 -> 9 chunks of 10 chars;
+        // 20 emoji at budget 10 -> 10 chunks of 2 chars - f12-fix-r6 raw).
+        // No whitespace anywhere: the window end IS the cut, so sizes are exact.
+        let cjk = "中".repeat(90);
+        let chunks = split_chars(&cjk, 30);
+        assert_eq!(chunks.len(), 3);
+        for chunk in &chunks {
+            assert_eq!(chunk.chars().count(), 30, "every window fits 30 scalars exactly");
+        }
+        assert_eq!(chunks.concat(), cjk);
+
+        let emoji = "💡".repeat(20);
+        let chunks = split_chars(&emoji, 10);
+        assert_eq!(chunks.len(), 2);
+        assert_eq!(chunks[0].chars().count(), 10);
+        assert_eq!(chunks[1].chars().count(), 10);
+        assert_eq!(chunks.concat(), emoji);
     }
 
     // ========================================================================
@@ -1561,11 +1572,15 @@ mod envelope_factory_tests {
     async fn refactor_preserves_exact_sse_bytes() {
         // Golden bytes captured VERBATIM from the REAL response for this exact fixture.
         // Pre-58 capture proved the sse_envelope refactor was byte-identical (task58
-        // evidence); retargeted in task 59 (order/derivation) and again in task 61 for
-        // the RAW-Value path: extras (system_fingerprint, x_top_unknown) ride every
-        // chunk, choices[1] now streams at index 1, and usage carries llama_extra
-        // verbatim. Disclosed behavior change - baseline drops these (task61 capture).
-        const BASELINE_BYTES: &str = "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_text\":\"Hmm, let me think.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Answer here.\"},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"function\":{\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\",\"name\":\"lookup\"},\"id\":\"call_1\",\"type\":\"function\"}]},\"finish_reason\":null,\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"tool_calls\",\"index\":0}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null,\"index\":1}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"SECOND CHOICE\"},\"finish_reason\":null,\"index\":1}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\",\"index\":1}],\"created\":171,\"id\":\"cmpl-probe\",\"model\":\"qwen3\",\"object\":\"chat.completion.chunk\",\"system_fingerprint\":\"fp_999\",\"usage\":{\"completion_tokens\":7,\"llama_extra\":{\"k\":1},\"prompt_tokens\":5,\"total_tokens\":12},\"x_top_unknown\":{\"alpha\":true}}\n\ndata: [DONE]\n\n";
+        // evidence); retargeted in task 59 (order/derivation), again in task 61 for
+        // the RAW-Value path (extras ride every chunk, choices[1] streams at index 1,
+        // usage carries llama_extra verbatim), and AGAIN in F12-R6 for serde_json
+        // preserve_order (ed9d3c2): the wire is now INSERTION order (id, object,
+        // created, model, choices, then extras; usage appended last on the final
+        // frame) instead of BTreeMap alphabetical. Clients now see the key order the
+        // backend declared - closer to the pass-through principle. New golden was
+        // derived from the ACTUAL serialization (panic left-hand raw), never hand-guessed.
+        const BASELINE_BYTES: &str = "data: {\"id\":\"cmpl-probe\",\"object\":\"chat.completion.chunk\",\"created\":171,\"model\":\"qwen3\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}],\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"id\":\"cmpl-probe\",\"object\":\"chat.completion.chunk\",\"created\":171,\"model\":\"qwen3\",\"choices\":[{\"index\":0,\"delta\":{\"reasoning_text\":\"Hmm, let me think.\"},\"finish_reason\":null}],\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"id\":\"cmpl-probe\",\"object\":\"chat.completion.chunk\",\"created\":171,\"model\":\"qwen3\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"Answer here.\"},\"finish_reason\":null}],\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"id\":\"cmpl-probe\",\"object\":\"chat.completion.chunk\",\"created\":171,\"model\":\"qwen3\",\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",\"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\\\"x\\\"}\"}}]},\"finish_reason\":null}],\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"id\":\"cmpl-probe\",\"object\":\"chat.completion.chunk\",\"created\":171,\"model\":\"qwen3\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"tool_calls\"}],\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"id\":\"cmpl-probe\",\"object\":\"chat.completion.chunk\",\"created\":171,\"model\":\"qwen3\",\"choices\":[{\"index\":1,\"delta\":{\"role\":\"assistant\"},\"finish_reason\":null}],\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"id\":\"cmpl-probe\",\"object\":\"chat.completion.chunk\",\"created\":171,\"model\":\"qwen3\",\"choices\":[{\"index\":1,\"delta\":{\"content\":\"SECOND CHOICE\"},\"finish_reason\":null}],\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true}}\n\ndata: {\"id\":\"cmpl-probe\",\"object\":\"chat.completion.chunk\",\"created\":171,\"model\":\"qwen3\",\"choices\":[{\"index\":1,\"delta\":{},\"finish_reason\":\"stop\"}],\"system_fingerprint\":\"fp_999\",\"x_top_unknown\":{\"alpha\":true},\"usage\":{\"prompt_tokens\":5,\"completion_tokens\":7,\"total_tokens\":12,\"llama_extra\":{\"k\":1}}}\n\ndata: [DONE]\n\n";
 
         let raw = serde_json::json!({
             "id": "cmpl-probe", "object": "chat.completion", "created": 171, "model": "qwen3",
@@ -1804,7 +1819,7 @@ mod tool_result_signature_tests {
         let stop1 = rfind_index(&b, 1);
         assert!(start1 < stop1, "start before stop at index 1");
         assert!(
-            b.contains("\"index\":1,\"type\":\"content_block_stop\""),
+            b.contains("\"type\":\"content_block_stop\",\"index\":1"),
             "gap-free: stop at index 1"
         );
     }
@@ -1860,7 +1875,9 @@ mod tool_result_signature_tests {
     }
 
     fn rfind_index(b: &str, idx: usize) -> usize {
-        let pat = format!("\"index\":{idx},\"type\":\"content_block_stop\"");
+        // F12-R6: insertion-order wire (serde_json preserve_order) serializes
+        // content_block_stop as {"type":...,"index":N} - the needle follows the wire.
+        let pat = format!("\"type\":\"content_block_stop\",\"index\":{idx}");
         b.rfind(&pat).expect("stop frame present")
     }
 }
