@@ -16,9 +16,11 @@
 //! This fix:
 //! 1. Detects tool calls with malformed arguments containing `{}"` property names
 //! 2. Uses tool schemas from the request to determine the correct parameter name
-//! 3. Replaces each malformed property name with the next missing schema name, in order
+//! 3. Fills a slot ONLY when exactly one schema parameter is missing; on an
+//!    ambiguous or empty candidate set it returns `Err` (no-guess, task 27) so
+//!    the registry forwards the ORIGINAL response untouched
 
-use super::{FixAction, FixError, ResponseFix};
+use super::{json_scan::top_level_key_count, FixAction, FixError, ResponseFix};
 use regex::Regex;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -63,46 +65,59 @@ impl ToolcallMalformedArgumentsFix {
         schemas
     }
 
-    /// Attempt to fix malformed arguments using tool schema
-    /// Returns Some(fixed_args) on success, None on failure
-    fn fix_arguments(&self, args_str: &str, tool_name: &str, schemas: &HashMap<String, Vec<String>>) -> Option<String> {
-        // Check if arguments contain malformed pattern
+    /// Attempt to fix malformed arguments using the tool schema, WITHOUT guessing.
+    ///
+    /// Candidates = schema keys (schema order) minus keys the task-23 scanner
+    /// proves present. The scanner cannot read a malformed document, so presence
+    /// is proven through a masked copy: every `{}` slot is spliced to an
+    /// unguessable sentinel key, and the scanner counts each schema key in that
+    /// copy. Exactly one candidate fills its slots; zero candidates or more than
+    /// one return `Err(Rebuild)` so the registry keeps the ORIGINAL response.
+    /// `Ok(None)` means the input is not our malformed shape at all.
+    fn fix_arguments(
+        &self,
+        args_str: &str,
+        tool_name: &str,
+        schemas: &HashMap<String, Vec<String>>,
+    ) -> Result<Option<String>, FixError> {
         if !self.malformed_pattern.is_match(args_str) {
-            return None;
+            return Ok(None);
         }
 
-        // Get schema for this tool
-        let schema_params = schemas.get(tool_name)?;
+        let Some(schema_params) = schemas.get(tool_name) else {
+            return Ok(None);
+        };
 
-        // Try to parse the malformed JSON to extract the value associated with `{}":`
-        // Pattern: ..."key":"value",{}"="other_value"...
-        // We need to find what parameters are present and what's missing
+        let candidates = self.candidate_keys(args_str, schema_params);
+        let slots = self.malformed_pattern.find_iter(args_str).count();
+        match candidates.as_slice() {
+            [] => Err(FixError::Rebuild("no candidate keys".to_string())),
+            [single] => {
+                let fixed_args = self.splice_empty_key_slots(args_str, &[*single]);
+                if serde_json::from_str::<Value>(&fixed_args).is_ok() {
+                    Ok(Some(fixed_args))
+                } else {
+                    Err(FixError::Rebuild(format!("fill invalid: {slots} slots, 1 candidate")))
+                }
+            }
+            many => Err(FixError::Rebuild(format!("ambiguous: {} candidates", many.len()))),
+        }
+    }
 
-        // First, try to parse as-is to see what we get
-        let parsed = self.aggressive_parse_json(args_str)?;
-
-        // Find which schema parameters are missing from parsed object, in schema order.
-        let parsed_keys: Vec<String> = parsed.keys().map(|k| k.to_string()).collect();
-        let missing_params: Vec<&str> = schema_params
+    /// Schema keys not present in `args_str`, in schema order. Presence is proven
+    /// on a masked copy of the arguments — every `{}` slot spliced to a sentinel
+    /// key no schema can contain — because the task-23 scanner only reads valid
+    /// JSON; on a document that stays invalid even masked, no key is provably
+    /// present, so every schema key is a candidate and ambiguity errors out.
+    fn candidate_keys<'a>(&self, args_str: &str, schema_params: &'a [String]) -> Vec<&'a str> {
+        const SENTINEL: &str = "\\u0000llama-proxy-slot";
+        let slots = self.malformed_pattern.find_iter(args_str).count();
+        let masked = self.splice_empty_key_slots(args_str, &vec![SENTINEL; slots]);
+        schema_params
             .iter()
-            .filter(|p| !parsed_keys.contains(p))
-            .map(|p| p.as_str())
-            .collect();
-
-        if missing_params.is_empty() {
-            return None;
-        }
-
-        // Splice the missing keys over the empty-key `{}` slots positionally: occurrence N
-        // gets missing key N. A slot beyond the missing count keeps its `{}` token, so the
-        // result fails the validity gate below and the original arguments are preserved.
-        let fixed_args = self.splice_empty_key_slots(args_str, &missing_params);
-
-        if serde_json::from_str::<Value>(&fixed_args).is_ok() {
-            Some(fixed_args)
-        } else {
-            None
-        }
+            .map(String::as_str)
+            .filter(|k| top_level_key_count(&masked, k) == 0)
+            .collect()
     }
 
     /// Splice `missing` keys over the empty-key `{}` slots in `args_str`, left to right.
@@ -139,68 +154,10 @@ impl ToolcallMalformedArgumentsFix {
         out
     }
 
-    /// Aggressively parse JSON, trying to extract key-value pairs even from malformed input
-    fn aggressive_parse_json(&self, json_str: &str) -> Option<HashMap<String, Value>> {
-        // First try normal parsing
-        if let Ok(val) = serde_json::from_str::<Value>(json_str) {
-            if let Some(obj) = val.as_object() {
-                return Some(obj.iter().map(|(k, v)| (k.clone(), v.clone())).collect());
-            }
-        }
-
-        // Try to extract key-value pairs manually
-        let mut result = HashMap::new();
-
-        // Pattern: "key":"value" (quoted key, string value)
-        let str_pattern = Regex::new(r#""([^"]+)"\s*:\s*"([^"]*)""#).ok()?;
-        for cap in str_pattern.captures_iter(json_str) {
-            if let (Some(key), Some(val)) = (cap.get(1), cap.get(2)) {
-                result.insert(key.as_str().to_string(), Value::String(val.as_str().to_string()));
-            }
-        }
-
-        // Pattern: unquoted_key":"value" (UNQUOTED key like {}, string value)
-        // Matches sequences like: ,{}"="value" or {{}":"value"
-        let unquoted_str_pattern = Regex::new(r#"[,\{]([^\s"]+)"\s*:\s*"([^"]*)""#).ok()?;
-        for cap in unquoted_str_pattern.captures_iter(json_str) {
-            if let Some(key) = cap.get(1) {
-                if key.as_str() == "{}" {
-                    continue;
-                }
-                if let Some(val) = cap.get(2) {
-                    result.insert(key.as_str().to_string(), Value::String(val.as_str().to_string()));
-                }
-            }
-        }
-
-        // Pattern: "key":number
-        let num_pattern = Regex::new(r#""([^"]+)"\s*:\s*(-?[0-9]+\.?[0-9]*)"#).ok()?;
-        for cap in num_pattern.captures_iter(json_str) {
-            if let (Some(key), Some(val)) = (cap.get(1), cap.get(2)) {
-                if let Ok(num) = val.as_str().parse::<f64>() {
-                    result.insert(key.as_str().to_string(), serde_json::json!(num));
-                }
-            }
-        }
-
-        // Pattern: "key":true/false
-        let bool_pattern = Regex::new(r#""([^"]+)"\s*:\s*(true|false)"#).ok()?;
-        for cap in bool_pattern.captures_iter(json_str) {
-            if let (Some(key), Some(val)) = (cap.get(1), cap.get(2)) {
-                let bool_val = val.as_str() == "true";
-                result.insert(key.as_str().to_string(), Value::Bool(bool_val));
-            }
-        }
-
-        if result.is_empty() {
-            None
-        } else {
-            Some(result)
-        }
-    }
-
-    /// Fix tool calls in response using request context
-    fn fix_response_with_context(&self, mut response: Value, request: &Value) -> (Value, FixAction) {
+    /// Fix tool calls in response using request context. The first tool call whose
+    /// candidate set is not exactly one aborts the whole repair with `Err`: the
+    /// registry fail-safe (task 31) then forwards the ORIGINAL response.
+    fn fix_response_with_context(&self, mut response: Value, request: &Value) -> Result<(Value, FixAction), FixError> {
         let schemas = Self::extract_tool_schemas(request);
 
         if schemas.is_empty() {
@@ -208,7 +165,7 @@ impl ToolcallMalformedArgumentsFix {
                 fix_name = self.name(),
                 "No tool schemas in request - cannot fix malformed arguments without context"
             );
-            return (response, FixAction::NotApplicable);
+            return Ok((response, FixAction::NotApplicable));
         }
 
         let mut overall_action = FixAction::NotApplicable;
@@ -223,10 +180,14 @@ impl ToolcallMalformedArgumentsFix {
                                 let tool_name = function.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
 
                                 if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
-                                    let original = args.to_string();
-                                    if let Some(fixed_args) = self.fix_arguments(args, &tool_name, &schemas) {
-                                        function["arguments"] = Value::String(fixed_args.clone());
-                                        overall_action = FixAction::fixed(&original, &fixed_args);
+                                    let args = args.to_string();
+                                    match self.fix_arguments(&args, &tool_name, &schemas) {
+                                        Err(error) => return Err(error),
+                                        Ok(Some(fixed_args)) => {
+                                            function["arguments"] = Value::String(fixed_args.clone());
+                                            overall_action = FixAction::fixed(&args, &fixed_args);
+                                        }
+                                        Ok(None) => {}
                                     }
                                 }
                             }
@@ -236,10 +197,13 @@ impl ToolcallMalformedArgumentsFix {
             }
         }
 
-        (response, overall_action)
+        Ok((response, overall_action))
     }
 
-    /// Fix tool calls in streaming delta using request context
+    /// Fix tool calls in streaming delta using request context. A no-guess `Err`
+    /// (ambiguous or empty candidate set) cannot ride the non-Result streaming
+    /// trait, so that call's chunk passes through byte-verbatim — the same
+    /// original-preserving fail-safe the registry applies on the buffered path.
     fn fix_stream_with_context(&self, mut chunk: Value, request: &Value) -> (Value, FixAction) {
         let schemas = Self::extract_tool_schemas(request);
 
@@ -263,14 +227,18 @@ impl ToolcallMalformedArgumentsFix {
                                 let tool_name = function.get("name").and_then(|n| n.as_str()).unwrap_or("").to_string();
 
                                 if let Some(args) = function.get("arguments").and_then(|a| a.as_str()) {
-                                    // For streaming, we might get partial JSON
-                                    // Only try to fix if we see the malformed pattern
-                                    if self.malformed_pattern.is_match(args) {
-                                        let original = args.to_string();
-                                        if let Some(fixed_args) = self.fix_arguments(args, &tool_name, &schemas) {
+                                    let args = args.to_string();
+                                    match self.fix_arguments(&args, &tool_name, &schemas) {
+                                        Err(error) => tracing::debug!(
+                                            fix_name = self.name(),
+                                            %error,
+                                            "streaming delta left verbatim: no-guess refusal"
+                                        ),
+                                        Ok(Some(fixed_args)) => {
                                             function["arguments"] = Value::String(fixed_args.clone());
-                                            overall_action = FixAction::fixed(&original, &fixed_args);
+                                            overall_action = FixAction::fixed(&args, &fixed_args);
                                         }
+                                        Ok(None) => {}
                                     }
                                 }
                             }
@@ -328,7 +296,7 @@ impl ResponseFix for ToolcallMalformedArgumentsFix {
     }
 
     fn apply_with_context(&self, response: Value, request: &Value) -> Result<(Value, FixAction), FixError> {
-        Ok(self.fix_response_with_context(response, request))
+        self.fix_response_with_context(response, request)
     }
 
     fn apply_stream_with_context(&self, chunk: Value, request: &Value) -> (Value, FixAction) {
@@ -415,7 +383,7 @@ mod tests {
 
         let malformed = "{\"content\":\"#!/bin/bash\\necho hello\",{}\":\"/tmp/test.sh\"}";
 
-        let fixed = fix.fix_arguments(malformed, "write", &schemas);
+        let fixed = fix.fix_arguments(malformed, "write", &schemas).unwrap();
 
         assert!(fixed.is_some());
         let fixed = fixed.unwrap();
@@ -446,7 +414,7 @@ mod tests {
         let result = fix.fix_arguments(valid, "write", &schemas);
 
         // Should return None for valid JSON
-        assert!(result.is_none());
+        assert!(result.unwrap().is_none());
     }
 
     #[test]
@@ -460,26 +428,24 @@ mod tests {
         let result = fix.fix_arguments(malformed, "unknown_tool", &schemas);
 
         // Should return None when tool not in schema
-        assert!(result.is_none());
+        assert!(result.unwrap().is_none());
     }
 
+    // The masked-presence check that replaces aggressive_parse_json must never
+    // see the `{}` garbage token as a key: masked splices it away, so candidates
+    // stay pure schema keys and the lone real candidate fills.
     #[test]
-    fn test_aggressive_parse_json() {
+    fn test_garbage_token_never_a_candidate() {
         let fix = ToolcallMalformedArgumentsFix::new();
+        let schemas = schema_map(&["path", "content"]);
 
         let malformed = "{\"content\":\"test value\",{}\":\"/some/path\"}";
+        assert_eq!(fix.candidate_keys(malformed, &schemas["write"]), vec!["path"]);
 
-        let parsed = fix.aggressive_parse_json(malformed);
-
-        assert!(parsed.is_some());
-        let parsed = parsed.unwrap();
-
-        // Should have extracted the valid key-value pairs
-        assert!(parsed.contains_key("content"));
-        assert_eq!(parsed["content"].as_str().unwrap(), "test value");
-
-        // {} garbage key should NOT be extracted (bug #3 fix)
-        assert!(!parsed.contains_key("{}"));
+        let fixed = fix.fix_arguments(malformed, "write", &schemas).unwrap();
+        let fixed = fixed.expect("lone candidate fills");
+        assert!(!fixed.contains("{}"));
+        serde_json::from_str::<Value>(&fixed).expect("fill is valid JSON");
     }
 
     #[test]
@@ -548,7 +514,7 @@ mod tests {
             }]
         });
 
-        let (fixed, action) = fix.fix_response_with_context(response, &request);
+        let (fixed, action) = fix.fix_response_with_context(response, &request).unwrap();
 
         let args = fixed["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"]
             .as_str()
@@ -646,7 +612,7 @@ mod tests {
 
         let malformed = "{\"content\":\"data\",\"mode\":\"0755\",{}\":\"/tmp/file\"}";
 
-        let fixed = fix.fix_arguments(malformed, "write", &schemas);
+        let fixed = fix.fix_arguments(malformed, "write", &schemas).unwrap();
 
         assert!(fixed.is_some());
         let fixed = fixed.unwrap();
@@ -738,55 +704,81 @@ mod tests {
         m
     }
 
-    // Given two empty-key slots and two missing keys, occurrence N gets missing key N in
-    // schema order (distinct keys, not a single key reused for every slot).
+    // Given two empty-key slots and two missing schema keys the old code GUESSED:
+    // occurrence N took missing key N. Two candidate keys is exactly the ambiguous
+    // case task 27 forbids — the fix must error, not guess. The splicer mechanism
+    // (task 26) is unchanged and stays pinned here at its own level: distinct keys
+    // in schema order, occurrence N gets missing key N.
     #[test]
-    fn test_two_empty_key_slots_assigned_in_schema_order() {
+    fn test_two_empty_key_slots_ambiguous_not_guessed() {
         let fix = ToolcallMalformedArgumentsFix::new();
         let schemas = schema_map(&["path", "mode", "content"]);
 
         let malformed = r#"{"content":"data",{}":"/tmp/a",{}":"hello"}"#;
-        let fixed = fix
+        let err = fix
             .fix_arguments(malformed, "write", &schemas)
-            .expect("two slots / two missing keys must be fixed");
+            .expect_err("two candidate keys must Err, never be positionally guessed");
+        assert!(matches!(err, FixError::Rebuild(_)), "must be Rebuild, got {err:?}");
+        assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates");
 
-        assert_eq!(fixed, r#"{"content":"data","path":"/tmp/a","mode":"hello"}"#);
-        let parsed: Value = serde_json::from_str(&fixed).expect("fixed args are valid JSON");
-        assert_eq!(parsed["path"].as_str().unwrap(), "/tmp/a");
-        assert_eq!(parsed["mode"].as_str().unwrap(), "hello");
-        assert!(!fixed.contains("{}\":"));
+        // Splicer-mechanism pin (task 26, unchanged): given the key list it splices
+        // distinct keys in order — occurrence N gets missing key N.
+        let spliced = fix.splice_empty_key_slots(malformed, &["path", "mode"]);
+        assert_eq!(spliced, r#"{"content":"data","path":"/tmp/a","mode":"hello"}"#);
     }
 
-    // Given one slot and two missing keys, the slot receives the first missing key; the
-    // second missing key has no slot and stays absent.
+    // One slot with two candidate keys (path, mode) must Err: choosing the first
+    // missing key WAS the positional guess. Splicer-level pin kept: one key spliced
+    // into one slot fills it.
     #[test]
-    fn test_one_slot_with_multiple_missing_takes_first_key() {
+    fn test_one_slot_with_multiple_candidates_ambiguous() {
         let fix = ToolcallMalformedArgumentsFix::new();
         let schemas = schema_map(&["path", "mode", "content"]);
 
         let malformed = r#"{"content":"x",{}":"/tmp/a"}"#;
-        let fixed = fix
+        let err = fix
             .fix_arguments(malformed, "write", &schemas)
-            .expect("single slot must be fixed with the first missing key");
+            .expect_err("two candidate keys for one slot must Err");
+        assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates");
 
-        assert_eq!(fixed, r#"{"content":"x","path":"/tmp/a"}"#);
+        assert_eq!(
+            fix.splice_empty_key_slots(malformed, &["path"]),
+            r#"{"content":"x","path":"/tmp/a"}"#
+        );
     }
 
-    // Given more slots than missing keys, the splicer fills the first slot and leaves the
-    // leftover slot's `{}` token untouched, so the result is invalid JSON and
-    // fix_arguments returns None (the caller keeps the original arguments).
+    // Given more slots than viable keys: the lone candidate (content is present)
+    // cannot cover both slots — splicing it leaves the second `{}` token, so the
+    // fill is invalid. The old code returned None silently; under the no-guess rule
+    // this is an Err(Rebuild) and the registry keeps the original — a strictly
+    // louder version of the same preservation. Splicer-level leftover pin kept:
+    // slots past the key list survive byte-verbatim.
     #[test]
-    fn test_more_slots_than_missing_leaves_leftover_untouched() {
+    fn test_more_slots_than_candidates_fill_invalid_err() {
         let fix = ToolcallMalformedArgumentsFix::new();
 
         // leftover slot keeps its `{}` token, byte-verbatim
         let spliced = fix.splice_empty_key_slots(r#"{"content":"x",{}":"/tmp/a",{}":"/tmp/b"}"#, &["path"]);
         assert_eq!(spliced, r#"{"content":"x","path":"/tmp/a",{}":"/tmp/b"}"#);
 
-        // invalid leftover fails validation -> None -> original preserved
         let schemas = schema_map(&["path", "content"]);
-        let result = fix.fix_arguments(r#"{"content":"x",{}":"/tmp/a",{}":"/tmp/b"}"#, "write", &schemas);
-        assert!(result.is_none(), "leftover empty-key slot must fail validation");
+        let err = fix
+            .fix_arguments(r#"{"content":"x",{}":"/tmp/a",{}":"/tmp/b"}"#, "write", &schemas)
+            .expect_err("one candidate cannot fill two slots -> Err, original preserved upstream");
+        assert_eq!(err.to_string(), "rebuild error: fill invalid: 2 slots, 1 candidate");
+    }
+
+    // Zero candidates: every schema key is already present and the `{}` slot is
+    // pure extra garbage. Nothing may be filled — Err("no candidate keys").
+    #[test]
+    fn test_all_schema_keys_present_yields_no_candidate_err() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let schemas = schema_map(&["path", "content"]);
+
+        let err = fix
+            .fix_arguments(r#"{"path":"/p","content":"c",{}":"/tmp/x"}"#, "write", &schemas)
+            .expect_err("all schema keys present: the slot is extra garbage, never guessed away");
+        assert_eq!(err.to_string(), "rebuild error: no candidate keys");
     }
 
     // With no empty-key slots, the splicer returns the input byte-identical and
@@ -799,7 +791,7 @@ mod tests {
         assert_eq!(fix.splice_empty_key_slots(clean, &["z"]), clean);
 
         let schemas = schema_map(&["path", "content"]);
-        assert!(fix.fix_arguments(clean, "write", &schemas).is_none());
+        assert!(fix.fix_arguments(clean, "write", &schemas).unwrap().is_none());
     }
 
     // Naive-regex trap: an empty-string key `"":` living inside a string VALUE is not
@@ -812,7 +804,7 @@ mod tests {
         assert!(!fix.malformed_pattern.is_match(decoy));
 
         let schemas = schema_map(&["path"]);
-        assert!(fix.fix_arguments(decoy, "write", &schemas).is_none());
+        assert!(fix.fix_arguments(decoy, "write", &schemas).unwrap().is_none());
         // Byte-identical: the splicer has nothing to rewrite.
         assert_eq!(fix.splice_empty_key_slots(decoy, &["path"]), decoy);
     }
@@ -827,6 +819,7 @@ mod tests {
         let malformed = r#"{"content":"brace {} here",{}":"/tmp/a"}"#;
         let fixed = fix
             .fix_arguments(malformed, "write", &schemas)
+            .unwrap()
             .expect("real slot must be fixed");
         assert_eq!(fixed, r#"{"content":"brace {} here","path":"/tmp/a"}"#);
     }
@@ -841,35 +834,163 @@ mod tests {
         let malformed = r#"{"outer":{"":1},"content":"x",{}":"/tmp/a"}"#;
         let fixed = fix
             .fix_arguments(malformed, "write", &schemas)
+            .unwrap()
             .expect("top-level slot must be fixed");
         assert_eq!(fixed, r#"{"outer":{"":1},"content":"x","path":"/tmp/a"}"#);
     }
 
-    // Byte-splice proof: CJK values before and after the slots keep their multibyte
-    // payloads verbatim; the splice lands on ASCII structural boundaries regardless.
+    // Byte-splice proof (task 26 splicer, mechanism unchanged): CJK values before
+    // and after the slots keep their multibyte payloads verbatim when the splicer
+    // IS given keys. At fix_arguments level this input is two candidates, which
+    // task 27 refuses to guess — Err, original preserved.
     #[test]
-    fn test_cjk_two_slots_spliced_byte_verbatim() {
+    fn test_cjk_two_slots_splicer_verbatim_but_ambiguous_at_fix_level() {
         let fix = ToolcallMalformedArgumentsFix::new();
         let schemas = schema_map(&["path", "mode", "content"]);
 
         let malformed = r#"{"content":"你好世界",{}":"/路径/文件.rs",{}":"第二"}"#;
-        let fixed = fix
+        let spliced = fix.splice_empty_key_slots(malformed, &["path", "mode"]);
+        assert_eq!(spliced, r#"{"content":"你好世界","path":"/路径/文件.rs","mode":"第二"}"#);
+
+        let err = fix
             .fix_arguments(malformed, "write", &schemas)
-            .expect("two slots must be fixed in order");
-        assert_eq!(fixed, r#"{"content":"你好世界","path":"/路径/文件.rs","mode":"第二"}"#);
+            .expect_err("two candidate keys must Err, not guess");
+        assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates");
     }
 
-    // Byte-splice proof with escaped quotes in a value: the value region is copied
-    // verbatim (the `\"` must survive) while both slots are filled positionally.
+    // Byte-splice proof with escaped quotes (task 26 splicer, mechanism unchanged):
+    // the `\"` value region survives verbatim. Two candidates at fix_arguments
+    // level -> Err under the no-guess rule.
     #[test]
-    fn test_escaped_quote_value_preserved_verbatim() {
+    fn test_escaped_quote_splicer_verbatim_but_ambiguous_at_fix_level() {
         let fix = ToolcallMalformedArgumentsFix::new();
         let schemas = schema_map(&["path", "mode", "content"]);
 
         let malformed = r#"{"content":"say \"hi\"",{}":"/tmp/a",{}":"b"}"#;
-        let fixed = fix
+        let spliced = fix.splice_empty_key_slots(malformed, &["path", "mode"]);
+        assert_eq!(spliced, r#"{"content":"say \"hi\"","path":"/tmp/a","mode":"b"}"#);
+
+        let err = fix
             .fix_arguments(malformed, "write", &schemas)
-            .expect("two slots must be fixed in order");
-        assert_eq!(fixed, r#"{"content":"say \"hi\"","path":"/tmp/a","mode":"b"}"#);
+            .expect_err("two candidate keys must Err, not guess");
+        assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates");
+    }
+
+    // ---- task 27: no-guess candidate parsing ----
+    //
+    // Candidates = (schema keys, iterated in SCHEMA order) minus (keys proven
+    // present by the task-23 scanner on the slot-masked copy). Exactly one
+    // candidate fills; zero or many return Err(Rebuild) so the registry keeps
+    // the ORIGINAL response.
+
+    // The candidate set is computed correctly under CJK schema keys, dotted key
+    // names, and escaped-\" string values mid-object: the scanner sees through
+    // all three, and a dotted key living in a VALUE stays a candidate.
+    #[test]
+    fn task27_candidate_scanner_sanity_cjk_dotted_escaped() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+
+        let cjk = schema_map(&["路径", "内容"]);
+        assert_eq!(fix.candidate_keys(r#"{"内容":"甲",{}":"/乙"}"#, &cjk["write"]), vec!["路径"]);
+
+        let dotted = schema_map(&["a.b", "path"]);
+        assert_eq!(
+            fix.candidate_keys(r#"{"a.b":1,{}":"v"}"#, &dotted["write"]),
+            vec!["path"],
+            "present dotted key drops out"
+        );
+        assert_eq!(
+            fix.candidate_keys(r#"{"x":"a.b",{}":"v"}"#, &dotted["write"]),
+            vec!["a.b", "path"],
+            "dotted key inside a value is not present: both stay candidates, schema order"
+        );
+
+        let escaped = schema_map(&["path", "say \"a.b\""]);
+        assert_eq!(
+            fix.candidate_keys(r#"{"say \"a.b\"":"x",{}":"/tmp/f"}"#, &escaped["write"]),
+            vec!["path"],
+            "escaped-quote key is present; scanner must not desync on the value"
+        );
+    }
+
+    // Ordering independence: the schema list, not the document's insertion order,
+    // is the iteration source. Same missing pair, document unchanged: reversing
+    // the schema reverses the candidate list.
+    #[test]
+    fn task27_candidate_set_follows_schema_order_not_scan_order() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let input = r#"{"content":"c",{}":"x"}"#;
+
+        let order_a = schema_map(&["path", "mode"]);
+        assert_eq!(
+            fix.candidate_keys(input, &order_a["write"]),
+            vec!["path", "mode"],
+            "candidates must be enumerated in schema order"
+        );
+
+        let order_b = schema_map(&["mode", "path"]);
+        assert_eq!(
+            fix.candidate_keys(input, &order_b["write"]),
+            vec!["mode", "path"],
+            "candidate order tracks the schema, independent of scan/insertion order"
+        );
+    }
+
+    // Two-candidate garbage must NEVER be positionally guessed: the fixer errors
+    // and the response reaches the client BYTE-IDENTICAL to the input (the
+    // task-31 registry forwards the untouched original on Err).
+    #[test]
+    fn task27_two_candidates_error_and_response_bytes_preserved() {
+        let fix = ToolcallMalformedArgumentsFix::new();
+        let request = write_request(&["path", "mode", "content"]);
+
+        let args = r#"{"content":"data",{}":"/tmp/a",{}":"b"}"#;
+        let response = json!({
+            "choices": [{
+                "message": {
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "type": "function",
+                        "function": { "name": "write", "arguments": args }
+                    }]
+                }
+            }]
+        });
+        let input_bytes = response.to_string();
+
+        let result = fix.apply_with_context(response.clone(), &request);
+        match result {
+            Ok((v, _a)) => panic!(
+                "RED (harm demonstration) — baseline guessed instead of erroring; \
+                 the wrong-key fill it produced for the client was: {:?}",
+                v["choices"][0]["message"]["tool_calls"][0]["function"]["arguments"].as_str()
+            ),
+            Err(err) => {
+                assert!(matches!(err, FixError::Rebuild(_)), "must be Rebuild, got {err:?}");
+                assert_eq!(err.to_string(), "rebuild error: ambiguous: 2 candidates");
+            }
+        }
+        assert_eq!(
+            response.to_string(),
+            input_bytes,
+            "fixer must not mutate what the fail-safe forwards"
+        );
+    }
+
+    /// Request carrying a `write` tool whose schema key order is exactly `order`.
+    fn write_request(order: &[&str]) -> serde_json::Value {
+        let mut props = serde_json::Map::new();
+        for k in order {
+            props.insert(k.to_string(), json!({"type": "string"}));
+        }
+        json!({
+            "tools": [{
+                "type": "function",
+                "function": {
+                    "name": "write",
+                    "parameters": { "type": "object", "properties": props }
+                }
+            }]
+        })
     }
 }
