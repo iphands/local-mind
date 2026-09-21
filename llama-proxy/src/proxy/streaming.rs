@@ -48,8 +48,16 @@ pub static PASSTHROUGH_STREAMS_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// Maximum bytes the framer will hold without seeing an event terminator.
 /// A backend that never emits a blank line (or terminates events with byte
 /// sequences we don't frame on) would otherwise stall the client forever and
-/// grow pending without bound. On breach we release pending verbatim.
+/// grow pending without bound. On breach we release pending with a
+/// synthesized blank line so the oversized block dispatches client-side.
 const PENDING_HIGH_WATER: usize = 1024 * 1024;
+
+/// Ceiling for a backend-supplied array index (OpenAI tool-call slot,
+/// Anthropic content-block slot) before it is treated as garbage: the
+/// merge grows its array to the index, so one hostile value allocates
+/// without bound. (Plan-era MAX_MERGE_FIELDS: the merge-fields mechanism
+/// is gone; the surviving cap guards indices.)
+const MAX_TRACKED_BLOCK_INDEX: usize = 100;
 
 /// Byte-framed SSE: splits a raw byte stream into complete
 /// `\n\n`-terminated events, holding an unterminated tail until it completes.
@@ -70,12 +78,15 @@ struct FramingState {
 }
 
 enum Framed {
-    /// All complete events to date, verbatim (each including its blank line)
-    Events(Vec<u8>),
+    /// All complete events to date, verbatim (each including its blank line),
+    /// plus the count of event terminators the framer found emitting them -
+    /// the single source of event counts (metrics denominators included).
+    Events(Vec<u8>, usize),
     /// High-water breached with no terminator in sight: these bytes are
-    /// released verbatim so the client is not stalled and pending is bounded.
-    /// Carrying the bytes here (rather than asking the caller to call
-    /// `finish()`) makes a forgotten drain unreachable.
+    /// released with a synthesized blank line so the client's framer
+    /// dispatches the oversized block instead of stalling, and pending is
+    /// bounded. Carrying the bytes here (rather than asking the caller to
+    /// call `finish()`) makes a forgotten drain unreachable.
     ForceFlush(Vec<u8>),
     Nothing,
 }
@@ -130,28 +141,34 @@ impl FramingState {
         );
         let start = self.scan_from.min(self.pending.len().saturating_sub(1));
         let mut last: Option<usize> = None;
+        let mut events = 0usize;
         let mut cursor = start;
         while let Some(rel) = find_double_newline(&self.pending[cursor..]) {
             last = Some(cursor + rel);
+            events += 1;
             cursor = (cursor + rel + 2).min(self.pending.len());
         }
         if let Some(p) = last {
             let end = p + 2;
             let out: Vec<u8> = self.pending.drain(..end).collect();
             self.scan_from = self.pending.len().saturating_sub(1);
-            Framed::Events(out)
+            Framed::Events(out, events)
         } else {
             self.scan_from = self.pending.len().saturating_sub(1);
             if self.pending.len() > PENDING_HIGH_WATER {
                 tracing::warn!(
                     pending_bytes = self.pending.len(),
-                    "SSE framer exceeded high-water mark without an event terminator; flushing verbatim"
+                    "SSE framer exceeded high-water mark without an event terminator; flushing with a synthesized one"
                 );
                 let out = {
                     if self.cr_held {
                         self.cr_held = false;
                         self.pending.push(b'\n');
                     }
+                    // The synthesized blank line makes the oversized block a
+                    // dispatched event client-side; without it the flush
+                    // would only move the stall into the client's framer.
+                    self.pending.extend_from_slice(b"\n\n");
                     std::mem::take(&mut self.pending)
                 };
                 self.scan_from = 0;
@@ -179,16 +196,6 @@ impl FramingState {
 
 fn find_double_newline(buf: &[u8]) -> Option<usize> {
     buf.windows(2).position(|w| w == b"\n\n")
-}
-
-fn count_double_newlines(buf: &[u8]) -> usize {
-    let mut count = 0;
-    let mut rest = buf;
-    while let Some(rel) = find_double_newline(rest) {
-        count += 1;
-        rest = &rest[(rel + 2).min(rest.len())..];
-    }
-    count
 }
 
 /// Analysis-only parse of one complete SSE event. Lossy by design: multiple
@@ -242,9 +249,11 @@ fn verbatim_passthrough(
 ) -> Response {
     let status = backend_response.status();
     let headers = backend_response.headers().clone();
+    // The permit and guard live in the closure's captures: they release when
+    // the stream (and with it the closure) drops, mid-stream included. One
+    // keep-alive binding states that; per-capture shadowings only obscured it.
     let byte_stream = backend_response.bytes_stream().map(move |chunk_result| {
-        let _permit = &permit;
-        let _guard = &guard;
+        let _keep_alive = (&permit, &guard);
         chunk_result.map_err(|e| std::io::Error::other(e.to_string()))
     });
     let mut builder = Response::builder().status(status);
@@ -379,16 +388,21 @@ where
     use futures::StreamExt;
     loop {
         match state.framing.take_framed() {
-            Framed::Events(out) => {
+            Framed::Events(out, events) => {
                 // Counted only where the unparsed/fix ratios are also computed:
                 // a denominator that keeps ticking while its numerator cannot
                 // would make every ratio read falsely pristine.
                 if state.accumulated.is_some() {
-                    SSE_EVENTS_TOTAL.fetch_add(count_double_newlines(&out) as u64, AtomicOrdering::Relaxed);
+                    SSE_EVENTS_TOTAL.fetch_add(events as u64, AtomicOrdering::Relaxed);
                 }
                 return Some(state.emit_block(out));
             }
             Framed::ForceFlush(out) => {
+                // The flush ships exactly one synthesized terminator (see
+                // FramingState::take_framed), so exactly one event dispatches.
+                if state.accumulated.is_some() {
+                    SSE_EVENTS_TOTAL.fetch_add(1, AtomicOrdering::Relaxed);
+                }
                 return Some(state.emit_block(out));
             }
             Framed::Nothing => {}
@@ -1139,7 +1153,12 @@ fn parse_sse_events(data: &str) -> Vec<SseEvent> {
     let mut current_event_type: Option<String> = None;
 
     for line in data.lines() {
-        if let Some(v) = strip_field(line, "event:") {
+        if line.is_empty() {
+            // A blank line dispatches the current event: its type must not
+            // carry into the next one (a failed data parse previously leaked
+            // the stale type into every following event).
+            current_event_type = None;
+        } else if let Some(v) = strip_field(line, "event:") {
             current_event_type = Some(v.to_string());
         } else if let Some(json_str) = strip_field(line, "data:") {
             if json_str.trim() == "[DONE]" {
@@ -1150,7 +1169,6 @@ fn parse_sse_events(data: &str) -> Vec<SseEvent> {
                     event_type: current_event_type.clone(),
                     data: json,
                 });
-                current_event_type = None;
             }
         }
     }
@@ -1184,7 +1202,7 @@ fn merge_anthropic_events(events: Vec<SseEvent>) -> serde_json::Value {
             "content_block_start" => {
                 // Create content block at specified index
                 let idx = event.data.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                if idx > 100 {
+                if idx > MAX_TRACKED_BLOCK_INDEX {
                     tracing::warn!(idx, "content_block_start index too large, skipping");
                 } else if let Some(block) = event.data.get("content_block") {
                     if let Some(content) = message.get_mut("content").and_then(|c| c.as_array_mut()) {
@@ -1198,7 +1216,7 @@ fn merge_anthropic_events(events: Vec<SseEvent>) -> serde_json::Value {
             "content_block_delta" => {
                 // Append delta text/thinking to content block
                 let idx = event.data.get("index").and_then(|i| i.as_u64()).unwrap_or(0) as usize;
-                if idx > 100 {
+                if idx > MAX_TRACKED_BLOCK_INDEX {
                     tracing::warn!(idx, "content_block_delta index too large, skipping");
                 } else if let Some(delta) = event.data.get("delta") {
                     if let Some(content) = message.get_mut("content").and_then(|c| c.as_array_mut()) {
@@ -1420,7 +1438,7 @@ fn merge_chunk(acc: Option<serde_json::Value>, chunk: serde_json::Value) -> serd
                                         {
                                             for new_call in new_arr {
                                                 match new_call.get("index").and_then(|i| i.as_u64()) {
-                                                    Some(idx) if idx > 100 => {
+                                                    Some(idx) if idx > MAX_TRACKED_BLOCK_INDEX as u64 => {
                                                         tracing::warn!(idx, "tool call index too large, skipping");
                                                     }
                                                     Some(idx) => {
@@ -1804,7 +1822,7 @@ mod framing_tests {
         for c in chunks {
             st.push(c);
             match st.take_framed() {
-                Framed::Events(out) | Framed::ForceFlush(out) => emitted.extend_from_slice(&out),
+                Framed::Events(out, _) | Framed::ForceFlush(out) => emitted.extend_from_slice(&out),
                 Framed::Nothing => {}
             }
         }
@@ -1857,7 +1875,30 @@ mod framing_tests {
         let (emitted, st) = frame_all(&[b"data: x\r\n\r\ndata: y\r\n\r\n"]);
         assert_eq!(emitted, b"data: x\n\ndata: y\n\n".to_vec());
         assert!(st.pending.is_empty());
-        assert_eq!(count_double_newlines(&emitted), 2);
+    }
+
+    #[test]
+    fn framer_count_is_the_single_event_source() {
+        // The framer counts terminators once during its scan; callers never
+        // recount. Splits must not change the total.
+        let cases: Vec<(Vec<&[u8]>, usize)> = vec![
+            (vec![b"data: a\n\ndata: b\n\ndata: c\n\n"], 3),
+            (vec![b"data: a\n", b"\ndata: b\n\ndata", b": c\n\n"], 3),
+            // \n\n\n\n dispatches an empty event between the two: 3 total
+            (vec![b"a\n\n\n\nb\n\n"], 3),
+            (vec![b"tail me"], 0),
+        ];
+        for (chunks, expected) in cases {
+            let mut st = FramingState::new();
+            let mut total = 0;
+            for c in &chunks {
+                st.push(c);
+                if let Framed::Events(_, n) = st.take_framed() {
+                    total += n;
+                }
+            }
+            assert_eq!(total, expected, "chunks {:?}", chunks);
+        }
     }
 
     #[test]
@@ -1896,7 +1937,7 @@ mod framing_tests {
         let mut st = FramingState::new();
         st.push(b"data: [DONE]\r\n\r\n");
         let out = match st.take_framed() {
-            Framed::Events(b) => b,
+            Framed::Events(b, _) => b,
             other => panic!("expected framed event, got {:?}", std::mem::discriminant(&other)),
         };
         let mut tx = Some(tokio::sync::oneshot::channel::<StreamEnd>().0);
@@ -1960,7 +2001,10 @@ mod framing_tests {
         let big = vec![b'a'; PENDING_HIGH_WATER + 10];
         st.push(&big);
         match st.take_framed() {
-            Framed::ForceFlush(bytes) => assert_eq!(bytes.len(), PENDING_HIGH_WATER + 10),
+            Framed::ForceFlush(bytes) => {
+                assert_eq!(bytes.len(), PENDING_HIGH_WATER + 12);
+                assert!(bytes.ends_with(b"\n\n"), "a flush must dispatch, not just move the stall");
+            }
             other => panic!("expected force flush, got {:?}", std::mem::discriminant(&other)),
         }
     }
@@ -1973,14 +2017,37 @@ mod framing_tests {
         let mut st = FramingState::new();
         st.push(&vec![b'a'; PENDING_HIGH_WATER + 10]);
         match st.take_framed() {
-            Framed::ForceFlush(bytes) => assert_eq!(bytes.len(), PENDING_HIGH_WATER + 10),
+            Framed::ForceFlush(bytes) => {
+                assert_eq!(bytes.len(), PENDING_HIGH_WATER + 12);
+                assert!(bytes.ends_with(b"\n\n"), "a flush must dispatch, not just move the stall");
+            }
             other => panic!("expected force flush, got {:?}", std::mem::discriminant(&other)),
         }
         st.push(b"\n\ndata: x\n\n");
         match st.take_framed() {
-            Framed::Events(out) => assert_eq!(out, b"\n\ndata: x\n\n"),
+            Framed::Events(out, _) => assert_eq!(out, b"\n\ndata: x\n\n"),
             other => panic!("expected events, got {:?}", std::mem::discriminant(&other)),
         }
+    }
+
+    #[test]
+    fn event_type_lifecycle_follows_blank_lines() {
+        // The type belongs to the event it was declared in; the blank line
+        // dispatches and clears it. A failed data parse must not leak the
+        // type into following events.
+        let events = parse_sse_events("event: foo\ndata: {oops\n\ndata: {\"a\":1}\n\n");
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].event_type, None);
+
+        let events = parse_sse_events("event: foo\ndata: {\"a\":1}\n\n\ndata: {\"b\":2}\n\n");
+        assert_eq!(events[0].event_type.as_deref(), Some("foo"));
+        assert_eq!(events[1].event_type, None);
+
+        // Spec: data lines before the next blank line are one event and all
+        // carry its type.
+        let events = parse_sse_events("event: foo\ndata: {\"a\":1}\ndata: {\"b\":2}\n\n");
+        assert_eq!(events[0].event_type.as_deref(), Some("foo"));
+        assert_eq!(events[1].event_type.as_deref(), Some("foo"));
     }
 
     #[test]
@@ -2247,6 +2314,11 @@ mod framing_tests {
         ]))
         .await;
         let mut expected = big;
+        // [D-L7]: the flush now ships a synthesized blank line so the
+        // oversized block dispatches client-side instead of moving the stall
+        // into the client's own framer. Retargeted pin; subject (no byte lost
+        // across a force flush) unchanged.
+        expected.extend_from_slice(b"\n\n");
         expected.extend_from_slice(b"\n\ndata: x\n\n");
         assert_eq!(out, expected, "no byte may be lost across a force flush");
     }
