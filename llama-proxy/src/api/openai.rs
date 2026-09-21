@@ -370,10 +370,40 @@ pub struct AnthropicMessage {
     pub usage: AnthropicUsage,
 }
 
-/// Anthropic content block (text, thinking, tool_use, or tool_result)
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(tag = "type")]
+/// Anthropic content block (text, thinking, tool_use, tool_result, or an
+/// opaque `Other` block whose unknown `type` is preserved verbatim)
+#[derive(Debug, Clone)]
 pub enum AnthropicContentBlock {
+    Text {
+        text: String,
+    },
+    Thinking {
+        thinking: String,
+        signature: Option<String>,
+    },
+    ToolUse {
+        id: String,
+        name: String,
+        input: serde_json::Value,
+    },
+    ToolResult {
+        tool_use_id: String,
+        content: serde_json::Value,
+        is_error: Option<bool>,
+    },
+    /// An unknown `type` — or a known `type` whose field shape does not
+    /// match — captured as the WHOLE raw object. Re-serialization emits it
+    /// verbatim (forward-compat pass-through: the proxy never rejects or
+    /// rewrites a block shape it does not understand).
+    Other(serde_json::Value),
+}
+
+/// Wire helper for content-buffered deserialization: exactly the four known
+/// internally-tagged block shapes. Private on purpose — unknown shapes never
+/// need a variant here, they land in `AnthropicContentBlock::Other`.
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum AnthropicContentBlockWire {
     #[serde(rename = "text")]
     Text { text: String },
     #[serde(rename = "thinking")]
@@ -395,6 +425,88 @@ pub enum AnthropicContentBlock {
         #[serde(default)]
         is_error: Option<bool>,
     },
+}
+
+/// Wire helper for serialization: borrowed mirror of the four known shapes so
+/// known variants emit byte-identical tagged objects to the old derived form
+/// (explicit `"signature":null` / `"is_error":null` included), while `Other`
+/// bypasses tagging entirely.
+#[derive(Serialize)]
+#[serde(tag = "type")]
+enum AnthropicContentBlockWireRef<'a> {
+    #[serde(rename = "text")]
+    Text { text: &'a str },
+    #[serde(rename = "thinking")]
+    Thinking { thinking: &'a str, signature: Option<&'a str> },
+    #[serde(rename = "tool_use")]
+    ToolUse {
+        id: &'a str,
+        name: &'a str,
+        input: &'a serde_json::Value,
+    },
+    #[serde(rename = "tool_result")]
+    ToolResult {
+        tool_use_id: &'a str,
+        content: &'a serde_json::Value,
+        is_error: Option<bool>,
+    },
+}
+
+impl<'de> Deserialize<'de> for AnthropicContentBlock {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Content-buffered: capture the raw object first, then try the known
+        // tagged shapes. Anything that does not fit — unknown `type`, or a
+        // known `type` with a missing/mismatched field — is preserved whole
+        // as Other instead of failing the enclosing message parse.
+        let raw = serde_json::Value::deserialize(deserializer)?;
+        Ok(match serde_json::from_value::<AnthropicContentBlockWire>(raw.clone()) {
+            Ok(AnthropicContentBlockWire::Text { text }) => Self::Text { text },
+            Ok(AnthropicContentBlockWire::Thinking { thinking, signature }) => Self::Thinking { thinking, signature },
+            Ok(AnthropicContentBlockWire::ToolUse { id, name, input }) => Self::ToolUse { id, name, input },
+            Ok(AnthropicContentBlockWire::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            }) => Self::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            },
+            Err(_) => Self::Other(raw),
+        })
+    }
+}
+
+impl Serialize for AnthropicContentBlock {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Text { text } => AnthropicContentBlockWireRef::Text { text }.serialize(serializer),
+            Self::Thinking { thinking, signature } => AnthropicContentBlockWireRef::Thinking {
+                thinking: thinking.as_str(),
+                signature: signature.as_deref(),
+            }
+            .serialize(serializer),
+            Self::ToolUse { id, name, input } => AnthropicContentBlockWireRef::ToolUse {
+                id: id.as_str(),
+                name: name.as_str(),
+                input,
+            }
+            .serialize(serializer),
+            Self::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => AnthropicContentBlockWireRef::ToolResult {
+                tool_use_id: tool_use_id.as_str(),
+                content,
+                is_error: *is_error,
+            }
+            .serialize(serializer),
+            // Unknown blocks: emit the original object verbatim — the `type`
+            // value and every field survive exactly as they arrived.
+            Self::Other(value) => value.serialize(serializer),
+        }
+    }
 }
 
 /// Anthropic usage (different field names than OpenAI)
@@ -459,6 +571,12 @@ impl From<AnthropicMessage> for ChatCompletionResponse {
                         }
                         _ => {}
                     }
+                }
+                AnthropicContentBlock::Other(_) => {
+                    // Opaque block: the OpenAI message has no carrier for it,
+                    // so it contributes nothing to this conversion. Verbatim
+                    // fidelity is preserved on the Anthropic-side round-trip;
+                    // the enclosing parse no longer fails on it.
                 }
             }
         }
@@ -2080,5 +2198,111 @@ mod tests {
         assert!(delta.reasoning_text.is_none());
         assert!(delta.reasoning_opaque.is_none());
         assert_eq!(chunk.choices[0].finish_reason.as_deref(), Some("stop"));
+    }
+
+    // ============================================================================
+    // Task 39: unknown Anthropic content blocks survive as Other
+    // RED baseline (raw, probe at 92ab176, re-confirmed at fcec6c8): request AND
+    // response parses failed with Err("unknown variant `advisor_tool_result`,
+    // expected one of `text`, `thinking`, `tool_use`, `tool_result`")
+    // ============================================================================
+
+    #[test]
+    fn test_unknown_content_block_parses_as_other_and_round_trips() {
+        let block = serde_json::json!({"type":"advisor_tool_result","tool_use_id":"x","content":"hi"});
+        let raw = serde_json::json!({
+            "model": "t",
+            "max_tokens": 100,
+            "messages": [{"role":"user","content":[{"type":"text","text":"hi"}, block.clone()]}]
+        });
+
+        let req: AnthropicMessageRequest = serde_json::from_value(raw).unwrap();
+        assert_eq!(req.messages[0].content.len(), 2);
+        match &req.messages[0].content[1] {
+            AnthropicContentBlock::Other(v) => assert_eq!(v, &block),
+            other => panic!("expected Other, got {other:?}"),
+        }
+
+        // Forwarding reality (pinned in evidence): handler forwards /v1/messages
+        // bodies as bytes; this typed parse feeds the augment-injection
+        // re-serialization. Structural fidelity: the unknown object re-emits
+        // exactly as it arrived.
+        let out = serde_json::to_value(&req).unwrap();
+        assert_eq!(out["messages"][0]["content"][1], block);
+        assert_eq!(out["messages"][0]["content"][0]["type"], "text");
+    }
+
+    #[test]
+    fn test_other_block_preserves_nested_arrays_unicode_and_all_keys() {
+        // Adversarial: nested arrays, unicode, many keys. Pinned STRUCTURAL
+        // equality + every original key present (NOT byte order: serde_json
+        // Map here is BTreeMap - preserve_order feature is not enabled).
+        let block = serde_json::json!({
+            "type": "weird_block",
+            "nested": [1, {"中": "文"}, [true, null]],
+            "emoji": "🤖",
+            "z_key": 1,
+            "a_key": 2
+        });
+        let b: AnthropicContentBlock = serde_json::from_value(block.clone()).unwrap();
+        assert!(matches!(&b, AnthropicContentBlock::Other(v) if v == &block));
+        let out = serde_json::to_value(&b).unwrap();
+        assert_eq!(out, block);
+        for key in ["type", "nested", "emoji", "z_key", "a_key"] {
+            assert!(out.get(key).is_some(), "original key {key} lost: {out}");
+        }
+    }
+
+    #[test]
+    fn test_known_tag_with_shape_mismatch_falls_to_other() {
+        // A known type whose required field is missing is a shape mismatch:
+        // the whole raw object is preserved instead of failing the parse.
+        let raw = serde_json::json!({"type":"text","unexpected":true});
+        let b: AnthropicContentBlock = serde_json::from_value(raw.clone()).unwrap();
+        assert!(matches!(&b, AnthropicContentBlock::Other(v) if v == &raw));
+    }
+
+    #[test]
+    fn test_known_blocks_still_serialize_byte_identical_to_derive_form() {
+        // Serialize parity pin: known variants emit the same tagged objects as
+        // the old #[derive(Serialize)] internally-tagged enum - including the
+        // explicit nulls the derive emitted for absent Option fields.
+        let t: AnthropicContentBlock = serde_json::from_str(r#"{"type":"text","text":"hi"}"#).unwrap();
+        assert!(matches!(&t, AnthropicContentBlock::Text { text } if text == "hi"));
+        assert_eq!(serde_json::to_string(&t).unwrap(), r#"{"type":"text","text":"hi"}"#);
+
+        let th: AnthropicContentBlock = serde_json::from_str(r#"{"type":"thinking","thinking":"x"}"#).unwrap();
+        assert_eq!(
+            serde_json::to_string(&th).unwrap(),
+            r#"{"type":"thinking","thinking":"x","signature":null}"#
+        );
+
+        let tr: AnthropicContentBlock =
+            serde_json::from_str(r#"{"type":"tool_result","tool_use_id":"t","content":"c"}"#).unwrap();
+        assert_eq!(
+            serde_json::to_string(&tr).unwrap(),
+            r#"{"type":"tool_result","tool_use_id":"t","content":"c","is_error":null}"#
+        );
+    }
+
+    #[test]
+    fn test_anthropic_message_with_unknown_block_parses_and_converts_without_panic() {
+        let msg: AnthropicMessage = serde_json::from_value(serde_json::json!({
+            "id": "msg-unknown",
+            "type": "message",
+            "role": "assistant",
+            "model": "m",
+            "content": [
+                {"type": "text", "text": "hi"},
+                {"type": "advisor_tool_result", "tool_use_id": "x", "content": "hi"}
+            ]
+        }))
+        .unwrap();
+        assert!(matches!(&msg.content[1], AnthropicContentBlock::Other(_)));
+
+        // Response conversion: no OpenAI carrier for an opaque block - it is
+        // skipped; the known text block still converts and the parse survives.
+        let resp: ChatCompletionResponse = msg.into();
+        assert_eq!(resp.choices[0].message.as_ref().unwrap().content, Some("hi".to_string()));
     }
 }

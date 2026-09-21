@@ -408,6 +408,23 @@ fn synthesize_anthropic_chunks(msg: AnthropicMessage) -> Vec<Result<Event, Infal
                     )));
                 }
             }
+            AnthropicContentBlock::Other(value) => {
+                // Verbatim pass-through: content_block_start carries the raw
+                // block exactly as it arrived. No deltas are synthesized -
+                // inventing a delta type for an opaque shape would rewrite it.
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_start",
+                    &json!({
+                        "type": "content_block_start",
+                        "index": idx,
+                        "content_block": value,
+                    }),
+                )));
+                chunks.push(Ok(create_anthropic_sse_event(
+                    "content_block_stop",
+                    &build_content_block_stop_event(idx),
+                )));
+            }
         }
     }
 
@@ -983,6 +1000,56 @@ mod tests {
         for chunk in &chunks {
             assert!(chunk.is_ok());
         }
+    }
+
+    #[tokio::test]
+    async fn test_synthesize_anthropic_stream_other_block_emits_verbatim_start() {
+        let other = serde_json::json!({"type": "advisor_tool_result", "tool_use_id": "x", "content": "hi"});
+        let msg = AnthropicMessage {
+            id: "msg-other".to_string(),
+            message_type: "message".to_string(),
+            role: "assistant".to_string(),
+            content: vec![
+                AnthropicContentBlock::Text { text: "hi".to_string() },
+                AnthropicContentBlock::Other(other.clone()),
+            ],
+            model: "m".to_string(),
+            stop_reason: Some("end_turn".to_string()),
+            stop_sequence: None,
+            usage: AnthropicUsage {
+                input_tokens: 1,
+                output_tokens: 1,
+            },
+        };
+
+        let resp = synthesize_anthropic_streaming_response(msg).await.unwrap();
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX).await.unwrap();
+        let text = String::from_utf8(bytes.to_vec()).unwrap();
+
+        let starts: Vec<serde_json::Value> = text
+            .split("\n\n")
+            .filter_map(|frame| {
+                let mut data = None;
+                let mut is_start = false;
+                for line in frame.lines() {
+                    if let Some(v) = line.strip_prefix("event:") {
+                        is_start = v.trim() == "content_block_start";
+                    } else if let Some(v) = line.strip_prefix("data:") {
+                        data = Some(v.trim());
+                    }
+                }
+                if is_start {
+                    Some(serde_json::from_str(data?).unwrap())
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(starts.len(), 2);
+        // The opaque block reaches the wire exactly as it arrived, at its own
+        // index; no delta events are invented for it.
+        assert_eq!(starts[1]["content_block"], other);
+        assert_eq!(starts[1]["index"], serde_json::json!(1));
     }
 
     #[test]
