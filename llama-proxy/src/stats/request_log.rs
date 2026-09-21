@@ -35,9 +35,15 @@ pub fn format_request_log(request_json: &serde_json::Value) -> String {
     format!("→ {}", parts.join(" "))
 }
 
-/// Extract and format the first user message with truncation
+/// Extract and format the first user message with truncation.
+///
+/// A user message whose content fails to parse contributes the `"<unparseable>"`
+/// marker and the scan continues: a later parseable user message supersedes the
+/// pending marker. Returns `None` only when there are no user messages at all.
 fn extract_first_user_message(request_json: &serde_json::Value) -> Option<String> {
     let messages = request_json.get("messages")?.as_array()?;
+
+    let mut pending_unparseable = false;
 
     for msg in messages {
         let role = msg.get("role").and_then(|r| r.as_str()).unwrap_or("");
@@ -45,9 +51,17 @@ fn extract_first_user_message(request_json: &serde_json::Value) -> Option<String
             continue;
         }
 
-        let content = extract_message_content(msg)?;
-        let normalized = normalize_whitespace(&content);
-        return Some(truncate_message(&normalized));
+        match extract_message_content(msg) {
+            Some(content) => {
+                let normalized = normalize_whitespace(&content);
+                return Some(truncate_message(&normalized));
+            }
+            None => pending_unparseable = true,
+        }
+    }
+
+    if pending_unparseable {
+        return Some("<unparseable>".to_string());
     }
 
     None
@@ -270,5 +284,92 @@ mod tests {
         let truncated = truncate_message(&mixed_msg);
         assert!(truncated.contains(" ... "));
         assert_split_on_char_boundaries(&mixed_msg, &truncated);
+    }
+
+    // ---- task 42: extraction must not stop on a user message that fails to parse ----
+
+    /// The exact shape `extract_message_content` genuinely rejects: content is a JSON
+    /// number, so neither `as_str()` (requires Value::String) nor `as_array()`
+    /// (requires Value::Array) matches and the function returns None.
+    fn unparseable_user() -> serde_json::Value {
+        json!({"role": "user", "content": 42})
+    }
+
+    /// Second genuine rejection shape: content is an array with zero `type: "text"`
+    /// parts (only `image_url`), so the collected `texts` stays empty — the
+    /// `if !texts.is_empty()` guard is not entered and the function returns None.
+    /// Pinned actual semantics: this is a genuine parse failure (contributes the
+    /// marker), NOT an empty-string success.
+    fn empty_parts_user() -> serde_json::Value {
+        json!({"role": "user", "content": [{"type": "image_url", "image_url": {"url": "x"}}]})
+    }
+
+    #[test]
+    fn extract_continues_past_unparseable_to_good() {
+        // Given: a first user message whose content fails to parse, then a good user message
+        // When: extracting (baseline: the `?` early-returned None at the bad message)
+        let req = json!({
+            "messages": [
+                unparseable_user(),
+                {"role": "user", "content": "good content"}
+            ]
+        });
+        let msg = extract_first_user_message(&req);
+        // Then: the scan reaches the good message and returns its content. Per the
+        // Option<String> contract the recovered content supersedes the pending
+        // "<unparseable>" marker (marker is the fallback when nothing parses);
+        // what must NOT happen is the baseline's None.
+        assert_eq!(msg, Some("good content".to_string()));
+    }
+
+    #[test]
+    fn extract_returns_marker_when_all_user_messages_unparseable() {
+        // Given: user messages only, none parseable
+        // When: extracting (baseline: None — the loss this task fixes)
+        let req = json!({"messages": [unparseable_user(), empty_parts_user()]});
+        let msg = extract_first_user_message(&req);
+        // Then: not None — the literal marker stands in. With the single-slot
+        // Option<String> return the recovered value is one marker, not one per
+        // failed message.
+        assert_eq!(msg, Some("<unparseable>".to_string()));
+    }
+
+    #[test]
+    fn extract_returns_none_only_when_no_user_messages() {
+        let no_users = json!({
+            "messages": [
+                {"role": "system", "content": "sys"},
+                {"role": "assistant", "content": "a"}
+            ]
+        });
+        assert_eq!(extract_first_user_message(&no_users), None);
+
+        let no_messages = json!({"model": "m"});
+        assert_eq!(extract_first_user_message(&no_messages), None);
+    }
+
+    #[test]
+    fn extract_marker_adjacent_cjk_recovery_is_boundary_safe() {
+        // Given: unparseable user message followed by a >100-byte CJK user message,
+        // so recovery routes multi-byte content straight through the truncation path.
+        let cjk = "漢字".repeat(60); // 240 bytes, splits at the byte-25 prefix boundary
+        let req = json!({"messages": [unparseable_user(), {"role": "user", "content": cjk}]});
+        let msg = extract_first_user_message(&req).expect("good CJK message must be reached");
+        assert_eq!(msg, truncate_message(&cjk));
+        assert_split_on_char_boundaries(&cjk, &msg);
+    }
+
+    #[test]
+    fn format_request_log_shows_marker_instead_of_dropping_prompt() {
+        // Baseline: all-unparseable produced None → no quoted prompt part at all.
+        let req = json!({"model": "m", "messages": [unparseable_user()]});
+        let log = format_request_log(&req);
+        assert!(log.contains("\"<unparseable>\""));
+        // And recovery is visible end-to-end: good message after a bad one.
+        let req = json!({
+            "model": "m",
+            "messages": [unparseable_user(), {"role": "user", "content": "recovered"}]
+        });
+        assert!(format_request_log(&req).contains("\"recovered\""));
     }
 }
