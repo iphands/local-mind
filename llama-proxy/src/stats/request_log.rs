@@ -106,26 +106,29 @@ fn normalize_whitespace(s: &str) -> String {
 /// - If <= 100 bytes: show all
 /// - If > 100 bytes: first ~25 + " ... " + last ~75, split on char boundaries
 fn truncate_message(s: &str) -> String {
-    const MAX_TOTAL: usize = 100;
-    const PREFIX_LEN: usize = 25;
-    const SUFFIX_LEN: usize = 75;
+    /// Byte length at which head/tail splitting triggers.
+    const TRIGGER_THRESHOLD_BYTES: usize = 100;
+    /// Head budget (bytes, snapped down to a char boundary).
+    const HEAD_CHARS: usize = 25;
+    /// Tail budget (bytes, snapped up to a char boundary).
+    const TAIL_CHARS: usize = 75;
     const ELLIPSIS: &str = " ... ";
 
-    if s.len() <= MAX_TOTAL {
+    if s.len() <= TRIGGER_THRESHOLD_BYTES {
         return s.to_string();
     }
 
-    // Largest char boundary <= PREFIX_LEN
+    // Largest char boundary <= HEAD_CHARS
     let mut head_end = 0;
     for (i, _) in s.char_indices() {
-        if i > PREFIX_LEN {
+        if i > HEAD_CHARS {
             break;
         }
         head_end = i;
     }
 
-    // Smallest char boundary >= len - SUFFIX_LEN
-    let tail_threshold = s.len() - SUFFIX_LEN;
+    // Smallest char boundary >= len - TAIL_CHARS
+    let tail_threshold = s.len() - TAIL_CHARS;
     let mut tail_start = s.len();
     for (i, _) in s.char_indices().rev() {
         if i >= tail_threshold {

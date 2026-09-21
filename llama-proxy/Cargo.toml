@@ -54,6 +54,7 @@ url = "2.5"
 flate2 = "1"
 brotli = "7"
 zstd = "0.13"
+unicode-width = "0.2"
 
 [features]
 default = []

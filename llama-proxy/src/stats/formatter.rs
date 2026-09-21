@@ -2,6 +2,7 @@
 
 use super::RequestMetrics;
 use crate::config::StatsFormat;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Format metrics according to the configured format
 pub fn format_metrics(metrics: &RequestMetrics, format: StatsFormat) -> String {
@@ -18,108 +19,121 @@ fn token_cell(tokens: Option<u64>) -> String {
     tokens.map_or_else(|| "n/a".to_string(), |t| t.to_string())
 }
 
-/// Pretty box format for terminal output
-fn format_pretty(m: &RequestMetrics) -> String {
+/// Inner width of the pretty box: the frame is `┌` + BOX_INNER `─` + `┐` and
+/// every content row is `│` + content padded to BOX_INNER + `│`. Padding is
+/// measured in terminal display cells (`unicode-width`), not chars: a
+/// `{:width$}` spec counts chars, so each CJK value pushed its right border
+/// past the frame (a CJK model name spanned 74 cells against 68).
+const BOX_INNER: usize = 66;
+
+/// One frame row: `│` + content padded to BOX_INNER display cells + `│`.
+fn box_row(content: &str) -> String {
+    let pad = BOX_INNER.saturating_sub(UnicodeWidthStr::width(content));
+    format!("│{}{}│\n", content, " ".repeat(pad))
+}
+
+/// A labelled row: `│ Label: value<padding>│`, label padded as historically
+/// (" Model: ", " Time:  ") and value fitted to the remaining cells.
+fn labeled_row(label: &str, value: &str) -> String {
+    let head = format!(" {:<6} ", label);
+    let fit = BOX_INNER - head.chars().count();
+    box_row(&format!("{head}{}", truncate_to_width(value, fit)))
+}
+
+/// Identity rows: model, timestamp, optional client/conversation ids.
+fn pretty_identity_lines(m: &RequestMetrics) -> String {
+    let mut out = labeled_row("Model:", &m.model);
+    out.push_str(&labeled_row(
+        "Time:",
+        &m.timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string(),
+    ));
+    if let Some(client) = &m.client_id {
+        out.push_str(&labeled_row("Client:", client));
+    }
+    if let Some(conv) = &m.conversation_id {
+        out.push_str(&labeled_row("Conv:", conv));
+    }
+    out
+}
+
+/// Performance rows. A prefill/decode split is only real when the backend
+/// reported one; otherwise show the throughput a single wall-clock duration
+/// can actually support rather than inventing a split.
+fn pretty_performance_lines(m: &RequestMetrics) -> String {
+    if m.has_timing_split {
+        box_row(&format!(
+            "   Prompt Processing: {:8.2} tokens/sec ({:7.1}ms)",
+            m.prompt_tps, m.prompt_ms
+        )) + &box_row(&format!(
+            "   Generation:        {:8.2} tokens/sec ({:7.1}ms)",
+            m.generation_tps, m.generation_ms
+        ))
+    } else {
+        box_row(&format!("   Total throughput:  {:8.2} tokens/sec", m.total_tps))
+            + &box_row("   (backend reported no prefill/decode split)")
+    }
+}
+
+/// Token rows: input/output/total plus the optional reasoning line.
+fn pretty_tokens_lines(m: &RequestMetrics) -> String {
+    let mut out = box_row(&format!(
+        "   Input: {:>6} │ Output: {:>6} │ Total: {:>6}",
+        token_cell(m.prompt_tokens),
+        token_cell(m.completion_tokens),
+        m.total_tokens
+    ));
+    if let Some(r) = m.reasoning_tokens {
+        out.push_str(&box_row(&format!("   Reasoning Tokens: {r}")));
+    }
+    out
+}
+
+/// Closing rows: context, finish reason, stream state, duration, concurrency.
+fn pretty_footer_lines(m: &RequestMetrics) -> String {
     let context_str = match (m.context_used, m.context_total, m.context_percent) {
-        (Some(used), Some(total), Some(pct)) => {
-            format!("{}/{} ({:.1}%)", used, total, pct)
-        }
-        (Some(used), Some(total), None) => {
-            format!("{}/{}", used, total)
-        }
+        (Some(used), Some(total), Some(pct)) => format!("{used}/{total} ({pct:.1}%)"),
+        (Some(used), Some(total), None) => format!("{used}/{total}"),
         _ => "N/A".to_string(),
     };
-
-    let client_str = m.client_id.as_ref().map(|c| format!("Client: {}", truncate(c, 48)));
-
-    let conv_str = m.conversation_id.as_ref().map(|c| format!("Conv: {}", truncate(c, 50)));
-
-    let extra_lines = match (&client_str, &conv_str) {
-        (Some(client), Some(conv)) => {
-            format!("│ {:60}│\n│ {:60}│\n", client, conv)
-        }
-        (Some(client), None) => {
-            format!("│ {:60}│\n", client)
-        }
-        (None, Some(conv)) => {
-            format!("│ {:60}│\n", conv)
-        }
-        (None, None) => String::new(),
-    };
-
-    let reasoning_line = m
-        .reasoning_tokens
-        .map(|r| format!("│   Reasoning Tokens: {:46}│\n", r))
-        .unwrap_or_default();
-
-    let concurrent_line = m
-        .concurrent_requests
-        .map(|c| format!("│ Concurrent: {:52}│\n", c))
-        .unwrap_or_default();
-
+    let mut out = labeled_row("Context:", &context_str);
+    out.push_str(&labeled_row("Finish:", &m.finish_reason));
     // A client that hung up is normal traffic, not a defect worth a box line;
     // an incomplete answer always is, whatever caused it.
-    let stream_line = if !m.streaming {
-        String::new()
-    } else {
-        match m.stream_end {
+    if m.streaming {
+        let badge = match m.stream_end {
             Some("truncated") => Some("TRUNCATED (backend ended without a completion event)"),
             Some("stalled") => Some("STALLED (stream timed out before completion)"),
             Some("client_gone") => None,
             _ => Some("ok"),
+        };
+        if let Some(badge) = badge {
+            out.push_str(&labeled_row("Stream:", badge));
         }
-        .map(|s| format!("│ Stream: {:55}│\n", s))
-        .unwrap_or_default()
-    };
+    }
+    out.push_str(&labeled_row("Duration:", &format!("{:.1}ms", m.duration_ms)));
+    if let Some(c) = m.concurrent_requests {
+        out.push_str(&labeled_row("Concurrent:", &c.to_string()));
+    }
+    out
+}
 
-    // A prefill/decode split is only real when the backend reported one. For
-    // backends that do not (vLLM), show the throughput a single wall-clock
-    // duration can actually support rather than inventing a split.
-    let perf_lines = if m.has_timing_split {
-        format!(
-            "│   Prompt Processing: {:8.2} tokens/sec ({:7.1}ms)                │\n\
-             │   Generation:        {:8.2} tokens/sec ({:7.1}ms)                │\n",
-            m.prompt_tps, m.prompt_ms, m.generation_tps, m.generation_ms
-        )
-    } else {
-        format!(
-            "│   Total throughput:  {:8.2} tokens/sec                           │\n\
-             │   (backend reported no prefill/decode split)                     │\n",
-            m.total_tps
-        )
-    };
-
-    format!(
-        r#"┌──────────────────────────────────────────────────────────────────┐
-│ LLM Request Metrics                                              │
-├──────────────────────────────────────────────────────────────────┤
-│ Model: {:56}│
-│ Time:  {:56}│
-{}├──────────────────────────────────────────────────────────────────┤
-│ Performance                                                      │
-{}├──────────────────────────────────────────────────────────────────┤
-│ Tokens                                                           │
-│   Input: {:>6} │ Output: {:>6} │ Total: {:>6}                   │
-{}├──────────────────────────────────────────────────────────────────┤
-│ Context: {:54}│
-│ Finish: {:56}│
-{}│ Duration: {:54.1}ms│
-{}└──────────────────────────────────────────────────────────────────┘
-"#,
-        truncate(&m.model, 56),
-        m.timestamp.format("%Y-%m-%d %H:%M:%S UTC"),
-        extra_lines,
-        perf_lines,
-        token_cell(m.prompt_tokens),
-        token_cell(m.completion_tokens),
-        m.total_tokens,
-        reasoning_line,
-        context_str,
-        m.finish_reason,
-        stream_line,
-        m.duration_ms,
-        concurrent_line,
-    )
+/// Pretty box format for terminal output
+fn format_pretty(m: &RequestMetrics) -> String {
+    let separator = format!("├{}┤\n", "─".repeat(BOX_INNER));
+    let mut out = format!("┌{}┐\n", "─".repeat(BOX_INNER));
+    out.push_str(&box_row(" LLM Request Metrics"));
+    out.push_str(&separator);
+    out.push_str(&pretty_identity_lines(m));
+    out.push_str(&separator);
+    out.push_str(&box_row(" Performance"));
+    out.push_str(&pretty_performance_lines(m));
+    out.push_str(&separator);
+    out.push_str(&box_row(" Tokens"));
+    out.push_str(&pretty_tokens_lines(m));
+    out.push_str(&separator);
+    out.push_str(&pretty_footer_lines(m));
+    out.push_str(&format!("└{}┘\n", "─".repeat(BOX_INNER)));
+    out
 }
 
 /// JSON format for structured logging
@@ -191,14 +205,26 @@ fn format_compact(m: &RequestMetrics) -> String {
     )
 }
 
-/// Truncate a string to max length with ellipsis
-fn truncate(s: &str, max_len: usize) -> String {
-    if s.chars().count() <= max_len {
-        s.to_string()
-    } else {
-        let kept: String = s.chars().take(max_len.saturating_sub(3)).collect();
-        format!("{}...", kept)
+/// Truncate a string to `max_cells` terminal display cells with an ellipsis.
+/// Never splits a character: a 2-cell character is kept only if both of its
+/// cells fit the remaining budget; below 3 cells the ellipsis cannot shrink.
+fn truncate_to_width(s: &str, max_cells: usize) -> String {
+    if UnicodeWidthStr::width(s) <= max_cells {
+        return s.to_string();
     }
+    let budget = max_cells.saturating_sub(3);
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in s.chars() {
+        let w = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        used += w;
+        out.push(ch);
+    }
+    out.push_str("...");
+    out
 }
 
 #[cfg(test)]
@@ -469,32 +495,32 @@ mod tests {
 
     #[test]
     fn test_truncate_short() {
-        let result = truncate("hello", 10);
+        let result = truncate_to_width("hello", 10);
         assert_eq!(result, "hello");
     }
 
     #[test]
     fn test_truncate_exact() {
-        let result = truncate("hello", 5);
+        let result = truncate_to_width("hello", 5);
         assert_eq!(result, "hello");
     }
 
     #[test]
     fn test_truncate_long() {
-        let result = truncate("hello world this is long", 10);
+        let result = truncate_to_width("hello world this is long", 10);
         assert_eq!(result, "hello w...");
         assert_eq!(result.len(), 10);
     }
 
     #[test]
     fn test_truncate_very_short() {
-        let result = truncate("hi", 2);
+        let result = truncate_to_width("hi", 2);
         assert_eq!(result, "hi");
     }
 
     #[test]
     fn test_truncate_empty() {
-        let result = truncate("", 10);
+        let result = truncate_to_width("", 10);
         assert_eq!(result, "");
     }
 
@@ -509,12 +535,17 @@ mod tests {
             "aaaaaaaaaaaa模型bbbbbbbbbbbbbbbbbbbbbbbbbbbbbb模型-very-long-model-name",
         ] {
             for width in 1..=name.chars().count() + 5 {
-                let out = truncate(name, width);
+                let out = truncate_to_width(name, width);
                 // "..." is the floor: below width 3 the ellipsis cannot shrink.
                 assert!(
                     out.chars().count() <= width.max(3),
                     "width {width} produced {} chars: {out:?}",
                     out.chars().count()
+                );
+                assert!(
+                    UnicodeWidthStr::width(out.as_str()) <= width.max(3),
+                    "width {width} produced {} cells: {out:?}",
+                    UnicodeWidthStr::width(out.as_str())
                 );
             }
         }
@@ -572,5 +603,48 @@ mod tests {
         assert!(output.contains("150.00"));
         assert!(output.contains("length"));
         assert!(output.contains("600"));
+    }
+
+    /// RED at baseline 57b2d2b (probe captured in .omo/evidence/big-fix/task92.txt):
+    /// the box padded with `{:w$}` specs that count CHARS, so the CJK model row
+    /// spanned 74 display cells (Client 69, Finish 69, even the ASCII Tokens row
+    /// 70) against the 68-cell frame. Every row must occupy the frame exactly,
+    /// measured in display cells.
+    #[test]
+    fn pretty_rows_all_share_the_frame_width() {
+        let mut m = create_test_metrics();
+        m.model = "本地大模型-Qwen3-14B-量化版".to_string();
+        m.client_id = Some("客户标识-中文-identifier".to_string());
+        m.conversation_id = Some("会话-abc".to_string());
+        m.finish_reason = "停止done".to_string();
+        m.context_used = Some(100);
+        m.context_total = Some(4096);
+        m.context_percent = Some(2.44);
+        m.reasoning_tokens = Some(10);
+        m.concurrent_requests = Some(2);
+        m.stream_end = Some("truncated");
+        m.stream_incomplete = true;
+
+        let frame = BOX_INNER + 2;
+        for line in format_pretty(&m).lines() {
+            let cells = UnicodeWidthStr::width(line);
+            assert_eq!(cells, frame, "row {line:?} spans {cells} cells");
+        }
+    }
+
+    /// The cut lands on display cells, not chars: a 2-cell character is kept
+    /// only when both of its cells fit the remaining budget.
+    #[test]
+    fn truncate_to_width_cuts_on_display_cells() {
+        assert_eq!(truncate_to_width("模型模型模型", 8), "模型...");
+        assert_eq!(truncate_to_width("模型模型模型", 7), "模型...");
+        assert_eq!(truncate_to_width("模型模型模型", 4), "...");
+        for max_cells in 3..=40 {
+            let out = truncate_to_width("本地大模型-Qwen3-14B-量化版很长", max_cells);
+            assert!(
+                UnicodeWidthStr::width(out.as_str()) <= max_cells.max(3),
+                "{max_cells} cells -> {out:?}"
+            );
+        }
     }
 }
