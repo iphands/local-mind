@@ -213,42 +213,37 @@ The proxy requires `config.yaml` (copy from `config.yaml.default`). Key settings
 
 **New Metric**:
 1. Add field to `RequestMetrics` in `src/stats/collector.rs`
-2. Update calculation logic in `from_response()` or `from_streaming_chunks()`
+2. Update calculation logic in `from_response()` or `merge_stream_stats()` (the per-chunk streaming stats accumulation)
 3. Update formatters in `src/stats/formatter.rs`
 4. Add to InfluxDB fields in `src/exporters/influxdb.rs`
 
-## Streaming Fix Delta Calculation (Important!)
+## Streaming Fixes: No Per-Chunk Delta Calculation (Important!)
 
-**Critical Implementation Detail**: When fixes are applied to streaming responses, the proxy must calculate and send **completion deltas**, not full fixed JSON.
+**The legacy per-chunk delta machinery was DELETED by big-fix 29 (21f0548).**
+`ToolCallAccumulator`, the `ResponseFix` streaming methods, the
+`FixRegistry::apply_fixes_stream*` family, `calculate_completion_delta` +
+`safe_completion`, and the per-fix streaming overrides had zero production
+callers and were removed wholesale (it flagged this section for docs sync).
+Do not reintroduce delta subtraction against client-accumulated SSE chunks.
 
-### The Problem
-Clients (Claude Code, Opencode) accumulate delta strings from SSE chunks. If a fix detects malformed JSON and sends the complete fixed result, the client will append it to what they've already accumulated, creating duplicate fields:
+**Current reality** (authoritative wording lives in the `streaming:` block of
+`config.yaml.default` and the streaming docs in README.md):
 
-```
-Client has: {"content":"test","filePath":"/path1",
-Proxy (bug): sends full JSON {"content":"test","filePath":"/path1"}
-Client gets: {"content":"test","filePath":"/path1",{"content":"test","filePath":"/path1"}  ← INVALID!
-```
+- **fake mode (default)**: the proxy fetches ONE complete JSON from the
+  backend, runs the fix layer on that buffered response, then synthesizes the
+  SSE stream from the FIXED body (`src/proxy/synthesis.rs`). The proxy emits
+  every synthesized chunk itself, so no client-side delta accumulation can
+  corrupt a repair. Chunk pacing/size are configured via `synthesis:`
+  (`chunk_delay_ms`, `chunk_size_chars`).
+- **passthrough mode**: the backend's SSE bytes are forwarded verbatim
+  (OpenAI `/v1/chat/completions` with `stream: true` only). On that path fixes
+  DETECT but do NOT repair — patching partial deltas is the corruption class
+  the deleted machinery courted — and reprompt cannot run (it needs the
+  complete body). Both still apply to buffered requests.
 
-### The Solution
-The fix in `src/fixes/toolcall_bad_filepath_fix.rs` implements robust delta calculation:
-
-1. **Primary method**: Subtract current chunk from accumulated using `ends_with()`
-2. **Fallback method**: Use `rfind()` to handle JSON reformatting edge cases
-3. **Safe default**: If delta calc fails, send minimal completion (`}`) - never send full JSON
-4. **Logging**: Extensive debug logging helps diagnose delta calculation issues
-
-See `../context/pitfalls.md` → "Streaming Response Delta Calculation" for full details and implementation guidance.
-
-### Testing Streaming Fixes
-When modifying streaming fixes:
-- Unit tests: `cargo test toolcall_bad_filepath`
-- Integration tests: `cargo test test_streaming_toolcall`
-- Client accumulation: `cargo test test_client_side_accumulation`
-- Delta calculation: `cargo test test_delta_calculation`
-- Manually test with real clients (Claude Code or Opencode)
-
-**Key test**: Verify that client-accumulated deltas produce valid JSON (see tests in `src/fixes/toolcall_bad_filepath_fix.rs` lines 1318-1615).
+**Testing the streaming paths**: fix logic via `cargo test fixes::`; stream
+behavior via the curl recipe in README "Is it really streaming?" (fake emits
+everything at once after the backend finishes; passthrough trickles).
 
 ## Maintaining Client Compatibility
 

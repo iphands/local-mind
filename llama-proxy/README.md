@@ -154,7 +154,6 @@ fixes:
 stats:
   enabled: true
   format: pretty  # pretty | json | compact
-  log_interval: 1  # log every N requests
 
 # Remote exporters
 exporters:
@@ -172,12 +171,6 @@ exporters:
 #   model: "fast-model"
 #   prompt_file: "./augmenter/backend_prompt.md"
 #   request_prompt_file: "./augmenter/request_prompt.md"
-
-# Pre-parse detection (default: enabled with warn level)
-# Detects malformed JSON patterns BEFORE parsing for early error detection
-# detection:
-#   enabled: true
-#   log_level: "warn"  # warn | error | info
 ```
 
 ### Running the Proxy

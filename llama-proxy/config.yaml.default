@@ -156,5 +156,3 @@ backend:
 #     org: "my-org"
 #     bucket: "llama-metrics"
 #     token: "your-token-here"
-#     batch_size: 10
-#     flush_interval_seconds: 5
