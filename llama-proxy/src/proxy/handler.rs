@@ -334,9 +334,6 @@ impl ProxyHandler {
 
         tracing::debug!(method = %method, path = %path, query = ?query, "Processing request");
 
-        let is_anthropic_api = path.starts_with("/v1/messages");
-        tracing::debug!(is_anthropic_api = is_anthropic_api, "Detected API format");
-
         // Save headers before consuming the request
         let headers = req.headers().clone();
 
@@ -376,8 +373,27 @@ impl ProxyHandler {
             }
         };
 
+        // [C-H4] A node mounted behind `strip_path_prefix` serves its API one level
+        // deeper than the client's URL: the client's "/completions/v1/messages" is the
+        // node's native "/v1/messages". Every routing decision below takes the
+        // backend-native view. The API-format detection ALSO checks the original path,
+        // because the client may speak /v1/messages while the node's native path
+        // differs (e.g. prefix "/v1" turns "/v1/messages" into "/messages").
+        // Forwarding keeps its own effective_path application unchanged, so the strip
+        // happens exactly once.
+        let routed = backend.node.effective_path(path);
+        let is_completion_route =
+            routed.starts_with("/completions") || routed.contains("/chat/completions") || routed.contains("/v1/messages");
+        let is_anthropic_api = path.starts_with("/v1/messages") || routed.starts_with("/v1/messages");
+        tracing::debug!(
+            is_anthropic_api = is_anthropic_api,
+            routed = %routed,
+            is_completion_route = is_completion_route,
+            "Detected API format"
+        );
+
         // Route specific endpoints to simple pass-through
-        match (&method, path) {
+        match (&method, routed) {
             // llama.cpp monitoring/status endpoints (simple pass-through)
             (&Method::GET, "/props")
             | (&Method::GET, "/slots")
@@ -1547,12 +1563,13 @@ mod tests {
         }
     }
 
-    /// Build a handler with an arbitrary balancer and augment backend, everything else
-    /// at the same inert settings as `create_test_handler_with_streaming` (no fixes, no
-    /// stats, no exporters). Nothing talks to a real backend in these tests.
+    /// Build a handler with an arbitrary balancer, augment backend, and streaming mode,
+    /// everything else at the same inert settings as `create_test_handler_with_streaming`
+    /// (no fixes, no stats, no exporters). Nothing talks to a real backend in these tests.
     fn handler_with_balancer(
         load_balancer: Arc<dyn LoadBalancer>,
         augment_backend: Option<Arc<AugmentBackend>>,
+        streaming: StreamingConfig,
     ) -> ProxyHandler {
         let config = AppConfig {
             server: crate::config::ServerConfig {
@@ -1583,7 +1600,7 @@ mod tests {
                 },
             },
             detection: crate::config::DetectionConfig::default(),
-            streaming: StreamingConfig::default(),
+            streaming,
             augment_backend: None,
             reprompt: None,
             dump: crate::config::DumpConfig::default(),
@@ -1636,7 +1653,7 @@ mod tests {
         // NoMatchingBackend, the exact state of a proxy started without a backend.
         let empty_groups: HashMap<String, crate::config::BackendGroupConfig> = HashMap::new();
         let balancer = Arc::new(GroupedLoadBalancer::new(empty_groups).expect("empty group map must build"));
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -1670,7 +1687,7 @@ mod tests {
             http_client: reqwest::Client::new(),
         };
         let balancer = Arc::new(RoundRobinBalancer::new(vec![Arc::new(bare_node(None))]).unwrap());
-        let handler = handler_with_balancer(balancer, Some(Arc::new(dead_augment)));
+        let handler = handler_with_balancer(balancer, Some(Arc::new(dead_augment)), StreamingConfig::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -1789,7 +1806,7 @@ mod tests {
     async fn unreadable_request_body_answers_400_with_error_envelope() {
         // Body read fails before the balancer hands out a node; node url is never contacted.
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler
             .handle(request_with_body(Method::POST, "/v1/chat/completions", exploding_body()))
@@ -1811,7 +1828,7 @@ mod tests {
         // handle() pre-buffers the body before rebuilding monitoring passthroughs,
         // so this site is only exercisable at the method boundary.
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
         let node = node_at_port(1);
 
         let res = handler
@@ -1825,7 +1842,7 @@ mod tests {
     async fn backend_connect_failure_answers_502_with_error_envelope() {
         // Port 1: connect is refused instantly, deterministic without any listener.
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -1842,7 +1859,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -1860,7 +1877,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -1871,7 +1888,7 @@ mod tests {
     async fn passthrough_connect_failure_answers_502_with_error_envelope() {
         // GET /health takes the monitoring pass-through arm inside handle().
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
 
@@ -1887,7 +1904,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
 
@@ -1903,7 +1920,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler.handle(request_with_body(Method::GET, "/health", Body::empty())).await;
 
@@ -1940,7 +1957,7 @@ mod tests {
         );
         let port = one_shot_backend(response).await;
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler.handle(completion_request()).await;
 
@@ -1987,7 +2004,7 @@ mod tests {
         // is called directly because handle() pre-buffers with the 100 MiB
         // main cap before rebuilding passthrough requests (task 5 learning).
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
         let node = node_at_port(1);
 
         let res = handler
@@ -2007,7 +2024,7 @@ mod tests {
         // (4 MiB of frames, then the stream dies) must stay 400 with the
         // unreadable-text verbatim - the 413 branch must not swallow it.
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(1)]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler
             .handle(request_with_body(
@@ -2119,7 +2136,7 @@ mod tests {
         let (port, _release) = held_open_sse_backend(b"data: a\n\n", b"data: [DONE]\n\n").await;
         let node = node_at_port(port);
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler.handle(completion_request()).await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -2139,7 +2156,7 @@ mod tests {
         let (port, release) = held_open_sse_backend(b"data: a\n\n", b"data: [DONE]\n\n").await;
         let node = node_at_port(port);
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler.handle(completion_request()).await;
         release.send(()).expect("backend task must still be listening");
@@ -2163,7 +2180,7 @@ mod tests {
         let (port, _release) = held_open_sse_backend(b"data: a\n\n", b"data: [DONE]\n\n").await;
         let node = node_at_port(port);
         let balancer = Arc::new(RoundRobinBalancer::new(vec![node.clone()]).unwrap());
-        let handler = handler_with_balancer(balancer, None);
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
 
         let res = handler.handle(completion_request()).await;
         assert_eq!(res.status(), StatusCode::OK);
@@ -2174,5 +2191,335 @@ mod tests {
             0,
             "mid-flight body drop must release the claim (no phantom +1)"
         );
+    }
+
+    // ---- big-fix task 13: routing runs on the effective request path [C-H4] ----
+    //
+    // A node with `strip_path_prefix` is mounted behind that prefix on the client side:
+    // the client asks for "/completions/v1/messages" while the backend-native path is
+    // "/v1/messages". Before the fix the route match and the API-format detection looked
+    // at the ORIGINAL path only, so such a request was misclassified as OpenAI-shaped
+    // (or as an unknown route) while the bytes forwarded already went to the native path.
+
+    /// One-shot backend that ALSO reports the full raw request (request line + headers +
+    /// body, assembled per content-length) so tests can pin WHICH path and WHICH bytes
+    /// the proxy actually put on the wire.
+    async fn recording_backend(response: Vec<u8>) -> (u16, tokio::sync::mpsc::Receiver<Vec<u8>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("recording backend must bind");
+        let port = listener.local_addr().expect("recording backend addr").port();
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.expect("one connection");
+            {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut raw = Vec::new();
+                let mut buf = [0u8; 8192];
+                let mut content_length: Option<usize> = None;
+                loop {
+                    let n = sock.read(&mut buf).await.unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    raw.extend_from_slice(&buf[..n]);
+                    let head = String::from_utf8_lossy(&raw)
+                        .lines()
+                        .take_while(|l| !l.is_empty())
+                        .collect::<Vec<_>>()
+                        .join("\r\n")
+                        .to_lowercase();
+                    if content_length.is_none() {
+                        content_length = head.lines().find_map(|l| {
+                            l.strip_prefix("content-length:")
+                                .map(|v| v.trim().parse::<usize>().unwrap_or(0))
+                        });
+                    }
+                    let sep = raw.windows(4).position(|w| w == b"\r\n\r\n").map(|p| p + 4);
+                    match content_length {
+                        Some(cl) if sep.is_some_and(|s| raw.len() - s >= cl) => break,
+                        None if sep.is_some() => break,
+                        _ => {}
+                    }
+                }
+                let _ = tx.send(raw).await;
+                let _ = sock.write_all(&response).await;
+                let _ = sock.flush().await;
+            }
+        });
+        (port, rx)
+    }
+
+    async fn recorded_raw(mut rx: tokio::sync::mpsc::Receiver<Vec<u8>>) -> String {
+        let raw = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+            .await
+            .expect("backend must receive a request within 5s")
+            .expect("request head");
+        String::from_utf8_lossy(&raw).into_owned()
+    }
+
+    /// First line of the recorded request ("POST /v1/messages HTTP/1.1"), bounded so a
+    /// missing request FAILS the test instead of hanging it.
+    async fn recorded_request_line(rx: tokio::sync::mpsc::Receiver<Vec<u8>>) -> String {
+        recorded_raw(rx).await.lines().next().expect("request line").to_string()
+    }
+
+    fn prefixed_node(port: u16, prefix: &str, model: Option<&str>) -> Arc<BackendNode> {
+        Arc::new(BackendNode {
+            url: format!("http://127.0.0.1:{port}"),
+            model: model.map(str::to_string),
+            strip_path_prefix: Some(prefix.to_string()),
+            ..bare_node(None)
+        })
+    }
+
+    fn completion_json_body() -> Vec<u8> {
+        serde_json::json!({
+            "id": "cmpl-1",
+            "object": "chat.completion",
+            "created": 1,
+            "model": "test-model",
+            "choices": [{
+                "index": 0,
+                "message": {"role": "assistant", "content": "hello"},
+                "finish_reason": "stop"
+            }],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    fn completion_response_bytes() -> Vec<u8> {
+        raw_http_response("200 OK", &[("content-type", "application/json")], &completion_json_body())
+    }
+
+    async fn body_text(res: Response) -> String {
+        let bytes = to_bytes(res.into_body(), 1024 * 1024).await.expect("body must be readable");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+
+    #[tokio::test]
+    async fn prefixed_node_v1_messages_request_takes_anthropic_synthesis_path() {
+        // RED [C-H4]: node mounted at "/completions", client speaks Anthropic.
+        // The backend-native path is "/v1/messages", so this must take the Anthropic
+        // synthesis path (message_start SSE) AND forward to the native path (no
+        // double-strip). Baseline classifies it as OpenAI -> synthesized SSE carries
+        // chat.completion.chunk frames and no message_start event.
+        let (port, rx) = recording_backend(completion_response_bytes()).await;
+        let node = prefixed_node(port, "/completions", None);
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let body = serde_json::json!({
+            "model": "test-model",
+            "max_tokens": 64,
+            "messages": [{"role": "user", "content": "hi"}],
+            "stream": true,
+        });
+        let res = handler
+            .handle(request_with_body(
+                Method::POST,
+                "/completions/v1/messages",
+                Body::from(body.to_string()),
+            ))
+            .await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+            "client asked for a stream and must get synthesized SSE"
+        );
+        let text = body_text(res).await;
+        assert!(
+            text.contains("message_start"),
+            "Anthropic synthesis must run for a /v1/messages node path, got: {text}"
+        );
+        assert!(
+            !text.contains("chat.completion.chunk"),
+            "OpenAI SSE frames must not leak into an Anthropic-classified route, got: {text}"
+        );
+        assert_eq!(
+            recorded_request_line(rx).await,
+            "POST /v1/messages HTTP/1.1",
+            "forwarding must use the node-native path exactly once (no double-strip, no prefix left on)"
+        );
+    }
+
+    #[tokio::test]
+    async fn plain_chat_completions_routing_is_unchanged() {
+        // Green before AND after: unprefixed node keeps the OpenAI synthesis path and
+        // forwards the requested path verbatim.
+        let (port, rx) = recording_backend(completion_response_bytes()).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+        assert_eq!(handler.state.anthropic_buffered_responses_total.load(Ordering::Relaxed), 0);
+
+        let res = handler.handle(completion_request_streaming()).await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let text = body_text(res).await;
+        assert!(
+            text.contains("chat.completion.chunk"),
+            "plain OpenAI route keeps OpenAI SSE, got: {text}"
+        );
+        assert!(
+            !text.contains("message_start"),
+            "Anthropic frames must not appear on the OpenAI route"
+        );
+        assert_eq!(recorded_request_line(rx).await, "POST /v1/chat/completions HTTP/1.1");
+    }
+
+    fn completion_request_streaming() -> Request<Body> {
+        Request::builder()
+            .method(Method::POST)
+            .uri("/v1/chat/completions")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "model": "test-model",
+                    "messages": [{"role": "user", "content": "hello"}],
+                    "stream": true,
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn v1_prefixed_node_still_completes_chat_completions() {
+        // Regression pin (green before AND after): the documented Z.ai-style config
+        // (strip_path_prefix "/v1") forwards the native "/chat/completions" and the
+        // completion still comes back complete.
+        let (port, rx) = recording_backend(completion_response_bytes()).await;
+        let node = prefixed_node(port, "/v1", None);
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let text = body_text(res).await;
+        assert!(
+            text.contains("\"chat.completion\""),
+            "completion body must reach the client, got: {text}"
+        );
+        assert_eq!(recorded_request_line(rx).await, "POST /chat/completions HTTP/1.1");
+    }
+
+    #[tokio::test]
+    async fn prefixed_node_monitoring_arm_matches_on_the_routed_path() {
+        // RED [C-H4]: GET /completions/props on a "/completions" node is the monitoring
+        // route ("/props" natively). The monitoring arm must fire (verbatim passthrough),
+        // not the completion pipeline. Distinguishing observable: the node's model
+        // override rewrites the body ONLY on the completion pipeline; passthrough keeps
+        // the client bytes.
+        let body = br#"{"model":"client-name","keep":true}"#;
+        let (port, rx) = recording_backend(raw_http_response(
+            "200 OK",
+            &[("content-type", "application/json")],
+            br#"{"total_slots":1}"#,
+        ))
+        .await;
+        let node = prefixed_node(port, "/completions", Some("renamed"));
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::default());
+
+        let res = handler
+            .handle(request_with_body(Method::GET, "/completions/props", Body::from(&body[..])))
+            .await;
+
+        assert_eq!(res.status(), StatusCode::OK);
+        let raw = recorded_raw(rx).await;
+        assert_eq!(raw.lines().next().expect("request line"), "GET /props HTTP/1.1");
+        assert!(
+            raw.contains("\"model\":\"client-name\""),
+            "monitoring arm must forward the client body VERBATIM, got: {raw}"
+        );
+        assert!(
+            !raw.contains("renamed"),
+            "model override must NOT touch a passthrough body, got: {raw}"
+        );
+    }
+
+    #[tokio::test]
+    async fn unicode_prefixed_node_classifies_anthropic_on_the_routed_path() {
+        // Prefix-edge: a multibyte prefix must strip cleanly (byte-safe strip_prefix) and
+        // the routed path must classify as Anthropic. Passthrough mode + dead backend:
+        // the anthropic_buffered counter is the routing decision, taken BEFORE the
+        // backend connect, so the 502 outcome is deterministic and format-independent.
+        let node = Arc::new(BackendNode {
+            url: "http://127.0.0.1:1".to_string(),
+            strip_path_prefix: Some("/日本".to_string()),
+            ..bare_node(None)
+        });
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::Passthrough);
+
+        let res = handler
+            .handle(request_with_body(
+                Method::POST,
+                "/日本/v1/messages",
+                Body::from(r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#),
+            ))
+            .await;
+
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY, "dead backend still answers 502");
+        assert_eq!(
+            handler.state.anthropic_buffered_responses_total.load(Ordering::Relaxed),
+            1,
+            "routed path /v1/messages must classify as Anthropic (buffered-under-passthrough counter)"
+        );
+    }
+
+    #[tokio::test]
+    async fn path_exactly_equal_to_prefix_is_not_anthropic_and_does_not_panic() {
+        // Prefix-edge: request == prefix exactly -> routed == "". No arm may fire on "",
+        // and "" must not be misclassified as Anthropic. Dead backend -> deterministic 502.
+        let node = Arc::new(BackendNode {
+            url: "http://127.0.0.1:1".to_string(),
+            strip_path_prefix: Some("/completions".to_string()),
+            ..bare_node(None)
+        });
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::Passthrough);
+
+        let res = handler
+            .handle(request_with_body(
+                Method::POST,
+                "/completions",
+                Body::from(r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#),
+            ))
+            .await;
+
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(handler.state.anthropic_buffered_responses_total.load(Ordering::Relaxed), 0);
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_prefix_is_deterministic_and_never_anthropic() {
+        // Prefix-edge: strip_path_prefix "/completions/" leaves routed == "v1/messages"
+        // (no leading slash) - a misconfigured prefix whose native destination is broken
+        // regardless of routing. The handler must stay deterministic: not Anthropic-classified,
+        // dead backend -> 502 envelope, no panic.
+        let node = Arc::new(BackendNode {
+            url: "http://127.0.0.1:1".to_string(),
+            strip_path_prefix: Some("/completions/".to_string()),
+            ..bare_node(None)
+        });
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingConfig::Passthrough);
+
+        let res = handler
+            .handle(request_with_body(
+                Method::POST,
+                "/completions/v1/messages",
+                Body::from(r#"{"model":"m","messages":[{"role":"user","content":"hi"}]}"#),
+            ))
+            .await;
+
+        assert_eq!(res.status(), StatusCode::BAD_GATEWAY);
+        assert_eq!(handler.state.anthropic_buffered_responses_total.load(Ordering::Relaxed), 0);
     }
 }
