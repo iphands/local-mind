@@ -3,7 +3,7 @@
 # sm120 image built from a vLLM main snapshot. The default since 2026-09-13;
 # ./qwen3.8-flash-next/run-legacy is the upstream PR-branch image it replaced.
 #
-#   VLLM_REF=main ./container/build                # build the snapshot first -> iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.dev20260918-g468663a
+#   VLLM_REF=main ./container/build                # build the snapshot first -> iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.dev20260923-g826e300
 #   ./qwen3.8-flash-next/run                       # primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8 (default)
 #   ./qwen3.8-flash-next/run <path-or-name>        # another Flash-Next checkpoint under models/vllm
 #
@@ -19,14 +19,15 @@
 # the table is allocated in PINNED host memory inside the worker and read
 # through UVA (a CUDA view of host memory), enabled by
 # --engram-config '{"cpu_offload": true}' (the legacy VLLM_PLE_CPU_OFFLOAD=1 env
-# still works but logs a deprecation). Different mechanism, so the three
+# was removed in vllm#57937; cpu_offload now defaults to true). Different mechanism, so the three
 # PR-branch-only pieces are gone here: no mp executor requirement, no
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Verified against main @ 468663a (2026-09-18, the commit ./container/build pins
-# for VLLM_REF=main; first verified at 1ee4be4, 2026-09-12, and re-checked on
-# the bump): vllm/config/engram.py with cpu_offload, Qwen4ExpPLE-
+# Verified against main @ 826e300 (2026-09-22, the commit ./container/build pins
+# for VLLM_REF=main; first verified at 1ee4be4, 2026-09-12, re-checked at
+# 468663a and on each bump; vllm/models/qwen4_exp is unchanged 468663a ->
+# 826e300): vllm/config/engram.py with cpu_offload, Qwen4ExpPLE-
 # PinnedHostEmbedding selected when it is set, Qwen4ExpForConditionalGeneration +
 # Qwen4ExpMTP in the registry, VLLM_GDN_DECODE_KERNEL still an env, the qwen3
 # reasoning parser and qwen3_coder tool parser still registered.
@@ -124,7 +125,7 @@ NAME=vllm
 # so a later snapshot build cannot change what this launcher runs unnoticed.
 # Keep in step with VLLM_MAIN_SHA in ./container/build: bumping that produces a
 # new -vllm<next>.dev<date>-g<sha7> tag, and this default has to follow it.
-IMAGE_TAG=${IMAGE_TAG:-cu1321-sm120-main-vllm0.31.0.dev20260918-g468663a}
+IMAGE_TAG=${IMAGE_TAG:-cu1321-sm120-main-vllm0.31.0.dev20260923-g826e300}
 vllm_image
 
 # shellcheck disable=SC2034  # read by resolve_model in common/_model-lib.sh
@@ -164,7 +165,7 @@ docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
 PATCH_ROOT="$HERE/patches/ple-ct-ignore"
 PATCH_SRC="$PATCH_ROOT/ngram_embedding.py"
 PATCH_DST=/opt/venv/lib/python3.12/site-packages/vllm/models/qwen4_exp/nvidia/ngram_embedding.py
-PATCH_FOR_REF=468663a5e56eba13367ce94f1b005bea4e183793   # the commit the overlay was derived from
+PATCH_FOR_REF=826e300cde4c512670bf2905cfd03c87451da36c   # the commit the overlay was derived from
 if [[ "$PATCH_PLE" != "0" ]]; then
   [[ -f "$PATCH_SRC" ]] || { echo "missing $PATCH_SRC"; exit 1; }
   _img_ref=$(docker image inspect -f '{{index .Config.Labels "ai.vllmcustom.vllm.ref"}}' "$CONTAINER")
@@ -258,8 +259,9 @@ VLLM_ARGS+=(
 )
 
 # The single-GPU path: table in pinned host RAM, looked up over UVA (vllm#54371).
-# The flag, not the legacy VLLM_PLE_CPU_OFFLOAD env: the env only fills the
-# default and logs a deprecation warning.
+# Explicit flag even though cpu_offload defaults to true since vllm#57937 (which
+# also removed the legacy VLLM_PLE_CPU_OFFLOAD env): the launcher should not
+# depend on an upstream default for a 95 GiB placement decision.
 [[ "$PLE_OFFLOAD" != "0" ]] && VLLM_ARGS+=( --engram-config '{"cpu_offload": true}' )
 [[ -n "$HF_OVERRIDES" ]] && VLLM_ARGS+=( --hf-overrides "$HF_OVERRIDES" )
 [[ -n "$EXECUTOR" ]] && VLLM_ARGS+=( --distributed-executor-backend "$EXECUTOR" )

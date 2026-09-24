@@ -23,8 +23,8 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at 468663a, 2026-09-18;
-#     was 1ee4be4, 2026-09-12): same torch 2.13.0 / torchaudio 2.11.0 /
+#   - main snapshot (VLLM_REF=main in ./build, pinned at 826e300, 2026-09-22;
+#     was 468663a, 2026-09-18, and 1ee4be4, 2026-09-12): same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0, flashinfer 0.6.18.post1 (cubin wheel published at
 #     flashinfer.ai/whl), same requirements/build/cuda.txt, same
 #     vllm-flash-attention CMakeLists (the sm120 patch below still matches),
@@ -37,6 +37,13 @@
 #     (built for 12.0) to the vllm-project fork, whose deep_jit submodule needs
 #     elfutils' libdw -- see vllm-build and vllm-openai. The new DeepSelect
 #     extension is 10.0f-only and configures to an empty target here.
+#     468663a -> 826e300 (2026-09-22): the only requirements change is
+#     humming-kernels[cu13] 0.1.12 -> 0.1.15 (runtime resolve, vllm-openai
+#     stage), so torch/torchaudio/flashinfer layers are reused again.
+#     vllm-flash-attention moves 506341a -> 9cd61de with a byte-identical
+#     CMakeLists (the sm120 patch dry-runs clean); DeepGEMM moves within the
+#     same vllm-project fork (e1f418c), so the libdw handling is unchanged;
+#     AllSpark (sm8x-only, never built here) is dropped from CMake.
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,
@@ -241,7 +248,7 @@ ARG VLLM_VERSION=0.29.0
 # setuptools-scm 10.2.1 / vcs-versioning 2.2.4. It silently appeared to work only
 # while .git was in the build context, because setuptools-scm was reading the
 # git tags instead. VLLM_VERSION_OVERRIDE is vLLM's own hook (setup.py:1020 in
-# v0.29.0, :1261 at main 468663a -- same early return) and sets the *unscoped*
+# v0.29.0, :1261 at main 468663a and 826e300 -- same early return) and sets the *unscoped*
 # SETUPTOOLS_SCM_PRETEND_VERSION internally.
 ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
     VLLM_USE_PRECOMPILED=0 \

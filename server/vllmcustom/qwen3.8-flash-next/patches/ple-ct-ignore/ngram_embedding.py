@@ -1,6 +1,6 @@
 # local-mind overlay of vllm/models/qwen4_exp/nvidia/ngram_embedding.py, taken
-# verbatim from vLLM main @ 468663a5e56eba13367ce94f1b005bea4e183793 (the commit
-# iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.dev20260918-g468663a is
+# verbatim from vLLM main @ 826e300cde4c512670bf2905cfd03c87451da36c (the commit
+# iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.dev20260923-g826e300 is
 # built from) plus ONE change, marked "local-mind patch" below and shown in
 # ngram_embedding.diff next to this file: from_quant_config() learns that a
 # compressed-tensors checkpoint whose `ignore` list matches the PLE table means
