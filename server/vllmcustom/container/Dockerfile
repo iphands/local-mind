@@ -23,9 +23,10 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at 826e300, 2026-09-22;
-#     was 468663a, 2026-09-18, and 1ee4be4, 2026-09-12): same torch 2.13.0 / torchaudio 2.11.0 /
-#     torchvision 0.28.0, flashinfer 0.6.18.post1 (cubin wheel published at
+#   - main snapshot (VLLM_REF=main in ./build, pinned at 36f94d5, 2026-09-24;
+#     was 826e300, 2026-09-22, 468663a, 2026-09-18, and 1ee4be4, 2026-09-12):
+#     same torch 2.13.0 / torchaudio 2.11.0 /
+#     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
 #     flashinfer.ai/whl), same requirements/build/cuda.txt, same
 #     vllm-flash-attention CMakeLists (the sm120 patch below still matches),
 #     same apache-tvm-ffi build range. Versus the release the runtime resolve
@@ -44,6 +45,17 @@
 #     CMakeLists (the sm120 patch dry-runs clean); DeepGEMM moves within the
 #     same vllm-project fork (e1f418c), so the libdw handling is unchanged;
 #     AllSpark (sm8x-only, never built here) is dropped from CMake.
+#     826e300 -> 36f94d5 (2026-09-24): vllm#58069 moves flashinfer to 0.7.0
+#     (python + cubin; cubin published at flashinfer.ai/whl) and humming to
+#     0.1.16, so flashinfer-build recompiles. 0.7.0 split the AOT jit-cache
+#     into a shim + per-arch provider wheel (flashinfer#4514) -- flashinfer-
+#     build now builds flashinfer-jit-cache-sm120f + the shim when the tree
+#     has flashinfer-jit-cache-provider/, and vllm-openai asserts the shim
+#     finds it. New flashinfer runtime deps (nccl-extensions, nccl4py>=0.4.1,
+#     cudnn-frontend>=1.29) resolve against torch 2.13.0 (uv dry-run of the
+#     36f94d5 requirements/cuda.txt in the g468663a image, 2026-09-24). vLLM
+#     extension pins are unchanged except QuTLASS compile flags (vllm#58173,
+#     the torch 2.13 fix; it does build for 12.0f here).
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,
@@ -179,7 +191,8 @@ ARG CUDA_VERSION
 # matching prebuilt flashinfer-cubin wheel instead of rebuilding it from source.
 ARG FLASHINFER_VERSION=0.6.18
 # 12.0f = sm120 family-conditional kernels (RTX PRO 6000 Blackwell). FlashInfer
-# 0.6.x has no setup.py; it builds via a PEP 517 backend (python -m build).
+# 0.6.x/0.7.x have no setup.py; they build via PEP 517 backends (python -m build).
+# 0.7.0's provider backend takes the same value as FLASHINFER_JIT_CACHE_PROVIDER_ARCH.
 ENV FLASHINFER_CUDA_ARCH_LIST="12.0f" \
     TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST}
 
@@ -197,11 +210,14 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     export MAX_JOBS NVCC_THREADS CMAKE_BUILD_PARALLEL_LEVEL="$MAX_JOBS" ; \
     uv pip install build "setuptools>=77" "packaging>=24" wheel ninja numpy \
         tqdm requests filelock nvidia-ml-py \
-        "apache-tvm-ffi>=0.1.6,!=0.1.8,!=0.1.8.post0,<0.2" && \
+        "apache-tvm-ffi>=0.1.11,<0.2" && \
+    # (0.1.11 is flashinfer 0.7.0's build-system floor and vLLM's ==pin; it also
+    # satisfies 0.6.x's >=0.1.6,!=0.1.8 range.)
     # flashinfer >= 0.6.18 declares extra "provider wheel" build deps in
     # ci/cuda-versions.json (dependency_policy; today nvidia-cutlass-dsl[cu13]
     # >=4.6.2a0), returned by build_utils.get_build_dependency_requirements()
-    # from the jit-cache backend's get_requires_for_build_wheel hook. Under
+    # from the AOT backend's get_requires_for_build_wheel hook (jit-cache in
+    # 0.6.18, jit-cache-provider since 0.7.0). Under
     # --no-isolation `python -m build` only *checks* them, and aborts with
     # "ERROR Unmet dependencies" (hit on the v0.29.0 bump, 2026-09-12). Ask the
     # tree instead of hardcoding, so the next policy entry does not repeat this.
@@ -229,9 +245,34 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     # flashinfer.ai/whl — the same --extra-index-url vLLM uses in requirements/cuda.txt.
     uv pip install --no-deps --extra-index-url https://flashinfer.ai/whl/ \
         "flashinfer-cubin==${FLASHINFER_VERSION}" && \
-    # AOT-precompiled sm120 kernels (the heavy compile; honors FLASHINFER_CUDA_ARCH_LIST)
-    python -m build --no-isolation --wheel --outdir /wheels ./flashinfer-jit-cache && \
-    uv pip install --no-deps /wheels/flashinfer_jit_cache-*.whl && \
+    # AOT-precompiled sm120 kernels (the heavy compile). Two layouts:
+    #   <= 0.6.x: flashinfer-jit-cache IS the AOT package; its backend compiles
+    #     for FLASHINFER_CUDA_ARCH_LIST.
+    #   >= 0.7.0 (flashinfer#4514): the kernels moved into one wheel per arch,
+    #     built from flashinfer-jit-cache-provider with
+    #     FLASHINFER_JIT_CACHE_PROVIDER_ARCH (exactly one arch; the backend
+    #     overrides FLASHINFER_CUDA_ARCH_LIST with it) -> distribution
+    #     flashinfer-jit-cache-sm120f, discovered at runtime through the
+    #     flashinfer.jit_cache.providers entry point. flashinfer-jit-cache is
+    #     now a metadata-only shim whose Requires-Dist names those providers,
+    #     and its backend refuses to import without
+    #     FLASHINFER_JIT_CACHE_PROVIDER_ARCHS. flashinfer only looks for
+    #     providers through the shim (jit/env.py _get_aot_providers), so both
+    #     wheels are needed; both land in /wheels, which is what lets the
+    #     vllm-openai `uv pip install /wheels/*.whl` satisfy the shim's pin.
+    #     sm120f scores as compatible with an sm120 device
+    #     (cuda_binary_target_compatibility_score('sm120f', 'sm120') = (2, 0)).
+    if [ -d flashinfer-jit-cache-provider ]; then \
+        FLASHINFER_JIT_CACHE_PROVIDER_ARCH="$FLASHINFER_CUDA_ARCH_LIST" \
+            python -m build --no-isolation --wheel --outdir /wheels ./flashinfer-jit-cache-provider && \
+        FLASHINFER_JIT_CACHE_PROVIDER_ARCHS="$FLASHINFER_CUDA_ARCH_LIST" \
+            python -m build --no-isolation --wheel --outdir /wheels ./flashinfer-jit-cache && \
+        uv pip install --no-deps /wheels/flashinfer_jit_cache_sm*.whl /wheels/flashinfer_jit_cache-*.whl ; \
+    else \
+        python -m build --no-isolation --wheel --outdir /wheels ./flashinfer-jit-cache && \
+        uv pip install --no-deps /wheels/flashinfer_jit_cache-*.whl ; \
+    fi && \
+    ls -la /wheels/flashinfer_* && \
     ccache -s
 
 ###############################################################################
@@ -366,7 +407,18 @@ RUN --mount=type=cache,target=/root/.cache/uv \
                print('torch', torch.__version__, torch.version.cuda, \
                      'torchvision', torchvision.__version__, \
                      'torchaudio', torchaudio.__version__, \
-                     'flashinfer-cubin', flashinfer_cubin.__file__)"
+                     'flashinfer-cubin', flashinfer_cubin.__file__)" && \
+    # flashinfer >= 0.7.0: the AOT kernels are only found if the jit-cache shim
+    # discovers the sm120f provider wheel (see flashinfer-build). A miss is not
+    # an error at serve time -- flashinfer silently JIT-compiles every kernel on
+    # first use -- so assert it here. 0.6.x has no provider API: skipped.
+    python -c "import flashinfer_jit_cache as j; \
+               f = getattr(j, 'get_jit_cache_providers', None); \
+               ps = f() if f else None; \
+               print('flashinfer-jit-cache', j.__version__, 'providers:', \
+                     'n/a (<0.7)' if ps is None else [(p.provider_id, len(p.modules)) for p in ps]); \
+               assert ps is None or any(a.startswith('sm120') for p in ps for a in p.cuda_architectures), \
+                      'flashinfer-jit-cache shim found no sm120 provider'"
 
 ENV VLLM_HOST_IP=0.0.0.0 \
     HF_HUB_ENABLE_HF_TRANSFER=1 \

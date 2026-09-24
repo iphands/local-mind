@@ -14,7 +14,7 @@
 # A snapshot build (VLLM_REF=main ./container/build) lives under its own tag and is
 # pushed by naming it: TAG=cu1321-sm120-main ./container/push. Its version label
 # is <next>.dev<date>+g<sha7>; the '+' is not legal in a docker tag and becomes
-# '-', so the pinned tags read cu1321-sm120-main-vllm0.31.0.dev20260923-g826e300[-<commit>].
+# '-', so the pinned tags read cu1321-sm120-main-vllm0.31.0.dev20260924-g36f94d5[-<commit>].
 # :latest is only pushed when it IS the image being pushed (it never is for a
 # snapshot; ./container/build does not retag :latest for those).
 #

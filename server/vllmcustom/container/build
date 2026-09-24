@@ -70,8 +70,8 @@ NVCC_THREADS=${NVCC_THREADS:-1}
 # 0.6.18 -- see its requirements/cuda.txt; ./container/preflight checks this).
 # Not bumped further on purpose (2026-09-11): torch 2.14.0 is out but no vLLM
 # release pins it (v0.29.0 and main are both on 2.13.0), and flashinfer
-# 0.6.18.post1 / 0.7.0rc1 are newer than what v0.29.0 pins (main is on
-# 0.6.18.post1). vLLM's wheel hard-pins flashinfer-python==X, so the flashinfer
+# 0.6.18.post1 / 0.7.0rc1 are newer than what v0.29.0 pins (main moved to
+# 0.7.0 on 2026-09-24, vllm#58069). vLLM's wheel hard-pins flashinfer-python==X, so the flashinfer
 # ref can only move together with VLLM_REF.
 #
 # Snapshot builds (an untagged vLLM commit). `VLLM_REF=main` means the commit
@@ -82,8 +82,8 @@ NVCC_THREADS=${NVCC_THREADS:-1}
 # (preflight refuses otherwise). Snapshots get their own tag family (see TAG
 # below) and never move :latest, so ./qwen/run and friends keep the release
 # build while ./qwen3.8-flash-next/run picks the snapshot up by tag.
-VLLM_MAIN_SHA=826e300cde4c512670bf2905cfd03c87451da36c   # main @ 2026-09-22: torch 2.13.0 / flashinfer 0.6.18.post1 (was 468663a, 2026-09-18)
-VLLM_MAIN_FLASHINFER_REF=v0.6.18.post1
+VLLM_MAIN_SHA=36f94d5fe8a3953f1ad340de3c5aaec909765243   # main @ 2026-09-24: torch 2.13.0 / flashinfer 0.7.0 (was 826e300, 2026-09-22)
+VLLM_MAIN_FLASHINFER_REF=v0.7.0
 VLLM_REF=${VLLM_REF:-v0.29.0}
 if [[ $VLLM_REF == main ]]; then
   VLLM_REF=$VLLM_MAIN_SHA

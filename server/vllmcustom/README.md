@@ -52,7 +52,7 @@ resolved before doing anything slow:
 | `./muse/run`  | serve Muse Glimmer — same image, plus the shims in `muse/patches/` (see below). Default `RedHatAI/Muse-Glimmer-30B-NVFP4` |
 | `./laguna/run`| serve Laguna-S with its DFlash drafter. Default `Laguna-S-2.1-NVFP4` |
 | `./qwen3.8-flash-next/run-legacy`| serve Qwen3.8-Flash-Next (180B-A6B) single-GPU via the `vllm/vllm-openai:qwen38-flash-next` PR-branch image — the only *published* build with a PLE CPU-offload path (vllm#53899); NOT the local build. The launcher the model card's numbers correspond to; kept for A/B. Default `primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8` |
-| `./qwen3.8-flash-next/run`| **the default since 2026-09-13**: the same model from the local **main snapshot** image (`iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.dev20260923-g826e300`, built with `VLLM_REF=main ./container/build`), using main's merged single-GPU path (vllm#54371, `--engram-config '{"cpu_offload": true}'`) instead of the PR branch's offload worker. Carries three fixes the first boots needed (see its header): an `--hf-overrides` correcting the checkpoint's wrong `ple_embedding_dtype`, auto-detected from the shard; a one-branch overlay of `ngram_embedding.py` (`qwen3.8-flash-next/patches/ple-ct-ignore/`) so a compressed-tensors `ignore` match on the PLE means unquantized; and `PYTORCH_CUDA_ALLOC_CONF=pinned_max_round_threshold_mb:1024`, because the 95.4 GiB table is one pinned allocation and torch's pinned allocator otherwise rounds it up to 128 GiB (measured: fails in 0.2 s without, pins in 35 s with) |
+| `./qwen3.8-flash-next/run`| **the default since 2026-09-13**: the same model from the local **main snapshot** image (`iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.dev20260924-g36f94d5`, built with `VLLM_REF=main ./container/build`), using main's merged single-GPU path (vllm#54371, `--engram-config '{"cpu_offload": true}'`) instead of the PR branch's offload worker. Carries three fixes the first boots needed (see its header): an `--hf-overrides` correcting the checkpoint's wrong `ple_embedding_dtype`, auto-detected from the shard; a one-branch overlay of `ngram_embedding.py` (`qwen3.8-flash-next/patches/ple-ct-ignore/`) so a compressed-tensors `ignore` match on the PLE means unquantized; and `PYTORCH_CUDA_ALLOC_CONF=pinned_max_round_threshold_mb:1024`, because the 95.4 GiB table is one pinned allocation and torch's pinned allocator otherwise rounds it up to 128 GiB (measured: fails in 0.2 s without, pins in 35 s with) |
 | `./bench/bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench/bench-results.md` |
 | `./bench/bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
 | `./bench/bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |
@@ -133,21 +133,21 @@ Two things worth knowing that did **not** need a change:
 
 The default set above is a tagged release, and stays that way. `VLLM_REF=main ./container/build`
 builds a **pinned** `main` commit instead — `VLLM_MAIN_SHA` in `container/build`, currently
-`826e300` (2026-09-22; was `468663a`, 2026-09-18, and `1ee4be4`, 2026-09-12, first taken for vllm#54371 — single-GPU
+`36f94d5` (2026-09-24; was `826e300`, 2026-09-22, `468663a`, 2026-09-18, and `1ee4be4`, 2026-09-12, first taken for vllm#54371 — single-GPU
 Qwen3.8-Flash-Next, see `./qwen3.8-flash-next/run`). `main` is *not* the moving tip: bump the sha on purpose, and
 re-check its `requirements/cuda.txt` when you do. What differs from the release set at that sha:
 
-| component | release (v0.29.0) | main @ `826e300` |
+| component | release (v0.29.0) | main @ `36f94d5` |
 |---|---|---|
-| FlashInfer | v0.6.18 | **v0.6.18.post1** (`VLLM_MAIN_FLASHINFER_REF`; cubin wheel is published) |
+| FlashInfer | v0.6.18 | **v0.7.0** (`VLLM_MAIN_FLASHINFER_REF`; vllm#58069, was 0.6.18.post1 through `826e300`; cubin wheel is published). 0.7.0 split the AOT jit-cache into a shim plus per-arch provider wheels (flashinfer#4514): flashinfer-build builds `flashinfer-jit-cache-sm120f` + the shim, and vllm-openai asserts the shim finds an sm120 provider |
 | torch / torchaudio / torchvision | 2.13.0 / 2.11.0 / 0.28.0 | unchanged |
-| runtime deps (from PyPI) | — | + `instanttensor`, cutlass-dsl 4.7.1, quack 0.6.5, transformers ≥ 5.10.4, `xgrammar==0.2.7` (was a range), `humming-kernels[cu13]==0.1.15` (0.1.12 at `468663a`; the only `requirements/cuda.txt` change in the 468663a → 826e300 bump); resolved against torch 2.13.0 with `uv pip install --dry-run` in the previous image on 2026-09-18 and the humming bump on 2026-09-22 (only humming-kernels changes; torch stays 2.13.0) |
+| runtime deps (from PyPI) | — | + `instanttensor`, cutlass-dsl 4.7.1, quack 0.6.5, transformers ≥ 5.10.4, `xgrammar==0.2.7` (was a range), `humming-kernels[cu13]==0.1.16` (0.1.12 at `468663a`, 0.1.15 at `826e300`), and via flashinfer 0.7.0 `nccl-extensions` / `nccl4py>=0.4.1`; the full `36f94d5` `requirements/cuda.txt` resolves against torch 2.13.0 (`uv pip install --dry-run` in the g468663a image, 2026-09-24; torch stays 2.13.0) |
 | system packages | — | **`libdw-dev`** in vllm-build, **`libdw1`** in vllm-openai: vllm#56876 repinned DeepGEMM (built for sm120) to the `vllm-project` fork, whose `deep_jit` submodule includes `<elfutils/libdwfl.h>` and `dlopen`s `libdw.so.1` for stack traces. Deliberately not in `base`, so torch/flashinfer layers stay cached |
 | new CUDA extensions | — | `_deepselect_C` (10.0f only → empty target on sm120, nothing compiled); FlashMLA repinned, still 9.0/10.x only |
 | vllm-flash-attention commit | `06bdd47` | `9cd61de` (was `506341a`) — `CMakeLists.txt` byte-identical, the sm120 patch applies (dry-run 2026-09-22) |
 | wheel version | `0.29.0` | `0.31.0.dev<commit date>+g<sha7>` (`VLLM_NEXT_VERSION`; 0.31 because the v0.30.0 release branch was cut at `f2aad6a`, 2026-09-15, before this sha) (`VLLM_VERSION_OVERRIDE`; `vllm --version` names the commit) |
 
-The snapshot is tagged `cu1321-sm120-main` and `cu1321-sm120-main-vllm0.31.0.dev20260923-g826e300`
+The snapshot is tagged `cu1321-sm120-main` and `cu1321-sm120-main-vllm0.31.0.dev20260924-g36f94d5`
 (the `+` of the PEP 440 local segment is not tag-legal, so it becomes `-`) and **never** `:latest`,
 so `./qwen/run` and the other launchers keep the release build. The image records what it was built
 from in the `ai.vllmcustom.vllm.ref` label (full sha for a snapshot, tag for a release). Push it by
@@ -161,7 +161,7 @@ preflight refuses a mismatch as usual.
 | candidate | status | blocker |
 |---|---|---|
 | torch 2.14.0 (2026-08-26) | released | no vLLM release pins it — v0.29.0 and `main` still pin 2.13.0 |
-| FlashInfer 0.6.18.post1 (2026-09-04), 0.7.0rc1 (2026-09-09) | released | vLLM's wheel hard-pins `flashinfer-python==X`; v0.29.0 wants 0.6.18 (`main` is on 0.6.18.post1) |
+| FlashInfer 0.6.18.post1 (2026-09-04), 0.7.0 (2026-09-21) | released | vLLM's wheel hard-pins `flashinfer-python==X`; v0.29.0 wants 0.6.18 (`main` is on 0.7.0 since 2026-09-24, and the snapshot follows it) |
 | CUDA 13.3.1 | image published; driver 610.43.03 ≥ its 610.43.02 floor | not in torch's binary matrix (12.6/12.9/13.0/13.2), no FlashInfer/vLLM CI; 13.3+ nvcc changed its dry-run output (broke sccache upstream) |
 | vLLM v0.30.0 | not tagged (2026-09-18: `v0.30.0rc2` is out, on a release branch) | when it is: `VLLM_REF=v0.30.0 FLASHINFER_REF=<its requirements/cuda.txt pin> PREFLIGHT_ONLY=1 ./container/build` first |
 
@@ -614,7 +614,7 @@ parallelism; if it brushes the ceiling, raise it.
   | `cu1321-sm120-vllm0.29.0` | pinned to the vLLM version |
   | `cu1321-sm120-vllm0.29.0-d6d029f` | pinned to vLLM version *and* build commit |
   | `latest` | newest build of anything (only pushed when it is the image being pushed) |
-  | `cu1321-sm120-main[-vllm0.31.0.dev20260923-g826e300[-<build commit>]]` | a `VLLM_REF=main` snapshot, pushed with `TAG=cu1321-sm120-main`; never `:latest` |
+  | `cu1321-sm120-main[-vllm0.31.0.dev20260924-g36f94d5[-<build commit>]]` | a `VLLM_REF=main` snapshot, pushed with `TAG=cu1321-sm120-main`; never `:latest` |
 
   The versions come from the image's own OCI labels (`ai.vllmcustom.*`, stamped
   by the container/Dockerfile), never re-declared in `./container/push` — so a tag cannot claim a
