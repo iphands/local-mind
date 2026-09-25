@@ -1,8 +1,9 @@
 #!/bin/bash
 # Push the built image to Docker Hub. Run `docker login` first.
 #
-#   ./container/push                  # pushes the resolved tags for the last build
+#   ./container/push                  # pushes what ./container/build last built (container/.last-build)
 #   TAG=cu1303-sm120 ./container/push # push a specific variant tag
+#   PUSH_DRY_RUN=1 ./container/push   # print the tags, push nothing
 #
 # Tags pushed, for vLLM 0.29.0 on CUDA 13.2.1 at commit d6d029f:
 #
@@ -11,10 +12,16 @@
 #   cu1321-sm120-vllm0.29.0-d6d029f  pinned to vLLM version *and* build commit
 #   latest                           moving — newest build of anything
 #
-# A snapshot build (VLLM_REF=main ./container/build) lives under its own tag and is
-# pushed by naming it: TAG=cu1321-sm120-main ./container/push. Its version label
-# is <next>.dev<date>+g<sha7>; the '+' is not legal in a docker tag and becomes
-# '-', so the pinned tags read cu1321-sm120-main-vllm0.31.0.dev20260924-g36f94d5[-<commit>].
+# Which image: $TAG if given, else the TAG ./container/build recorded in
+# container/.last-build on its last successful run, else the CUDA variant of
+# :latest (the old default, for images built before .last-build existed). So
+# `VLLM_REF=main ./container/build && ./container/push` pushes the snapshot.
+#
+# A snapshot build (VLLM_REF=main) lives under its own tag family. Its version
+# label is <next>.dev<date>+g<sha7>; the '+' is not legal in a docker tag and
+# becomes '-', so the pinned tags read
+# cu<cuda>-sm120-main-vllm<next>.dev<yyyymmdd>-g<sha7>[-<commit>]. Pushing a
+# snapshot that was not built from VLLM_MAIN_SHA (container/versions.env) warns.
 # :latest is only pushed when it IS the image being pushed (it never is for a
 # snapshot; ./container/build does not retag :latest for those).
 #
@@ -30,9 +37,25 @@ REF=$(git rev-parse --short HEAD)
 # subfolder that feeds a build, however this script was invoked.
 root=$(cd "$(dirname "$0")/.." && pwd)
 
+# shellcheck source-path=SCRIPTDIR source=versions.env
+source "$root/container/versions.env"
+
 # TAG still has to be derived without the image, since it is how we *find* the
-# image. Default to the CUDA variant of whatever :latest actually is.
+# image: explicit TAG, then the last build, then the CUDA variant of :latest.
 label() { docker image inspect -f "{{index .Config.Labels \"$1\"}}" "$2" 2>/dev/null; }
+
+last_build="$root/container/.last-build"
+if [[ -n ${TAG:-} ]]; then
+  echo "## TAG=$TAG (from the environment)"
+elif [[ -f $last_build ]]; then
+  TAG=$(sed -n 's/^TAG=//p' "$last_build")
+  _lb_image=$(sed -n 's/^IMAGE=//p' "$last_build")
+  if [[ -n $_lb_image && $_lb_image != "$IMAGE" ]]; then
+    echo "ERROR: container/.last-build is for $_lb_image, not $IMAGE. Pass TAG=... explicitly." >&2
+    exit 1
+  fi
+  echo "## TAG=$TAG (from container/.last-build)"
+fi
 
 if [[ -z ${TAG:-} ]]; then
   cuda=$(label ai.vllmcustom.cuda.version "$IMAGE:latest")
@@ -42,6 +65,7 @@ if [[ -z ${TAG:-} ]]; then
     exit 1
   fi
   TAG="cu${cuda//./}-sm120"
+  echo "## TAG=$TAG (no container/.last-build: the CUDA variant of :latest)"
 fi
 
 docker image inspect "$IMAGE:$TAG" >/dev/null 2>&1 || {
@@ -56,6 +80,12 @@ fi
 
 VTAG="${TAG}-vllm${vllm_version//+/-}"   # PEP 440 local segment '+' is not tag-legal
 STAG="${VTAG}-${REF}"
+
+vllm_ref=$(label ai.vllmcustom.vllm.ref "$IMAGE:$TAG")
+if [[ $TAG == *-main && $vllm_ref != "$VLLM_MAIN_SHA" ]]; then
+  echo "WARN: $IMAGE:$TAG was built from vLLM $vllm_ref, but container/versions.env pins"
+  echo "      VLLM_MAIN_SHA=$VLLM_MAIN_SHA -- this is a stale snapshot. Rebuild with VLLM_REF=main first?"
+fi
 
 echo "## $IMAGE:$TAG carries vllm=$vllm_version ($(label ai.vllmcustom.vllm.ref "$IMAGE:$TAG")) torch=$(label ai.vllmcustom.torch.version "$IMAGE:$TAG") flashinfer=$(label ai.vllmcustom.flashinfer.version "$IMAGE:$TAG")"
 

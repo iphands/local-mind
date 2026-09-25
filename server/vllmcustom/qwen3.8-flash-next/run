@@ -3,7 +3,7 @@
 # sm120 image built from a vLLM main snapshot. The default since 2026-09-13;
 # ./qwen3.8-flash-next/run-legacy is the upstream PR-branch image it replaced.
 #
-#   VLLM_REF=main ./container/build                # build the snapshot first -> iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.dev20260924-g36f94d5
+#   VLLM_REF=main ./container/build                # build the snapshot first (the VLLM_MAIN_SHA pinned in container/versions.env)
 #   ./qwen3.8-flash-next/run                       # primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8 (default)
 #   ./qwen3.8-flash-next/run <path-or-name>        # another Flash-Next checkpoint under models/vllm
 #
@@ -24,8 +24,8 @@
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Verified against main @ 36f94d5 (2026-09-24, the commit ./container/build pins
-# for VLLM_REF=main; first verified at 1ee4be4, 2026-09-12, re-checked at
+# Last verified against main @ 36f94d5 (2026-09-24, VLLM_MAIN_SHA in
+# container/versions.env at the time; first verified at 1ee4be4, 2026-09-12, re-checked at
 # 468663a, 826e300 and on each bump; ngram_embedding.py is unchanged 468663a ->
 # 36f94d5): vllm/config/engram.py with cpu_offload, Qwen4ExpPLE-
 # PinnedHostEmbedding selected when it is set, Qwen4ExpForConditionalGeneration +
@@ -53,8 +53,9 @@
 #      the upstream file plus one branch -- a compressed-tensors `ignore` match
 #      on the PLE prefix (this checkpoint: 're:.*\.ple\..*') means unquantized.
 #      Mounted over the image's copy (PATCH_PLE=0 to drop it). The overlay is
-#      commit-specific, so the launcher checks the image's ai.vllmcustom.vllm.ref
-#      label against the sha the patch was taken from before mounting it.
+#      only valid over the exact upstream file it came from, so the launcher
+#      hashes the image's copy against BASE_SHA256 in
+#      patches/ple-ct-ignore/UPSTREAM before mounting it.
 #      Verified in the image: from_quant_config(<this checkpoint's CT config>,
 #      <ple prefix>) -> Qwen4ExpPLEUnquantizedEmbeddingMethod.
 # SECOND BOOT (2026-09-13): past the PLE method, the pinned-host table itself
@@ -107,7 +108,7 @@
 #   KV_FP8=1 ...                                   # --kv-cache-dtype fp8 (A/B only)
 #   VISION=0 ...                                   # --language-model-only (drops the ViT)
 #   MAX_NUM_SEQS=36 MAX_MODEL_LEN=32768 ...        # the card's exact measured config
-#   IMAGE_TAG=cu1321-sm120-main ...                # the MOVING snapshot tag (newest VLLM_REF=main build) instead of the pinned default
+#   IMAGE_TAG=cu1321-sm120-main ...                # the MOVING snapshot tag (newest VLLM_REF=main build) instead of the VLLM_MAIN_SHA lookup
 #   IMAGE=... ENV_EXTRA=... EXTRA_ARGS=...         # as everywhere else
 #
 # Benchmark against the running server: ./bench/bench <label>
@@ -121,11 +122,26 @@ source "$HERE/../common/_run-lib.sh"
 NAME=vllm
 # Our own build, but the SNAPSHOT tag family (VLLM_REF=main ./container/build),
 # never :latest -- :latest stays the release build every other launcher uses.
-# Pinned to the exact vLLM commit rather than the moving cu1321-sm120-main tag,
-# so a later snapshot build cannot change what this launcher runs unnoticed.
-# Keep in step with VLLM_MAIN_SHA in ./container/build: bumping that produces a
-# new -vllm<next>.dev<date>-g<sha7> tag, and this default has to follow it.
-IMAGE_TAG=${IMAGE_TAG:-cu1321-sm120-main-vllm0.31.0.dev20260924-g36f94d5}
+# Pinned to the exact vLLM commit rather than the moving cu<cuda>-sm120-main
+# tag, so a later snapshot build cannot change what this launcher runs
+# unnoticed: the image is looked up by its ai.vllmcustom.vllm.ref label (stamped
+# by container/Dockerfile) against VLLM_MAIN_SHA in container/versions.env --
+# the same pin ./container/build builds -- so a bump there is picked up here
+# with no edit. The build date in the tag no longer needs to be known. Newest
+# match wins (docker lists newest first), restricted to the default CUDA
+# variant. IMAGE_TAG=... still overrides.
+# shellcheck source-path=SCRIPTDIR source=../container/versions.env
+source "$HERE/../container/versions.env"
+IMAGE=${IMAGE:-iphands/vllm-blackwell}
+if [[ -z ${IMAGE_TAG:-} ]]; then
+  IMAGE_TAG=$(docker images "$IMAGE" --filter "label=ai.vllmcustom.vllm.ref=$VLLM_MAIN_SHA" \
+                --format '{{.Tag}}' | grep -m1 "^cu${DEFAULT_CUDA_VERSION//./}-sm120-main-vllm" || true)
+  if [[ -z $IMAGE_TAG ]]; then
+    echo "No $IMAGE image built from vLLM $VLLM_MAIN_SHA (VLLM_MAIN_SHA in container/versions.env)."
+    echo "Build the main snapshot first:"
+    echo "  VLLM_REF=main ./container/build"; exit 1
+  fi
+fi
 vllm_image
 
 # shellcheck disable=SC2034  # read by resolve_model in common/_model-lib.sh
@@ -159,20 +175,25 @@ docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
   echo "Image $CONTAINER not found. Build the main snapshot first:"
   echo "  VLLM_REF=main ./container/build"; exit 1; }
 
-# PLE patch: an overlay of one upstream file, valid for exactly one vLLM commit.
-# The image says which commit it was built from (ai.vllmcustom.vllm.ref label,
-# stamped by container/Dockerfile); refuse to mount onto any other.
+# PLE patch: an overlay of one upstream file, valid only over the exact upstream
+# file it was derived from. Checked by CONTENT: the image's copy must hash to
+# BASE_SHA256 in patches/ple-ct-ignore/UPSTREAM. (It used to be checked by vLLM
+# commit, which forced an edit on every bump even though the file had not
+# changed since 468663a.) Costs one short-lived container, ~1 s.
 PATCH_ROOT="$HERE/patches/ple-ct-ignore"
 PATCH_SRC="$PATCH_ROOT/ngram_embedding.py"
 PATCH_DST=/opt/venv/lib/python3.12/site-packages/vllm/models/qwen4_exp/nvidia/ngram_embedding.py
-PATCH_FOR_REF=36f94d5fe8a3953f1ad340de3c5aaec909765243   # the commit the overlay was derived from
 if [[ "$PATCH_PLE" != "0" ]]; then
-  [[ -f "$PATCH_SRC" ]] || { echo "missing $PATCH_SRC"; exit 1; }
-  _img_ref=$(docker image inspect -f '{{index .Config.Labels "ai.vllmcustom.vllm.ref"}}' "$CONTAINER")
-  if [[ "$_img_ref" != "$PATCH_FOR_REF" ]]; then
-    echo "$CONTAINER was built from vLLM '${_img_ref:-<no ai.vllmcustom.vllm.ref label>}' but"
-    echo "$PATCH_SRC is an overlay of $PATCH_FOR_REF. Re-derive the patch (see its header and"
-    echo ".diff) and update PATCH_FOR_REF, or PATCH_PLE=0 to boot without it."; exit 1
+  [[ -f "$PATCH_SRC" && -f "$PATCH_ROOT/UPSTREAM" ]] || { echo "missing $PATCH_SRC or $PATCH_ROOT/UPSTREAM"; exit 1; }
+  # shellcheck source-path=SCRIPTDIR source=patches/ple-ct-ignore/UPSTREAM
+  source "$PATCH_ROOT/UPSTREAM"
+  _img_sum=$(docker run --rm --entrypoint sha256sum "$CONTAINER" "$PATCH_DST" 2>/dev/null | cut -d' ' -f1 || true)
+  if [[ "$_img_sum" != "$BASE_SHA256" ]]; then
+    _img_ref=$(docker image inspect -f '{{index .Config.Labels "ai.vllmcustom.vllm.ref"}}' "$CONTAINER")
+    echo "$CONTAINER (vLLM ${_img_ref:-<no ai.vllmcustom.vllm.ref label>}) ships a different"
+    echo "$PATCH_DST than the overlay was derived from (sha256 ${_img_sum:-<unreadable>}, overlay"
+    echo "expects $BASE_SHA256 from $BASE_REF). Re-derive the patch (see $PATCH_ROOT/UPSTREAM),"
+    echo "or PATCH_PLE=0 to boot without it."; exit 1
   fi
 fi
 

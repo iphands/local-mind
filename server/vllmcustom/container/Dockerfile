@@ -11,6 +11,10 @@
 # "PyTorch has CUDA version 13.2 whereas TorchAudio has CUDA version 13.0").
 # transformers imports torchaudio at module load, so that error kills `vllm`.
 #
+# The pins themselves live in container/versions.env; ./build passes them all as
+# --build-arg, so the ARG defaults in this file are fallbacks for a bare
+# `docker build` only. The notes below are the history of each bump.
+#
 # Version notes (checked 2026-09-11; see README "Default version set"):
 #   - vLLM v0.29.0 (tagged 2026-09-08) pins torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0 / flashinfer 0.6.18 -- only flashinfer moved from

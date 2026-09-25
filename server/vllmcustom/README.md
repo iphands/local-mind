@@ -52,12 +52,12 @@ resolved before doing anything slow:
 | `./muse/run`  | serve Muse Glimmer — same image, plus the shims in `muse/patches/` (see below). Default `RedHatAI/Muse-Glimmer-30B-NVFP4` |
 | `./laguna/run`| serve Laguna-S with its DFlash drafter. Default `Laguna-S-2.1-NVFP4` |
 | `./qwen3.8-flash-next/run-legacy`| serve Qwen3.8-Flash-Next (180B-A6B) single-GPU via the `vllm/vllm-openai:qwen38-flash-next` PR-branch image — the only *published* build with a PLE CPU-offload path (vllm#53899); NOT the local build. The launcher the model card's numbers correspond to; kept for A/B. Default `primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8` |
-| `./qwen3.8-flash-next/run`| **the default since 2026-09-13**: the same model from the local **main snapshot** image (`iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.dev20260924-g36f94d5`, built with `VLLM_REF=main ./container/build`), using main's merged single-GPU path (vllm#54371, `--engram-config '{"cpu_offload": true}'`) instead of the PR branch's offload worker. Carries three fixes the first boots needed (see its header): an `--hf-overrides` correcting the checkpoint's wrong `ple_embedding_dtype`, auto-detected from the shard; a one-branch overlay of `ngram_embedding.py` (`qwen3.8-flash-next/patches/ple-ct-ignore/`) so a compressed-tensors `ignore` match on the PLE means unquantized; and `PYTORCH_CUDA_ALLOC_CONF=pinned_max_round_threshold_mb:1024`, because the 95.4 GiB table is one pinned allocation and torch's pinned allocator otherwise rounds it up to 128 GiB (measured: fails in 0.2 s without, pins in 35 s with) |
+| `./qwen3.8-flash-next/run`| **the default since 2026-09-13**: the same model from the local **main snapshot** image (the `cu1321-sm120-main-vllm…` image built from `VLLM_MAIN_SHA` in `container/versions.env`, found by its `ai.vllmcustom.vllm.ref` label; built with `VLLM_REF=main ./container/build`), using main's merged single-GPU path (vllm#54371, `--engram-config '{"cpu_offload": true}'`) instead of the PR branch's offload worker. Carries three fixes the first boots needed (see its header): an `--hf-overrides` correcting the checkpoint's wrong `ple_embedding_dtype`, auto-detected from the shard; a one-branch overlay of `ngram_embedding.py` (`qwen3.8-flash-next/patches/ple-ct-ignore/`) so a compressed-tensors `ignore` match on the PLE means unquantized; and `PYTORCH_CUDA_ALLOC_CONF=pinned_max_round_threshold_mb:1024`, because the 95.4 GiB table is one pinned allocation and torch's pinned allocator otherwise rounds it up to 128 GiB (measured: fails in 0.2 s without, pins in 35 s with) |
 | `./bench/bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench/bench-results.md` |
 | `./bench/bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
 | `./bench/bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |
 | `./bench/make-test-convo`| build the static ~100k-token "summarize Quake II source" turn from `vendor/yquake2` into `bench/data/test-convo.json` |
-| `./container/push` | `docker push` to `docker.io/iphands/vllm-blackwell` |
+| `./container/push` | `docker push` to `docker.io/iphands/vllm-blackwell` — by default whatever `./container/build` last built (`container/.last-build`) |
 | `bench/lib/`   | the shared measurement client (`benchclient.py`) + the Python drivers the bench scripts invoke (`measure.py`, `ctxbench.py`) |
 
 ## Quick start
@@ -78,7 +78,9 @@ old `server/vllm` scripts:
 
 ## Default version set (mutually compatible)
 
-vLLM `v0.29.0` pins these (see its `requirements/cuda.txt`), so they are the defaults:
+vLLM `v0.29.0` pins these (see its `requirements/cuda.txt`), so they are the defaults. **All version
+pins live in [`container/versions.env`](container/versions.env)** (with the reason for each);
+`./container/build`, `./container/push` and `./qwen3.8-flash-next/run` read them from there:
 
 | component  | ref/version | arch flags |
 |------------|-------------|------------|
@@ -132,7 +134,7 @@ Two things worth knowing that did **not** need a change:
 ### Snapshot builds from `main` (experimental)
 
 The default set above is a tagged release, and stays that way. `VLLM_REF=main ./container/build`
-builds a **pinned** `main` commit instead — `VLLM_MAIN_SHA` in `container/build`, currently
+builds a **pinned** `main` commit instead — `VLLM_MAIN_SHA` in `container/versions.env`, currently
 `36f94d5` (2026-09-24; was `826e300`, 2026-09-22, `468663a`, 2026-09-18, and `1ee4be4`, 2026-09-12, first taken for vllm#54371 — single-GPU
 Qwen3.8-Flash-Next, see `./qwen3.8-flash-next/run`). `main` is *not* the moving tip: bump the sha on purpose, and
 re-check its `requirements/cuda.txt` when you do. What differs from the release set at that sha:
@@ -147,12 +149,25 @@ re-check its `requirements/cuda.txt` when you do. What differs from the release 
 | vllm-flash-attention commit | `06bdd47` | `9cd61de` (was `506341a`) — `CMakeLists.txt` byte-identical, the sm120 patch applies (dry-run 2026-09-22) |
 | wheel version | `0.29.0` | `0.31.0.dev<commit date>+g<sha7>` (`VLLM_NEXT_VERSION`; 0.31 because the v0.30.0 release branch was cut at `f2aad6a`, 2026-09-15, before this sha) (`VLLM_VERSION_OVERRIDE`; `vllm --version` names the commit) |
 
-The snapshot is tagged `cu1321-sm120-main` and `cu1321-sm120-main-vllm0.31.0.dev20260924-g36f94d5`
+The snapshot is tagged `cu1321-sm120-main` and `cu1321-sm120-main-vllm<next>.dev<commit date>-g<sha7>`
 (the `+` of the PEP 440 local segment is not tag-legal, so it becomes `-`) and **never** `:latest`,
 so `./qwen/run` and the other launchers keep the release build. The image records what it was built
-from in the `ai.vllmcustom.vllm.ref` label (full sha for a snapshot, tag for a release). Push it by
-name: `TAG=cu1321-sm120-main ./container/push` (which now pushes `:latest` only when `:latest` *is*
-the image being pushed). Any other untagged ref works the same way but has to bring its own
+from in the `ai.vllmcustom.vllm.ref` label (full sha for a snapshot, tag for a release), and
+`./qwen3.8-flash-next/run` selects its image by that label against `VLLM_MAIN_SHA`, so it never needs
+the tag typed in. `./container/push` pushes whatever the last successful build produced
+(`container/.last-build`), and pushes `:latest` only when `:latest` *is* the image being pushed.
+
+**Bumping the snapshot** is one edit:
+
+1. `container/versions.env`: set `VLLM_MAIN_SHA`, and `VLLM_MAIN_FLASHINFER_REF` to that commit's
+   `requirements/cuda.txt` flashinfer pin.
+2. `PREFLIGHT_ONLY=1 VLLM_REF=main ./container/build` — seconds; refuses a mismatched pin.
+3. `VLLM_REF=main ./container/build && ./container/push`
+4. `./qwen3.8-flash-next/run` — picks the new image up by label. The PLE overlay is checked by the
+   upstream file's content hash (`qwen3.8-flash-next/patches/ple-ct-ignore/UPSTREAM`), so it needs
+   attention only if that upstream file changed; the launcher says so if it did.
+
+Any other untagged ref works the same way but has to bring its own
 flashinfer pin: `VLLM_REF=<sha> FLASHINFER_REF=<its requirements/cuda.txt pin> ./container/build`;
 preflight refuses a mismatch as usual.
 
@@ -614,7 +629,7 @@ parallelism; if it brushes the ceiling, raise it.
   | `cu1321-sm120-vllm0.29.0` | pinned to the vLLM version |
   | `cu1321-sm120-vllm0.29.0-d6d029f` | pinned to vLLM version *and* build commit |
   | `latest` | newest build of anything (only pushed when it is the image being pushed) |
-  | `cu1321-sm120-main[-vllm0.31.0.dev20260924-g36f94d5[-<build commit>]]` | a `VLLM_REF=main` snapshot, pushed with `TAG=cu1321-sm120-main`; never `:latest` |
+  | `cu1321-sm120-main[-vllm<next>.dev<date>-g<sha7>[-<build commit>]]` | a `VLLM_REF=main` snapshot, pushed by a plain `./container/push` right after its build (or `TAG=cu1321-sm120-main`); never `:latest` |
 
   The versions come from the image's own OCI labels (`ai.vllmcustom.*`, stamped
   by the container/Dockerfile), never re-declared in `./container/push` — so a tag cannot claim a

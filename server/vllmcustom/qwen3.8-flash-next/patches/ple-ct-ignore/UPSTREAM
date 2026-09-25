@@ -1,0 +1,13 @@
+# What ngram_embedding.py (this overlay) was derived from. Sourced by
+# ./qwen3.8-flash-next/run, which mounts the overlay only when the image's own
+# vllm/models/qwen4_exp/nvidia/ngram_embedding.py hashes to BASE_SHA256 -- i.e.
+# by the upstream file's CONTENT, not by vLLM commit, so a VLLM_MAIN_SHA bump
+# that leaves this file alone needs no edit here. When the launcher refuses:
+# re-derive the overlay from the new upstream file (keep the one marked
+# "local-mind patch" branch), regenerate ngram_embedding.diff, and update both
+# lines below.
+#
+# BASE_REF is provenance only (the commit the overlay was last re-derived at);
+# the upstream file is byte-identical at 468663a, 826e300 and 36f94d5.
+BASE_REF=468663a5e56eba13367ce94f1b005bea4e183793
+BASE_SHA256=01c2cb7c691c9a8a448e57619fdb97bfe1c3230e7be3c92dd4642d3f7173a499

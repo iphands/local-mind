@@ -111,7 +111,7 @@ The owner's build fails or degrades if these move; check them from the raw files
    - **Upstream:** `Qwen4ExpPLEEmbeddingMethod.from_quant_config` in
      https://github.com/vllm-project/vllm/blob/main/vllm/models/qwen4_exp/nvidia/ngram_embedding.py
      only handles `Fp8Config` / ModelOpt and raises `NotImplementedError` for a
-     compressed-tensors quant config (as of `36f94d5`, 2026-09-24). The owner overlays a
+     compressed-tensors quant config (as of `VLLM_MAIN_SHA` in `server/vllmcustom/container/versions.env`; last checked at `36f94d5`, 2026-09-24). The owner overlays a
      one-branch patch (`server/vllmcustom/qwen3.8-flash-next/patches/ple-ct-ignore/`). Report
      when `main` handles `CompressedTensorsConfig` (an `ignore` match on the PLE prefix →
      unquantized) there, with the commit; then the overlay can go.

@@ -1,13 +1,13 @@
 # local-mind overlay of vllm/models/qwen4_exp/nvidia/ngram_embedding.py, taken
-# verbatim from vLLM main @ 36f94d5fe8a3953f1ad340de3c5aaec909765243 (the commit
-# iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.dev20260924-g36f94d5 is
-# built from) plus ONE change, marked "local-mind patch" below and shown in
-# ngram_embedding.diff next to this file: from_quant_config() learns that a
-# compressed-tensors checkpoint whose `ignore` list matches the PLE table means
-# "unquantized". Mounted over the image's copy by ./qwen3.8-flash-next/run
-# (PATCH_PLE=0 disables). Re-derive from the new upstream file after any bump of
-# VLLM_MAIN_SHA; a mismatch is silent breakage, so the launcher refuses to mount
-# this over an image built from a different commit.
+# verbatim from upstream vLLM main (which file exactly: UPSTREAM next to this
+# one, by commit and by content hash) plus ONE change, marked "local-mind patch"
+# below and shown in ngram_embedding.diff next to this file: from_quant_config()
+# learns that a compressed-tensors checkpoint whose `ignore` list matches the PLE
+# table means "unquantized". Mounted over the image's copy by
+# ./qwen3.8-flash-next/run (PATCH_PLE=0 disables). A mismatch is silent
+# breakage, so the launcher refuses to mount this unless the image's own copy
+# hashes to UPSTREAM's BASE_SHA256; re-derive from the new upstream file (and
+# update UPSTREAM) when it does.
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Qwen4Exp n-gram embeddings with device and pinned-host storage."""
