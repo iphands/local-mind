@@ -258,8 +258,15 @@ mod tests {
             Some("5080"),
             "the 9999 belonging to vllm:cache_config_info_extra must not leak"
         );
-        assert!(!labels.contains_key("model_name"), "a foreign family's label leaked: {labels:?}");
-        assert_eq!(labels.len(), 8, "no aggregation across families (7 memory labels + engine): {labels:?}");
+        assert!(
+            !labels.contains_key("model_name"),
+            "a foreign family's label leaked: {labels:?}"
+        );
+        assert_eq!(
+            labels.len(),
+            8,
+            "no aggregation across families (7 memory labels + engine): {labels:?}"
+        );
     }
 
     #[test]

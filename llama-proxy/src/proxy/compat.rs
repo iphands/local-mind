@@ -148,13 +148,10 @@ pub(crate) async fn resolve_context_length(node: &Arc<BackendNode>) -> Option<u6
     // The 2s client timeout bounds ONE request; this bound is what bounds the WHOLE
     // probe, because the fallback path is two requests (`/props` then `/v1/models`) and
     // a backend that accepts and never answers would otherwise cost 2s + 2s.
-    tokio::time::timeout(
-        CONTEXT_PROBE_TIMEOUT,
-        fetch_context_total(client, node.base_url(), None),
-    )
-    .await
-    .ok()
-    .flatten()
+    tokio::time::timeout(CONTEXT_PROBE_TIMEOUT, fetch_context_total(client, node.base_url(), None))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// The shim's probe client: 2s total, 2s connect, built once.
@@ -346,7 +343,10 @@ pub(crate) fn build_vram_estimate_body(model: &str, context_length: u64, kv: Opt
     body.insert("model".to_string(), serde_json::Value::String(model.to_string()));
     body.insert("context_length".to_string(), serde_json::json!(context_length));
     body.insert("model_max_context".to_string(), serde_json::json!(context_length));
-    body.insert("context_note".to_string(), serde_json::Value::String(CONTEXT_NOTE.to_string()));
+    body.insert(
+        "context_note".to_string(),
+        serde_json::Value::String(CONTEXT_NOTE.to_string()),
+    );
     if let Some(kv) = kv {
         let mut vllm = serde_json::Map::new();
         for label in MEMORY_LABELS {
@@ -403,16 +403,8 @@ mod tests {
     /// so the tests prove the shim's own probe cap dominates the node's client.
     fn node_for(base_url: &str, api_key: Option<&str>) -> Arc<BackendNode> {
         Arc::new(
-            BackendNode::from_config(
-                base_url.to_string(),
-                300,
-                None,
-                None,
-                api_key.map(str::to_string),
-                None,
-                None,
-            )
-            .expect("a plain http node with no TLS config always builds"),
+            BackendNode::from_config(base_url.to_string(), 300, None, None, api_key.map(str::to_string), None, None)
+                .expect("a plain http node with no TLS config always builds"),
         )
     }
 
@@ -594,7 +586,10 @@ mod tests {
         for forbidden in ["id", "vram_bytes", "vram_display", "size_bytes", "size_display"] {
             assert!(body.get(forbidden).is_none(), "`{forbidden}` must not exist: {body}");
         }
-        assert!(body["context_length"].is_number(), "the one field the client reads must be a number: {body}");
+        assert!(
+            body["context_length"].is_number(),
+            "the one field the client reads must be a number: {body}"
+        );
 
         // Then: no byte/VRAM-flavoured key at ANY depth, including inside `vllm`.
         let mut keys = Vec::new();
@@ -607,7 +602,11 @@ mod tests {
         }
 
         // Then: the nested note carries the gauge's values VERBATIM as strings.
-        assert_eq!(body["vllm"]["num_gpu_blocks"], json!("5080"), "a label must not be coerced to a number");
+        assert_eq!(
+            body["vllm"]["num_gpu_blocks"],
+            json!("5080"),
+            "a label must not be coerced to a number"
+        );
         assert_eq!(body["vllm"]["kv_cache_size_tokens"], json!("81280"));
         assert_eq!(body["vllm"]["enable_prefix_caching"], json!("True"));
         assert_eq!(
@@ -629,13 +628,20 @@ mod tests {
         assert_eq!(body["model"], json!("qwen3"));
         assert_eq!(body["context_length"], json!(4096));
         assert_eq!(body["model_max_context"], json!(4096), "same number, LocalAI's field name");
-        assert_eq!(body.as_object().expect("object").len(), 4, "exactly the four documented keys: {body}");
+        assert_eq!(
+            body.as_object().expect("object").len(),
+            4,
+            "exactly the four documented keys: {body}"
+        );
 
         // Then: the note stays SOURCE-AGNOSTIC. The context cache stores a bare u64 with
         // no source tag (deliberately deleted, context.rs:16-17), so the body must not
         // claim which endpoint the number came from.
         let note = body["context_note"].as_str().expect("context_note is a string");
-        assert!(!note.contains("/props") && !note.contains("max_model_len"), "note names an endpoint it cannot know: {note}");
+        assert!(
+            !note.contains("/props") && !note.contains("max_model_len"),
+            "note names an endpoint it cannot know: {note}"
+        );
         assert!(!note.is_empty());
     }
 
@@ -644,11 +650,8 @@ mod tests {
     #[tokio::test]
     async fn resolve_context_length_reads_props_then_models() {
         // Given: a llama.cpp-shaped backend (its own port — CONTEXT_CACHE is global).
-        let (props_port, props_state) = scripted_backend(routes(vec![(
-            "/props",
-            vec![json_response("200 OK", PROPS_4096_BODY)],
-        )]))
-        .await;
+        let (props_port, props_state) =
+            scripted_backend(routes(vec![("/props", vec![json_response("200 OK", PROPS_4096_BODY)])])).await;
 
         // When: the shim resolves the context window.
         let from_props = resolve_context_length(&node_for(&url_for(props_port), None)).await;
@@ -690,11 +693,17 @@ mod tests {
         let started = Instant::now();
         let resolved = resolve_context_length(&node).await;
         let elapsed = started.elapsed();
-        println!("hung probe: result={resolved:?} after {elapsed:?}, accepts={}", stuck.accepts.load(Ordering::SeqCst));
+        println!(
+            "hung probe: result={resolved:?} after {elapsed:?}, accepts={}",
+            stuck.accepts.load(Ordering::SeqCst)
+        );
 
         // Then: an honest None, fast — a wedged backend cannot stall the shim.
         assert_eq!(resolved, None, "a hung backend must yield None, not a hang");
-        assert!(elapsed < Duration::from_secs(3), "the whole probe must fit the 2s cap, took {elapsed:?}");
+        assert!(
+            elapsed < Duration::from_secs(3),
+            "the whole probe must fit the 2s cap, took {elapsed:?}"
+        );
         assert!(
             stuck.accepts.load(Ordering::SeqCst) >= 1,
             "the probe must actually have reached the backend"
@@ -790,7 +799,9 @@ mod tests {
         let node = node_for(&fixture.base_url, Some("secret"));
 
         // When: the scrape runs.
-        let info = kv_cache_info(&node).await.expect("an auth'd /metrics must not be a silent miss");
+        let info = kv_cache_info(&node)
+            .await
+            .expect("an auth'd /metrics must not be a silent miss");
 
         // Then: the gauge came back, and the request that fetched it carried the token
         // (E-M3: a dropped api_key is a "successful connection, 401 body" miss).

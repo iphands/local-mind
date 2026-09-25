@@ -58,11 +58,19 @@ impl ScriptedState {
 
     /// Response frames still queued across every path.
     pub(crate) fn remaining(&self) -> usize {
-        self.queues.lock().expect("scripted_backend queues lock").values().map(VecDeque::len).sum()
+        self.queues
+            .lock()
+            .expect("scripted_backend queues lock")
+            .values()
+            .map(VecDeque::len)
+            .sum()
     }
 
     fn record(&self, method: &str, path: &str) {
-        self.requests.lock().expect("scripted_backend requests lock").push((method.to_string(), path.to_string()));
+        self.requests
+            .lock()
+            .expect("scripted_backend requests lock")
+            .push((method.to_string(), path.to_string()));
     }
 
     /// Pop the next frame scripted for `path`.
@@ -94,12 +102,19 @@ impl ScriptedState {
 /// port): caches keyed by backend URL (e.g. `CONTEXT_CACHE`) are process-global and the
 /// suite runs tests in parallel inside one process, so a shared port cross-contaminates.
 pub(crate) async fn scripted_backend(routes: HashMap<String, Vec<Vec<u8>>>) -> (u16, SharedScriptedState) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("scripted backend must bind an ephemeral port");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("scripted backend must bind an ephemeral port");
     let port = listener.local_addr().expect("scripted backend must report its addr").port();
     let state = Arc::new(ScriptedState {
         accepts: AtomicUsize::new(0),
         requests: Mutex::new(Vec::new()),
-        queues: Mutex::new(routes.into_iter().map(|(path, queue)| (path, queue.into_iter().collect())).collect()),
+        queues: Mutex::new(
+            routes
+                .into_iter()
+                .map(|(path, queue)| (path, queue.into_iter().collect()))
+                .collect(),
+        ),
     });
     let task_state = Arc::clone(&state);
     tokio::spawn(async move {
@@ -204,10 +219,7 @@ mod tests {
 
     /// Build the per-path route table `scripted_backend` consumes.
     fn routes(pairs: Vec<(&str, Vec<Vec<u8>>)>) -> HashMap<String, Vec<Vec<u8>>> {
-        pairs
-            .into_iter()
-            .map(|(path, queue)| (path.to_string(), queue))
-            .collect()
+        pairs.into_iter().map(|(path, queue)| (path.to_string(), queue)).collect()
     }
 
     async fn get_body(port: u16, path: &str) -> String {
@@ -261,10 +273,7 @@ mod tests {
         println!("recorded paths: {:?}", state.requests());
         assert_eq!(
             state.requests(),
-            vec![
-                ("GET".to_string(), "/b".to_string()),
-                ("GET".to_string(), "/a".to_string()),
-            ],
+            vec![("GET".to_string(), "/b".to_string()), ("GET".to_string(), "/a".to_string()),],
             "recording order is arrival order; only the response lookup is path-keyed"
         );
         assert_eq!(state.remaining(), 0, "each path drained its own queue");
@@ -273,10 +282,7 @@ mod tests {
     #[tokio::test]
     async fn counts_every_accept() {
         let (port, state) = scripted_backend(routes(vec![
-            (
-                "/one",
-                vec![json_response("200 OK", "1a"), json_response("200 OK", "1b")],
-            ),
+            ("/one", vec![json_response("200 OK", "1a"), json_response("200 OK", "1b")]),
             ("/two", vec![json_response("200 OK", "2a")]),
         ]))
         .await;
@@ -338,11 +344,7 @@ mod tests {
         );
         assert!(framed.ends_with(b"second"), "the body must survive the splice");
 
-        let (port, state) = scripted_backend(routes(vec![(
-            "/kv",
-            vec![json_response("200 OK", "first"), framed],
-        )]))
-        .await;
+        let (port, state) = scripted_backend(routes(vec![("/kv", vec![json_response("200 OK", "first"), framed])])).await;
         assert_eq!(state.remaining(), 2);
 
         assert_eq!(get_body(port, "/kv").await, "first");
