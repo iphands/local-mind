@@ -173,6 +173,24 @@ pub fn backend_malformed_arguments_response() -> String {
 
 // ─── Assertion helpers ────────────────────────────────────────────────────────
 
+/// Render the backend's recorded requests as one `METHOD path | METHOD path` line.
+///
+/// Non-forwarding assertions quote this in their failure message, and the suites print
+/// it on success too: "the backend never saw X" is only observable evidence if the
+/// reader can see what the backend did see.
+pub fn summarize_requests(recorded: &[crate::types::ReceivedRequest]) -> String {
+    if recorded.is_empty() {
+        return "(nothing)".to_string();
+    }
+    let lines: Vec<String> = recorded.iter().map(|r| format!("{} {}", r.method, r.path)).collect();
+    lines.join(" | ")
+}
+
+/// Print the recorded requests under the harness' aligned evidence column.
+pub fn print_recorded_requests(recorded: &[crate::types::ReceivedRequest]) {
+    println!("    backend saw   : {}", summarize_requests(recorded));
+}
+
 /// Assert that a string is valid JSON, return parsed value
 pub fn assert_valid_json(s: &str, label: &str) -> anyhow::Result<Value> {
     serde_json::from_str(s).map_err(|e| anyhow::anyhow!("{} is not valid JSON: {}\nContent: {}", label, e, s))

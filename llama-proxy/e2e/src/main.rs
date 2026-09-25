@@ -9,6 +9,7 @@
 
 mod backend;
 mod client;
+mod isolated;
 mod runner;
 mod tests;
 mod types;
@@ -21,7 +22,7 @@ use tests::all_tests;
 /// Default proxy binary candidates, tried in order
 const DEFAULT_PROXY_BINS: &[&str] = &["../target/release/llama-proxy", "../target/debug/llama-proxy"];
 
-const DEFAULT_PROXY_CONFIG: &str = "test_configs/proxy_fixes_on.yaml";
+pub(crate) const DEFAULT_PROXY_CONFIG: &str = "test_configs/proxy_fixes_on.yaml";
 const DEFAULT_BACKEND_PORT: u16 = 18080;
 const DEFAULT_PROXY_PORT: u16 = 18066;
 
@@ -194,7 +195,7 @@ async fn do_spawn_and_run(
 /// Picks the most recently built candidate rather than a fixed release-then-debug
 /// order. A stale release binary sitting next to a fresh debug one would otherwise be
 /// tested silently, so the suite would report on code that is not the code just changed.
-fn find_proxy_bin() -> anyhow::Result<String> {
+pub(crate) fn find_proxy_bin() -> anyhow::Result<String> {
     let mut found: Vec<(std::time::SystemTime, &str)> = DEFAULT_PROXY_BINS
         .iter()
         .filter_map(|candidate| {

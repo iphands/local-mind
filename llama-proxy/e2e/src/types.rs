@@ -127,7 +127,6 @@ pub struct ProxyResponse {
 
 impl ProxyResponse {
     /// Look up a response header by (case-insensitive) name.
-    #[allow(dead_code)]
     pub fn header(&self, name: &str) -> Option<&str> {
         self.headers.get(&name.to_ascii_lowercase()).map(|s| s.as_str())
     }

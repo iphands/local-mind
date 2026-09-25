@@ -171,25 +171,21 @@ pub fn drain_requests(state: &SharedBackendState) -> Vec<ReceivedRequest> {
 }
 
 /// Override the body served by `GET /props` for the current test.
-#[allow(dead_code)]
 pub fn set_props_body(state: &SharedBackendState, body: impl Into<String>) {
     state.lock().unwrap().props_body = body.into();
 }
 
 /// Override the body served by `GET /v1/models` for the current test.
-#[allow(dead_code)]
 pub fn set_models_body(state: &SharedBackendState, body: impl Into<String>) {
     state.lock().unwrap().models_body = body.into();
 }
 
 /// Override the body served by `GET /metrics` for the current test.
-#[allow(dead_code)]
 pub fn set_metrics_body(state: &SharedBackendState, body: impl Into<String>) {
     state.lock().unwrap().metrics_body = body.into();
 }
 
 /// Install a vLLM-shaped `/v1/models` whose entries carry `max_model_len`.
-#[allow(dead_code)]
 pub fn install_vllm_models(state: &SharedBackendState) {
     set_models_body(
         state,
@@ -199,13 +195,11 @@ pub fn install_vllm_models(state: &SharedBackendState) {
 
 /// Install a `/props` body that carries no context length, i.e. what a non-llama.cpp
 /// backend returns so context resolution must fall through to `/v1/models`.
-#[allow(dead_code)]
 pub fn install_props_without_context(state: &SharedBackendState) {
     set_props_body(state, r#"{"model_path":"/models/test-model.gguf","build_info":{"version":"b3000"}}"#);
 }
 
 /// Install a `/metrics` body containing a `vllm:cache_config_info` gauge line.
-#[allow(dead_code)]
 pub fn install_vllm_metrics(state: &SharedBackendState) {
     set_metrics_body(
         state,
@@ -216,7 +210,6 @@ pub fn install_vllm_metrics(state: &SharedBackendState) {
 }
 
 /// Helper to clear the request log
-#[allow(dead_code)]
 pub fn clear_requests(state: &SharedBackendState) {
     state.lock().unwrap().received_requests.clear();
 }

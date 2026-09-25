@@ -48,6 +48,35 @@ pub async fn send_non_streaming(
     Ok(ProxyResponse { status, body, headers })
 }
 
+/// POST to an arbitrary `path` and parse the reply. `send_non_streaming` is pinned to
+/// `/v1/chat/completions` and `send_get` is a GET; a client hitting some other endpoint
+/// needs neither. A non-JSON reply is kept as `Value::String`, never dropped.
+pub async fn send_post(
+    client: &Client,
+    proxy_addr: &str,
+    path: &str,
+    body: &serde_json::Value,
+) -> anyhow::Result<ProxyResponse> {
+    let resp = client
+        .post(format!("http://{proxy_addr}{path}"))
+        .header("Content-Type", "application/json")
+        .json(body)
+        .send()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to POST {path} to {proxy_addr}: {}", e))?;
+
+    let status = resp.status().as_u16();
+    let headers = collect_headers(&resp);
+    let body_text = resp
+        .text()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to read the reply from {path}: {}", e))?;
+
+    let body: serde_json::Value = serde_json::from_str(&body_text).unwrap_or(serde_json::Value::String(body_text));
+
+    Ok(ProxyResponse { status, body, headers })
+}
+
 /// Snapshot response headers into a lowercase-keyed map
 fn collect_headers(resp: &reqwest::Response) -> std::collections::HashMap<String, String> {
     resp.headers()

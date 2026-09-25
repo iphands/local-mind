@@ -5,6 +5,7 @@ pub mod concurrent;
 pub mod helpers;
 pub mod passthrough;
 pub mod toolcall;
+pub mod vram;
 
 use crate::runner::TestCase;
 
@@ -198,6 +199,20 @@ pub fn all_tests() -> Vec<TestCase> {
             "concurrent/proxy_metrics",
             "/proxy/metrics exposes proxy counters in Prometheus format",
             concurrent::test_proxy_metrics_endpoint
+        ),
+        // ── AnythingLLM vram-estimate shim ──────────────────────────────────────
+        // Appended last so the 33 pre-existing tests keep their indices. The two tests
+        // are order-independent because the failure scenario runs its own proxy against a
+        // different base_url — the key CONTEXT_CACHE/KV_INFO are keyed by.
+        test!(
+            "vram_estimate/answered_locally_and_never_forwarded",
+            "POST /api/models/vram-estimate is answered from the backend's advertised window, never forwarded",
+            vram::test_answered_locally_and_never_forwarded
+        ),
+        test!(
+            "vram_estimate/own_404_when_context_unknown",
+            "With no advertised context window the proxy returns its OWN 404 instead of a number",
+            vram::test_own_404_when_context_unknown
         ),
     ]
 }
