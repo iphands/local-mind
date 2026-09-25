@@ -36,7 +36,10 @@
 # safe=ceil2dp((non_kv+1GiB+max(1.5GiB,2%total))/total)). Without
 # torch/CUDA the samplers record nothing and the memory sections vanish
 # ("memory: insufficient marks") — never a boot-path failure. BOOT_TIMING=0
-# still disables EVERYTHING, memory sampling included.
+# still disables EVERYTHING, memory sampling included. The WEIGHT LOAD line
+# carries an effective GPU-placement rate " @ 170 MiB/s (47.3 GiB)" from the
+# same mem.load marks (worker.load is the only whitelisted span: a KV "rate"
+# would measure cudaMalloc caching, a host-pin one cudaHostRegister fill).
 #
 # Drift checks:
 #   host, render logic only:  python3 container/patches/boot-timing/test_boot_timing.py

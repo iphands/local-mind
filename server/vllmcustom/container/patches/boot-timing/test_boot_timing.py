@@ -218,6 +218,33 @@ assert f"hard floor     {hard:.2f}" in report
 assert f"-> frees {freed / G:.1f} GiB · KV {kv / G:.1f} -> {kv_at_safe / G:.1f} GiB" in report
 assert f"(~{int(431552.0 * kv_at_safe / kv) // 1000}k tok)" in report
 
+# --- load-rate suffix ----------------------------------------------------
+# numeric: 47.3 GiB GPU-placed over the 285 s worker.load span. Whitelist,
+# not threshold: KV's "rate" would measure cudaMalloc caching behavior and
+# the host line's would measure cudaHostRegister page-lock fill — neither
+# is a load rate, so only worker.load may carry an " @ ".
+mibs = w / G * 1024 / 285
+assert f" @ {mibs:.0f} MiB/s ({w / G:.1f} GiB)" in report, mibs
+for ln in report.splitlines():
+    if "█" in ln and ln.lstrip().startswith("+"):
+        assert ln.count(" @ ") <= (1 if "WEIGHT LOAD" in ln else 0), ln
+# _fmt_rate: honest binary labels; the 1023.5 branch keeps the rounded
+# MiB/s leg from printing "1024 MiB/s" one tick before "1.000 GiB/s"
+assert bt._fmt_rate(2**20 * 1023.4, 1.0) == "1023 MiB/s"
+assert bt._fmt_rate(2**20 * 1023.6, 1.0) == "1.000 GiB/s"
+assert bt._fmt_rate(2**30 * 2, 1.0) == "2.000 GiB/s"
+assert bt._fmt_rate(0, 10) is None and bt._fmt_rate(-5, 10) is None
+assert bt._fmt_rate(100, 0.04) is None and bt._fmt_rate(None, 10) is None
+# containment pairing: the marks must bracket the span, not merely share
+# its name — a second load cycle must not borrow the first cycle's bytes
+pm = bt._pid_mem([r for r in rows if r.pid == 381])
+assert bt._rate_suffix(pm, bt.Span("worker.load", "", T + 57, T + 342)) == (
+    f" @ {mibs:.0f} MiB/s ({w / G:.1f} GiB)")
+assert bt._rate_suffix(pm, bt.Span("worker.load", "", T + 50, T + 60)) == ""
+pm_nox = bt._pid_mem([r for r in rows
+                      if r.pid == 381 and r.name != "mem.load.x"])
+assert bt._rate_suffix(pm_nox, bt.Span("worker.load", "", T + 57, T + 342)) == ""
+
 # zero-slack sub-case: with budget == final_used (no granted-but-unused
 # slack) the corrected formula and the naive kv - freed must agree
 u0_zs = final_used / total_b
@@ -288,6 +315,9 @@ assert "█" not in lines2[gi + 1]
 # mem-marks-absent case: no GPU section, one explanatory note, no crash
 assert "memory: insufficient marks" in report2
 assert "GPU memory" not in report2
+# ... and the waterfall degrades with it: span rendered, rate silent
+gl = next(ln for ln in lines2 if "WEIGHT LOAD" in ln)
+assert " @ " not in gl, gl
 # unfired-spans note: this boot never reached most LABELS phases
 assert "spans not seen this boot: " in report2
 assert "api.app_state" in report2

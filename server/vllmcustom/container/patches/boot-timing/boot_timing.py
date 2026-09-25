@@ -220,6 +220,64 @@ def _mdelta(
     return None if a is None or b is None else b - a
 
 
+# spans that earn an effective-throughput suffix, mapped to the marks whose
+# byte delta they measure. Whitelist, not a threshold: a rate that measures
+# cudaMalloc (kv_alloc) or cudaHostRegister page-lock fill (host pinning) is
+# not a load rate, and a suffix vocabulary where @ means two different
+# things means nothing. worker.load is the 81%-of-boot line and the only
+# number here anyone acts on; it is a GPU-PLACEMENT rate — bytes streamed to
+# pinned host RAM in the same span are not in the numerator — which stays
+# useful because a same-model boot-over-boot comparison is the page-cache
+# question, and the printed GiB makes the scope checkable.
+_RATE_SPANS = {"worker.load": ("mem.load.e|", "mem.load.x|")}
+
+
+def _pid_mem(rows: list[Row]) -> dict[str, tuple[float, dict[str, str]]]:
+    """One pid's mem marks -> key -> (ts, kv). Span attribution must be
+    per-pid: the GPU section's role-merged map would happily pair this
+    pid's span with another process's bytes at TP>1."""
+    m: dict[str, tuple[float, dict[str, str]]] = {}
+    for r in sorted(rows, key=lambda r: r.ts):
+        if r.kind == "mem":
+            kv = _parse_kv(r.detail)
+            m[f"{r.name}|{kv.get('phase', '')}"] = (r.ts, kv)
+    return m
+
+
+def _fmt_rate(b: float | None, secs: float | None) -> str | None:
+    """Binary math, honestly labeled (the report says GiB elsewhere; MB/s
+    with /2**20 math is a silent 7% lie). Branch at 1023.5 so the rounded
+    MiB/s leg cannot print "1024 MiB/s" one tick before "1.000 GiB/s"."""
+    if b is None or secs is None or b <= 0 or secs < 0.05:
+        return None
+    mib = b / (2**20 * secs)
+    if mib < 1023.5:
+        return f"{mib:.0f} MiB/s"
+    return f"{mib / 1024:.3f} GiB/s"
+
+
+def _rate_suffix(pid_mem: dict[str, tuple[float, dict[str, str]]], sp: "Span") -> str:
+    """' @ 182 MiB/s (77.2 GiB)' when the span's own marks bracket it. The
+    sampler writes the e-mark just after the enter row and the x-mark just
+    before exit, so a legitimate pair satisfies t0 <= e.ts < x.ts <= t1
+    (0.05 slack for clock granularity); containment, not name-matching, is
+    what keeps a second load cycle from borrowing the first cycle's bytes.
+    Anything missing, unbracketing or non-positive degrades to no suffix —
+    the line then reads exactly as it used to."""
+    marks = _RATE_SPANS.get(sp.name)
+    if not marks:
+        return ""
+    e, x = pid_mem.get(marks[0]), pid_mem.get(marks[1])
+    if not e or not x or not (sp.t0 - 0.05 <= e[0] < x[0] <= sp.t1 + 0.05):
+        return ""
+    try:
+        b = float(x[1]["alloc"]) - float(e[1]["alloc"])
+    except (KeyError, ValueError):
+        return ""
+    r = _fmt_rate(b, sp.t1 - sp.t0)
+    return "" if r is None else f" @ {r} ({b / _GIB:.1f} GiB)"
+
+
 def _mem_total(m: dict[str, dict[str, str]]) -> float | None:
     """Card size in bytes; mem.final preferred (latest read), device fallback."""
     t = _mv(m, "mem.final", "total")
@@ -588,6 +646,7 @@ def format_report(rows: list[Row], now: float, width: int = 74) -> str:
                 f"   {_fmt_off(0):<7s}  {'python imports + bootstrap':<46s}"
                 f"{_fmt_dur(imports):>7s} {_bar(imports, total)}"
             )
+        pid_mem = _pid_mem(rws)
         for sp in spans:
             if sp.t1 - sp.t0 < 0.5 and sp.name != "api.uvicorn":
                 continue
@@ -597,6 +656,7 @@ def format_report(rows: list[Row], now: float, width: int = 74) -> str:
             out.append(
                 f"   {_fmt_off(sp.t0 - start):<7s}  {'  ' * depth}{label:<{pad}.{pad}s}"
                 f"{_fmt_dur(sp.t1 - sp.t0):>7s} {_bar(sp.t1 - sp.t0, total)}"
+                + _rate_suffix(pid_mem, sp)
             )
         covered = imports + sum(s.t1 - s.t0 for s in spans if _depth(s, spans) == 0)
         if wall - covered >= 1.0:
