@@ -8,8 +8,8 @@ NAME=${NAME:-llama-server-vanilla-both}
 SINGLE=${SINGLE:-0}
 
 LAYERS=${LAYERS:-0}
-CTX=${CTX:-65024}
-(( CTX < 1024 )) && CTX=$(( CTX * 1000 ))
+CTX=${CTX:-131072}
+# (( CTX < 1024 )) && CTX=$(( CTX * 1000 ))
 
 RUNNER=docker
 [[ -f /usr/bin/podman ]] && RUNNER=podman
@@ -78,6 +78,7 @@ LLAMA_ARGS=(
   # --temp 0.75 --top_p 0.95 --min-p 0.01   # --top_k 40
   # --temp 0.60 --top_k 0
   # --temp 0.6 --top-p 0.95 --top-k 20 --min-p 0.01
+  --temp 0.6 --top-p 0.95 --top-k 20
   --cache-ram 16384
 )
 
@@ -88,7 +89,7 @@ case $MODE in
 "vanilla")
   CONTAINER=ghcr.io/ggml-org/llama.cpp:full-cuda
   CONTAINER_ARGS+=(--entrypoint /app/llama-server)
-  LLAMA_ARGS+=(--mmap)
+  # LLAMA_ARGS+=(--mmap)
   LLAMA_ARGS+=(--fit on --main-gpu 1)
   ;;
 *)
@@ -128,6 +129,7 @@ function run_model_vision() {
   echo
   echo "## Running $CONTAINER"
   echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
-  "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}" --mmproj /models/mmproj-BF16.gguf
+  "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}"
+  # "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}" --mmproj /models/mmproj-BF16.gguf
   # "$RUNNER" "${CONTAINER_ARGS[@]}" "$CONTAINER" "${LLAMA_ARGS[@]}" --mmproj /models/jina-embeddings-v5-omni-small-classification-vision-mmproj-F16.gguf
 }
