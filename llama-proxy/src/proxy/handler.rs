@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::OwnedSemaphorePermit;
 
+use super::compat;
 use super::server::ProxyState;
 use super::streaming::handle_streaming_response;
 use super::{
@@ -1084,6 +1085,16 @@ impl ProxyHandler {
         group_name: Option<&str>,
     ) -> RouteDecision {
         let routed = backend.effective_path(uri.path());
+
+        // AnythingLLM's model-management probe, answered HERE. A plain llama.cpp/vLLM
+        // backend has never heard of this path, so forwarding it is precisely the 404 the
+        // shim exists to remove. BOTH path views are tested, the [C-H4] precedent above:
+        // behind a `strip_path_prefix` gateway the shim path exists only in `routed`, and
+        // matching `uri.path()` alone would forward it and re-produce that same 404.
+        if method == Method::POST && (compat::is_vram_estimate_path(uri.path()) || compat::is_vram_estimate_path(routed)) {
+            return RouteDecision::Handled(self.handle_vram_estimate(body_bytes, backend).await);
+        }
+
         match (method, routed) {
             // llama.cpp monitoring/status endpoints (simple pass-through)
             (&Method::GET, "/props")
@@ -1169,7 +1180,13 @@ impl ProxyHandler {
                       llama_proxy_metrics_export_skipped_total {}\n\
                       # HELP llama_proxy_context_cache_stale_skips_total Context-cache refreshes skipped because the write lock was held when a fresh value arrived; the cache keeps its previous value, so context_total can read stale. Not a defect signal on its own - it explains context_percent jumps. Spans the buffered and pass-through paths.\n\
                       # TYPE llama_proxy_context_cache_stale_skips_total counter\n\
-                      llama_proxy_context_cache_stale_skips_total {}\n",
+                       llama_proxy_context_cache_stale_skips_total {}\n\
+                       # HELP llama_proxy_vram_estimate_served_total POST /api/models/vram-estimate requests the proxy answered itself instead of forwarding a 404. The success path logs at debug, so this counter is the only operator-visible proof the shim is working.\n\
+                       # TYPE llama_proxy_vram_estimate_served_total counter\n\
+                       llama_proxy_vram_estimate_served_total {}\n\
+                       # HELP llama_proxy_vram_estimate_unknown_total Same endpoint, answered with the proxy's own 404 because the backend advertised no context window on /props or /v1/models. The client then falls back to its own default window; this is the number that says so.\n\
+                       # TYPE llama_proxy_vram_estimate_unknown_total counter\n\
+                       llama_proxy_vram_estimate_unknown_total {}\n",
                      fallback_hits,
                      concurrent,
                      rejected,
@@ -1185,8 +1202,10 @@ impl ProxyHandler {
                      l(&stream_stats::FIX_UNREPAIRED_TOTAL),
                      l(&stream_stats::STREAM_COMPRESSED_TOTAL),
                      l(&crate::exporters::EXPORTS_SKIPPED_TOTAL),
-                     crate::proxy::context::context_cache_stale_skips(),
-                 );
+                      crate::proxy::context::context_cache_stale_skips(),
+                      l(&self.state.vram_estimate_served_total),
+                      l(&self.state.vram_estimate_unknown_total),
+                  );
 
                 RouteDecision::Handled(
                     (StatusCode::OK, [(header::CONTENT_TYPE, "text/plain; version=0.0.4")], body).into_response(),
@@ -1196,6 +1215,55 @@ impl ProxyHandler {
             // All other routes continue with existing logic
             _ => RouteDecision::Forward { body_bytes },
         }
+    }
+
+    /// Answer AnythingLLM's `POST /api/models/vram-estimate` from what the backend itself
+    /// advertised. The ONE field the client consumes is `context_length`, in tokens;
+    /// [`compat::build_vram_estimate_body`] renders the honest body (no VRAM figures, no
+    /// `id`) and both probes are bounded at 2s, so a wedged backend cannot stall this.
+    ///
+    /// The requested `model` is parsed TOLERANTLY and only echoed back: an absent,
+    /// non-string or wholly unparseable body is an estimate for the empty model, never a
+    /// 500 — `prepare_request` already treats an unparseable body as legitimate, and this
+    /// path must not be stricter than the one it replaces.
+    async fn handle_vram_estimate(&self, body: bytes::Bytes, backend: &Arc<BackendNode>) -> Response {
+        let model = serde_json::from_slice::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|json| json.get("model").and_then(|model| model.as_str()).map(str::to_string))
+            .unwrap_or_default();
+
+        // Independent probes, one round trip of wall time: the context window is the
+        // answer, the KV-cache labels are a bonus the body omits when they are absent.
+        let (context_length, kv) = tokio::join!(compat::resolve_context_length(backend), compat::kv_cache_info(backend));
+
+        let Some(context_length) = context_length else {
+            self.state.vram_estimate_unknown_total.fetch_add(1, Ordering::Relaxed);
+            tracing::debug!(
+                backend_url = %backend.base_url(),
+                model = %model,
+                reason = "the backend advertised no context window on /props or /v1/models",
+                "vram-estimate answered with the proxy's own 404 rather than a fabricated number"
+            );
+            return (
+                StatusCode::NOT_FOUND,
+                Json(err_envelope(
+                    "vram_estimate_context_unknown",
+                    format!(
+                        "Backend {} advertises no context window; cannot estimate for model {:?}",
+                        backend.base_url(),
+                        if model.is_empty() { None } else { Some(&model) }
+                    ),
+                )),
+            )
+                .into_response();
+        };
+
+        self.state.vram_estimate_served_total.fetch_add(1, Ordering::Relaxed);
+        (
+            StatusCode::OK,
+            Json(compat::build_vram_estimate_body(&model, context_length, kv.as_ref())),
+        )
+            .into_response()
     }
 
     /// Body-read + JSON classification, moved verbatim out of `handle` (big-fix 95
@@ -2053,6 +2121,8 @@ mod tests {
             backend_nonsse_when_streamed_for: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             anthropic_buffered_responses_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             anthropic_buffered_notice_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            vram_estimate_served_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vram_estimate_unknown_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             rejected_requests: Arc::new(AtomicUsize::new(0)),
             concurrent_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(100))),
         })
@@ -2375,6 +2445,8 @@ mod tests {
             backend_nonsse_when_streamed_for: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             anthropic_buffered_responses_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             anthropic_buffered_notice_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            vram_estimate_served_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vram_estimate_unknown_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             rejected_requests: Arc::new(AtomicUsize::new(0)),
             concurrent_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(100))),
         })
@@ -2539,6 +2611,340 @@ mod tests {
         assert_eq!(
             level, "ERROR",
             "/v1/chat/completions is not an optional endpoint - its errors must stay at ERROR"
+        );
+    }
+
+    // ---- plan todo 6: AnythingLLM's POST /api/models/vram-estimate is answered locally ----
+    //
+    // The premise of the shim is that a plain llama.cpp/vLLM backend has never heard of
+    // this path, so forwarding it is exactly what produced the 404 the plan removes.
+    // Every path the shim touches is scripted below and `scripted_backend` PANICS on any
+    // path it was not given, so "the shim request was never forwarded" is a provable
+    // property: an unexpected forward explodes instead of passing quietly.
+
+    /// How many times one probe path stays answerable in a shim test fixture.
+    ///
+    /// Not one: `context.rs::cache_result` writes with `try_write` and DELIBERATELY DROPS
+    /// the write under lock contention (big-fix 94 C-M9), so whether a shim request
+    /// re-probes `/props`/`/v1/models` depends on what another parallel test holds at that
+    /// microsecond. A one-frame queue made that legitimate retry `scripted_backend`'s
+    /// exhaustion panic — a flake that blamed the shim for the cache's own staleness policy.
+    const PROBE_FRAMES: usize = 6;
+
+    fn probe_frames(frame: Vec<u8>) -> Vec<Vec<u8>> {
+        (0..PROBE_FRAMES).map(|_| frame.clone()).collect()
+    }
+
+    /// Route table of a backend that knows its own context window but not the shim path.
+    /// `/props` 404s so a returned `context_length` provably came from `max_model_len`
+    /// rather than from a value the test planted twice, `/v1/models` is vLLM-shaped, and
+    /// `/metrics` 404s so the body claims no `vllm` object it cannot support.
+    fn shim_backend_routes(max_model_len: u64) -> HashMap<String, Vec<Vec<u8>>> {
+        use crate::proxy::test_support::{json_response, scripted_response};
+        let mut routes = HashMap::new();
+        routes.insert(
+            "/props".to_string(),
+            probe_frames(json_response("404 Not Found", r#"{"detail":"Not Found"}"#)),
+        );
+        routes.insert(
+            "/v1/models".to_string(),
+            probe_frames(json_response(
+                "200 OK",
+                &format!(r#"{{"object":"list","data":[{{"id":"anythingllm-model","max_model_len":{max_model_len}}}]}}"#),
+            )),
+        );
+        routes.insert(
+            "/metrics".to_string(),
+            probe_frames(scripted_response(
+                "404 Not Found",
+                &[("content-type", "text/plain")],
+                b"Not Found",
+            )),
+        );
+        routes
+    }
+
+    /// The probe exactly as the AnythingLLM localAi provider sends it.
+    fn vram_estimate_request(body: &str) -> Request<Body> {
+        request_with_body(Method::POST, "/api/models/vram-estimate", Body::from(body.to_string()))
+    }
+
+    /// The sample value of one `/proxy/metrics` counter. Also asserts its HELP/TYPE lines:
+    /// a series without `# TYPE` is not scrapeable by Prometheus, so its absence is a
+    /// defect even when the number itself is right.
+    fn prometheus_counter(body: &str, name: &str) -> u64 {
+        assert!(
+            body.contains(&format!("# HELP {name} ")) && body.contains(&format!("# TYPE {name} counter")),
+            "{name} needs a HELP and a TYPE line, got:\n{body}"
+        );
+        let line = body
+            .lines()
+            .find(|l| l.starts_with(&format!("{name} ")))
+            .unwrap_or_else(|| panic!("{name} sample missing from:\n{body}"));
+        line.rsplit_once(' ')
+            .and_then(|(_, value)| value.trim().parse::<u64>().ok())
+            .unwrap_or_else(|| panic!("unparsable sample line: {line}"))
+    }
+
+    async fn scrape_proxy_metrics(handler: &ProxyHandler) -> String {
+        let res = handler
+            .handle(request_with_body(Method::GET, "/proxy/metrics", Body::empty()))
+            .await;
+        assert_eq!(res.status(), StatusCode::OK, "/proxy/metrics stays a proxy-local 200");
+        body_text(res).await
+    }
+
+    async fn vram_estimate_json(res: Response) -> serde_json::Value {
+        let bytes = to_bytes(res.into_body(), 64 * 1024).await.expect("body must be readable");
+        serde_json::from_slice(&bytes).expect("vram-estimate body must be JSON")
+    }
+
+    /// The shim's reason for existing: the client gets a real answer, and the backend is
+    /// never asked. Covers BOTH path views — the client's own path and the backend-native
+    /// one — because a `strip_path_prefix` gateway presents the shim path ONLY in the
+    /// second view, so matching `uri.path()` alone would forward it and re-create the bug.
+    #[tokio::test]
+    async fn vram_estimate_is_answered_locally_and_never_forwarded() {
+        use crate::proxy::test_support::scripted_backend;
+        const MAX_MODEL_LEN: u64 = 262_144;
+
+        // View 1: an ordinary node, where the predicate matches `uri.path()`.
+        let (port, plain_state) = scripted_backend(shim_backend_routes(MAX_MODEL_LEN)).await;
+        let plain = handler_with_balancer(
+            Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap()),
+            None,
+            StreamingMode::default(),
+        );
+        let res = plain.handle(vram_estimate_request(r#"{"model":"anythingllm-model"}"#)).await;
+
+        assert_eq!(res.status(), StatusCode::OK, "the proxy answers the probe itself");
+        assert_eq!(
+            res.headers().get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()),
+            Some("application/json"),
+            "the client parses this body as JSON"
+        );
+        let body = vram_estimate_json(res).await;
+        println!("vram-estimate body: {body}");
+        assert_eq!(
+            body["context_length"],
+            serde_json::json!(MAX_MODEL_LEN),
+            "context_length is the window the backend itself advertised"
+        );
+        assert_eq!(
+            body["model"],
+            serde_json::json!("anythingllm-model"),
+            "the requested model echoes back"
+        );
+        assert!(
+            body.get("id").is_none(),
+            "the client does `{{ id, ...est }}`; an `id` here would overwrite its own"
+        );
+        println!("plain node recorded: {:?}", plain_state.requests());
+        assert!(
+            !plain_state
+                .requests()
+                .iter()
+                .any(|(m, p)| m == "POST" && p == "/api/models/vram-estimate"),
+            "the shim request must never reach the backend, recorded: {:?}",
+            plain_state.requests()
+        );
+
+        // View 2: the same proxy behind a `/gw` gateway prefix.
+        let (gw_port, gw_state) = scripted_backend(shim_backend_routes(MAX_MODEL_LEN)).await;
+        let gateway_node = Arc::new(BackendNode {
+            url: format!("http://127.0.0.1:{gw_port}"),
+            strip_path_prefix: Some("/gw".to_string()),
+            ..bare_node(None)
+        });
+        let gateway = handler_with_balancer(
+            Arc::new(RoundRobinBalancer::new(vec![gateway_node]).unwrap()),
+            None,
+            StreamingMode::default(),
+        );
+        let res = gateway
+            .handle(request_with_body(
+                Method::POST,
+                "/gw/api/models/vram-estimate",
+                Body::from(r#"{"model":"gateway-model"}"#),
+            ))
+            .await;
+
+        assert_eq!(
+            res.status(),
+            StatusCode::OK,
+            "a gateway-prefixed shim path is answered locally too"
+        );
+        let gw_body = vram_estimate_json(res).await;
+        println!("gateway vram-estimate body: {gw_body}");
+        assert_eq!(gw_body["context_length"], serde_json::json!(MAX_MODEL_LEN));
+        println!("gateway node recorded: {:?}", gw_state.requests());
+        assert!(
+            !gw_state.requests().iter().any(|(m, _)| m == "POST"),
+            "no POST may cross the gateway shim, recorded: {:?}",
+            gw_state.requests()
+        );
+    }
+
+    /// When the backend advertises no context window at all the honest answer is a 404 the
+    /// PROXY generated — never a fabricated number. The mock's recorded requests are the
+    /// proof: nothing arrived, so the 404 cannot have come from the backend.
+    #[tokio::test]
+    async fn vram_estimate_returns_own_404_when_context_unknown() {
+        use crate::proxy::test_support::{json_response, scripted_backend};
+        let mut routes = HashMap::new();
+        let nothing = || probe_frames(json_response("404 Not Found", r#"{"detail":"Not Found"}"#));
+        routes.insert("/props".to_string(), nothing());
+        routes.insert("/v1/models".to_string(), nothing());
+        routes.insert("/metrics".to_string(), nothing());
+        let (port, state) = scripted_backend(routes).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
+
+        let res = handler.handle(vram_estimate_request(r#"{"model":"ghost"}"#)).await;
+
+        let body = assert_error_envelope(res, StatusCode::NOT_FOUND, "vram_estimate_context_unknown").await;
+        println!("unknown-context body: {body}");
+        assert_eq!(
+            handler.state.vram_estimate_unknown_total.load(Ordering::Relaxed),
+            1,
+            "the log line is debug, so the counter is the only operator-visible signal"
+        );
+        assert_eq!(handler.state.vram_estimate_served_total.load(Ordering::Relaxed), 0);
+        println!("backend recorded: {:?}", state.requests());
+        assert!(
+            !state
+                .requests()
+                .iter()
+                .any(|(m, p)| m == "POST" && p == "/api/models/vram-estimate"),
+            "the 404 is proxy-generated: the backend saw no shim POST, recorded: {:?}",
+            state.requests()
+        );
+    }
+
+    /// The `model` field is decorative in this body, so a body the proxy cannot parse is
+    /// an estimate for an unnamed model — never a 500. The completion path already treats
+    /// an unparseable body as a legitimate class (`prepare_request`); the shim is not
+    /// allowed to be stricter than the path it replaces.
+    #[tokio::test]
+    async fn vram_estimate_survives_a_malformed_request_body() {
+        use crate::proxy::test_support::scripted_backend;
+        let (port, state) = scripted_backend(shim_backend_routes(4096)).await;
+        let handler = handler_with_balancer(
+            Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap()),
+            None,
+            StreamingMode::default(),
+        );
+
+        for (label, raw) in [
+            ("empty", ""),
+            ("garbage", "not json at all {{{"),
+            ("non-string model", r#"{"model":42}"#),
+        ] {
+            let res = handler.handle(vram_estimate_request(raw)).await;
+            assert_eq!(
+                res.status(),
+                StatusCode::OK,
+                "a {label} body must still get a real estimate, not a 500"
+            );
+            let body = vram_estimate_json(res).await;
+            println!("{label} body -> {body}");
+            assert_eq!(
+                body["context_length"],
+                serde_json::json!(4096),
+                "{label} body keeps the context answer"
+            );
+            assert_eq!(body["model"], serde_json::json!(""), "{label} body yields the empty model");
+        }
+        println!("backend recorded: {:?}", state.requests());
+        assert!(
+            !state.requests().iter().any(|(m, _)| m == "POST"),
+            "no POST reaches the backend, recorded: {:?}",
+            state.requests()
+        );
+    }
+
+    /// Both counters render on `/proxy/metrics` with HELP/TYPE lines, read 0 before any
+    /// shim request, and the served one moves exactly once per answered estimate.
+    #[tokio::test]
+    async fn vram_estimate_metrics_counters_move() {
+        use crate::proxy::test_support::scripted_backend;
+        const SERVED: &str = "llama_proxy_vram_estimate_served_total";
+        const UNKNOWN: &str = "llama_proxy_vram_estimate_unknown_total";
+
+        let (port, _state) = scripted_backend(shim_backend_routes(32_768)).await;
+        let handler = handler_with_balancer(
+            Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap()),
+            None,
+            StreamingMode::default(),
+        );
+
+        let metrics = scrape_proxy_metrics(&handler).await;
+        assert_eq!(prometheus_counter(&metrics, SERVED), 0, "no shim request has happened yet");
+        assert_eq!(prometheus_counter(&metrics, UNKNOWN), 0, "and no unknown answer either");
+
+        let res = handler.handle(vram_estimate_request(r#"{"model":"m"}"#)).await;
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let metrics = scrape_proxy_metrics(&handler).await;
+        let excerpt: String = metrics
+            .lines()
+            .filter(|l| l.contains("vram_estimate"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        println!("/proxy/metrics vram lines after one success:\n{excerpt}");
+        assert_eq!(prometheus_counter(&metrics, SERVED), 1, "one answered estimate");
+        assert_eq!(
+            prometheus_counter(&metrics, UNKNOWN),
+            0,
+            "an answered estimate is not also an unknown"
+        );
+    }
+
+    /// ACCEPTED AND DOCUMENTED limitation, pinned on purpose: model routing happens in
+    /// `load_balancer.select()`, BEFORE `route()` runs, so a vram-estimate for a model that
+    /// matches no mapping 503s with the proxy's `no_backend` envelope and the shim never
+    /// sees it. This test is the deliberate guard on that limitation — it is documented in
+    /// the README/AGENTS client notes, not repaired here.
+    #[tokio::test]
+    async fn unmapped_model_still_503s_before_the_shim() {
+        use crate::proxy::test_support::scripted_backend;
+        let (port, state) = scripted_backend(shim_backend_routes(8192)).await;
+        let mut groups = HashMap::new();
+        groups.insert(
+            "mapped".to_string(),
+            crate::config::BackendGroupConfig {
+                mappings: vec!["mapped-model".to_string()],
+                strategy: "round_robin".to_string(),
+                failure_cooldown_secs: 0,
+                // `exclusive` is what makes this a REAL 503: a lone NON-exclusive group
+                // would take unmatched traffic positionally (E-M6) and never 503.
+                exclusive: true,
+                nodes: vec![crate::config::BackendNodeConfig {
+                    url: format!("http://127.0.0.1:{port}"),
+                    timeout_seconds: 300,
+                    tls: None,
+                    model: None,
+                    api_key: None,
+                    strip_path_prefix: None,
+                    temperature: None,
+                }],
+            },
+        );
+        let balancer = Arc::new(GroupedLoadBalancer::new(groups).expect("one exclusive group must build"));
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
+
+        let res = handler.handle(vram_estimate_request(r#"{"model":"unmapped-model"}"#)).await;
+
+        assert_error_envelope(res, StatusCode::SERVICE_UNAVAILABLE, "no_backend").await;
+        assert!(
+            state.requests().is_empty(),
+            "select() rejected the model before route() ran, so the backend saw nothing: {:?}",
+            state.requests()
+        );
+        assert_eq!(
+            handler.state.vram_estimate_served_total.load(Ordering::Relaxed),
+            0,
+            "a request that never reached route() moves no shim counter"
         );
     }
 
@@ -4823,6 +5229,8 @@ mod tests {
             backend_nonsse_when_streamed_for: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             anthropic_buffered_responses_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             anthropic_buffered_notice_once: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            vram_estimate_served_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            vram_estimate_unknown_total: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             rejected_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             concurrent_semaphore: Some(Arc::new(tokio::sync::Semaphore::new(100))),
         })

@@ -28,11 +28,11 @@
 //! node's own client timeout is 300s by default (`src/config/mod.rs:134-136`), which is
 //! a completion timeout, not a probe timeout.
 //!
-//! # Interim `#[allow(dead_code)]`
-//! The four `pub(crate)` items below have no caller in the shipped proxy yet: plan todo 6
-//! wires them into `handler::route()`. The allowance is per-item, never module-level, so a
-//! fifth item added later without a caller is still caught. `kv_labels.rs` needs no
-//! allowance of its own — an annotated item marks everything below it live.
+//! # Callers
+//! `handler::route()` intercepts the path and owns the response; the four `pub(crate)`
+//! items below are its only moving parts, and `kv_cache_info_for_test` is the test seam
+//! for the retry window. Nothing else in the proxy may answer this path — forwarding it is
+//! the 404 this module exists to remove.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, OnceLock};
@@ -129,7 +129,6 @@ static KV_WARNED: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
 /// (`src/backends/node.rs:124-129`) and `route()` checks BOTH views. Making this
 /// predicate suffix-match would let the proxy locally answer paths the operator
 /// deliberately routed elsewhere — an over-match that silently swallows a real endpoint.
-#[allow(dead_code)] // todo 6 wires this into handler::route()
 pub(crate) fn is_vram_estimate_path(path: &str) -> bool {
     path.strip_suffix('/').unwrap_or(path) == SHIM_PATH
 }
@@ -144,7 +143,6 @@ pub(crate) fn is_vram_estimate_path(path: &str) -> bool {
 ///
 /// `_strip_path_prefix` is `None` because monitoring is backend-native: a request-path
 /// prefix a gateway needs must not rewrite `/props` or `/v1/models` (`context.rs:48-49`).
-#[allow(dead_code)] // todo 6 wires this into handler::route()
 pub(crate) async fn resolve_context_length(node: &Arc<BackendNode>) -> Option<u64> {
     let client = probe_client()?;
     // The 2s client timeout bounds ONE request; this bound is what bounds the WHOLE
@@ -186,7 +184,6 @@ fn probe_client() -> Option<&'static reqwest::Client> {
 /// changes after engine profiling, and scraping `/metrics` on every prompt would make
 /// the shim a per-prompt round trip to a backend that answers it with a megabyte of
 /// counters. See [`KvLookup`] for why a failure is never cached as an answer.
-#[allow(dead_code)] // todo 6 wires this into handler::route()
 pub(crate) async fn kv_cache_info(node: &Arc<BackendNode>) -> Option<KvCacheInfo> {
     kv_cache_info_with_backoff(node, KV_RETRY_BACKOFF).await
 }
@@ -342,7 +339,6 @@ async fn warn_kv_scrape_failed_once(base_url: &str, reason: &str) {
 /// fabricate, no `nvidia-smi`/NVML call to make, and no stdout to parse; the field list
 /// LocalAI's `pkg/vram/types.go:46-58` declares is a superset this backend simply cannot
 /// fill, and a proxy that invented one would be presenting a guess as a measurement.
-#[allow(dead_code)] // todo 6 wires this into handler::route()
 pub(crate) fn build_vram_estimate_body(model: &str, context_length: u64, kv: Option<&KvCacheInfo>) -> serde_json::Value {
     // No `id` key, ever: the client does `{ id, ...est }`, so an `id` here would
     // OVERWRITE the one it already bound from `/v1/models`.

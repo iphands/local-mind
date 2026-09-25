@@ -58,6 +58,17 @@ pub struct ProxyState {
     /// Fires the "passthrough does not apply here" notice on the first /v1/messages only.
     pub anthropic_buffered_notice_once: Arc<AtomicBool>,
 
+    /// `POST /api/models/vram-estimate` requests the proxy answered itself instead of
+    /// forwarding. The success path logs at debug, so this is the only operator-visible
+    /// proof the shim is doing its job.
+    pub vram_estimate_served_total: Arc<AtomicU64>,
+
+    /// Same endpoint, answered with the proxy's OWN 404 because the backend advertised no
+    /// context window. Counted, not merely logged, because the honest answer is silent by
+    /// design (debug!) and a client that quietly loses its context window is otherwise
+    /// invisible to the operator.
+    pub vram_estimate_unknown_total: Arc<AtomicU64>,
+
     /// Counter for rejected requests at capacity
     pub rejected_requests: Arc<AtomicUsize>,
 
@@ -217,6 +228,8 @@ pub async fn run_server(
         backend_nonsse_when_streamed_for: Arc::new(AtomicU64::new(0)),
         anthropic_buffered_responses_total: Arc::new(AtomicU64::new(0)),
         anthropic_buffered_notice_once: Arc::new(AtomicBool::new(false)),
+        vram_estimate_served_total: Arc::new(AtomicU64::new(0)),
+        vram_estimate_unknown_total: Arc::new(AtomicU64::new(0)),
         rejected_requests: Arc::new(AtomicUsize::new(0)),
         concurrent_semaphore: if config.server.max_concurrent_requests > 0 {
             Some(Arc::new(Semaphore::new(config.server.max_concurrent_requests)))
