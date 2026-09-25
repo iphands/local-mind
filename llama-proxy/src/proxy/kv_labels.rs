@@ -34,9 +34,6 @@ const ENGINE_LABEL: &str = "engine";
 /// reproducible - the deterministic-ordering precedent this repo already follows is
 /// `src/api/openai.rs:2239` (`serde_json::Map` is a `BTreeMap` because `preserve_order`
 /// is off for that map).
-//  `compat.rs` (plan todo 4) is the first production caller; until it lands, only the
-//  tests below use these items. Same practice as the e2e mock-backend setters.
-#[allow(dead_code)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct KvCacheInfo {
     labels: BTreeMap<String, String>,
@@ -44,7 +41,6 @@ pub(crate) struct KvCacheInfo {
 
 impl KvCacheInfo {
     /// The winning series' labels. Values are exactly what vLLM printed, quotes removed.
-    #[allow(dead_code)]
     pub(crate) fn labels(&self) -> &BTreeMap<String, String> {
         &self.labels
     }
@@ -63,7 +59,6 @@ impl KvCacheInfo {
 /// label** wins, and the comparison is a plain string compare, so `"10" < "2"`: the pick is
 /// stable and reproducible, NOT numerically ordered. A series with no `engine` label sorts
 /// first (empty string), and equal `engine` values keep the FIRST occurrence in body order.
-#[allow(dead_code)]
 pub(crate) fn parse_cache_config_info(body: &str) -> Option<KvCacheInfo> {
     let mut best: Option<(String, KvCacheInfo)> = None;
     for line in body.lines() {

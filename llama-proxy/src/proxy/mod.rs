@@ -1,5 +1,6 @@
 //! HTTP proxy server
 
+mod compat;
 mod context;
 mod handler;
 mod kv_labels;
