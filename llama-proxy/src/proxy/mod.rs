@@ -6,6 +6,8 @@ pub mod reprompt;
 pub mod server;
 mod streaming;
 mod synthesis;
+#[cfg(test)]
+pub(crate) mod test_support;
 
 pub use context::{cache_context_from_preflight, fetch_context_total, warn_context_fetch_failed_once};
 pub use handler::ProxyHandler;
