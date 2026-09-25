@@ -511,6 +511,28 @@ enum RouteDecision {
     Forward { body_bytes: bytes::Bytes },
 }
 
+/// Client management endpoints a non-LocalAI backend legitimately does not implement, so a
+/// backend 404 there is the expected answer rather than a fault. Exactly the paths the proxy
+/// knows about - a path is listed here only once a shim or a client actually depends on it.
+const OPTIONAL_CLIENT_ENDPOINTS: &[&str] = &["/api/models/vram-estimate"];
+
+/// True when the backend answered 404 on a path from [`OPTIONAL_CLIENT_ENDPOINTS`]
+/// (with or without one trailing slash).
+///
+/// Method-agnostic by design: the compat shim intercepts only POST, so a GET on the same
+/// path is genuinely forwarded to the backend today and this is what keeps that real case
+/// off ERROR. It also protects the shim itself should a future change ever forward the path
+/// instead of answering it locally.
+fn is_optional_client_404(uri: &axum::http::Uri, status: StatusCode) -> bool {
+    if status != StatusCode::NOT_FOUND {
+        return false;
+    }
+    let path = uri.path();
+    // `strip_suffix` removes at most one slash: `/x//` is not the optional endpoint.
+    let path = path.strip_suffix('/').unwrap_or(path);
+    OPTIONAL_CLIENT_ENDPOINTS.contains(&path)
+}
+
 /// Proxy request handler
 pub struct ProxyHandler {
     state: ProxyState,
@@ -1397,12 +1419,25 @@ impl ProxyHandler {
         // If error status, log the full response body for debugging
         if status.is_client_error() || status.is_server_error() {
             let error_body = String::from_utf8_lossy(&body_bytes);
-            tracing::error!(
-                status = %status,
-                url = %backend.base_url(),
-                error_body = %error_body,
-                "Backend returned error response"
-            );
+            // is_optional_client_404 also covers the compat shim: if a future change ever
+            // forwards /api/models/vram-estimate instead of answering it, that 404 stays
+            // at debug. Every other 4xx/5xx, completion paths included, keeps its ERROR.
+            if is_optional_client_404(&request_uri, status) {
+                tracing::debug!(
+                    status = %status,
+                    url = %backend.base_url(),
+                    error_body = %error_body,
+                    path = %request_uri.path(),
+                    "Backend returned error response"
+                );
+            } else {
+                tracing::error!(
+                    status = %status,
+                    url = %backend.base_url(),
+                    error_body = %error_body,
+                    "Backend returned error response"
+                );
+            }
         }
 
         // Debug: Log received response details
@@ -2380,6 +2415,130 @@ mod tests {
         assert!(
             log.contains("has_request_json=true"),
             "the request DID parse - the miss is the response shape:\n{log}"
+        );
+    }
+
+    /// The `LEVEL` token of the captured line carrying `marker`. The marker only LOCATES
+    /// the line; the assertion is always on the level token itself, never on message text
+    /// (matching prose would stay green while the severity it claims to guard regresses).
+    fn captured_level(log: &str, marker: &str) -> String {
+        const LEVELS: [&str; 5] = ["TRACE", "DEBUG", "INFO", "WARN", "ERROR"];
+        let line = log
+            .lines()
+            .find(|l| l.contains(marker))
+            .unwrap_or_else(|| panic!("no captured line contains {marker:?}. captured:\n{log}"));
+        println!("captured line: {line}");
+        LEVELS
+            .iter()
+            .copied()
+            .find(|level| line.split_whitespace().any(|token| token == *level))
+            .unwrap_or_else(|| panic!("captured line carries no level token: {line}"))
+            .to_string()
+    }
+
+    /// The error the proxy logs for a backend 4xx/5xx, as the line locator.
+    const BACKEND_ERROR_LOG: &str = "Backend returned error response";
+
+    /// A plain llama.cpp/vLLM backend has no `/api/models/vram-estimate`, so the AnythingLLM
+    /// client-management probe comes back 404. That 404 is the EXPECTED answer and must not
+    /// be an ERROR line - while the client still gets the backend's status and body verbatim.
+    #[tokio::test(flavor = "current_thread")]
+    async fn optional_endpoint_404_logs_at_debug() {
+        use crate::proxy::test_support::{json_response, scripted_backend};
+        crate::fixes::pin_interest_cache_for_tests();
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _sub = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(HandlerCaptureWriter(buf.clone()))
+                .finish(),
+        );
+
+        let mut routes = HashMap::new();
+        routes.insert(
+            "/api/models/vram-estimate".to_string(),
+            vec![json_response("404 Not Found", r#"{"detail":"Not Found"}"#)],
+        );
+        let (port, state) = scripted_backend(routes).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
+
+        // A GET is the request that actually reaches the forward path today (the shim in
+        // `compat` answers POST), so this is the real, currently-noisy case.
+        let res = handler
+            .handle(request_with_body(Method::GET, "/api/models/vram-estimate", Body::empty()))
+            .await;
+
+        assert_eq!(
+            res.status(),
+            StatusCode::NOT_FOUND,
+            "the gate is about the log level only - the client must still see the backend's 404"
+        );
+        assert_eq!(
+            body_text(res).await,
+            r#"{"detail":"Not Found"}"#,
+            "the backend body must reach the client unchanged"
+        );
+        assert_eq!(
+            state.requests(),
+            vec![("GET".to_string(), "/api/models/vram-estimate".to_string())],
+            "the request really was forwarded to the backend (this is what gets logged)"
+        );
+
+        let log = String::from_utf8_lossy(&buf.lock().expect("capture lock").clone()).to_string();
+        let level = captured_level(&log, BACKEND_ERROR_LOG);
+        println!("captured level for the optional-endpoint 404: {level}");
+        assert_eq!(
+            level, "DEBUG",
+            "a client-management 404 a plain llama.cpp backend legitimately cannot answer is not a fault"
+        );
+        assert!(
+            log.contains("path=/api/models/vram-estimate"),
+            "the debug line must name the path that made it optional:\n{log}"
+        );
+    }
+
+    /// Anti-slop guard for `optional_endpoint_404_logs_at_debug`: the SAME fixture on a real
+    /// completion route must still be an ERROR. If the gate ever widens to a generic 404
+    /// policy, genuine chat errors get silenced and this test is what catches it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn completion_404_still_logs_at_error() {
+        use crate::proxy::test_support::{json_response, scripted_backend};
+        crate::fixes::pin_interest_cache_for_tests();
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _sub = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_ansi(false)
+                .with_max_level(tracing::Level::DEBUG)
+                .with_writer(HandlerCaptureWriter(buf.clone()))
+                .finish(),
+        );
+
+        let mut routes = HashMap::new();
+        routes.insert(
+            "/v1/chat/completions".to_string(),
+            vec![json_response("404 Not Found", r#"{"detail":"Not Found"}"#)],
+        );
+        let (port, state) = scripted_backend(routes).await;
+        let balancer = Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap());
+        let handler = handler_with_balancer(balancer, None, StreamingMode::default());
+
+        let res = handler.handle(completion_request()).await;
+
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "a completion 404 still forwards as 404");
+        assert_eq!(
+            state.requests(),
+            vec![("POST".to_string(), "/v1/chat/completions".to_string())],
+            "the completion must really have been forwarded, so the log line is the one under test"
+        );
+
+        let log = String::from_utf8_lossy(&buf.lock().expect("capture lock").clone()).to_string();
+        let level = captured_level(&log, BACKEND_ERROR_LOG);
+        println!("captured level for the completion 404: {level}");
+        assert_eq!(
+            level, "ERROR",
+            "/v1/chat/completions is not an optional endpoint - its errors must stay at ERROR"
         );
     }
 
