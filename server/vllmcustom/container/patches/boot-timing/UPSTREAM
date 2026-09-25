@@ -24,6 +24,20 @@
 #   vllm.v1.worker.gpu.model_runner               GPUModelRunner.capture_model (profile|final flag)
 #   vllm.model_executor.warmup.kernel_warmup      kernel_warmup, flashinfer_autotune
 #
+# Memory + headroom report (2026-09-25): the gpu_worker/model_runner rows
+# above gained mem= OPTIONS on the SAME wrapper, emitting mem.* marks
+# (device/cfg/load/prof/kvbudget/kv/kvcfg/gr+phase/final/host0) that sample
+# torch.cuda and /proc around the already-hooked calls. THE HOOK TABLE IS
+# UNCHANGED — no new module, no new attribute, so ZERO new drift surface: a
+# drifted target loses its timing row and its memory row together, through
+# the same "hooks NOT applied" note. The KV cache is the only
+# gpu_memory_utilization-scaled component, so the report's hard/safe util
+# floors are exact arithmetic on measured bytes (hard=non_kv/total,
+# safe=ceil2dp((non_kv+1GiB+max(1.5GiB,2%total))/total)). Without
+# torch/CUDA the samplers record nothing and the memory sections vanish
+# ("memory: insufficient marks") — never a boot-path failure. BOOT_TIMING=0
+# still disables EVERYTHING, memory sampling included.
+#
 # Drift checks:
 #   host, render logic only:  python3 container/patches/boot-timing/test_boot_timing.py
 #   in-image, hooks fire:     see smoke one-liner in this repo's git log for this

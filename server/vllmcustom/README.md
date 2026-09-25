@@ -52,7 +52,7 @@ resolved before doing anything slow:
 | `./muse/run`  | serve Muse Glimmer — same image, plus the shims in `muse/patches/` (see below). Default `RedHatAI/Muse-Glimmer-30B-NVFP4` |
 | `./laguna/run`| serve Laguna-S with its DFlash drafter. Default `Laguna-S-2.1-NVFP4` |
 | `./qwen3.8-flash-next/run-legacy`| serve Qwen3.8-Flash-Next (180B-A6B) single-GPU via the `vllm/vllm-openai:qwen38-flash-next` PR-branch image — the only *published* build with a PLE CPU-offload path (vllm#53899); NOT the local build. The launcher the model card's numbers correspond to; kept for A/B. Default `primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8` |
-| `./qwen3.8-flash-next/run`| **the default since 2026-09-13**: the same model from the local **main snapshot** image (the `cu1321-sm120-main-vllm…` image built from `VLLM_MAIN_SHA` in `container/versions.env`, found by its `ai.vllmcustom.vllm.ref` label; built with `VLLM_REF=main ./container/build`), using main's merged single-GPU path (vllm#54371, `--engram-config '{"cpu_offload": true}'`) instead of the PR branch's offload worker. Carries three fixes the first boots needed (see its header): an `--hf-overrides` correcting the checkpoint's wrong `ple_embedding_dtype`, auto-detected from the shard; a one-branch overlay of `ngram_embedding.py` (`qwen3.8-flash-next/patches/ple-ct-ignore/`) so a compressed-tensors `ignore` match on the PLE means unquantized; and `PYTORCH_CUDA_ALLOC_CONF=pinned_max_round_threshold_mb:1024`, because the 95.4 GiB table is one pinned allocation and torch's pinned allocator otherwise rounds it up to 128 GiB (measured: fails in 0.2 s without, pins in 35 s with) |
+| `./qwen3.8-flash-next/run`| **the default since 2026-09-13**: the same model from the local **main snapshot** image (the `cu1321-sm120-main-vllm…` image built from `VLLM_MAIN_SHA` in `container/versions.env`, found by its `ai.vllmcustom.vllm.ref` label; built with `VLLM_REF=main ./container/build`), using main's merged single-GPU path (vllm#54371, `--engram-config '{"cpu_offload": true}'`) instead of the PR branch's offload worker. Carries three fixes the first boots needed (see its header): an `--hf-overrides` correcting the checkpoint's wrong `ple_embedding_dtype`, auto-detected from the shard; a one-branch overlay of `ngram_embedding.py` (`qwen3.8-flash-next/patches/ple-ct-ignore/`) so a compressed-tensors `ignore` match on the PLE means unquantized; and `PYTORCH_CUDA_ALLOC_CONF=pinned_max_round_threshold_mb:1024`, because the 95.4 GiB table is one pinned allocation and torch's pinned allocator otherwise rounds it up to 128 GiB (measured: fails in 0.2 s without, pins in 35 s with) — plus the boot-timing `sitecustomize` mount (`container/patches/boot-timing/`) that prints a phase + GPU/host-memory + `gpu_memory_utilization` headroom report at serve-ready |
 | `./bench/bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench/bench-results.md` |
 | `./bench/bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
 | `./bench/bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |
@@ -170,6 +170,20 @@ the tag typed in. `./container/push` pushes whatever the last successful build p
 Any other untagged ref works the same way but has to bring its own
 flashinfer pin: `VLLM_REF=<sha> FLASHINFER_REF=<its requirements/cuda.txt pin> ./container/build`;
 preflight refuses a mismatch as usual.
+
+### Boot timing report (`container/patches/boot-timing/`)
+
+`./qwen3.8-flash-next/run` mounts a `sitecustomize.py` through `PYTHONPATH`; it
+wraps known upstream boot functions post-import rather than overlaying a file, so
+there is nothing to re-derive on a snapshot bump — a renamed target just no-ops and
+the report prints a `hooks NOT applied` line. Once uvicorn binds, the APIServer
+prints one report: the phase waterfall, GPU memory attributed per phase (weights /
+KV cache / CUDA graphs), host RAM, and a `gpu_memory_utilization` **headroom**
+block — since the KV cache is the only util-scaled component, the floors are exact
+arithmetic on measured bytes, not estimates. `BOOT_TIMING=0` disables everything
+(the mount stays, the apport chain still runs); marks land per-container in
+`/tmp/vllm-boot-timing/marks.log`, and `container/patches/boot-timing/test_boot_timing.py`
+covers the renderer on any host without vLLM.
 
 ### Why not newer (as of 2026-09-11)
 
