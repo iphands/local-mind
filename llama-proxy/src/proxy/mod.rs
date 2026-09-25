@@ -2,6 +2,7 @@
 
 mod context;
 mod handler;
+mod kv_labels;
 pub mod reprompt;
 pub mod server;
 mod streaming;
