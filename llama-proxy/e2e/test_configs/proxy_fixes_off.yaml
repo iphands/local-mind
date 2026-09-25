@@ -23,13 +23,9 @@ fixes:
 stats:
   enabled: false
   format: compact
-  log_interval: 10
 
 exporters:
   influxdb:
     enabled: false
-
-detection:
-  enabled: false
 
 streaming: fake

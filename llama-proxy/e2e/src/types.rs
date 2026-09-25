@@ -57,12 +57,39 @@ impl MockResponse {
 }
 
 /// Shared state for the mock backend server
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BackendState {
     /// Queue of responses to serve - tests push responses, backend pops and serves them
     pub response_queue: VecDeque<MockResponse>,
     /// All requests received by the backend (for inspection)
     pub received_requests: Vec<ReceivedRequest>,
+    /// Body served by `GET /props` (overridable per test; default reproduces llama.cpp)
+    pub props_body: String,
+    /// Body served by `GET /v1/models` (overridable per test; default has no `max_model_len`)
+    pub models_body: String,
+    /// Body served by `GET /metrics` (overridable per test; default has no vLLM metric)
+    pub metrics_body: String,
+}
+
+/// Exact `/props` body the mock returned before per-path state existed.
+pub const DEFAULT_PROPS_BODY: &str = r#"{"model_path":"/models/test-model.gguf","n_ctx":8192,"n_batch":512,"gpu_layers":0,"chat_template":"llama3","build_info":{"version":"b3000"}}"#;
+
+/// Exact `/v1/models` body the mock returned before per-path state existed (no `max_model_len`).
+pub const DEFAULT_MODELS_BODY: &str = r#"{"object":"list","data":[{"id":"test-model","object":"model","created":1700000000,"owned_by":"llamacpp"}]}"#;
+
+/// Exact `/metrics` body the mock returned before per-path state existed.
+pub const DEFAULT_METRICS_BODY: &str = "# No metrics in test mode\n";
+
+impl Default for BackendState {
+    fn default() -> Self {
+        Self {
+            response_queue: VecDeque::new(),
+            received_requests: Vec::new(),
+            props_body: DEFAULT_PROPS_BODY.to_string(),
+            models_body: DEFAULT_MODELS_BODY.to_string(),
+            metrics_body: DEFAULT_METRICS_BODY.to_string(),
+        }
+    }
 }
 
 /// A request received by the mock backend

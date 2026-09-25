@@ -21,16 +21,6 @@ fn default_slots_response() -> &'static str {
     r#"[{"id":0,"model":"test-model","n_ctx":8192,"n_tokens":0,"is_processing":false,"params":{"n_predict":4096}}]"#
 }
 
-/// Default props returned by /props
-fn default_props_response() -> &'static str {
-    r#"{"model_path":"/models/test-model.gguf","n_ctx":8192,"n_batch":512,"gpu_layers":0,"chat_template":"llama3","build_info":{"version":"b3000"}}"#
-}
-
-/// Default models list returned by /v1/models
-fn default_models_response() -> &'static str {
-    r#"{"object":"list","data":[{"id":"test-model","object":"model","created":1700000000,"owned_by":"llamacpp"}]}"#
-}
-
 /// Default fallback response when no response is queued
 fn default_completion_response() -> MockResponse {
     MockResponse::json(
@@ -87,27 +77,50 @@ async fn handle_slots() -> impl IntoResponse {
     )
 }
 
+/// Record a request into the shared received-request list.
+fn record_request(state: &SharedBackendState, method: String, path: String, body: serde_json::Value) {
+    state.lock().unwrap().received_requests.push(ReceivedRequest { method, path, body });
+}
+
 /// Handle GET /props
-async fn handle_props() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [("Content-Type", "application/json")],
-        default_props_response(),
-    )
+async fn handle_props(State(state): State<SharedBackendState>) -> impl IntoResponse {
+    record_request(&state, "GET".to_string(), "/props".to_string(), serde_json::Value::Null);
+    let body = state.lock().unwrap().props_body.clone();
+    (StatusCode::OK, [("Content-Type", "application/json")], body)
 }
 
 /// Handle GET /v1/models
-async fn handle_models() -> impl IntoResponse {
-    (
-        StatusCode::OK,
-        [("Content-Type", "application/json")],
-        default_models_response(),
-    )
+async fn handle_models(State(state): State<SharedBackendState>) -> impl IntoResponse {
+    record_request(&state, "GET".to_string(), "/v1/models".to_string(), serde_json::Value::Null);
+    let body = state.lock().unwrap().models_body.clone();
+    (StatusCode::OK, [("Content-Type", "application/json")], body)
 }
 
-/// Handle GET /metrics (empty for testing)
-async fn handle_metrics() -> impl IntoResponse {
-    (StatusCode::OK, "# No metrics in test mode\n")
+/// Handle GET /metrics
+async fn handle_metrics(State(state): State<SharedBackendState>) -> impl IntoResponse {
+    record_request(&state, "GET".to_string(), "/metrics".to_string(), serde_json::Value::Null);
+    let body = state.lock().unwrap().metrics_body.clone();
+    (StatusCode::OK, body)
+}
+
+/// Catch-all for every method+path with no explicit route (e.g. a
+/// `POST /api/models/vram-estimate`). Records the request, then answers 404 the
+/// way a backend that does not implement the path would.
+async fn handle_fallback(State(state): State<SharedBackendState>, request: Request<Body>) -> Response {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let body_bytes = axum::body::to_bytes(request.into_body(), 10 * 1024 * 1024)
+        .await
+        .unwrap_or_default();
+    let body_json: serde_json::Value = serde_json::from_slice(&body_bytes).unwrap_or(serde_json::Value::Null);
+    record_request(&state, method, path, body_json);
+
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header("Content-Type", "application/json")
+        .body(Body::from(r#"{"detail":"Not Found"}"#))
+        .unwrap()
+        .into_response()
 }
 
 /// Start the mock backend server and return the shared state handle
@@ -123,6 +136,7 @@ pub async fn start(port: u16) -> anyhow::Result<SharedBackendState> {
         .route("/props", get(handle_props))
         .route("/v1/models", get(handle_models))
         .route("/metrics", get(handle_metrics))
+        .fallback(handle_fallback)
         .with_state(state.clone());
 
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -156,8 +170,97 @@ pub fn drain_requests(state: &SharedBackendState) -> Vec<ReceivedRequest> {
     s.received_requests.drain(..).collect()
 }
 
+/// Override the body served by `GET /props` for the current test.
+#[allow(dead_code)]
+pub fn set_props_body(state: &SharedBackendState, body: impl Into<String>) {
+    state.lock().unwrap().props_body = body.into();
+}
+
+/// Override the body served by `GET /v1/models` for the current test.
+#[allow(dead_code)]
+pub fn set_models_body(state: &SharedBackendState, body: impl Into<String>) {
+    state.lock().unwrap().models_body = body.into();
+}
+
+/// Override the body served by `GET /metrics` for the current test.
+#[allow(dead_code)]
+pub fn set_metrics_body(state: &SharedBackendState, body: impl Into<String>) {
+    state.lock().unwrap().metrics_body = body.into();
+}
+
+/// Install a vLLM-shaped `/v1/models` whose entries carry `max_model_len`.
+#[allow(dead_code)]
+pub fn install_vllm_models(state: &SharedBackendState) {
+    set_models_body(
+        state,
+        r#"{"object":"list","data":[{"id":"test-model","object":"model","created":1700000000,"owned_by":"vllm","max_model_len":262144}]}"#,
+    );
+}
+
+/// Install a `/props` body that carries no context length, i.e. what a non-llama.cpp
+/// backend returns so context resolution must fall through to `/v1/models`.
+#[allow(dead_code)]
+pub fn install_props_without_context(state: &SharedBackendState) {
+    set_props_body(state, r#"{"model_path":"/models/test-model.gguf","build_info":{"version":"b3000"}}"#);
+}
+
+/// Install a `/metrics` body containing a `vllm:cache_config_info` gauge line.
+#[allow(dead_code)]
+pub fn install_vllm_metrics(state: &SharedBackendState) {
+    set_metrics_body(
+        state,
+        "# HELP vllm:cache_config_info Information about the KV cache configuration\n\
+         # TYPE vllm:cache_config_info gauge\n\
+         vllm:cache_config_info{block_size=\"16\",cache_dtype=\"auto\",engine=\"0\",gpu_memory_utilization=\"0.9\",kv_cache_size_tokens=\"81280\",kv_cache_max_concurrency=\"42\",enable_prefix_caching=\"True\",num_gpu_blocks=\"5080\"} 1\n",
+    );
+}
+
 /// Helper to clear the request log
 #[allow(dead_code)]
 pub fn clear_requests(state: &SharedBackendState) {
     state.lock().unwrap().received_requests.clear();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Port for the standalone backend self-check, kept clear of the harness
+    /// mock backend (18080) and the proxy (18066).
+    const SELF_CHECK_PORT: u16 = 18090;
+
+    /// The mock backend must record EVERY request, not just chat completions.
+    ///
+    /// Before this todo the router had no fallback and request recording lived
+    /// only inside `handle_chat_completions`, so a `POST /api/models/vram-estimate`
+    /// never reached the received-request list and was invisible to the harness.
+    /// This self-check pins the recording catch-all: it is impossible to satisfy
+    /// without the fallback added in this todo.
+    #[tokio::test]
+    async fn records_non_chat_requests() {
+        let state = start(SELF_CHECK_PORT).await.expect("mock backend should bind");
+        drain_requests(&state);
+
+        let url = format!("http://127.0.0.1:{SELF_CHECK_PORT}/api/models/vram-estimate");
+        let client = reqwest::Client::new();
+        let _ = client
+            .post(&url)
+            .json(&serde_json::json!({ "model": "test-model" }))
+            .send()
+            .await
+            .expect("POST to the mock backend should reach it at the transport level");
+
+        let recorded = drain_requests(&state);
+        let found = recorded
+            .iter()
+            .any(|r| r.method == "POST" && r.path == "/api/models/vram-estimate");
+        assert!(
+            found,
+            "POST /api/models/vram-estimate was not recorded; received = {:?}",
+            recorded
+                .iter()
+                .map(|r| format!("{} {}", r.method, r.path))
+                .collect::<Vec<_>>()
+        );
+    }
 }

@@ -48,6 +48,9 @@ pub async fn run_tests(cases: Vec<TestCase>, ctx: TestContext, filter: Option<&s
             let mut state = ctx.backend_state.lock().unwrap();
             state.response_queue.clear();
             state.received_requests.clear();
+            state.props_body = crate::types::DEFAULT_PROPS_BODY.to_string();
+            state.models_body = crate::types::DEFAULT_MODELS_BODY.to_string();
+            state.metrics_body = crate::types::DEFAULT_METRICS_BODY.to_string();
         }
 
         let start = Instant::now();

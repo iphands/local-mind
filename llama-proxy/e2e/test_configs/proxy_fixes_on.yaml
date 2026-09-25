@@ -28,14 +28,10 @@ fixes:
 stats:
   enabled: false
   format: compact
-  log_interval: 10
 
 exporters:
   influxdb:
     enabled: false
-
-detection:
-  enabled: true
 
 # Fake mode: proxy forces non-streaming to backend, synthesizes SSE for clients
 streaming: fake
