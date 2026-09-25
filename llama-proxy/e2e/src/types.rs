@@ -75,7 +75,8 @@ pub struct BackendState {
 pub const DEFAULT_PROPS_BODY: &str = r#"{"model_path":"/models/test-model.gguf","n_ctx":8192,"n_batch":512,"gpu_layers":0,"chat_template":"llama3","build_info":{"version":"b3000"}}"#;
 
 /// Exact `/v1/models` body the mock returned before per-path state existed (no `max_model_len`).
-pub const DEFAULT_MODELS_BODY: &str = r#"{"object":"list","data":[{"id":"test-model","object":"model","created":1700000000,"owned_by":"llamacpp"}]}"#;
+pub const DEFAULT_MODELS_BODY: &str =
+    r#"{"object":"list","data":[{"id":"test-model","object":"model","created":1700000000,"owned_by":"llamacpp"}]}"#;
 
 /// Exact `/metrics` body the mock returned before per-path state existed.
 pub const DEFAULT_METRICS_BODY: &str = "# No metrics in test mode\n";

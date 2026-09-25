@@ -79,7 +79,11 @@ async fn handle_slots() -> impl IntoResponse {
 
 /// Record a request into the shared received-request list.
 fn record_request(state: &SharedBackendState, method: String, path: String, body: serde_json::Value) {
-    state.lock().unwrap().received_requests.push(ReceivedRequest { method, path, body });
+    state
+        .lock()
+        .unwrap()
+        .received_requests
+        .push(ReceivedRequest { method, path, body });
 }
 
 /// Handle GET /props
@@ -196,7 +200,10 @@ pub fn install_vllm_models(state: &SharedBackendState) {
 /// Install a `/props` body that carries no context length, i.e. what a non-llama.cpp
 /// backend returns so context resolution must fall through to `/v1/models`.
 pub fn install_props_without_context(state: &SharedBackendState) {
-    set_props_body(state, r#"{"model_path":"/models/test-model.gguf","build_info":{"version":"b3000"}}"#);
+    set_props_body(
+        state,
+        r#"{"model_path":"/models/test-model.gguf","build_info":{"version":"b3000"}}"#,
+    );
 }
 
 /// Install a `/metrics` body containing a `vllm:cache_config_info` gauge line.

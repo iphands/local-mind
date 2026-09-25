@@ -22,7 +22,7 @@ cargo run
 1. Finds the proxy binary (`../target/release/llama-proxy`, falls back to debug)
 2. Starts the mock backend on port 18080
 3. Spawns the proxy with `test_configs/proxy_fixes_on.yaml`
-4. Runs all 24 tests
+4. Runs every registered test (35 as of this writing — `cargo run -- list` is authoritative)
 5. Kills the proxy and exits (code 0 = all pass, code 1 = failures)
 
 ## Filtering Tests
@@ -97,7 +97,10 @@ Both configs point the proxy backend at `127.0.0.1:18080` (the mock backend port
 
 ## Test Coverage
 
-24 tests across three categories:
+35 tests across five test modules — `basic`, `toolcall`, `passthrough`, `concurrent`, and
+`vram_estimate`. (`src/tests/helpers.rs` is shared assertion code, not a category.)
+`cargo run -- list` prints this inventory and is the authoritative source for both the
+count and the module list.
 
 ### `basic/` — Core proxy behavior
 
@@ -126,6 +129,9 @@ Both configs point the proxy backend at `127.0.0.1:18080` (the mock backend port
 | `null_index/fixed_non_streaming` | `null` tool call index is replaced with `0` |
 | `null_index/fixed_streaming` | Synthesized SSE has integer index after null-index fix |
 | `malformed_args/fixed` | `{}":` pattern replaced with correct param name from tool schema |
+| `fixes/multiple_fixes_applied` | Multiple fixes can be applied in sequence without breaking |
+| `fixes/ordering_preserves_valid` | Fix ordering doesn't break valid responses |
+| `fixes/streaming_with_fixes` | Fixes work correctly with streaming responses |
 
 ### `passthrough/` — Monitoring endpoints
 
@@ -137,6 +143,34 @@ Both configs point the proxy backend at `127.0.0.1:18080` (the mock backend port
 | `props` | `/props` is proxied to backend, returns server properties |
 | `models` | `/v1/models` is proxied to backend, returns model list |
 | `not_modified` | Pass-through responses have no extra proxy-injected fields |
+
+### `concurrent/` — Concurrency control
+
+| Test | What it verifies |
+|------|-----------------|
+| `limit_enforcement` | Concurrent requests are limited and excess get 429 |
+| `429_format` | 429 response has correct format and `Retry-After` header |
+| `permits_released` | Permits are returned after a burst so later requests succeed |
+| `permits_released_streaming_fallback` | Permits are released when a streaming-fallback response ends |
+| `monitoring_not_rejected` | Monitoring routes stay reachable while at capacity |
+| `proxy_metrics` | `/proxy/metrics` exposes proxy counters in Prometheus format |
+
+### `vram_estimate/` — AnythingLLM management shim
+
+`POST /api/models/vram-estimate` is answered by the proxy itself and never forwarded. These
+two tests install per-test `/props`, `/v1/models` and `/metrics` bodies on the mock backend.
+
+| Test | What it verifies |
+|------|-----------------|
+| `answered_locally_and_never_forwarded` | 200 whose `context_length` equals the backend's advertised window, carries the scraped `vllm` labels, contains no VRAM/byte/`id` key, and leaves no `POST /api/models/vram-estimate` in the mock's recorded requests |
+| `own_404_when_context_unknown` | With no advertised window the proxy returns its OWN 404 (`vram_estimate_context_unknown`) instead of inventing a number |
+
+The second test runs a **dedicated proxy and mock** on ports 18071/18081 (`src/isolated.rs`).
+The default run spawns one proxy for the whole suite, and the proxy caches the resolved
+context window and KV labels per backend URL for the life of the process — so reusing port
+18080 would let the first test's cached answer satisfy the second test's assertions. A
+distinct backend URL is the isolation mechanism; the reasoning is documented on
+`isolated::spawn_configured` in `src/isolated.rs`.
 
 ## Architecture
 
@@ -161,7 +195,9 @@ Both configs point the proxy backend at `127.0.0.1:18080` (the mock backend port
 
 ### Adding a New Test
 
-1. Write a test function in `src/tests/basic.rs`, `toolcall.rs`, or `passthrough.rs`:
+1. Write a test function in the module matching its category — `src/tests/basic.rs`,
+   `toolcall.rs`, `passthrough.rs`, `concurrent.rs`, or `vram.rs` (that last module registers
+   under the `vram_estimate/` prefix):
 
 ```rust
 pub async fn test_my_scenario(ctx: TestContext) -> anyhow::Result<()> {
