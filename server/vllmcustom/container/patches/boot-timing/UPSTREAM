@@ -1,0 +1,33 @@
+# boot-timing overlay notes. NO BASE_SHA256 here, deliberately: unlike
+# patches/ple-ct-ignore (a whole-file overlay, valid only over one exact
+# upstream file), this patch NEVER replaces an upstream file. It injects
+# sitecustomize.py via PYTHONPATH and wraps upstream functions post-import,
+# looked up by name at import time. If upstream renames/removes a target the
+# hook no-ops and the report prints "hooks NOT applied: <list>" -- the boot
+# itself is untouched either way. So nothing to re-derive on snapshot bumps;
+# only a shrinking report would ever signal drift.
+#
+# Verified against: image iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.
+#   dev20260924-g36f94d5 (VLLM_MAIN_SHA 36f94d5, V2 Model Runner), 2026-09-25,
+#   by grepping each target in the shipped tree, then by the smoke test below.
+#
+# Hook table (module -> attr; all confirmed present in that image):
+#   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client
+#   vllm.entrypoints.launchers.api_server.app_state  init_app_state
+#   vllm.renderers.base                           BaseRenderer.warmup_mm  (class-scanned)
+#   vllm.v1.engine.core_client                    make_client             (class-scanned)
+#   uvicorn.server                                Server.startup  -> prints the report
+#   vllm.v1.engine.core                           EngineCoreProc.run_engine_core, EngineCore.__init__
+#   vllm.v1.worker.gpu_worker                     Worker.__init__/init_device/load_model/
+#                                                 determine_available_memory/initialize_from_config/
+#                                                 compile_or_warm_up_model
+#   vllm.v1.worker.gpu.model_runner               GPUModelRunner.capture_model (profile|final flag)
+#   vllm.model_executor.warmup.kernel_warmup      kernel_warmup, flashinfer_autotune
+#
+# Drift checks:
+#   host, render logic only:  python3 container/patches/boot-timing/test_boot_timing.py
+#   in-image, hooks fire:     see smoke one-liner in this repo's git log for this
+#   directory; also visible per-boot: the report's "hooks NOT applied" note.
+#
+# Knobs: BOOT_TIMING=0 (launcher env) drops the mount entirely;
+#        VLLM_BOOT_TIMING_DIR (container env) moves the marks file.

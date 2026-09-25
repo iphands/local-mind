@@ -98,6 +98,7 @@
 # Knobs (same names as ./qwen3.8-flash-next/run-legacy where the meaning is the same):
 #   PLE_OFFLOAD=0 ...                              # do NOT offload: table on GPU (TP2+ only; will not fit one card)
 #   PATCH_PLE=0 ...                                # do NOT mount patches/ple-ct-ignore (reproduces the NotImplementedError)
+#   BOOT_TIMING=0 ...                              # do NOT mount container/patches/boot-timing (startup waterfall report)
 #   PLE_DTYPE=float8_e4m3fn / PLE_DTYPE= ...       # force / skip the ple_embedding_dtype override (default: auto from the shard)
 #   PINNED_ROUND_MB=0 ...                          # drop the pinned-allocator knob (reproduces the 128 GiB cudaHostAlloc OOM)
 #   GDN_KERNEL=cuda ...                            # VLLM_GDN_DECODE_KERNEL (default triton: REQUIRED by the FP8 GDN projections on the PR image)
@@ -165,6 +166,7 @@ PLE_OFFLOAD=${PLE_OFFLOAD:-1}                    # 1 = --engram-config cpu_offlo
 PATCH_PLE=${PATCH_PLE:-1}                        # mount patches/ple-ct-ignore over the image's ngram_embedding.py (see header)
 PLE_DTYPE=${PLE_DTYPE-auto}                      # auto = read the shard; a dtype name = force; EMPTY = trust config.json
 PINNED_ROUND_MB=${PINNED_ROUND_MB:-1024}         # pinned requests above this are not rounded to a power of 2; 0 = torch default (see header)
+BOOT_TIMING=${BOOT_TIMING:-1}                    # mount container/patches/boot-timing on PYTHONPATH: per-section boot report at "Application startup complete"
 GDN_KERNEL=${GDN_KERNEL:-triton}                 # VLLM_GDN_DECODE_KERNEL
 EXECUTOR=${EXECUTOR:-}                           # --distributed-executor-backend; empty = default
 CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
@@ -263,6 +265,15 @@ CONTAINER_ARGS+=(
 # ENV_EXTRA (last -e wins) and keep this key in it.
 [[ "$PINNED_ROUND_MB" != "0" ]] && CONTAINER_ARGS+=( -e PYTORCH_CUDA_ALLOC_CONF="pinned_max_round_threshold_mb:$PINNED_ROUND_MB" )
 [[ "$PATCH_PLE" != "0" ]] && CONTAINER_ARGS+=( -v "$PATCH_SRC:$PATCH_DST:ro" )
+# Startup timing: a PYTHONPATH dir with sitecustomize.py + boot_timing.py. No
+# upstream file is replaced, so there is nothing to sha-check (see its UPSTREAM).
+# The image ships no PYTHONPATH; sitecustomize chains Debian's own regardless.
+BOOT_TIMING_DIR="$HERE/../container/patches/boot-timing"
+if [[ "$BOOT_TIMING" != "0" ]]; then
+  [[ -f "$BOOT_TIMING_DIR/sitecustomize.py" && -f "$BOOT_TIMING_DIR/boot_timing.py" ]] || {
+    echo "missing $BOOT_TIMING_DIR/{sitecustomize,boot_timing}.py"; exit 1; }
+  CONTAINER_ARGS+=( -v "$BOOT_TIMING_DIR:/opt/boot-timing:ro" -e PYTHONPATH=/opt/boot-timing )
+fi
 env_extra_args
 
 vllm_core_args
