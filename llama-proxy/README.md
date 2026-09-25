@@ -65,6 +65,8 @@ An HTTP reverse proxy for [llama.cpp](https://github.com/ggerganov/llama.cpp) se
   - Full OpenAI Chat Completions API support
   - Claude Code CLI/TUI compatibility
   - Opencode CLI/TUI compatibility
+  - AnythingLLM compatibility (its `POST /api/models/vram-estimate` probe is answered by the
+    proxy itself, so it learns your real context window instead of assuming 8192 tokens)
   - Streaming (SSE) and non-streaming modes
   - Preserves all client-specific extensions
 
@@ -744,6 +746,8 @@ The proxy maintains full compatibility with:
 - **llama.cpp Extensions**: `timings` object, `/props`, `/slots` endpoints
 - **Opencode Extensions**: `reasoning_text`, `reasoning_opaque`, extended usage details
 - **Claude Code**: All standard features work seamlessly
+- **AnythingLLM**: Standard chat requests, plus `POST /api/models/vram-estimate`, which the proxy
+  answers itself from the backend's advertised context window and never forwards
 
 See `../context/opencode_claude_llama_notes.md` for comprehensive client compatibility documentation.
 
@@ -817,3 +821,46 @@ pass-through paths, which is why it does not match
 `llama_proxy_passthrough_stream_client_gone_total`. And note the corollary of the
 filter itself: load the proxy never observed no longer reaches InfluxDB, so remote
 token totals under-count actual backend work by roughly the skipped count.
+
+### AnythingLLM assumed an 8192-token window
+
+AnythingLLM's LocalAI provider asks the server how large the context window is by POSTing
+`/api/models/vram-estimate`. Neither llama.cpp nor vLLM has ever heard of that path, so the request
+used to come back as a 404 and AnythingLLM fell back to a hard-coded 8192 tokens no matter how big
+your model actually is. The proxy answers that path **itself** and never forwards it, using the
+context size it learned during startup preflight or, when that cache is cold, the backend's own
+advertised window (`/props` `n_ctx`, otherwise `/v1/models` `max_model_len`). The window
+AnythingLLM shows you is now the real one.
+
+The only field AnythingLLM reads out of that response is `context_length`, in tokens. The body also
+carries a nested `vllm` object, and that is real data scraped from the backend's
+`vllm:cache_config_info` gauge: `num_gpu_blocks`, `block_size`, `kv_cache_size_tokens`,
+`kv_cache_max_concurrency`, `gpu_memory_utilization`, `cache_dtype`, `enable_prefix_caching`, each one
+passed through as the string vLLM printed. It appears only when the backend exposes that gauge, so a
+llama.cpp backend simply has no `vllm` key. `engine` is a series selector rather than a memory
+figure, so it is not surfaced. The byte-sized fields that endpoint's schema declares stay absent on
+purpose: vLLM prints its KV-cache memory figure to its own stdout while the engine profiles and
+never serves it over HTTP, so there is no honest number to report, and AnythingLLM does not read
+those fields either. The proxy reports no figure it cannot source.
+
+Two limitations are documented rather than repaired:
+
+- The window is **per backend node, not per model**. One number is cached per backend URL, so a
+  server hosting several models with different windows reports one number for all of them.
+- A request whose `model` matches no backend mapping still gets a **503** at load-balancer
+  selection, before the shim is reached. The shim only answers requests the proxy already routed.
+
+Both outcomes log at `debug!`, which is off by default, so the signal an operator can actually see
+is a pair of counters:
+
+```bash
+curl -s localhost:8066/proxy/metrics | grep vram_estimate
+```
+
+- `llama_proxy_vram_estimate_served_total`: answered with a real context window.
+- `llama_proxy_vram_estimate_unknown_total`: answered with the proxy's own 404 because the backend
+  advertised no context window anywhere, which sends AnythingLLM back to its default and gives you
+  the 8192 behaviour above. Like the counters above, both are per process and reset on restart.
+
+Nothing here changes a completion request. `/v1/chat/completions` is still forwarded as it always
+was; only the management probe is answered locally.

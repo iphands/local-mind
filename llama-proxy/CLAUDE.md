@@ -17,6 +17,9 @@ The proxy sits between **llama.cpp server** and AI client tools, supporting:
 **Supported Clients:**
 1. **Claude Code CLI/TUI** (`../vendor/claude-code`) - Anthropic's official Claude CLI
 2. **Opencode CLI/TUI** (`../vendor/opencode`) - Open-source AI coding assistant
+3. **AnythingLLM** - Desktop AI app whose LocalAI provider speaks the OpenAI chat API and
+   probes `POST /api/models/vram-estimate`, an endpoint no backend implements, so the proxy
+   answers it itself (see the AnythingLLM block under "API Standards Supported")
 
 **API Standards Supported:**
 - ✅ **Vanilla OpenAI Chat Completions API** (`/v1/chat/completions`)
@@ -39,11 +42,39 @@ The proxy sits between **llama.cpp server** and AI client tools, supporting:
   - **Metrics tracking**: Extended token counts logged and exported to InfluxDB
   - **Note**: llama.cpp models don't generate these fields, but proxy preserves them for forward compatibility
 
+- ✅ **AnythingLLM Management Endpoint** (`POST /api/models/vram-estimate`, proxy-answered)
+  - `route()` has an early guard, before the `match (method, routed)`, that tests BOTH
+    `uri.path()` and the `strip_path_prefix`-stripped `routed` view; `handle_vram_estimate()`
+    owns the response and no branch forwards this request
+  - `context_length` (tokens) is the ONLY field the client reads. It comes from the same
+    context cache startup preflight warms (`src/backends/preflight.rs`), i.e. the backend's own
+    advertised window: `/props` `n_ctx`, else `/v1/models` `max_model_len`
+  - A nested `vllm` object carries the seven memory-relevant labels scraped from the backend's
+    `vllm:cache_config_info` gauge, as strings, and appears ONLY when the backend serves that
+    gauge (absent for llama.cpp). `engine` is a series selector and is deliberately not surfaced
+  - The byte/VRAM fields of that endpoint's schema are intentionally absent because they are not
+    obtainable over vLLM's HTTP surface (the engine prints its KV-cache memory figure to stdout
+    while profiling, and serves no such value). State it as a deliberate omission: the shim
+    answers a context-window question and estimates no VRAM
+  - No advertised window means the proxy's OWN 404 (`vram_estimate_context_unknown`), never a
+    fabricated number. A malformed body yields the empty model, never a 500
+  - Accepted limitations, documented not repaired: the window is per backend node, not per model,
+    so a multi-model server reports one number for all of them; and a `model` matching no backend
+    mapping still 503s at load-balancer selection, before the shim runs
+  - Operator-visible consequence: AnythingLLM previously assumed an 8192-token window and now
+    gets the real one
+  - Both outcomes log at `debug!`, off by default, so `/proxy/metrics` carries
+    `llama_proxy_vram_estimate_served_total` and `llama_proxy_vram_estimate_unknown_total` as
+    the only operator-visible signal of what the shim did
+
 **Key Compatibility Principles:**
 1. **Transparent Pass-Through**: Unknown fields in requests/responses are preserved (forward compatibility)
 2. **No Modification of Standard Fields**: OpenAI-compliant fields passed unmodified
 3. **Extension Preservation**: Client-specific extensions preserved even if not used by backend
 4. **Fix Layer Isolation**: Response fixes applied without breaking API contract
+5. **Honest Local Answers**: when no backend implements a client endpoint, the proxy answers it
+   from data that backend did advertise and omits the rest. It never leaves a 404 the client
+   misreads, and never invents a figure to fill out a schema it cannot source
 
 **Detailed Client Documentation:**
 See `../context/opencode_claude_llama_notes.md` for comprehensive details on:
@@ -100,6 +131,10 @@ cp config.yaml.default config.yaml
 - `handler.rs`: Request router with pass-through endpoints (/props, /slots, /health, /v1/models, /metrics)
 - `streaming.rs`: SSE pass-through stream forwarding (passthrough mode) — forwards backend bytes verbatim; fixes DETECT only, never repair
 - `context.rs`: Fetches context_total from backend /slots endpoint for stats
+- `compat.rs`: Client-management-endpoint shims. Today one endpoint (AnythingLLM's
+  `vram-estimate`), its path predicate, its two bounded probes, and the honest body builder
+- `kv_labels.rs`: Pure parser for the backend's `vllm:cache_config_info` label line; values
+  stay strings, and `None` (never an empty Some) is what the scrape cache keys on
 
 **fixes/** - Pluggable response fix system
 - `mod.rs`: Defines `ResponseFix` trait with `applies()` and `apply()` methods
@@ -115,12 +150,16 @@ cp config.yaml.default config.yaml
 - Metrics collected for both streaming and non-streaming requests
 - Context usage calculated from model's KV cache via /slots endpoint
 - Extended metrics: reasoning_tokens, accepted_prediction_tokens, rejected_prediction_tokens (Opencode/Copilot)
+- Endpoint counters are not part of `RequestMetrics`: the shim's `vram_estimate_served_total`
+  and `vram_estimate_unknown_total` live on ProxyState and render on /proxy/metrics only
 
 **exporters/** - Remote metrics export
 - `mod.rs`: `ExporterManager` with pluggable exporter trait
 - `influxdb.rs`: InfluxDB v2 exporter (bounded writer queue; one write per
   sample since tasks 81/84 - there is no batching)
 - Exporters run async after request completes
+- The shim's two `vram_estimate` counters never reach an exporter: they are endpoint totals
+  on ProxyState, not per-request samples
 
 **api/** - Type definitions
 - `openai.rs`: OpenAI API types with Opencode extensions (reasoning fields, extended usage)
@@ -269,6 +308,10 @@ When modifying the proxy, ensure these compatibility requirements:
 - ✅ Message ordering and structure
 - ✅ Reasoning fields (reasoning_text, reasoning_opaque) in both messages and streaming deltas
 - ✅ Unknown request/response fields (pass-through)
+- ✅ The shim's body shape for `/api/models/vram-estimate`: `model`, `context_length`,
+  `model_max_context`, `context_note`, plus `vllm` only when the backend exposed the gauge.
+  Never an `id` key (the client does `{id, ...est}` and would overwrite the id it already bound
+  from `/v1/models`), and never a byte/VRAM key
 
 **MUST NOT:**
 - ❌ Modify standard OpenAI field values
