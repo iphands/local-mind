@@ -24,11 +24,11 @@
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Last verified against main @ 36f94d5 (2026-09-24, VLLM_MAIN_SHA in
+# Last verified against main @ a44d7b5 (2026-09-25, VLLM_MAIN_SHA in
 # container/versions.env at the time; first verified at 1ee4be4, 2026-09-12, re-checked at
-# 468663a, 826e300 and on each bump; ngram_embedding.py is unchanged 468663a ->
-# 36f94d5): vllm/config/engram.py with cpu_offload, Qwen4ExpPLE-
-# PinnedHostEmbedding selected when it is set, Qwen4ExpForConditionalGeneration +
+# 468663a, 826e300, 36f94d5 and on each bump): vllm/config/engram.py with
+# cpu_offload, Qwen4ExpPLEPinnedHostEmbedding (in qwen4_exp/common/ since
+# vllm#57497) selected when it is set, Qwen4ExpForConditionalGeneration +
 # Qwen4ExpMTP in the registry, VLLM_GDN_DECODE_KERNEL still an env, the qwen3
 # reasoning parser and qwen3_coder tool parser still registered.
 #
@@ -180,15 +180,17 @@ docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
 # PLE patch: an overlay of one upstream file, valid only over the exact upstream
 # file it was derived from. Checked by CONTENT: the image's copy must hash to
 # BASE_SHA256 in patches/ple-ct-ignore/UPSTREAM. (It used to be checked by vLLM
-# commit, which forced an edit on every bump even though the file had not
-# changed since 468663a.) Costs one short-lived container, ~1 s.
+# commit, which forced an edit on every bump even though the file was
+# byte-identical from 468663a to 36f94d5.) Costs one short-lived container, ~1 s.
 PATCH_ROOT="$HERE/patches/ple-ct-ignore"
 PATCH_SRC="$PATCH_ROOT/ngram_embedding.py"
-PATCH_DST=/opt/venv/lib/python3.12/site-packages/vllm/models/qwen4_exp/nvidia/ngram_embedding.py
 if [[ "$PATCH_PLE" != "0" ]]; then
   [[ -f "$PATCH_SRC" && -f "$PATCH_ROOT/UPSTREAM" ]] || { echo "missing $PATCH_SRC or $PATCH_ROOT/UPSTREAM"; exit 1; }
   # shellcheck source-path=SCRIPTDIR source=patches/ple-ct-ignore/UPSTREAM
   source "$PATCH_ROOT/UPSTREAM"
+  # Where upstream keeps the file moves between commits (nvidia/ -> common/ at
+  # vLLM 267eee5), so the mount target comes from UPSTREAM too.
+  PATCH_DST=/opt/venv/lib/python3.12/site-packages/$UPSTREAM_PATH
   _img_sum=$(docker run --rm --entrypoint sha256sum "$CONTAINER" "$PATCH_DST" 2>/dev/null | cut -d' ' -f1 || true)
   if [[ "$_img_sum" != "$BASE_SHA256" ]]; then
     _img_ref=$(docker image inspect -f '{{index .Config.Labels "ai.vllmcustom.vllm.ref"}}' "$CONTAINER")

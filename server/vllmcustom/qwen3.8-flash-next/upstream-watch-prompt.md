@@ -48,8 +48,9 @@ run. Do not answer from memory; cite a URL for every claim.
 1. List tags at https://github.com/vllm-project/vllm/tags. Identify the newest non-rc tag
    and any rc newer than v0.29.0. Note the tag date.
 2. For the newest tag T (and any new rc), confirm whether it contains the offload:
-   - https://github.com/vllm-project/vllm/blob/T/vllm/models/qwen4_exp/nvidia/ngram_embedding.py
-     must exist and contain `Qwen4ExpPLEPinnedHostEmbedding`.
+   - https://github.com/vllm-project/vllm/blob/T/vllm/models/qwen4_exp/common/ngram_embedding.py
+     must exist and contain `Qwen4ExpPLEPinnedHostEmbedding` (before vllm#57497, 2026-09-24, it
+     lived in `.../qwen4_exp/nvidia/ngram_embedding.py`; a tag older than that has it there).
    - https://github.com/vllm-project/vllm/blob/T/vllm/config/engram.py must exist.
    - https://github.com/vllm-project/vllm/blob/T/vllm/model_executor/models/registry.py must
      map `Qwen4ExpForConditionalGeneration`.
@@ -109,9 +110,9 @@ The owner's build fails or degrades if these move; check them from the raw files
      without that rounding (chunked, `cudaHostRegister`, or setting the threshold itself), or
      documents the requirement; then the env var can go.
    - **Upstream:** `Qwen4ExpPLEEmbeddingMethod.from_quant_config` in
-     https://github.com/vllm-project/vllm/blob/main/vllm/models/qwen4_exp/nvidia/ngram_embedding.py
+     https://github.com/vllm-project/vllm/blob/main/vllm/models/qwen4_exp/common/ngram_embedding.py
      only handles `Fp8Config` / ModelOpt and raises `NotImplementedError` for a
-     compressed-tensors quant config (as of `VLLM_MAIN_SHA` in `server/vllmcustom/container/versions.env`; last checked at `36f94d5`, 2026-09-24). The owner overlays a
+     compressed-tensors quant config (as of `VLLM_MAIN_SHA` in `server/vllmcustom/container/versions.env`; last checked at `a44d7b5`, 2026-09-25). The owner overlays a
      one-branch patch (`server/vllmcustom/qwen3.8-flash-next/patches/ple-ct-ignore/`). Report
      when `main` handles `CompressedTensorsConfig` (an `ignore` match on the PLE prefix →
      unquantized) there, with the commit; then the overlay can go.

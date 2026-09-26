@@ -134,12 +134,12 @@ Two things worth knowing that did **not** need a change:
 ### Snapshot builds from `main` (experimental)
 
 The default set above is a tagged release, and stays that way. `VLLM_REF=main ./container/build`
-builds a **pinned** `main` commit instead — `VLLM_MAIN_SHA` in `container/versions.env`, currently
-`36f94d5` (2026-09-24; was `826e300`, 2026-09-22, `468663a`, 2026-09-18, and `1ee4be4`, 2026-09-12, first taken for vllm#54371 — single-GPU
-Qwen3.8-Flash-Next, see `./qwen3.8-flash-next/run`). `main` is *not* the moving tip: bump the sha on purpose, and
+builds a **pinned** `main` commit instead — `VLLM_MAIN_SHA` in `container/versions.env` (first taken at
+`1ee4be4`, 2026-09-12, for vllm#54371 — single-GPU Qwen3.8-Flash-Next, see `./qwen3.8-flash-next/run`;
+the bump history is in the `container/Dockerfile` header). `main` is *not* the moving tip: bump the sha on purpose, and
 re-check its `requirements/cuda.txt` when you do. What differs from the release set at that sha:
 
-| component | release (v0.29.0) | main @ `36f94d5` |
+| component | release (v0.29.0) | main snapshot (`VLLM_MAIN_SHA`) |
 |---|---|---|
 | FlashInfer | v0.6.18 | **v0.7.0** (`VLLM_MAIN_FLASHINFER_REF`; vllm#58069, was 0.6.18.post1 through `826e300`; cubin wheel is published). 0.7.0 split the AOT jit-cache into a shim plus per-arch provider wheels (flashinfer#4514): flashinfer-build builds `flashinfer-jit-cache-sm120f` + the shim, and vllm-openai asserts the shim finds an sm120 provider |
 | torch / torchaudio / torchvision | 2.13.0 / 2.11.0 / 0.28.0 | unchanged |
