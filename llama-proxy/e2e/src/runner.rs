@@ -5,13 +5,15 @@ use std::time::Instant;
 
 use crate::types::{SharedBackendState, TestResult};
 
+/// The boxed future every test's `run` returns: an async closure can't be `Fn`-boxed without
+/// pinning its future, so the return type is named once here to keep `TestCase::run` readable.
+type TestFuture = std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>>;
+
 /// A single test case
 pub struct TestCase {
     pub name: &'static str,
     pub description: &'static str,
-    pub run: Box<
-        dyn Fn(TestContext) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send>> + Send + Sync,
-    >,
+    pub run: Box<dyn Fn(TestContext) -> TestFuture + Send + Sync>,
 }
 
 /// Context passed to each test - contains proxy address and backend state

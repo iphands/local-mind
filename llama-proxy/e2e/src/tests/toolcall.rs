@@ -507,7 +507,7 @@ pub async fn test_streaming_with_fixes(ctx: TestContext) -> anyhow::Result<()> {
 
     let resp = send_streaming(&ctx.http_client, &ctx.proxy_addr, request_with_write_tool("stream")).await?;
 
-    assert_true(resp.events.len() > 0, "Should have SSE events")?;
+    assert_true(!resp.events.is_empty(), "Should have SSE events")?;
 
     // Should have synthesized streaming response with valid JSON
     let args = resp.accumulated_tool_args(0);

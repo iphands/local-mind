@@ -205,7 +205,7 @@ pub(crate) fn find_proxy_bin() -> anyhow::Result<String> {
         .collect();
 
     // Newest first
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|a| std::cmp::Reverse(a.0));
 
     let (_, newest) = found.first().ok_or_else(|| {
         anyhow::anyhow!(

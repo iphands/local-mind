@@ -171,7 +171,7 @@ pub fn clear_queued_responses(state: &SharedBackendState) {
 /// Helper to get all requests received since last clear
 pub fn drain_requests(state: &SharedBackendState) -> Vec<ReceivedRequest> {
     let mut s = state.lock().unwrap();
-    s.received_requests.drain(..).collect()
+    std::mem::take(&mut s.received_requests)
 }
 
 /// Override the body served by `GET /props` for the current test.
