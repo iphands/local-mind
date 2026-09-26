@@ -353,7 +353,7 @@ src/
 │   ├── handler.rs       # Request routing and response handling
 │   ├── streaming.rs     # SSE pass-through stream forwarding (passthrough mode)
 │   ├── synthesis.rs     # SSE synthesis from complete JSON (fake streaming)
-│   └── context.rs       # Context fetching from /slots endpoint
+│   └── context.rs       # Fetch context window from /props + /v1/models (cached)
 ├── backends/            # Multi-backend load balancing
 │   ├── mod.rs           # Builder functions
 │   ├── balancer.rs      # LoadBalancer trait and BackendGuard
@@ -864,3 +864,50 @@ curl -s localhost:8066/proxy/metrics | grep vram_estimate
 
 Nothing here changes a completion request. `/v1/chat/completions` is still forwarded as it always
 was; only the management probe is answered locally.
+
+### The `context_total` / `context_percent` in your metrics
+
+Every sample carries the backend's advertised context window (`context_total`) and, when a request
+used part of it, `context_percent`. The number is the same advertised window the AnythingLLM shim
+above reports: `/props` `n_ctx` for llama.cpp, otherwise `/v1/models` `max_model_len`. It is learned
+once at startup and then **cached per backend URL**, not fetched on every request, so three things
+about it are worth knowing:
+
+- **The probe is bounded.** When the cache is cold the proxy probes the backend, but the whole probe
+  is capped at 2s for `/props` and `/v1/models` together. A backend that accepts the connection and
+  never answers can no longer delay an already-complete response; that stall becomes a counted
+  timeout instead. A backend behind an `api_key` is probed *with* that key, exactly as startup
+  preflight does — so an auth-guarded backend now reports a window instead of silently 401-ing the
+  probe and leaving `context_total` empty.
+- **The cache expires.** A cached window is dropped 600s after it was fetched, and *immediately* when
+  the backend is marked failed. This is what lets a backend restarted with a different `-c` be
+  picked up: without it, the first window seen for a URL would be reported forever, because a
+  restart keeps the same base URL.
+- **Multi-model `/v1/models` is selected, not guessed.** The cold fallback no longer reads
+  `data[0]`. It uses the same policy as startup: the entry whose id matches the node's configured
+  model name, otherwise the largest `max_model_len` among entries that carry both an `id` and a
+  numeric `max_model_len`. An entry with no `id` is ignored, which matches what vLLM and
+  OpenAI-compatible servers actually emit.
+
+Like the counters above, the window is cached **per backend node, not per model**: a node hosting
+several models reports one number for all of them, and this section changes only which `/v1/models`
+entry is chosen for that node, not the per-node caching.
+
+These outcomes are invisible in the default log, so an operator's signal is the counters:
+
+```bash
+curl -s localhost:8066/proxy/metrics | grep -E 'context_probe_timeout|context_cache'
+```
+
+- `llama_proxy_context_probe_timeout_total`: probes that hit the 2s bound (the response was not
+  delayed by them; this says how often it would have been).
+- `llama_proxy_context_cache_evictions_total`: windows dropped because their backend failed, so the
+  next request re-probes it. A number that climbs with a flapping backend is expected.
+- `llama_proxy_context_cache_stale_skips_total`: refreshes that found the cache write-locked and were
+  skipped, so the old window was kept one more round; it explains `context_percent` jumps.
+
+The reprompt engine adds its own three, also process-global and reset on restart:
+`llama_proxy_reprompt_skipped_read_only_total` (declined: no mutating tool),
+`llama_proxy_reprompt_triggered_total` (a premature stop it acted on), and
+`llama_proxy_reprompt_exhausted_total` (a loop that ran out of rounds or budget and returned the
+text unchanged — a subset of triggered).

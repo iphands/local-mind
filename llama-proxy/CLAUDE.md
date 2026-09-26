@@ -130,7 +130,14 @@ cp config.yaml.default config.yaml
 - `server.rs`: Axum server setup, ProxyState with shared config/registry/exporters
 - `handler.rs`: Request router with pass-through endpoints (/props, /slots, /health, /v1/models, /metrics)
 - `streaming.rs`: SSE pass-through stream forwarding (passthrough mode) — forwards backend bytes verbatim; fixes DETECT only, never repair
-- `context.rs`: Fetches context_total from backend /slots endpoint for stats
+- `context.rs`: Fetches the backend's advertised context window (`context_total`) for stats —
+  `/props` `n_ctx` first, else `/v1/models` `max_model_len` (NOT `/slots`, which carries only
+  `context_used`). Cached per `backend_url` behind a 600s TTL and evicted the instant a backend is
+  marked failed, so a backend restarted with a different `-c` is picked up rather than pinned
+  forever. Every probe is bounded by `CONTEXT_PROBE_TIMEOUT` (2s total) and carries the node
+  `api_key`, matching startup preflight; the cold `/v1/models` fallback uses the SAME selection as
+  preflight (`preflight::select_max_model_len`), never `data[0]`. Never blocks a request: a wedged
+  backend counts `context_probe_timeout_total`, a failure evicts and counts `context_cache_evictions_total`.
 - `compat.rs`: Client-management-endpoint shims. Today one endpoint (AnythingLLM's
   `vram-estimate`), its path predicate, its two bounded probes, and the honest body builder
 - `kv_labels.rs`: Pure parser for the backend's `vllm:cache_config_info` label line; values
@@ -152,6 +159,11 @@ cp config.yaml.default config.yaml
 - Extended metrics: reasoning_tokens, accepted_prediction_tokens, rejected_prediction_tokens (Opencode/Copilot)
 - Endpoint counters are not part of `RequestMetrics`: the shim's `vram_estimate_served_total`
   and `vram_estimate_unknown_total` live on ProxyState and render on /proxy/metrics only
+- The context probe and reprompt engine add process-global counters that likewise render only on
+  /proxy/metrics (never an exporter; all reset on restart): `context_probe_timeout_total`,
+  `context_cache_evictions_total` (plus the pre-existing `context_cache_stale_skips`), and the
+  reprompt outcomes `reprompt_skipped_read_only_total` / `reprompt_triggered_total` /
+  `reprompt_exhausted_total`
 
 **exporters/** - Remote metrics export
 - `mod.rs`: `ExporterManager` with pluggable exporter trait
@@ -185,7 +197,8 @@ fixes DETECT but do NOT repair on that path. Both modes run fixes on buffered re
 **Stats Collection Flow**:
 1. Parse request JSON to extract prompt tokens
 2. After response, extract completion tokens and timing
-3. Fetch context_total from backend /slots
+3. Read context_total from the per-backend cache (probed from /props, else /v1/models — see
+   `context.rs`); `context_used` comes from /slots. context_percent = context_used / context_total.
 4. Calculate metrics (tokens/sec, context percentage)
 5. Format and log to stdout
 6. Export to remote systems asynchronously

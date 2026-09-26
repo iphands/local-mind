@@ -146,6 +146,12 @@ backend:
 # stats:
 #   enabled: true
 #   format: "pretty"
+# Note: each request's context_total is the backend's advertised window (/props n_ctx, else
+# /v1/models max_model_len), probed at most once per backend and cached — the cache expires after
+# 600s, or immediately if that backend is marked failed. The 2s probe bound and the cache lifetime
+# are fixed constants, not configurable here. If context_total looks missing or stale, watch
+# llama_proxy_context_probe_timeout_total and llama_proxy_context_cache_evictions_total on
+# /proxy/metrics.
 
 # Remote exporters (default: all disabled)
 # exporters:
