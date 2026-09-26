@@ -1,0 +1,39 @@
+# draft-load-filter notes. NO BASE_SHA256 here, deliberately: like
+# container/patches/boot-timing (and unlike qwen3.8-flash-next/patches/
+# ple-ct-ignore) this NEVER replaces an upstream file. draft_load_filter.pth is
+# a new file mounted into site-packages; it installs a sys.meta_path hook that
+# wraps upstream functions post-import, looked up by name. If upstream renames
+# or removes a target the hook no-ops and prints "[draft-load-filter] NOT
+# applied ..." -- the load then reads the whole checkpoint, exactly as
+# upstream does. Nothing to re-derive on snapshot bumps.
+#
+# Hook table (module -> attr), confirmed present at vLLM a44d7b5 (2026-09-26):
+#   vllm.model_executor.model_loader.weight_utils
+#       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
+#                               safetensors_weights_iterator resolves it as a
+#                               module global before f.get_tensor() in its
+#                               lazy / eager / torchao branches
+#   vllm.model_executor.model_loader.default_loader
+#       DefaultModelLoader.load_weights(self, model, model_config)
+#                            -- consumes get_all_weights() synchronously via
+#                               model.load_weights(...)
+# Filter table (model class -> function in the class's own module):
+#   Qwen4ExpMTP -> _remap_mtp_weight_name (vllm/models/qwen4_exp/nvidia/mtp.py);
+#                  keep(name) = _remap_mtp_weight_name(name) is not None, i.e.
+#                  exactly what Qwen4ExpMTP.load_weights keeps.
+#
+# Drift signals, all printed to the container log:
+#   "NOT applied ..."                         a target or the remap fn vanished
+#   "filter was active but the weight iterator never consulted
+#    should_skip_weight"                      load format / iterator changed:
+#                                             nothing skipped, boot is slow again
+#   "Qwen4ExpMTP: read N checkpoint tensors, skipped M before reading them"
+#                                             working as intended
+# Formats the filter cannot help (they ignore should_skip_weight upstream):
+# fastsafetensors, instanttensor, enable_multithread_load, *.bin/*.pt. The
+# launcher uses the default load format.
+#
+# Measured on nvidia/Qwen3.8-Flash-Next-NVFP4 (2026-09-26, headers): the
+# drafter keeps 3103 of the checkpoint's tensors = 4.88 GiB of 123.53 GiB
+# (mtp.* 2.51 GiB in model-fp8-mtp-ple + shards 9/10, embed_tokens + lm_head
+# 2.37 GiB in shard 9). Before: the drafter pass took 171.6 s over NFS.

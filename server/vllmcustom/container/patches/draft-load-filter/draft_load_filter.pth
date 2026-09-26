@@ -1,0 +1,6 @@
+# draft-load-filter: mounted into the venv's site-packages by ./qwen3.8-flash-next/run
+# (a NEW file there, not an overlay). site processes it in every interpreter:
+# the path line puts the module on sys.path, the import line installs the hook.
+# A failure prints one line and leaves the interpreter untouched.
+/opt/draft-load-filter
+import sys; exec("try:\n import draft_load_filter; draft_load_filter.install()\nexcept Exception as e:\n print('[draft-load-filter] disabled (install failed: %r)' % (e,), file=sys.stderr)")
