@@ -48,8 +48,9 @@ use crate::backends::{node_url, with_auth, BackendNode};
 /// The ONE path this shim owns.
 const SHIM_PATH: &str = "/api/models/vram-estimate";
 
-/// Total budget for the context-window probe, `/props` and `/v1/models` together.
-const CONTEXT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+/// Total budget for the context-window probe, `/props` and `/v1/models` together. Shared with
+/// the buffered-path stats probe in `handler.rs` so both cap the same management call the same way.
+pub(crate) const CONTEXT_PROBE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Total budget for one `/metrics` scrape: connect through last byte.
 const KV_SCRAPE_TIMEOUT: Duration = Duration::from_secs(2);
@@ -148,10 +149,13 @@ pub(crate) async fn resolve_context_length(node: &Arc<BackendNode>) -> Option<u6
     // The 2s client timeout bounds ONE request; this bound is what bounds the WHOLE
     // probe, because the fallback path is two requests (`/props` then `/v1/models`) and
     // a backend that accepts and never answers would otherwise cost 2s + 2s.
-    tokio::time::timeout(CONTEXT_PROBE_TIMEOUT, fetch_context_total(client, node.base_url(), None))
-        .await
-        .ok()
-        .flatten()
+    tokio::time::timeout(
+        CONTEXT_PROBE_TIMEOUT,
+        fetch_context_total(client, node.base_url(), None, node.api_key.as_deref(), node.model.as_deref()),
+    )
+    .await
+    .ok()
+    .flatten()
 }
 
 /// The shim's probe client: 2s total, 2s connect, built once.

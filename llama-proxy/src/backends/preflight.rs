@@ -286,7 +286,7 @@ async fn fetch_models(
 /// carrying BOTH a string id and a numeric max_model_len — never the bare
 /// first entry, which on a multi-model node is not necessarily the served one
 /// (E-L8). Entries lacking either field are skipped honestly.
-fn select_max_model_len(entries: &[serde_json::Value], model_name: Option<&str>) -> Option<u64> {
+pub(crate) fn select_max_model_len(entries: &[serde_json::Value], model_name: Option<&str>) -> Option<u64> {
     let scored = entries.iter().filter_map(|e| {
         let id = e.get("id").and_then(|i| i.as_str())?;
         let len = e.get("max_model_len").and_then(|v| v.as_u64())?;

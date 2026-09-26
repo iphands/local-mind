@@ -301,6 +301,10 @@ fn decode_body_bytes(body_bytes: &[u8], content_encoding: Option<&str>) -> Resul
                 Ok(_) => decoded_within_cap(body_bytes.len(), zlib_out, "deflate (zlib format)"),
                 Err(_) if zlib_out.len() > MAX_DECOMPRESSED_BYTES => Err(cap_breached()),
                 Err(zlib_err) => {
+                    // Free the partial zlib buffer (up to the 64 MiB cap) before allocating the
+                    // raw-deflate one: a stream that decodes far before erroring must not peak at
+                    // 2x the cap. Only zlib_err is used from here on.
+                    drop(zlib_out);
                     let mut raw_out = Vec::new();
                     match DeflateDecoder::new(body_bytes).take(read_limit).read_to_end(&mut raw_out) {
                         Ok(_) => {
@@ -627,6 +631,12 @@ impl ProxyHandler {
             "Backend failure marks the node out of selection"
         );
         node.mark_failed(cooldown);
+        // Evict the cached context window so a backend restarted with a new -c is re-probed on
+        // the next request instead of reporting its old window forever (TTL in context.rs is the
+        // backstop for a window that changed with no observable failure).
+        if crate::proxy::context::invalidate_context_cache(node.base_url()) {
+            tracing::debug!(backend_url = %node.base_url(), "Evicted cached context window for failed backend; next request re-probes");
+        }
     }
 
     /// Record one post-forward backend status on the node's runtime health:
@@ -1022,6 +1032,7 @@ impl ProxyHandler {
                 backend.node.base_url().to_string(),
                 backend.group_name.clone(),
                 backend.node.strip_path_prefix.clone(),
+                backend.node.api_key.clone(),
                 self.state.dump_path.clone(),
                 Some(method.to_string()),
                 Some(uri.to_string()),
@@ -1184,9 +1195,24 @@ impl ProxyHandler {
                        # HELP llama_proxy_vram_estimate_served_total POST /api/models/vram-estimate requests the proxy answered itself instead of forwarding a 404. The success path logs at debug, so this counter is the only operator-visible proof the shim is working.\n\
                        # TYPE llama_proxy_vram_estimate_served_total counter\n\
                        llama_proxy_vram_estimate_served_total {}\n\
-                       # HELP llama_proxy_vram_estimate_unknown_total Same endpoint, answered with the proxy's own 404 because the backend advertised no context window on /props or /v1/models. The client then falls back to its own default window; this is the number that says so.\n\
-                       # TYPE llama_proxy_vram_estimate_unknown_total counter\n\
-                       llama_proxy_vram_estimate_unknown_total {}\n",
+                        # HELP llama_proxy_vram_estimate_unknown_total Same endpoint, answered with the proxy's own 404 because the backend advertised no context window on /props or /v1/models. The client then falls back to its own default window; this is the number that says so.\n\
+                        # TYPE llama_proxy_vram_estimate_unknown_total counter\n\
+                        llama_proxy_vram_estimate_unknown_total {}\n\
+                        # HELP llama_proxy_context_probe_timeout_total Request-path context probes that hit the 2s bound because the backend accepted /props or /v1/models and never replied in time. The response is no longer delayed by this; the counter says how often it would have been. Resets on restart.\n\
+                        # TYPE llama_proxy_context_probe_timeout_total counter\n\
+                        llama_proxy_context_probe_timeout_total {}\n\
+                        # HELP llama_proxy_reprompt_skipped_read_only_total Requests the reprompt engine declined because they expose no mutating tool (read-only subagent). The skip logs at debug, so this counter is the only operator-visible signal of it.\n\
+                        # TYPE llama_proxy_reprompt_skipped_read_only_total counter\n\
+                        llama_proxy_reprompt_skipped_read_only_total {}\n\
+                        # HELP llama_proxy_reprompt_triggered_total Premature stops (finish_reason=stop, no tool_calls) the reprompt engine acted on by entering its retry loop. Includes loops that later exhausted.\n\
+                        # TYPE llama_proxy_reprompt_triggered_total counter\n\
+                        llama_proxy_reprompt_triggered_total {}\n\
+                        # HELP llama_proxy_reprompt_exhausted_total Reprompt loops that ran out of rounds or the wall-clock budget and returned the collected text unchanged. A subset of reprompt_triggered_total.\n\
+                        # TYPE llama_proxy_reprompt_exhausted_total counter\n\
+                        llama_proxy_reprompt_exhausted_total {}\n\
+                        # HELP llama_proxy_context_cache_evictions_total Times a cached context window was evicted because its backend was marked failed, so the next request re-probes the (possibly restarted) backend instead of serving a stale window. Fast path for a backend restarted with a new -c; the cache TTL is the backstop. Resets on restart.\n\
+                        # TYPE llama_proxy_context_cache_evictions_total counter\n\
+                        llama_proxy_context_cache_evictions_total {}\n",
                      fallback_hits,
                      concurrent,
                      rejected,
@@ -1205,6 +1231,11 @@ impl ProxyHandler {
                       crate::proxy::context::context_cache_stale_skips(),
                       l(&self.state.vram_estimate_served_total),
                       l(&self.state.vram_estimate_unknown_total),
+                       crate::proxy::context::context_probe_timeout_total(),
+                       crate::proxy::reprompt::reprompt_skipped_read_only_total(),
+                       crate::proxy::reprompt::reprompt_triggered_total(),
+                       crate::proxy::reprompt::reprompt_exhausted_total(),
+                       crate::proxy::context::context_cache_evictions_total(),
                   );
 
                 RouteDecision::Handled(
@@ -1748,16 +1779,34 @@ impl ProxyHandler {
             // there is nothing for context_percent to divide. This also skips
             // warn_context_fetch_failed_once for those samples.
             if let Some(m) = metrics.as_mut().filter(|m| m.has_throughput_signal()) {
-                match fetch_context_total(&backend.http_client, backend.base_url(), backend.strip_path_prefix.as_deref()).await
-                {
-                    Some(ctx_total) => {
+                // A statistic, not part of the response, yet emitted on the request path. Bound
+                // it with the shim's own budget (compat.rs CONTEXT_PROBE_TIMEOUT: 2s for /props
+                // + /v1/models together) so a wedged backend cannot delay an already-complete
+                // response by the node's full timeout_seconds. A timeout counts as a failed probe.
+                let probe = tokio::time::timeout(
+                    compat::CONTEXT_PROBE_TIMEOUT,
+                    fetch_context_total(
+                        &backend.http_client,
+                        backend.base_url(),
+                        backend.strip_path_prefix.as_deref(),
+                        backend.api_key.as_deref(),
+                        backend.model.as_deref(),
+                    ),
+                )
+                .await;
+                match probe {
+                    Ok(Some(ctx_total)) => {
                         m.context_total = Some(ctx_total);
                         m.calculate_context_percent();
                     }
-                    None => {
+                    Ok(None) => {
                         // Warn once per backend URL, not per request
                         crate::proxy::warn_context_fetch_failed_once(backend.base_url(), &m.model).await;
                         // Continue without context metrics - the request still succeeds
+                    }
+                    Err(_elapsed) => {
+                        crate::proxy::context::note_context_probe_timeout();
+                        crate::proxy::warn_context_fetch_failed_once(backend.base_url(), &m.model).await;
                     }
                 }
             }
@@ -2898,6 +2947,52 @@ mod tests {
             0,
             "an answered estimate is not also an unknown"
         );
+    }
+
+    /// The four new counters render on `/proxy/metrics`. The probe-timeout value line is proven
+    /// wired to its getter by a known delta (a `format!` arg-order slip would not carry it); the
+    /// three reprompt counters are process-global, so only their presence and TYPE line are
+    /// asserted, not a specific count.
+    #[tokio::test]
+    async fn new_context_and_reprompt_counters_render() {
+        use crate::proxy::test_support::scripted_backend;
+        const PROBE: &str = "llama_proxy_context_probe_timeout_total";
+        const REPROMPT: [&str; 3] = [
+            "llama_proxy_reprompt_skipped_read_only_total",
+            "llama_proxy_reprompt_triggered_total",
+            "llama_proxy_reprompt_exhausted_total",
+        ];
+
+        let (port, _state) = scripted_backend(shim_backend_routes(32_768)).await;
+        let handler = handler_with_balancer(
+            Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap()),
+            None,
+            StreamingMode::default(),
+        );
+
+        let before = crate::proxy::context::context_probe_timeout_total();
+        crate::proxy::context::note_context_probe_timeout();
+        crate::proxy::context::note_context_probe_timeout();
+
+        let metrics = scrape_proxy_metrics(&handler).await;
+        assert_eq!(
+            prometheus_counter(&metrics, PROBE),
+            before + 2,
+            "the rendered probe-timeout value tracks its getter, so the arg order is right"
+        );
+
+        for name in REPROMPT {
+            assert!(
+                metrics
+                    .lines()
+                    .any(|l| l.trim_start().starts_with(&format!("# TYPE {name} counter"))),
+                "{name} must render a TYPE line"
+            );
+            assert!(
+                metrics.lines().any(|l| l.trim_start().starts_with(&format!("{name} "))),
+                "{name} must render a value line"
+            );
+        }
     }
 
     /// ACCEPTED AND DOCUMENTED limitation, pinned on purpose: model routing happens in

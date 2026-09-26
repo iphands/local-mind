@@ -2,7 +2,7 @@
 //!
 //! Supports multiple backend types:
 //! - llama.cpp: Uses `/props` endpoint with `default_generation_settings.n_ctx`
-//! - vLLM/OpenAI-compatible: Uses `/v1/models` endpoint with `data[0].max_model_len`
+//! - vLLM/OpenAI-compatible: `/v1/models`, entry chosen by the shared preflight policy (name match, else max)
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -10,12 +10,59 @@ use std::sync::OnceLock;
 use tokio::sync::RwLock;
 
 use crate::backends::node_url;
+use crate::backends::preflight::select_max_model_len;
 use crate::backends::preflight::ContextProbe;
 use crate::backends::with_auth;
 
-// Global cache: backend_url -> context_size. The (value, BackendType) tuple stored a
-// source tag that no reader ever consulted - big-fix 93 [C-L10] deleted the write-only enum.
-static CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, u64>>> = OnceLock::new();
+// Global cache: backend_url -> context_size, stamped with the fetch instant so the entry can
+// expire. A backend restarted with a new `-c`/window keeps the SAME base URL, so a permanent
+// cache would report the old window forever; TTL is the backstop and `invalidate_context_cache`
+// (on backend failure) is the fast path. The old (value, BackendType) tuple stored a source tag
+// no reader ever consulted - big-fix 93 [C-L10] deleted the write-only enum.
+static CONTEXT_CACHE: OnceLock<RwLock<HashMap<String, CacheEntry>>> = OnceLock::new();
+
+/// Backstop staleness bound on a cached context window. A backend failure evicts the entry
+/// immediately (see `invalidate_context_cache`); this only catches a window that changed with no
+/// failure we could observe. Sized well above a preflight interval so the TTL path is rare.
+const CONTEXT_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(600);
+
+/// A cached context window plus when it was fetched, so the TTL can be evaluated on read.
+#[derive(Clone, Copy)]
+struct CacheEntry {
+    value: u64,
+    fetched_at: std::time::Instant,
+}
+
+/// Times a cached context window was evicted because its backend was marked failed, so the next
+/// request re-probes the (hopefully restarted) backend. Process-global; rendered on `/proxy/metrics`.
+static CONTEXT_CACHE_EVICTIONS: AtomicU64 = AtomicU64::new(0);
+
+/// True while a cached entry is younger than `ttl`. The read path calls this with the real
+/// [`CONTEXT_CACHE_TTL`]; tests pass a short bound to exercise expiry without waiting it out.
+fn entry_is_fresh(fetched_at: std::time::Instant, ttl: std::time::Duration) -> bool {
+    fetched_at.elapsed() < ttl
+}
+
+/// Drop a backend's cached context window so the next fetch re-probes it. Called when the backend
+/// is marked failed. Returns whether an entry was present.
+pub(crate) fn invalidate_context_cache(backend_url: &str) -> bool {
+    let Some(cache) = CONTEXT_CACHE.get() else {
+        return false; // cache never initialized -> nothing cached
+    };
+    let Ok(mut guard) = cache.try_write() else {
+        return false; // never block a failure path on the cache lock
+    };
+    let removed = guard.remove(backend_url).is_some();
+    if removed {
+        CONTEXT_CACHE_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+    }
+    removed
+}
+
+/// Read-only view of the eviction counter, rendered on `/proxy/metrics`.
+pub fn context_cache_evictions_total() -> u64 {
+    CONTEXT_CACHE_EVICTIONS.load(Ordering::Relaxed)
+}
 
 // Track which backends we've already warned about to avoid log spam
 static WARNED_BACKENDS: OnceLock<RwLock<HashSet<String>>> = OnceLock::new();
@@ -34,16 +81,34 @@ pub fn context_cache_stale_skips() -> u64 {
     CONTEXT_CACHE_STALE_SKIPS.load(Ordering::Relaxed)
 }
 
+/// Number of request-path context probes that hit the bounded timeout (compat.rs
+/// CONTEXT_PROBE_TIMEOUT) rather than getting an answer: the backend accepted the connection to
+/// `/props`/`/v1/models` and never replied in time. Bounded now, so it no longer stalls the
+/// response — this counts how often it would have.
+static CONTEXT_PROBE_TIMEOUTS: AtomicU64 = AtomicU64::new(0);
+
+/// Record that the request-path context probe timed out. Called from `handler.rs`, where the
+/// bounded probe lives.
+pub(crate) fn note_context_probe_timeout() {
+    CONTEXT_PROBE_TIMEOUTS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Read-only view of the probe-timeout counter, rendered on `/proxy/metrics`.
+pub fn context_probe_timeout_total() -> u64 {
+    CONTEXT_PROBE_TIMEOUTS.load(Ordering::Relaxed)
+}
+
 /// Fetch context total from backend with caching
 ///
 /// Tries multiple endpoints to support different backend types:
 /// 1. `/props` (llama.cpp) - extracts `default_generation_settings.n_ctx`
-/// 2. `/v1/models` (vLLM, OpenAI-compatible) - extracts `data[0].max_model_len`
+/// 2. `/v1/models` (vLLM, OpenAI-compatible) - `max_model_len` of the entry the shared policy picks (never `data[0]`)
 ///
-/// The cache is permanent for the lifetime of the application since context
-/// size is a static server configuration. When a refresh is attempted and the
-/// write lock is held, the accepted staleness window runs until one successful
-/// refresh lands - see the policy documented on `cache_result` (big-fix 94).
+/// The cache expires: an entry is dropped after `CONTEXT_CACHE_TTL` (600s), or immediately when
+/// its backend is marked failed (`invalidate_context_cache`), so a backend restarted with a
+/// different `-c` is re-probed instead of pinned to its first-seen window forever. When a refresh
+/// is attempted and the write lock is held, the accepted staleness window runs until one
+/// successful refresh lands - see the policy documented on `cache_result` (big-fix 94).
 ///
 /// Monitoring always targets the backend-native `/props` and `/v1/models`
 /// paths; a configured request-path prefix must not alter these endpoints.
@@ -52,29 +117,40 @@ pub fn context_cache_stale_skips() -> u64 {
 /// * `client` - The HTTP client to use for the request
 /// * `backend_url` - The base URL of the backend server
 /// * `_strip_path_prefix` - Accepted for caller compatibility, ignored
+/// * `api_key` - Node key presented as `Authorization: Bearer` on the probe (auth-guarded backends)
+/// * `model_name` - Node model name, used only by the `/v1/models` fallback for entry selection
 ///
 /// # Returns
 /// * `Some(u64)` - The context size if successfully fetched
 /// * `None` - If all fetch attempts failed or responses were malformed
-pub async fn fetch_context_total(client: &reqwest::Client, backend_url: &str, _strip_path_prefix: Option<&str>) -> Option<u64> {
+pub async fn fetch_context_total(
+    client: &reqwest::Client,
+    backend_url: &str,
+    _strip_path_prefix: Option<&str>,
+    api_key: Option<&str>,
+    model_name: Option<&str>,
+) -> Option<u64> {
     let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
 
-    // Check cache first
+    // Check cache first, honoring the TTL. The read lock is released before any await: an expired
+    // entry is refetched on the network below, never under the lock.
     {
         let read_guard = cache.read().await;
-        if let Some(&ctx) = read_guard.get(backend_url) {
-            return Some(ctx);
+        if let Some(entry) = read_guard.get(backend_url) {
+            if entry_is_fresh(entry.fetched_at, CONTEXT_CACHE_TTL) {
+                return Some(entry.value);
+            }
         }
     }
 
-    // Try llama.cpp /props endpoint first
-    if let Some(n_ctx) = fetch_from_props(client, backend_url, None).await {
+    // Try llama.cpp /props endpoint first (with auth: an auth'd backend 401s the fetch otherwise).
+    if let Some(n_ctx) = fetch_from_props(client, backend_url, api_key).await {
         cache_result(cache, backend_url, n_ctx);
         return Some(n_ctx);
     }
 
-    // Fallback to vLLM/OpenAI-compatible /v1/models endpoint
-    if let Some(max_model_len) = fetch_from_models(client, backend_url).await {
+    // Fallback to vLLM/OpenAI-compatible /v1/models (same model-selection policy as preflight).
+    if let Some(max_model_len) = fetch_from_models(client, backend_url, api_key, model_name).await {
         cache_result(cache, backend_url, max_model_len);
         return Some(max_model_len);
     }
@@ -98,8 +174,8 @@ pub async fn cache_context_from_preflight(client: &reqwest::Client, probe: &Cont
     // Check cache first (shouldn't be populated yet during preflight, but be safe)
     {
         let read_guard = cache.read().await;
-        if let Some(&ctx) = read_guard.get(&probe.base_url) {
-            return Some(ctx);
+        if let Some(entry) = read_guard.get(&probe.base_url) {
+            return Some(entry.value);
         }
     }
 
@@ -146,19 +222,24 @@ async fn fetch_from_props(client: &reqwest::Client, backend_url: &str, api_key: 
     }
 }
 
-/// Fetch context size from vLLM/OpenAI-compatible `/v1/models` endpoint
-async fn fetch_from_models(client: &reqwest::Client, backend_url: &str) -> Option<u64> {
+/// Fetch context size from vLLM/OpenAI-compatible `/v1/models` endpoint.
+/// Selection delegates to [`select_max_model_len`] so the cold path and startup preflight agree on
+/// which entry wins (longest-prefix-match on the configured name, else max) instead of trusting
+/// `data[0]`, which on a multi-model node is not necessarily the served one (E-L8).
+async fn fetch_from_models(
+    client: &reqwest::Client,
+    backend_url: &str,
+    api_key: Option<&str>,
+    model_name: Option<&str>,
+) -> Option<u64> {
     let models_url = node_url(backend_url, "/v1/models", None);
-    match client.get(&models_url).send().await {
+    match with_auth(client.get(&models_url), api_key).send().await {
         Ok(resp) => {
             if let Ok(models) = resp.json::<serde_json::Value>().await {
-                // Extract max_model_len from first model: data[0].max_model_len
                 if let Some(max_model_len) = models
                     .get("data")
                     .and_then(|d| d.as_array())
-                    .and_then(|arr| arr.first())
-                    .and_then(|model| model.get("max_model_len"))
-                    .and_then(|m| m.as_u64())
+                    .and_then(|arr| select_max_model_len(arr, model_name))
                 {
                     tracing::debug!("Fetched context size from /v1/models: {}", max_model_len);
                     return Some(max_model_len);
@@ -187,9 +268,15 @@ async fn fetch_from_models(client: &reqwest::Client, backend_url: &str) -> Optio
 /// lost policy-wise - the next cache-miss fetch re-attempts it, and the first `try_write`
 /// that lands (lock free, as in the common case) installs the fresh value and closes the
 /// window.
-fn cache_result(cache: &RwLock<HashMap<String, u64>>, backend_url: &str, value: u64) {
+fn cache_result(cache: &RwLock<HashMap<String, CacheEntry>>, backend_url: &str, value: u64) {
     if let Ok(mut write_guard) = cache.try_write() {
-        write_guard.insert(backend_url.to_string(), value);
+        write_guard.insert(
+            backend_url.to_string(),
+            CacheEntry {
+                value,
+                fetched_at: std::time::Instant::now(),
+            },
+        );
     } else {
         let stale_skips_total = CONTEXT_CACHE_STALE_SKIPS.fetch_add(1, Ordering::Relaxed) + 1;
         tracing::debug!(
@@ -249,7 +336,7 @@ mod tests {
     use tracing_subscriber::fmt::MakeWriter;
 
     const PROPS_BODY: &str = r#"{"default_generation_settings":{"n_ctx":4096}}"#;
-    const MODELS_BODY: &str = r#"{"data":[{"max_model_len":8192}]}"#;
+    const MODELS_BODY: &str = r#"{"data":[{"id":"served-model","max_model_len":8192}]}"#;
 
     /// Spawn a minimal HTTP/1.1 listener on an ephemeral 127.0.0.1 port that records
     /// every request URI and answers with the JSON body the monitoring fetch expects.
@@ -329,7 +416,7 @@ mod tests {
         let _iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
 
-        let ctx = fetch_context_total(&client, &base, Some("/completions")).await;
+        let ctx = fetch_context_total(&client, &base, Some("/completions"), None, None).await;
 
         assert_eq!(ctx, Some(4096));
         let uri = next_uri(&mut rx).await;
@@ -342,7 +429,7 @@ mod tests {
         // Adversarial edge: trailing-slash prefix must not alter the monitoring path either.
         let (base2, mut rx2, server2) = spawn_monitor_listener(true).await;
         let _iso2 = IsolatedContextCache::new(&base2).await;
-        let ctx2 = fetch_context_total(&client, &base2, Some("/completions/")).await;
+        let ctx2 = fetch_context_total(&client, &base2, Some("/completions/"), None, None).await;
         assert_eq!(ctx2, Some(4096));
         assert_eq!(next_uri(&mut rx2).await, "/props");
         server2.abort();
@@ -357,7 +444,7 @@ mod tests {
         let _iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
 
-        let ctx = fetch_context_total(&client, &base, Some("/v1")).await;
+        let ctx = fetch_context_total(&client, &base, Some("/v1"), None, None).await;
 
         assert_eq!(ctx, Some(8192), "/v1/models fallback must succeed");
         assert_eq!(next_uri(&mut rx).await, "/props", "props is tried first");
@@ -526,7 +613,7 @@ mod tests {
     /// value - rewinding a global would corrupt foreign snapshots. Combined with
     /// `policy_lock()` (which keeps this module's tests off each other), every
     /// cache/count/log assertion becomes race-free. Production code never constructs the
-    /// guard; the cache stays the permanent process-global by design.
+    /// guard; the cache stays process-global by design.
     struct IsolatedContextCache {
         url: String,
         skips_before: u64,
@@ -648,7 +735,7 @@ mod tests {
         }
         {
             let _reader = cache.read().await;
-            let served = fetch_context_total(&client, &base, None).await;
+            let served = fetch_context_total(&client, &base, None, None, None).await;
             assert_eq!(served, Some(4096), "the fetching caller still receives the fresh value");
             assert!(!cache.read().await.contains_key(&base), "the contended write must not land");
             assert!(
@@ -694,19 +781,19 @@ mod tests {
         // after which a further in-window fetch lands it. Silent loss is the only outcome
         // this branch rejects.
         let skips_after_phase1 = iso.skips();
-        let served = fetch_context_total(&client, &base, None).await;
+        let served = fetch_context_total(&client, &base, None, None, None).await;
         assert_eq!(served, Some(4096));
         if cache.read().await.get(&base).is_none() {
             assert!(
                 iso.skips() > skips_after_phase1,
                 "a refresh that does not land must be counted, never silently lost"
             );
-            let served2 = fetch_context_total(&client, &base, None).await;
+            let served2 = fetch_context_total(&client, &base, None, None, None).await;
             assert_eq!(served2, Some(4096), "the retried in-window fetch must serve the fresh value");
         }
         assert_eq!(
-            cache.read().await.get(&base),
-            Some(&4096),
+            cache.read().await.get(&base).map(|e| e.value),
+            Some(4096),
             "one successful refresh within the window must end it"
         );
         server.abort();
@@ -722,9 +809,15 @@ mod tests {
         let iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
         let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
-        cache.write().await.insert(base.clone(), 4096);
+        cache.write().await.insert(
+            base.clone(),
+            CacheEntry {
+                value: 4096,
+                fetched_at: std::time::Instant::now(),
+            },
+        );
 
-        let served = fetch_context_total(&client, &base, None).await;
+        let served = fetch_context_total(&client, &base, None, None, None).await;
         assert_eq!(
             served,
             Some(4096),
@@ -738,7 +831,7 @@ mod tests {
         // skip is counted and a further in-window fetch lands it - never silent.
         cache.write().await.remove(&base);
         let skips_before_miss = iso.skips();
-        let served = fetch_context_total(&client, &base, None).await;
+        let served = fetch_context_total(&client, &base, None, None, None).await;
         assert_eq!(served, Some(8192), "post-window refresh must serve the fresh value");
         assert_eq!(next_uri(&mut rx).await, "/props", "props is tried first on the miss");
         assert_eq!(next_uri(&mut rx).await, "/v1/models");
@@ -747,10 +840,10 @@ mod tests {
                 iso.skips() > skips_before_miss,
                 "a refresh that does not land must be counted, never silently lost"
             );
-            let served2 = fetch_context_total(&client, &base, None).await;
+            let served2 = fetch_context_total(&client, &base, None, None, None).await;
             assert_eq!(served2, Some(8192), "the retried in-window fetch must serve the fresh value");
         }
-        assert_eq!(cache.read().await.get(&base), Some(&8192));
+        assert_eq!(cache.read().await.get(&base).map(|e| e.value), Some(8192));
         server.abort();
     }
 
@@ -776,7 +869,7 @@ mod tests {
             .expect("timeout client");
 
         let started = std::time::Instant::now();
-        let ctx = tokio::time::timeout(Duration::from_secs(10), fetch_context_total(&client, &base, None))
+        let ctx = tokio::time::timeout(Duration::from_secs(10), fetch_context_total(&client, &base, None, None, None))
             .await
             .expect("fetch must return within 10s, never hang");
         let elapsed = started.elapsed();
@@ -807,7 +900,7 @@ mod tests {
         let iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
 
-        let ctx = fetch_context_total(&client, &base, None).await;
+        let ctx = fetch_context_total(&client, &base, None, None, None).await;
 
         assert_eq!(
             ctx,
@@ -822,12 +915,12 @@ mod tests {
                 iso.skips() >= 1,
                 "a fallback refresh that does not land must be counted, never silently lost"
             );
-            let served2 = fetch_context_total(&client, &base, None).await;
+            let served2 = fetch_context_total(&client, &base, None, None, None).await;
             assert_eq!(served2, Some(8192), "the retried in-window fetch must serve the fresh value");
         }
         assert_eq!(
-            cache.read().await.get(&base),
-            Some(&8192),
+            cache.read().await.get(&base).map(|e| e.value),
+            Some(8192),
             "only the parsed value is cached - never a zero or the malformed shape"
         );
         server.abort();
@@ -840,7 +933,7 @@ mod tests {
         let _iso = IsolatedContextCache::new(&base).await;
         let client = reqwest::Client::new();
 
-        let ctx = fetch_context_total(&client, &base, None).await;
+        let ctx = fetch_context_total(&client, &base, None, None, None).await;
 
         assert_eq!(ctx, None, "both endpoints garbage -> honest None, no fabricated context size");
         assert_eq!(next_uri(&mut rx).await, "/props");
@@ -864,13 +957,201 @@ mod tests {
         // Pre-populate cache
         {
             let mut write_guard = cache.write().await;
-            write_guard.insert("http://test".to_string(), 4096);
+            write_guard.insert(
+                "http://test".to_string(),
+                CacheEntry {
+                    value: 4096,
+                    fetched_at: std::time::Instant::now(),
+                },
+            );
         }
 
         // Verify cache read works
         {
             let read_guard = cache.read().await;
-            assert_eq!(read_guard.get("http://test"), Some(&4096));
+            assert_eq!(read_guard.get("http://test").map(|e| e.value), Some(4096));
         }
+    }
+
+    // ---- F11: the REQUEST-PATH monitor probe must present the node api_key (was None) ----
+
+    #[tokio::test]
+    async fn monitor_fetch_presents_the_nodes_api_key() {
+        let _serial = policy_lock().lock().await;
+        let (base, mut rx, server) = spawn_auth_props_listener().await;
+        let _iso = IsolatedContextCache::new(&base).await;
+        let client = reqwest::Client::new();
+
+        let ctx = fetch_context_total(&client, &base, None, Some("secret"), None).await;
+
+        assert_eq!(
+            ctx,
+            Some(4096),
+            "the request-path /props probe must present the node key, not 401 into a miss"
+        );
+        let (uri, authed) = next_recorded(&mut rx).await;
+        assert_eq!(
+            (uri.as_str(), authed),
+            ("/props", true),
+            "the monitor /props request must carry the bearer token"
+        );
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn monitor_fetch_without_a_key_is_a_clean_miss() {
+        let _serial = policy_lock().lock().await;
+        let (base, mut rx, server) = spawn_auth_props_listener().await;
+        let _iso = IsolatedContextCache::new(&base).await;
+        let client = reqwest::Client::new();
+
+        let ctx = fetch_context_total(&client, &base, None, None, None).await;
+
+        assert_eq!(
+            ctx, None,
+            "an unauthenticated probe of an auth-gated backend degrades to None"
+        );
+        let (uri, authed) = next_recorded(&mut rx).await;
+        assert_eq!(
+            (uri.as_str(), authed),
+            ("/props", false),
+            "no key configured -> no header sent"
+        );
+        server.abort();
+    }
+
+    // ---- F3: the cold /v1/models path selects by preflight policy, not data[0] ----
+
+    /// /v1/models-only listener: 404 /props (forces the selection fallback), 200 the caller's
+    /// /v1/models body. Drives the cold-path selection policy end to end.
+    async fn spawn_models_listener(models_body: &'static str) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind ephemeral port");
+        let port = listener.local_addr().expect("local_addr").port();
+        let handle = tokio::spawn(async move {
+            loop {
+                let Ok((mut sock, _)) = listener.accept().await else { break };
+                let mut head: Vec<u8> = Vec::new();
+                let mut tmp = [0u8; 512];
+                loop {
+                    match sock.read(&mut tmp).await {
+                        Ok(0) => break,
+                        Ok(n) => {
+                            head.extend_from_slice(&tmp[..n]);
+                            if head.windows(4).any(|w| w == b"\r\n\r\n") {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                let text = String::from_utf8_lossy(&head).to_string();
+                let uri = text
+                    .lines()
+                    .next()
+                    .and_then(|line| line.split(' ').nth(1))
+                    .unwrap_or("")
+                    .to_string();
+                let (status, body): (&str, &str) = if uri == "/v1/models" {
+                    ("200 OK", models_body)
+                } else {
+                    ("404 NOT FOUND", "{}")
+                };
+                let resp = format!(
+                    "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        (format!("http://127.0.0.1:{port}"), handle)
+    }
+
+    #[tokio::test]
+    async fn cold_path_selects_the_served_model_not_the_first_entry() {
+        let _serial = policy_lock().lock().await;
+        // data[0] is "small" (4096); the served model is "big" (8192). The old data[0] path
+        // returned 4096 for every model; the shared policy picks the name match, else the max.
+        const TWO: &str = r#"{"data":[{"id":"small","max_model_len":4096},{"id":"big","max_model_len":8192}]}"#;
+        let client = reqwest::Client::new();
+
+        let (base, s1) = spawn_models_listener(TWO).await;
+        let _i1 = IsolatedContextCache::new(&base).await;
+        assert_eq!(
+            fetch_context_total(&client, &base, None, None, Some("big")).await,
+            Some(8192),
+            "name match must beat data[0]"
+        );
+        s1.abort();
+
+        let (base2, s2) = spawn_models_listener(TWO).await;
+        let _i2 = IsolatedContextCache::new(&base2).await;
+        assert_eq!(
+            fetch_context_total(&client, &base2, None, None, None).await,
+            Some(8192),
+            "no name -> max over id+max_model_len entries"
+        );
+        s2.abort();
+
+        let (base3, s3) = spawn_models_listener(TWO).await;
+        let _i3 = IsolatedContextCache::new(&base3).await;
+        assert_eq!(
+            fetch_context_total(&client, &base3, None, None, Some("small")).await,
+            Some(4096),
+            "name match on the first entry is honored"
+        );
+        s3.abort();
+    }
+
+    // ---- F2: failure eviction + TTL ----
+
+    #[tokio::test]
+    async fn invalidate_context_cache_evicts_a_present_entry_and_counts_once() {
+        let _serial = policy_lock().lock().await;
+        let url = "http://evict-me.invalid";
+        let cache = CONTEXT_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+        cache.write().await.insert(
+            url.to_string(),
+            CacheEntry {
+                value: 4096,
+                fetched_at: std::time::Instant::now(),
+            },
+        );
+        let before = context_cache_evictions_total();
+
+        assert!(
+            invalidate_context_cache(url),
+            "a present entry must be evicted so the next fetch re-probes"
+        );
+        assert_eq!(
+            context_cache_evictions_total() - before,
+            1,
+            "the eviction is counted exactly once"
+        );
+        assert!(
+            cache.read().await.get(url).is_none(),
+            "the cached window must be gone after eviction"
+        );
+
+        assert!(!invalidate_context_cache(url), "evicting an absent entry is a no-op");
+        assert_eq!(context_cache_evictions_total() - before, 1, "the no-op must not count");
+
+        cache.write().await.remove(url);
+    }
+
+    #[test]
+    fn cache_entry_expires_once_past_the_ttl() {
+        // Deterministic: no real 600s wait. The read path calls this same predicate with the
+        // production CONTEXT_CACHE_TTL; here a short bound proves both branches.
+        let t0 = std::time::Instant::now();
+        assert!(
+            entry_is_fresh(t0, std::time::Duration::from_secs(3600)),
+            "just-fetched is fresh"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert!(
+            !entry_is_fresh(t0, std::time::Duration::from_millis(10)),
+            "past the bound it is stale -> refetch"
+        );
     }
 }

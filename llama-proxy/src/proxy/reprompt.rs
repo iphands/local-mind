@@ -28,7 +28,7 @@ use crate::backends::{BackendGuard, BackendNode};
 use crate::config::RepromptConfig;
 use crate::prompt_cache::{self, Refresh};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -41,6 +41,29 @@ const MAX_BUDGET_CAP: std::time::Duration = std::time::Duration::from_secs(24 * 
 /// The clamp warning is process-scoped (the engine is process-wide, not per-node)
 /// and logs once — a pathological config would otherwise emit a line per trigger.
 static BUDGET_CLAMP_LOGGED: AtomicBool = AtomicBool::new(false);
+
+/// Reprompt outcome counters, rendered on `/proxy/metrics`. The skip and the trigger/exhaust
+/// decisions log at `debug!`/`info!` (off by default), so without these the engine's whole
+/// decision — did it run, did it decline a read-only request, did it spin out — is invisible to
+/// an operator. Process-global like the engine itself.
+static REPROMPT_SKIPPED_READ_ONLY_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REPROMPT_TRIGGERED_TOTAL: AtomicU64 = AtomicU64::new(0);
+static REPROMPT_EXHAUSTED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Requests the engine declined because they expose no mutating tool (read-only subagent).
+pub fn reprompt_skipped_read_only_total() -> u64 {
+    REPROMPT_SKIPPED_READ_ONLY_TOTAL.load(Ordering::Relaxed)
+}
+
+/// Premature stops the engine acted on (passed the skip gate and entered the retry loop).
+pub fn reprompt_triggered_total() -> u64 {
+    REPROMPT_TRIGGERED_TOTAL.load(Ordering::Relaxed)
+}
+
+/// Retry loops that ran out of rounds or budget and returned the collected text as-is.
+pub fn reprompt_exhausted_total() -> u64 {
+    REPROMPT_EXHAUSTED_TOTAL.load(Ordering::Relaxed)
+}
 
 pub struct RepromptEngine {
     /// Current prompt text — guarded for dynamic reload. The file's mtime is
@@ -191,7 +214,10 @@ impl RepromptEngine {
                 .and_then(|n| n.as_str())
                 .unwrap_or("");
             let name = name.to_ascii_lowercase();
-            MUTATING_TOOL_NAMES.contains(&name.as_str())
+            // Substring, not equality: namespaced/compound ids (`mcp__fs__write_file`,
+            // `edit_file`) must not read as read-only. Over-matching only keeps reprompt
+            // enabled (the pre-skip default); it can never wrongly disable it, the dangerous way.
+            MUTATING_TOOL_NAMES.iter().any(|keyword| name.contains(keyword))
         })
     }
 
@@ -393,10 +419,12 @@ impl RepromptEngine {
         }
 
         if self.skip_read_only_requests && Self::request_is_read_only(original_request) {
+            REPROMPT_SKIPPED_READ_ONLY_TOTAL.fetch_add(1, Ordering::Relaxed);
             tracing::debug!("Reprompt skipped: request exposes no mutating tools (read-only agent)");
             return original_response;
         }
 
+        REPROMPT_TRIGGERED_TOTAL.fetch_add(1, Ordering::Relaxed);
         tracing::info!(
             max_retries = self.max_retries,
             "Reprompt triggered: finish_reason=stop with no tool_calls"
@@ -505,6 +533,7 @@ impl RepromptEngine {
             current = new_resp;
         }
 
+        REPROMPT_EXHAUSTED_TOTAL.fetch_add(1, Ordering::Relaxed);
         tracing::warn!(
             max_retries = self.max_retries,
             "Reprompt: exhausted retries, returning collected text"
@@ -897,6 +926,27 @@ mod tests {
         assert!(!RepromptEngine::request_is_read_only(&req));
     }
 
+    #[test]
+    fn test_request_is_read_only_catches_namespaced_and_compound_mutators() {
+        // MCP bridges expose tools as `mcp__<server>__<tool>` and compound ids like `write_file`.
+        // The old exact-match on the bare name read every one of these as read-only and silently
+        // disabled the engine for MCP clients.
+        assert!(!RepromptEngine::request_is_read_only(&req_with_tools(&[
+            "mcp__filesystem__write_file"
+        ])));
+        assert!(!RepromptEngine::request_is_read_only(&req_with_tools(&[
+            "mcp__fs__edit_file",
+            "read"
+        ])));
+        assert!(!RepromptEngine::request_is_read_only(&req_with_tools(&["edit_file"])));
+        // A genuinely read-only set stays read-only even with compound names sharing no keyword.
+        assert!(RepromptEngine::request_is_read_only(&req_with_tools(&[
+            "read_file",
+            "list_files",
+            "glob"
+        ])));
+    }
+
     #[tokio::test]
     async fn test_maybe_reprompt_skips_read_only_request() {
         // No backend is running — if the gate failed to short-circuit, send_follow_up would
@@ -913,6 +963,49 @@ mod tests {
             )
             .await;
         assert_eq!(result, original);
+    }
+
+    #[tokio::test]
+    async fn test_reprompt_outcome_counters_move() {
+        use super::{reprompt_exhausted_total, reprompt_skipped_read_only_total, reprompt_triggered_total};
+
+        // A read-only premature stop bumps the skip counter.
+        let e = engine();
+        let node = Arc::new(test_node());
+        let skipped0 = reprompt_skipped_read_only_total();
+        e.maybe_reprompt(
+            stop_resp("all good, nothing further to do"),
+            &req_with_tools(&["read", "grep", "glob"]),
+            "/v1/chat/completions",
+            &node,
+        )
+        .await;
+        assert!(
+            reprompt_skipped_read_only_total() > skipped0,
+            "a read-only premature stop bumps the skip counter"
+        );
+
+        // A write-capable premature stop that never resumes bumps trigger AND exhaust. Lower
+        // bounds only: these counters are process-global and other reprompt tests run in parallel.
+        let url = spawn_backend(vec![stop_resp("still stopped"), stop_resp("stopped once more")]).await;
+        let w = write_capable_engine(2);
+        let trig0 = reprompt_triggered_total();
+        let exh0 = reprompt_exhausted_total();
+        w.maybe_reprompt(
+            stop_resp("first half"),
+            &req_with_tools(&["read", "write"]),
+            "/v1/chat/completions",
+            &node_at(url).await,
+        )
+        .await;
+        assert!(
+            reprompt_triggered_total() > trig0,
+            "acting on a premature stop bumps the trigger counter"
+        );
+        assert!(
+            reprompt_exhausted_total() > exh0,
+            "running out of rounds bumps the exhausted counter"
+        );
     }
 
     // --- text extraction ---

@@ -550,6 +550,7 @@ struct StreamObserver {
     http_client: reqwest::Client,
     backend_url: String,
     strip_path_prefix: Option<String>,
+    api_key: Option<String>,
     dump: Option<StreamDump>,
 }
 
@@ -831,7 +832,20 @@ impl StreamObserver {
         // either, so nothing can be done with context_percent -
         // skip the /slots round-trip it would be wasted on.
         if metrics.has_throughput_signal() {
-            match fetch_context_total(&self.http_client, &self.backend_url, self.strip_path_prefix.as_deref()).await {
+            let probe_model = self
+                .request_json
+                .as_ref()
+                .and_then(|j| j.get("model"))
+                .and_then(|v| v.as_str());
+            match fetch_context_total(
+                &self.http_client,
+                &self.backend_url,
+                self.strip_path_prefix.as_deref(),
+                self.api_key.as_deref(),
+                probe_model,
+            )
+            .await
+            {
                 Some(ctx_total) => {
                     metrics.context_total = Some(ctx_total);
                     metrics.calculate_context_percent();
@@ -959,6 +973,7 @@ pub async fn handle_streaming_response(
     backend_url: String,
     group_name: Option<String>,
     strip_path_prefix: Option<String>,
+    api_key: Option<String>,
     dump_path: Option<Arc<std::path::PathBuf>>,
     request_method: Option<String>,
     request_uri: Option<String>,
@@ -1088,6 +1103,7 @@ pub async fn handle_streaming_response(
             http_client,
             backend_url,
             strip_path_prefix,
+            api_key,
             dump,
         };
         tokio::spawn(observer.run());
