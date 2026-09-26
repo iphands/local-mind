@@ -90,6 +90,10 @@ FAKE = {
     "vllm/models/target.py": """
         class Qwen4ExpForConditionalGeneration:
             def load_weights(self, weights):
+                drop = {"mtp.": None}  # mirrors WeightsMapper(orig_to_new_substr=...)
+                return {n for n, _ in weights if not any(k in n for k in drop)}
+        class Qwen4ExpForCausalLM:  # drop rule gone upstream: must not be filtered
+            def load_weights(self, weights):
                 return {n for n, _ in weights}
     """,
 }
@@ -105,6 +109,7 @@ NAMES = [
     "lm_head.weight",
     "model.language_model.ple.ple_embedding.ngram_embedding.shard_0.weight",
 ]
+TARGET_KEEP = [n for n in NAMES if "mtp." not in n]
 DRAFT_KEEP = [
     n for n in NAMES
     if "mtp." in n or n.endswith(("embed_tokens.weight",)) or n == "lm_head.weight"
@@ -155,6 +160,7 @@ try:
     import vllm.model_executor.model_loader.weight_utils as wu  # noqa: E402
     from vllm.models.qwen4_exp.nvidia.mtp import Boom, Qwen4ExpMTP  # noqa: E402
     from vllm.models.renamed import Qwen4ExpMTP as RenamedMTP  # noqa: E402
+    from vllm.models.target import Qwen4ExpForCausalLM as NoRuleTarget  # noqa: E402
     from vllm.models.target import Qwen4ExpForConditionalGeneration as Target  # noqa: E402
 
     assert getattr(wu.should_skip_weight, dlf._MARK, False), "should_skip_weight not hooked"
@@ -175,11 +181,19 @@ try:
     assert f"read {len(DRAFT_KEEP)} checkpoint tensors, skipped {skipped}" in err, err
     assert dlf._active is None, "filter must be cleared after load_weights"
 
-    # --- target model: no filter, everything read
+    # --- target model: the drafter's mtp.* is skipped, everything else read
     wu.READS.clear()
     loaded, err = captured(dl.DefaultModelLoader(NAMES).load_weights, Target(), None)
-    assert wu.READS == NAMES and loaded == set(NAMES), wu.READS
-    assert err == "", err
+    assert wu.READS == TARGET_KEEP and loaded == set(TARGET_KEEP), wu.READS
+    skipped_t = len(NAMES) - len(TARGET_KEEP)
+    assert f"Qwen4ExpForConditionalGeneration: read {len(TARGET_KEEP)} checkpoint tensors, skipped {skipped_t}" in err, err
+
+    # --- target whose load_weights lost the "mtp.": None rule: untouched, noted once
+    wu.READS.clear()
+    _, err = captured(dl.DefaultModelLoader(NAMES).load_weights, NoRuleTarget(), None)
+    assert wu.READS == NAMES and "no longer says" in err, err
+    _, err2 = captured(dl.DefaultModelLoader(NAMES).load_weights, NoRuleTarget(), None)
+    assert err2 == "", err2
 
     # --- draft + EP: both filters compose (MTP keep AND local expert)
     wu.READS.clear()
@@ -201,7 +215,7 @@ try:
     assert dlf._active is None, "filter leaked past an exception"
     wu.READS.clear()
     captured(dl.DefaultModelLoader(NAMES).load_weights, Target(), None)
-    assert wu.READS == NAMES
+    assert wu.READS == TARGET_KEEP, "state leaked across loads"
 
     # --- a class not in FILTERS (subclass with another name): untouched
     wu.READS.clear()
@@ -223,7 +237,7 @@ try:
             raise ValueError("flaky")
         return mtp_mod._remap_mtp_weight_name(name)
     mtp_mod.flaky_remap = flaky
-    dlf.FILTERS["Qwen4ExpMTP"] = "flaky_remap"
+    dlf.FILTERS["Qwen4ExpMTP"] = "fn:flaky_remap"
     wu.READS.clear()
     captured(dl.DefaultModelLoader(NAMES).load_weights, Qwen4ExpMTP(), None)
     assert wu.READS == DRAFT_KEEP, wu.READS  # fc_hidden still read via fallback
@@ -244,6 +258,14 @@ try:
     _, err = captured(dl.DefaultModelLoader(NAMES).load_weights, Qwen4ExpMTP(), None)
     assert wu.READS == NAMES and "should_skip_weight was not hooked" in err, err
     dlf._applied.add(dlf.WEIGHT_UTILS)
+
+    # --- a malformed FILTERS rule: not applied, read everything
+    dlf.FILTERS["Qwen4ExpMTP"] = "bogus"
+    wu.READS.clear()
+    _, err = captured(dl.DefaultModelLoader(NAMES).load_weights, Qwen4ExpMTP(), None)
+    assert wu.READS == NAMES and "bad FILTERS rule" in err, err
+    dlf.FILTERS.clear()
+    dlf.FILTERS.update(orig_filters)
 
     # --- _apply is idempotent (a second pass must not double-wrap)
     w1 = wu.should_skip_weight

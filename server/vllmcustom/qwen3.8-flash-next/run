@@ -99,7 +99,7 @@
 #   PLE_OFFLOAD=0 ...                              # do NOT offload: table on GPU (TP2+ only; will not fit one card)
 #   PATCH_PLE=0 ...                                # do NOT mount patches/ple-ct-ignore (reproduces the NotImplementedError)
 #   BOOT_TIMING=0 ...                              # do NOT mount container/patches/boot-timing (startup waterfall report)
-#   DRAFT_LOAD_FILTER=0 ...                        # MTP drafter reads the WHOLE checkpoint again (container/patches/draft-load-filter off)
+#   DRAFT_LOAD_FILTER=0 ...                        # read every checkpoint tensor again: the MTP drafter all 123.5 GiB, the target its 2.5 GiB of mtp.*
 #   PLE_DTYPE=float8_e4m3fn / PLE_DTYPE= ...       # force / skip the ple_embedding_dtype override (default: auto from the shard)
 #   PINNED_ROUND_MB=0 ...                          # drop the pinned-allocator knob (reproduces the 128 GiB cudaHostAlloc OOM)
 #   GDN_KERNEL=cuda ...                            # VLLM_GDN_DECODE_KERNEL (default triton: REQUIRED by the FP8 GDN projections on the PR image)
@@ -168,7 +168,7 @@ PATCH_PLE=${PATCH_PLE:-1}                        # mount patches/ple-ct-ignore o
 PLE_DTYPE=${PLE_DTYPE-auto}                      # auto = read the shard; a dtype name = force; EMPTY = trust config.json
 PINNED_ROUND_MB=${PINNED_ROUND_MB:-1024}         # pinned requests above this are not rounded to a power of 2; 0 = torch default (see header)
 BOOT_TIMING=${BOOT_TIMING:-1}                    # mount container/patches/boot-timing on PYTHONPATH: per-section boot report at "Application startup complete"
-DRAFT_LOAD_FILTER=${DRAFT_LOAD_FILTER:-1}        # with MTP: the drafter reads only the 4.9 GiB it keeps, not the 123.5 GiB checkpoint (see below)
+DRAFT_LOAD_FILTER=${DRAFT_LOAD_FILTER:-1}        # skip checkpoint tensors a model drops, before reading them (see below)
 GDN_KERNEL=${GDN_KERNEL:-triton}                 # VLLM_GDN_DECODE_KERNEL
 EXECUTOR=${EXECUTOR:-}                           # --distributed-executor-backend; empty = default
 CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
@@ -278,18 +278,20 @@ if [[ "$BOOT_TIMING" != "0" ]]; then
     echo "missing $BOOT_TIMING_DIR/{sitecustomize,boot_timing}.py"; exit 1; }
   CONTAINER_ARGS+=( -v "$BOOT_TIMING_DIR:/opt/boot-timing:ro" -e PYTHONPATH=/opt/boot-timing )
 fi
-# MTP drafter load filter. The drafter (Qwen4ExpMTP) is a second model that
+# Checkpoint load filter. The MTP drafter (Qwen4ExpMTP) is a second model that
 # vLLM loads from the SAME checkpoint, and the default safetensors iterator
 # reads every tensor before the drafter's load_weights discards 96% of them:
 # 171 s of NFS re-reading on the 2026-09-26 boot (the pinned PLE table leaves
 # too little RAM for the page cache to help). draft_load_filter skips, before
 # the read, every tensor the drafter's own name-remap would drop -- through
-# the same should_skip_weight seam upstream uses for EP expert filtering.
-# Like boot-timing it replaces no upstream file (hooks by name, no-ops on
-# drift; see its UPSTREAM). Loaded by a NEW .pth in site-packages, so it is
-# independent of PYTHONPATH/sitecustomize. Only mounted when MTP is on.
+# the same should_skip_weight seam upstream uses for EP expert filtering. The
+# target gets the mirror image: the 2.5 GiB of mtp.* its load_weights drops
+# (~4.7 s with MTP off; ~a wash with MTP on, where that read had been warming
+# the page cache for the drafter). Like boot-timing it replaces no upstream
+# file (hooks by name, no-ops on drift; see its UPSTREAM). Loaded by a NEW
+# .pth in site-packages, so it is independent of PYTHONPATH/sitecustomize.
 DRAFT_FILTER_DIR="$HERE/../container/patches/draft-load-filter"
-if [[ "$DRAFT_LOAD_FILTER" != "0" && "$SPEC_TOKENS" != "0" ]]; then
+if [[ "$DRAFT_LOAD_FILTER" != "0" ]]; then
   [[ -f "$DRAFT_FILTER_DIR/draft_load_filter.py" && -f "$DRAFT_FILTER_DIR/draft_load_filter.pth" ]] || {
     echo "missing $DRAFT_FILTER_DIR/draft_load_filter.{py,pth}"; exit 1; }
   CONTAINER_ARGS+=(
@@ -328,5 +330,5 @@ nvfp4_backend_args
 vllm_extra_args
 
 echo
-echo "## Running $CONTAINER  (attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS draft-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" && "$SPEC_TOKENS" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0, PLE table pinned in host RAM via --engram-config)"
+echo "## Running $CONTAINER  (attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0, PLE table pinned in host RAM via --engram-config)"
 vllm_launch

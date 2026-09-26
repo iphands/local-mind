@@ -17,10 +17,23 @@
 #       DefaultModelLoader.load_weights(self, model, model_config)
 #                            -- consumes get_all_weights() synchronously via
 #                               model.load_weights(...)
-# Filter table (model class -> function in the class's own module):
-#   Qwen4ExpMTP -> _remap_mtp_weight_name (vllm/models/qwen4_exp/nvidia/mtp.py);
+# Filter table (draft_load_filter.FILTERS, model class -> rule):
+#   Qwen4ExpMTP -> fn:_remap_mtp_weight_name (vllm/models/qwen4_exp/nvidia/mtp.py);
 #                  keep(name) = _remap_mtp_weight_name(name) is not None, i.e.
 #                  exactly what Qwen4ExpMTP.load_weights keeps.
+#   Qwen4ExpForConditionalGeneration, Qwen4ExpForCausalLM -> drop:mtp.
+#                  (vllm/models/qwen4_exp/nvidia/model.py); their load_weights
+#                  map any name containing "mtp." to None via WeightsMapper
+#                  orig_to_new_substr={"mtp.": None} (checked before any prefix
+#                  rewrite), so keep(name) = "mtp." not in name. Applied only
+#                  while that literal is in load_weights' source. On a44d7b5
+#                  the real composed mapper drops exactly the 3101 "mtp."
+#                  names of this checkpoint, nothing else (checked over all
+#                  299545 names).
+#                  Savings: 2.51 GiB = ~4.7 s with MTP off; ~0-0.5 s with MTP
+#                  on, because the target's read of mtp.* (the LAST 2.3 GiB of
+#                  its stream, in model-fp8-mtp-ple) had been warming the page
+#                  cache for the drafter, which now reads it cold instead.
 #
 # Drift signals, all printed to the container log:
 #   "NOT applied ..."                         a target or the remap fn vanished

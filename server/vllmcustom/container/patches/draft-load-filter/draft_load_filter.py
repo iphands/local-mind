@@ -19,9 +19,12 @@ before get_tensor (lazy, eager and torchao branches). Post-import this module
   * wraps DefaultModelLoader.load_weights: for a model class listed in
     FILTERS it activates that model's keep-predicate for the duration of the
     call (the checkpoint generator is consumed inside it, synchronously).
-The predicate is the model's OWN name-remap function, imported from the
+The drafter's predicate is its OWN name-remap function, imported from the
 model's own module -- so the filter keeps exactly what load_weights keeps,
-and follows upstream if that mapping changes.
+and follows upstream if that mapping changes. The target
+(Qwen4ExpForConditionalGeneration) gets the mirror image: its load_weights
+drops every "mtp." name, so those 2.5 GiB are skipped too -- applied only
+while its load_weights still carries that drop rule.
 
 Loaded from draft_load_filter.pth in the venv's site-packages (every
 interpreter, including the spawn'd EngineCore; before sitecustomize, so
@@ -38,6 +41,7 @@ Design rules (same as container/patches/boot-timing):
 from __future__ import annotations
 
 import functools
+import inspect
 import os
 import sys
 import time
@@ -50,11 +54,23 @@ WEIGHT_UTILS = "vllm.model_executor.model_loader.weight_utils"
 DEFAULT_LOADER = "vllm.model_executor.model_loader.default_loader"
 TARGETS = (WEIGHT_UTILS, DEFAULT_LOADER)
 
-# model class name -> name of a function in THAT CLASS'S OWN MODULE mapping a
-# checkpoint tensor name to the name load_weights uses, or None when
-# load_weights drops it. keep(name) = fn(name) is not None.
+# model class name -> how to know which checkpoint tensors its load_weights keeps:
+#   "fn:<name>"      a function in THAT CLASS'S OWN MODULE mapping a checkpoint
+#                    name to the loaded name, or None when load_weights drops
+#                    it. keep(name) = fn(name) is not None.
+#   "drop:<substr>"  load_weights maps every name containing <substr> to None
+#                    (WeightsMapper orig_to_new_substr={"<substr>": None}, which
+#                    is checked before any prefix rewrite). keep(name) = substr
+#                    not in name. Applied only while that literal is still in the
+#                    class's load_weights source -- the model's own statement
+#                    that it drops those tensors.
 FILTERS: dict[str, str] = {
-    "Qwen4ExpMTP": "_remap_mtp_weight_name",
+    # the MTP drafter keeps 4.9 of 123.5 GiB (the big win, ~160 s over NFS)
+    "Qwen4ExpMTP": "fn:_remap_mtp_weight_name",
+    # the target drops the drafter's 2.5 GiB of mtp.* (~4.7 s with MTP off;
+    # ~a wash with MTP on, where that read warmed the page cache for the drafter)
+    "Qwen4ExpForConditionalGeneration": "drop:mtp.",
+    "Qwen4ExpForCausalLM": "drop:mtp.",
 }
 
 _MARK = "__draft_load_filter__"
@@ -98,18 +114,36 @@ def _wrap_should_skip(orig: Callable[..., bool]) -> Callable[..., bool]:
 
 def _keep_for(model: Any) -> Callable[[str], bool] | None:
     cls = type(model)
-    fname = FILTERS.get(cls.__name__)
-    if fname is None:
+    rule = FILTERS.get(cls.__name__)
+    if rule is None:
         return None
-    fn = getattr(sys.modules.get(cls.__module__), fname, None)
-    if not callable(fn):
-        _note_once(
-            f"fn:{cls.__module__}.{fname}",
-            f"NOT applied for {cls.__name__}: {cls.__module__}.{fname} not found "
-            "(upstream renamed it?) -- loading reads the whole checkpoint",
-        )
-        return None
-    return lambda name: fn(name) is not None
+    kind, _, arg = rule.partition(":")
+    if kind == "fn":
+        fn = getattr(sys.modules.get(cls.__module__), arg, None)
+        if not callable(fn):
+            _note_once(
+                f"fn:{cls.__module__}.{arg}",
+                f"NOT applied for {cls.__name__}: {cls.__module__}.{arg} not found "
+                "(upstream renamed it?) -- loading reads the whole checkpoint",
+            )
+            return None
+        return lambda name: fn(name) is not None
+    if kind == "drop":
+        literal = f'"{arg}": None'
+        try:
+            src = inspect.getsource(cls.load_weights)
+        except (OSError, TypeError):
+            src = ""
+        if literal not in src:
+            _note_once(
+                f"drop:{cls.__module__}.{cls.__name__}",
+                f"NOT applied for {cls.__name__}: its load_weights no longer says "
+                f"{literal} -- loading reads the whole checkpoint",
+            )
+            return None
+        return lambda name: arg not in name
+    _note_once(f"rule:{rule}", f"NOT applied for {cls.__name__}: bad FILTERS rule {rule!r}")
+    return None
 
 
 def _wrap_load_weights(orig: Callable[..., Any]) -> Callable[..., Any]:
