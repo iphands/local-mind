@@ -105,6 +105,7 @@
 #   GDN_KERNEL=cuda ...                            # VLLM_GDN_DECODE_KERNEL (default triton: REQUIRED by the FP8 GDN projections on the PR image)
 #   EXECUTOR=mp ...                                # --distributed-executor-backend (default EMPTY = vLLM's choice; mp was PR-image-only)
 #   SPEC_TOKENS=0 ./qwen3.8-flash-next/run         # MTP off (default 3)
+#   BLOCK_SIZE=64 / BLOCK_SIZE= ...                # force --block-size / pass none (default auto: only when the QSA ring needs it, see below)
 #   MOE_BACKEND=marlin ...                         # force it either way (see above)
 #   ATTN_BACKEND=flashinfer ...                    # default EMPTY = let vLLM pick
 #   KV_FP8=1 ...                                   # --kv-cache-dtype fp8 (A/B only)
@@ -155,6 +156,7 @@ ATTN_BACKEND=${ATTN_BACKEND-}                    # EMPTY = vLLM auto-select
 MOE_BACKEND=${MOE_BACKEND:-}                     # empty = auto (may already be marlin on main; see header)
 NVFP4_BACKEND=${NVFP4_BACKEND:-}                 # --linear-backend; the linear layers here are FP8, so leave it
 SPEC_TOKENS=${SPEC_TOKENS:-0}                    # MTP speculative tokens; 3 = card optimum on the PR image; 0 = off
+BLOCK_SIZE=${BLOCK_SIZE-auto}                    # auto = --block-size lcm(16, QSA ring) only when needed; a number = forced; EMPTY = none
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.955}              # card value; the Mamba-block budget was measured at it
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}           # native; the PR image needed <=135168 beside the MTP draft head
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-8}                 # see ./qwen3.8-flash-next/run-legacy
@@ -237,6 +239,46 @@ PY
     override\ *) _dt=${_ple#override }; _dt=${_dt%% *}
                  HF_OVERRIDES='{"text_config": {"ple_embedding_dtype": "'"$_dt"'"}}' ;;
   esac
+fi
+
+# --block-size for the QSA key ring (upstream gap, vLLM a44d7b5). With MTP,
+# qwen4_exp/common/qsa_cache.py sizes each QSA layer's key ring as
+# capacity = cr * ceil((cr + k) / cr)   (cr = indexer_compress_ratio, k = SPEC_TOKENS)
+# and asserts block_size % capacity == 0 -- its comment says the ring joins
+# the LCM that sets the block size, but platforms/interface.py
+# _align_hybrid_block_size never adds it: it picks the smallest multiple of
+# max(16, --block-size) that holds the mamba page (1616 = 16 x 101 here).
+# With cr=4 the ring is 8 for k=1-4 and 16 for k=9-12 (fine), but 12 for
+# k=5-8: "QSA ring capacity 12 must divide the attention block size 1616",
+# after the full ~8 min weight load (2026-09-26, SPEC_TOKENS=5). Passing
+# --block-size lcm(16, capacity) (48) makes that same code pick a multiple of
+# 48 instead (1632 = 12 x 136, ~1% bigger pages); a user block size only skips
+# the backend-preference pass, the hybrid mamba alignment still runs. Drop
+# this once upstream folds the ring capacity into the LCM.
+BLOCK_ARG=
+if [[ "$BLOCK_SIZE" == auto ]]; then
+  if [[ "$SPEC_TOKENS" != "0" ]]; then
+    _blk=$(python3 - "$MODEL_ROOT/$MODEL" "$SPEC_TOKENS" <<'PY'
+import json, math, pathlib, sys
+m, k = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+cfg = json.load(open(m / "config.json"))
+cr = (cfg.get("text_config") or cfg).get("indexer_compress_ratio")
+if not cr:
+    print("none no indexer_compress_ratio in config.json (no QSA ring)"); sys.exit(0)
+cap = cr * -(-(cr + k) // cr)
+align = math.lcm(16, cap)
+if align == 16:
+    print(f"none QSA ring capacity {cap} (cr={cr}, k={k}) divides every 16-aligned block size")
+else:
+    print(f"{align} QSA ring capacity {cap} (cr={cr}, k={k}) does not divide 16-aligned block sizes"
+          f" -> --block-size {align} (vLLM rounds it up to fit the mamba page)")
+PY
+    ) || { echo "QSA block-size check failed"; exit 1; }
+    echo "## block size: ${_blk#* }"
+    [[ "${_blk%% *}" != none ]] && BLOCK_ARG=${_blk%% *}
+  fi
+elif [[ -n "$BLOCK_SIZE" ]]; then
+  BLOCK_ARG=$BLOCK_SIZE
 fi
 
 # Observed on the PR-branch image, unverified on main: warn, don't refuse.
@@ -326,9 +368,10 @@ VLLM_ARGS+=(
 [[ "$VISION" == "0" ]] && VLLM_ARGS+=( --language-model-only )
 # SPEC_TOKENS=0 disables MTP entirely (clean no-speculation baseline); else add it.
 [[ "$SPEC_TOKENS" != "0" ]] && VLLM_ARGS+=( --speculative-config '{"method":"mtp","num_speculative_tokens":'"$SPEC_TOKENS"'}' )
+[[ -n "$BLOCK_ARG" ]] && VLLM_ARGS+=( --block-size "$BLOCK_ARG" )
 nvfp4_backend_args
 vllm_extra_args
 
 echo
-echo "## Running $CONTAINER  (attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0, PLE table pinned in host RAM via --engram-config)"
+echo "## Running $CONTAINER  (attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS block=${BLOCK_ARG:-auto} load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0, PLE table pinned in host RAM via --engram-config)"
 vllm_launch
