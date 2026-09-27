@@ -456,6 +456,12 @@ Preflight flags it precisely because the build won't.
   forbids arbitrary host bind mounts inside `RUN`) and persists across builds on
   the same daemon exactly like a bind mount would — so a small source change
   re-links in minutes instead of recompiling torch from scratch.
+- **Runtime image in two install layers**: `vllm-openai` installs torch + flashinfer +
+  torchaudio (+ flashinfer-cubin, torchvision) in one RUN, then the vLLM wheel in the
+  next. Both bind-mount their wheels from the build stages instead of COPYing them. A vLLM
+  bump reuses the first layer (~8.7 GB; flashinfer-cubin alone is 6.4 GB) and only
+  installs and exports the second (~3.3 GB). The single install it replaced made every
+  bump rewrite a 12.4 GB layer. `uv pip check` guards the two-step resolve.
 - **Runtime caches** (HF downloads, `torch.compile`, FlashInfer JIT) bind-mount
   from `/mnt/noir/scratch/ai/vllm/cache` into the container, so model loads and
   JIT compiles persist between `./qwen/run`s.

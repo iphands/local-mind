@@ -395,31 +395,47 @@ ARG FLASHINFER_VERSION
 # kernel/JIT exception. A failed dlopen is tolerated (frames print as ??:0), so
 # this is not needed to serve -- it is what makes a DeepGEMM failure readable.
 # This stage starts from base, not vllm-build, so the -dev install there does
-# not reach it. Before the wheel COPY so a vLLM bump does not redo it.
+# not reach it. Before the wheel installs so a vLLM bump does not redo it.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends libdw1 && \
     python -c "import ctypes; ctypes.CDLL('libdw.so.1')"
 
-# All locally-built wheels (torch, flashinfer, vllm, torchaudio). Installing
-# them in one resolve lets vLLM's torch==/torchaudio== pins land on our wheels
-# instead of PyPI's cu130 builds.
-COPY --from=vllm-build /wheels /wheels
-COPY --from=torchaudio-build /wheels-torchaudio /wheels
-
+# The locally-built wheels go in as two layers, split by how often they change.
+# One install of everything made each vLLM bump reinstall and re-export a
+# 12.4 GB layer, 8.7 GB of it torch + flashinfer (flashinfer-cubin alone is
+# 6.4 GB) that the bump never touched. The wheels are bind-mounted from their
+# stages rather than COPY'd, so they leave no layer of their own behind.
+#
+# Layer 1, torch + flashinfer + torchaudio: flashinfer-build's /wheels is torch-
+# build's torch wheel plus the flashinfer wheels (vllm-build only adds vLLM on
+# top). Nothing vLLM-specific is in this RUN's cache key, so a vLLM bump reuses it.
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv pip install /wheels/*.whl && \
+    --mount=type=bind,from=flashinfer-build,source=/wheels,target=/wheels-base \
+    --mount=type=bind,from=torchaudio-build,source=/wheels-torchaudio,target=/wheels-torchaudio \
+    uv pip install /wheels-base/*.whl /wheels-torchaudio/*.whl && \
     # flashinfer-cubin: pinned in vLLM's requirements/cuda.txt, but setup.py
     # strips it from the wheel's Requires-Dist (it left PyPI after 0.6.13), so
-    # the resolve above never installs it and flashinfer would instead download
+    # vLLM's resolve never installs it and flashinfer would instead download
     # cubins into ~/.cache/flashinfer at first use, at serve time. Pull the same
     # prebuilt wheel flashinfer-build uses, from the same index.
     uv pip install --no-deps --extra-index-url https://flashinfer.ai/whl/ \
         "flashinfer-cubin==${FLASHINFER_VERSION}" && \
     { uv pip install --no-deps --index-url https://download.pytorch.org/whl/${TORCHVISION_INDEX} \
         torchvision==${TORCHVISION_VERSION} || \
-      echo "WARN: torchvision ${TORCHVISION_VERSION} ${TORCHVISION_INDEX} wheel unavailable; multimodal disabled"; } && \
-    rm -rf /wheels && \
+      echo "WARN: torchvision ${TORCHVISION_VERSION} ${TORCHVISION_INDEX} wheel unavailable; multimodal disabled"; }
+
+# Layer 2, vLLM (rebuilt on every bump; ~3.3 GB with the deps it adds). vLLM's
+# torch==/torchaudio==/flashinfer-python== pins are already satisfied by layer 1's
+# wheels, so uv leaves those alone instead of pulling PyPI's cu130 builds. Only the
+# vLLM wheel is named: its neighbours in this /wheels are layer 1's, and naming
+# them again by a new path would make uv reinstall them here.
+RUN --mount=type=cache,target=/root/.cache/uv \
+    --mount=type=bind,from=vllm-build,source=/wheels,target=/wheels \
+    uv pip install /wheels/vllm-*.whl && \
+    # Two resolves where there used to be one: fail here if they left the env
+    # inconsistent (it passes on the single-resolve 2b9b55c image).
+    uv pip check && \
     # Fail the build here, not at `vllm serve`, if any CUDA-minor check trips,
     # and confirm the cubin package is importable (flashinfer.jit.env checks
     # for the flashinfer_cubin module, not the dist name).
