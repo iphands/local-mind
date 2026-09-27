@@ -1,0 +1,320 @@
+#!/bin/bash
+# Give BuildKit a garbage-collection policy that keeps ./container/build's caches
+# alive between builds and caps the whole build cache.
+#
+#   su -c '/path/to/vllmcustom/container/gc-setup'              # merge, check, ask before restarting docker
+#   su -c '/path/to/vllmcustom/container/gc-setup --yes'        # same, restart without asking
+#   su -c 'CACHE_MAX_GB=120 /path/to/.../container/gc-setup'    # other values: re-run to change any of them
+#   su -c '/path/to/vllmcustom/container/gc-setup --rollback'   # put back the newest backup
+#   su -c '.../container/gc-setup --rollback=/etc/docker/daemon.json.bak.<ts>'   # ...or a specific one
+#
+# Why. The docker driver's default GC rule #0 (see `docker buildx inspect`) puts
+# every cache mount (ccache, uv), build context and git checkout under one
+# 48 h / 12.1 GiB budget: anything unused for 48 h is deleted once that group is
+# over budget. Two vLLM bumps two days apart were enough to wipe the ccache (302 MB
+# of a 40G CCACHE_MAXSIZE) and the uv cache (12.7 MB), so FA2 recompiled (~6 min)
+# and 187 packages were re-downloaded (65 s instead of 15 s). Meanwhile the cap on
+# everything else defaults to ~80% of the disk (693.8 GiB), which is how the build
+# cache reached 245 GB.
+#
+# What it writes: builder.gc.enabled and builder.gc.policy in /etc/docker/daemon.json,
+# nothing else. Every other key -- the nvidia runtime, default-runtime, any other
+# builder setting -- is carried over unchanged. A `policy` list replaces all of
+# Docker's default rules, so every rule is written:
+#   rule 0  cache mounts (ccache, uv): delete ones unused for MOUNTS_KEEP, least
+#           recently used first, while they total more than MOUNTS_MAX_GB
+#   rule 1  build contexts: same, with CONTEXTS_KEEP / CONTEXTS_MAX_GB
+#   rule 2  everything unused for OLD_KEEP  } delete least recently used while the
+#   rule 3  everything                      } cache is over CACHE_MAX_GB or the disk
+#   rule 4  everything incl. internal (all) } has less than MIN_FREE_GB free, but
+#                                             never below CACHE_FLOOR_GB
+# One type per rule is not a style choice. dockerd turns each rule's filters into
+# a BuildKit filter and allows ONE value per key: a rule listing type=exec.cachemount
+# and type=source.local together makes dockerd refuse to start ("could not get
+# builder GC policy: filters expect only one value"). `dockerd --validate` does not
+# catch that; it only fails at startup. Git-checkout sources (unused here) fall
+# under rules 2-4.
+#
+# The ages go in as an `unused-for=<hours>` filter, not a `keepDuration` key. Current
+# Docker docs show keepDuration, but dockerd 29.7.2 drops it without an error: a policy
+# written that way came up with no "Keep Duration" on any rule in `docker buildx
+# inspect` (2026-09-27). unused-for is the prune filter dockerd has always turned
+# into the rule's keep duration. It is a different key from `type`, so it does not
+# trip the one-value rule. The check after the restart looks for the durations, so
+# a dockerd that drops them again gets reported.
+#
+# CACHE_MAX_GB must stay well above one build's working set (~42 GB measured on
+# 2026-09-27: torch/flashinfer/vllm compile layers, install layers, contexts,
+# ccache). Otherwise GC starts on recent records, and the torch layer takes hours
+# to rebuild. Images are not build cache: old image tags are not touched here.
+#
+# Safety: backs up daemon.json to daemon.json.bak.<timestamp>. Checks the merged file
+# (the filter rule above, then `dockerd --validate`) before installing it, and asks
+# before restarting docker. If docker does not come back, it restores the backup,
+# clears systemd's start limit, restarts docker on the old config, and prints what
+# dockerd logged. A restart stops every running container, and ones started with
+# --rm (vllm, opencode, anyllm here) are deleted and have to be relaunched.
+#
+# Idempotent: re-running with the same values writes nothing.
+set -euo pipefail
+
+CACHE_MAX_GB=${CACHE_MAX_GB:-100}       # cap on the whole build cache
+CACHE_FLOOR_GB=${CACHE_FLOOR_GB:-50}    # GC never shrinks the cache below this, even under disk pressure
+MIN_FREE_GB=${MIN_FREE_GB:-174}         # shrink the cache (to the floor) when free disk drops below this
+MOUNTS_MAX_GB=${MOUNTS_MAX_GB:-40}      # budget for cache mounts (ccache, uv)
+MOUNTS_KEEP=${MOUNTS_KEEP:-720h}        # ...which are only eligible after this long unused
+CONTEXTS_MAX_GB=${CONTEXTS_MAX_GB:-10}  # budget for build contexts (~2.6 GB per build; re-sent if evicted)
+CONTEXTS_KEEP=${CONTEXTS_KEEP:-720h}
+OLD_KEEP=${OLD_KEEP:-1440h}             # rule 2's age limit (Docker's default, 60 days)
+CONF=${CONF:-/etc/docker/daemon.json}
+UP_WAIT=${UP_WAIT:-60}                  # seconds to wait for docker after a restart
+
+self=$(cd "$(dirname "$0")" && pwd)/$(basename "$0")
+die() { echo "## ERROR: $*" >&2; exit 1; }
+
+mode=apply yes=0 rollback_to=
+for a in "$@"; do
+  case $a in
+    --rollback) mode=rollback ;;
+    --rollback=*) mode=rollback rollback_to=${a#--rollback=} ;;
+    --yes|-y)   yes=1 ;;
+    -h|--help)  sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "$0"; exit 0 ;;
+    *)          die "unknown argument '$a' (see --help)" ;;
+  esac
+done
+
+if [[ $EUID -ne 0 ]]; then
+  echo "## $0 must run as root (it writes $CONF and restarts docker)." >&2
+  echo "##" >&2
+  echo "##   su -c '$self'" >&2
+  exit 1
+fi
+
+for n in CACHE_MAX_GB CACHE_FLOOR_GB MIN_FREE_GB MOUNTS_MAX_GB CONTEXTS_MAX_GB UP_WAIT; do
+  [[ ${!n} =~ ^[0-9]+$ ]] || die "$n must be a whole number (got '${!n}')"
+done
+for n in MOUNTS_KEEP CONTEXTS_KEEP OLD_KEEP; do
+  [[ ${!n} =~ ^[0-9]+h$ ]] || die "$n must be hours, like 720h (got '${!n}')"
+done
+(( CACHE_FLOOR_GB < CACHE_MAX_GB )) || die "CACHE_FLOOR_GB ($CACHE_FLOOR_GB) must be below CACHE_MAX_GB ($CACHE_MAX_GB)"
+(( MOUNTS_MAX_GB + CONTEXTS_MAX_GB < CACHE_MAX_GB )) ||
+  die "MOUNTS_MAX_GB + CONTEXTS_MAX_GB ($MOUNTS_MAX_GB + $CONTEXTS_MAX_GB) must be below CACHE_MAX_GB ($CACHE_MAX_GB)"
+for c in python3 dockerd docker systemctl journalctl diff; do
+  command -v "$c" >/dev/null || die "$c not found"
+done
+
+# Key-sorted, indented JSON so diffs show content changes only.
+norm() { if [[ -f $1 ]]; then python3 -m json.tool --sort-keys "$1"; else echo '{}'; fi; }
+
+newest_backup() {
+  find "$(dirname "$CONF")" -maxdepth 1 -name "$(basename "$CONF").bak.*" -printf '%T@ %p\n' \
+    | sort -rn | head -1 | cut -d' ' -f2-
+}
+
+# Is the policy this script writes the one dockerd is running with? Checks each
+# rule's type filter and keep duration in `docker buildx inspect`.
+live_ok() {
+  local gc
+  gc=$(docker buildx inspect 2>/dev/null | sed -n '/GC Policy rule#0/,$p')
+  rule() { sed -n "/rule#$1:/,/rule#$(( $1 + 1 )):/p" <<<"$gc"; }
+  rule 0 | grep -q 'type==exec.cachemount' &&
+  rule 0 | grep -qE "Keep Duration: *${MOUNTS_KEEP%h}h0m0(\.[0-9]+)?s" &&
+  rule 1 | grep -q 'type==source.local' &&
+  rule 1 | grep -qE "Keep Duration: *${CONTEXTS_KEEP%h}h0m0(\.[0-9]+)?s" &&
+  rule 2 | grep -qE "Keep Duration: *${OLD_KEEP%h}h0m0(\.[0-9]+)?s"
+}
+
+docker_up() {
+  local _
+  for _ in $(seq "$UP_WAIT"); do docker info >/dev/null 2>&1 && return 0; sleep 1; done
+  return 1
+}
+
+# Docker did not come back with the new config: put $1 back ("none" = there was
+# no daemon.json before, so remove it), clear the start limit systemd's own retries
+# ran into, and start docker on the old config. Always exits non-zero.
+recover() {
+  local undo=$1
+  echo >&2
+  echo "## docker did not come back up. dockerd logged:" >&2
+  journalctl -u docker -n 60 --no-pager -o cat 2>/dev/null \
+    | grep -iE 'level=(error|fatal)|^error|failed to start|start-limit' | tail -5 | sed 's/^/##   /' >&2 || true
+  if [[ $undo == none ]]; then
+    rm -f "$CONF"
+    echo "## removed $CONF (there was none before)" >&2
+  else
+    cp -a "$undo" "$CONF"
+    echo "## restored $CONF from $undo" >&2
+  fi
+  systemctl reset-failed docker.service 2>/dev/null || true
+  if systemctl restart docker && docker_up; then
+    echo "## docker is back up on the previous config. The new policy is NOT applied." >&2
+  else
+    echo "## docker is STILL down. Look at: systemctl status docker; journalctl -u docker -n 80" >&2
+  fi
+  exit 1
+}
+
+# Restart docker if the user agrees. $2 is what recover() restores if that fails.
+# Returns 1 if the restart was declined; exits (via recover) if it failed.
+restart_docker() {
+  local before=$1 undo=$2 ids after
+  echo
+  echo "## A docker restart stops every running container; --rm ones are deleted:"
+  ids=$(docker ps -q 2>/dev/null || true)
+  if [[ -n $ids ]]; then
+    # shellcheck disable=SC2086  # one id per word
+    docker inspect -f '##   {{.Name}}  rm={{.HostConfig.AutoRemove}}  restart-policy={{.HostConfig.RestartPolicy.Name}}' $ids
+  else
+    echo "##   (none running)"
+  fi
+  if (( ! yes )); then
+    if [[ -t 0 ]]; then
+      read -r -p "## Restart docker now? [y/N] " ans
+      if [[ $ans != [yY]* ]]; then
+        echo "## Not restarted. The policy takes effect at the next: systemctl restart docker"
+        return 1
+      fi
+    else
+      echo "## No terminal to ask on: not restarting. Run: systemctl restart docker"
+      return 1
+    fi
+  fi
+  echo "## systemctl restart docker"
+  systemctl reset-failed docker.service 2>/dev/null || true
+  if ! systemctl restart docker || ! docker_up; then
+    recover "$undo"
+  fi
+  after=$(docker info --format '{{.DefaultRuntime}}')
+  if [[ $before == unknown ]]; then
+    echo "## docker was not answering when this started; it is up now (default runtime: $after)"
+  elif [[ $after != "$before" ]]; then
+    echo "## WARNING: default runtime changed: $before -> $after" >&2
+  fi
+  echo
+  echo "## live GC policy (docker buildx inspect):"
+  docker buildx inspect | sed -n '/GC Policy rule#0/,$p'
+}
+
+runtime_now=$(docker info --format '{{.DefaultRuntime}}' 2>/dev/null || echo unknown)
+
+if [[ $mode == rollback ]]; then
+  echo "## backups (newest first):"
+  find "$(dirname "$CONF")" -maxdepth 1 -name "$(basename "$CONF").bak.*" -printf '%T@ %p\n' \
+    | sort -rn | cut -d' ' -f2- | sed 's/^/##   /'
+  bak=${rollback_to:-$(newest_backup)}
+  [[ -n $bak ]] || die "no $CONF.bak.* to roll back to"
+  [[ -f $bak ]] || die "$bak does not exist"
+  dockerd --validate --config-file "$bak" >/dev/null || die "$bak does not validate; $CONF left as is"
+  echo "## rolling back to $bak:"
+  diff -u <(norm "$CONF") <(norm "$bak") || true
+  undo=none
+  if [[ -f $CONF ]]; then
+    undo=$(mktemp "$CONF.prerollback.XXXXXX")
+    cp -a "$CONF" "$undo"
+  fi
+  cp -a "$bak" "$CONF"
+  echo "## restored $CONF (the backup is kept)"
+  restart_docker "$runtime_now" "$undo" || true
+  [[ $undo == none ]] || rm -f "$undo"
+  exit 0
+fi
+
+mkdir -p "$(dirname "$CONF")"
+tmp=$(mktemp "$CONF.new.XXXXXX")   # same directory, so the final mv is atomic
+trap 'rm -f "$tmp"' EXIT
+
+CACHE_MAX_GB=$CACHE_MAX_GB CACHE_FLOOR_GB=$CACHE_FLOOR_GB MIN_FREE_GB=$MIN_FREE_GB \
+MOUNTS_MAX_GB=$MOUNTS_MAX_GB MOUNTS_KEEP=$MOUNTS_KEEP \
+CONTEXTS_MAX_GB=$CONTEXTS_MAX_GB CONTEXTS_KEEP=$CONTEXTS_KEEP OLD_KEEP=$OLD_KEEP \
+python3 - "$CONF" "$tmp" <<'PY'
+import json, os, sys
+
+src, dst = sys.argv[1], sys.argv[2]
+e = os.environ
+try:
+    d = json.load(open(src)) if os.path.exists(src) else {}
+except json.JSONDecodeError as err:
+    sys.exit(f"## ERROR: {src} is not valid JSON ({err}); left as is")
+if not isinstance(d, dict):
+    sys.exit(f"## ERROR: {src} is not a JSON object")
+builder = d.setdefault("builder", {})
+gc = builder.setdefault("gc", {}) if isinstance(builder, dict) else None
+if not isinstance(gc, dict):
+    sys.exit(f"## ERROR: {src}: builder / builder.gc is not a JSON object")
+# Left in place, but say so: they are Docker's other way of sizing GC.
+for k in ("defaultKeepStorage", "defaultReservedSpace", "defaultMaxUsedSpace", "defaultMinFreeSpace"):
+    if k in gc:
+        print(f"## NOTE: keeping existing builder.gc.{k} = {gc[k]!r}", file=sys.stderr)
+cap = {"reservedSpace": f"{e['CACHE_FLOOR_GB']}GB",
+       "maxUsedSpace": f"{e['CACHE_MAX_GB']}GB",
+       "minFreeSpace": f"{e['MIN_FREE_GB']}GB"}
+policy = [
+    {"filter": ["type=exec.cachemount", f"unused-for={e['MOUNTS_KEEP']}"],
+     "maxUsedSpace": f"{e['MOUNTS_MAX_GB']}GB"},
+    {"filter": ["type=source.local", f"unused-for={e['CONTEXTS_KEEP']}"],
+     "maxUsedSpace": f"{e['CONTEXTS_MAX_GB']}GB"},
+    {"filter": [f"unused-for={e['OLD_KEEP']}"], **cap},
+    dict(cap),
+    {"all": True, **cap},
+]
+# dockerd's own rule, checked here because `dockerd --validate` doesn't: one value
+# per filter key per rule, or the daemon refuses to start.
+for i, rule in enumerate(policy):
+    keys = [f.split("=", 1)[0] for f in rule.get("filter", [])]
+    if len(keys) != len(set(keys)):
+        sys.exit(f"## ERROR: rule {i} repeats a filter key {keys}: dockerd would refuse to "
+                 "start ('filters expect only one value')")
+if "policy" in gc and gc["policy"] != policy:
+    print(f"## NOTE: replacing the existing builder.gc.policy ({len(gc['policy'])} rules; "
+          "it stays in the backup)", file=sys.stderr)
+gc["enabled"] = True
+gc["policy"] = policy
+with open(dst, "w") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+PY
+
+if [[ -f $CONF ]] && cmp -s <(norm "$CONF") <(norm "$tmp"); then
+  echo "## $CONF already has this policy; nothing written."
+  if live_ok; then
+    echo "## ...and dockerd is running with it. Done."
+    exit 0
+  fi
+  echo "## ...but dockerd is not running with it yet."
+  undo=$(newest_backup)
+  restart_docker "$runtime_now" "${undo:-none}" || exit 0
+  if live_ok; then
+    echo "## OK: new GC policy is live."
+  else
+    echo "## WARNING: the rules above do not show the new policy" >&2
+  fi
+  exit 0
+fi
+
+echo "## changes to $CONF (key-sorted view):"
+diff -u <(norm "$CONF") <(norm "$tmp") || true
+echo
+dockerd --validate --config-file "$tmp" || die "dockerd rejects the merged config; $CONF left as is"
+
+bak=
+if [[ -f $CONF ]]; then
+  bak=$CONF.bak.$(date +%Y%m%d-%H%M%S)
+  cp -a "$CONF" "$bak"
+  chown --reference="$CONF" "$tmp"
+  chmod --reference="$CONF" "$tmp"
+else
+  chmod 644 "$tmp"
+fi
+mv -f "$tmp" "$CONF"
+echo "## wrote $CONF${bak:+ (backup: $bak)}"
+
+if restart_docker "$runtime_now" "${bak:-none}"; then
+  echo
+  if live_ok; then
+    echo "## OK: new GC policy is live."
+  else
+    echo "## WARNING: the rules above do not show the new policy. Roll back with: su -c '$self --rollback'" >&2
+  fi
+fi
+echo "## To undo: su -c '$self --rollback'"

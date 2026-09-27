@@ -7,7 +7,7 @@ images: PyTorch, FlashInfer, and vLLM are all compiled from source for
 ## Layout
 
 ```
-container/   build, push, Dockerfile, and the two build helpers (preflight, slice-setup)
+container/   build, push, Dockerfile, and the build helpers (preflight, slice-setup, gc-setup)
 common/      the shared launcher mechanism every */run sources
 qwen/        run — Qwen3.5 / Qwen3.6
 laguna/      run — Laguna-S DFlash
@@ -453,9 +453,37 @@ Preflight flags it precisely because the build won't.
   (default `$BUILD_DIR/ctx`), not the trees themselves. See the `.git` bullet below.
 - **Compiler cache**: the container/Dockerfile uses BuildKit `--mount=type=cache` for
   ccache + uv. This is the supported alternative to host bind mounts (Docker
-  forbids arbitrary host bind mounts inside `RUN`) and persists across builds on
-  the same daemon exactly like a bind mount would — so a small source change
-  re-links in minutes instead of recompiling torch from scratch.
+  forbids arbitrary host bind mounts inside `RUN`), so a small source change
+  re-links in minutes instead of recompiling. **It persists only if BuildKit's GC
+  lets it.** The docker driver's default rule #0 puts every cache mount, build
+  context and git checkout under one 48 h / 12.1 GiB budget (`docker buildx inspect`).
+  Anything unused for 48 h is deleted once they're over that budget. On 2026-09-27 the
+  ccache mount was 302 MB despite `CCACHE_MAXSIZE=40G`, and the uv mount was 12.7 MB. A vLLM
+  bump then recompiled FA2 (~6 min) and re-downloaded 187 packages (65 s instead of
+  15 s), for 13.5 min where ~5 would do. The fix is `su -c "$PWD/container/gc-setup"`.
+  It merges a GC policy into `/etc/docker/daemon.json` and keeps every other key (the
+  nvidia default runtime lives in that file). It backs up the old file, checks the
+  result, and asks before restarting docker. If docker doesn't come back, it restores
+  the backup and restarts docker on the old config. The restart stops all containers,
+  and the `--rm` ones are gone afterwards. `--rollback` puts back the newest backup.
+  What the policy does:
+  - **Cache mounts (ccache, uv):** eligible after 30 days unused, capped at 40 GB.
+  - **Build contexts:** eligible after 30 days unused, capped at 10 GB. That's a separate
+    rule on purpose: dockerd allows one value per filter key per rule. A rule listing
+    both types stops dockerd from starting ("filters expect only one value"), and
+    `dockerd --validate` doesn't catch it.
+  - **Ages:** set as an `unused-for=720h` filter, not a `keepDuration` key. Current Docker
+    docs show `keepDuration`, but dockerd 29.7.2 ignores it without an error, and no rule
+    shows a `Keep Duration`. The script's final check looks for the durations.
+  - **Whole build cache:** capped at 100 GB, shrinks to a 50 GB floor if free disk drops
+    below 174 GB. Docker's defaults were ~80% / ~10% / ~20% of the disk. A build reuses
+    ~42 GB, so keep the cap well above that, or GC evicts recent layers (torch = hours).
+  - **Knobs:** `CACHE_MAX_GB`, `CACHE_FLOOR_GB`, `MIN_FREE_GB`, `MOUNTS_MAX_GB`,
+    `MOUNTS_KEEP`, `CONTEXTS_MAX_GB`, `CONTEXTS_KEEP`. Re-run the script to change any of
+    them.
+
+  Check with `docker buildx inspect | sed -n '/rule#0/,$p'`: rule #0 should show 720h.
+  daemon.json filters use a single `=`; buildkitd.toml uses `==`.
 - **Runtime image in two install layers**: `vllm-openai` installs torch + flashinfer +
   torchaudio (+ flashinfer-cubin, torchvision) in one RUN, then the vLLM wheel in the
   next. Both bind-mount their wheels from the build stages instead of COPYing them. A vLLM
