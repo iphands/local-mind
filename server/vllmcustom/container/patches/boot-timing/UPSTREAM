@@ -10,6 +10,9 @@
 # Verified against: image iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.
 #   dev20260924-g36f94d5 (VLLM_MAIN_SHA 36f94d5, V2 Model Runner), 2026-09-25,
 #   by grepping each target in the shipped tree, then by the smoke test below.
+#   Targets re-grepped present at 2b9b55c (2026-09-27) in the source tree;
+#   gpu_worker.py, gpu/model_runner.py and api_server/app_state.py changed
+#   since a44d7b5, but no hooked name or signature did.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client

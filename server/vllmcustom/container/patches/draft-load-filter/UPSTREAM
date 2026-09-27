@@ -7,7 +7,8 @@
 # applied ..." -- the load then reads the whole checkpoint, exactly as
 # upstream does. Nothing to re-derive on snapshot bumps.
 #
-# Hook table (module -> attr), confirmed present at vLLM a44d7b5 (2026-09-26):
+# Hook table (module -> attr), confirmed present at vLLM a44d7b5 (2026-09-26)
+# and re-grepped at 2b9b55c (2026-09-27; none of the hooked files changed):
 #   vllm.model_executor.model_loader.weight_utils
 #       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
 #                               safetensors_weights_iterator resolves it as a

@@ -27,8 +27,9 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at a44d7b5, 2026-09-25;
-#     was 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18, and 1ee4be4, 2026-09-12):
+#   - main snapshot (VLLM_REF=main in ./build, pinned at 2b9b55c, 2026-09-27;
+#     was a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#     and 1ee4be4, 2026-09-12):
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
 #     flashinfer.ai/whl), same requirements/build/cuda.txt, same
@@ -65,6 +66,13 @@
 #     flashinfer layers are reused and only vllm-build/vllm-openai rebuild.
 #     Nothing build-side; the Flash-Next PLE overlay was re-derived because
 #     vllm#57497 moved from_quant_config into qwen4_exp/common/.
+#     a44d7b5 -> 2b9b55c (2026-09-27, 68 commits): requirements/ and setup.py
+#     are unchanged (flashinfer stays 0.7.0), so torch/torchaudio/flashinfer
+#     layers are reused and only vllm-build/vllm-openai rebuild. vllm_flash_attn.cmake
+#     is unchanged (the sm120 hook below still lands). vllm#58846 moves FlashKDA
+#     b59532f -> 17a037d (it builds for 12.0f here; only Kimi/GLM use it at
+#     runtime); vllm#58586 drops all_reduce_mhc.cu from the stable extension
+#     (now CuTe DSL). The PLE overlay's upstream file is byte-identical.
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,

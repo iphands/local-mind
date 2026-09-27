@@ -24,9 +24,9 @@
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Last verified against main @ a44d7b5 (2026-09-25, VLLM_MAIN_SHA in
+# Last verified against main @ 2b9b55c (2026-09-27, VLLM_MAIN_SHA in
 # container/versions.env at the time; first verified at 1ee4be4, 2026-09-12, re-checked at
-# 468663a, 826e300, 36f94d5 and on each bump): vllm/config/engram.py with
+# 468663a, 826e300, 36f94d5, a44d7b5 and on each bump): vllm/config/engram.py with
 # cpu_offload, Qwen4ExpPLEPinnedHostEmbedding (in qwen4_exp/common/ since
 # vllm#57497) selected when it is set, Qwen4ExpForConditionalGeneration +
 # Qwen4ExpMTP in the registry, VLLM_GDN_DECODE_KERNEL still an env, the qwen3
@@ -241,7 +241,7 @@ PY
   esac
 fi
 
-# --block-size for the QSA key ring (upstream gap, vLLM a44d7b5). With MTP,
+# --block-size for the QSA key ring (upstream gap, vLLM 2b9b55c). With MTP,
 # qwen4_exp/common/qsa_cache.py sizes each QSA layer's key ring as
 # capacity = cr * ceil((cr + k) / cr)   (cr = indexer_compress_ratio, k = SPEC_TOKENS)
 # and asserts block_size % capacity == 0 -- its comment says the ring joins
