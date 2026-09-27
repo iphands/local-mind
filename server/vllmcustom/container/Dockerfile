@@ -148,6 +148,9 @@ ENV TORCH_CUDA_ARCH_LIST=${TORCH_CUDA_ARCH_LIST} \
 # by the `git fetch` every ./build does — invalidating torch, and with it
 # flashinfer and vllm downstream. Nothing here needs git metadata:
 # PYTORCH_BUILD_VERSION above is what sets the wheel version.
+# The exclude only governs this COPY; BuildKit still TRANSFERS the whole context.
+# So ./build hands over rsync'd copies without .git ($CTX_DIR) and never sends it
+# at all. These excludes stay for CTX_DIR= (contexts straight from the trees).
 COPY --from=pytorch --exclude=.git --exclude=**/.git . /src/pytorch
 WORKDIR /src/pytorch
 # MAX_JOBS/NVCC_THREADS arrive by secret mount, NOT as ARG/ENV. BuildKit excludes

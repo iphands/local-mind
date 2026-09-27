@@ -449,6 +449,8 @@ Preflight flags it precisely because the build won't.
 - **Source** lives in `$BUILD_DIR/src/{pytorch,flashinfer,vllm}` (default
   `/mnt/noir/scratch/ai/vllm/build`). `./container/build` only `git fetch` + `checkout`s
   the pinned ref — **no re-clone**. Patch or `git checkout` in place to iterate.
+  `docker build` gets rsync'd copies of those trees without `.git`, in `$CTX_DIR`
+  (default `$BUILD_DIR/ctx`), not the trees themselves. See the `.git` bullet below.
 - **Compiler cache**: the container/Dockerfile uses BuildKit `--mount=type=cache` for
   ccache + uv. This is the supported alternative to host bind mounts (Docker
   forbids arbitrary host bind mounts inside `RUN`) and persists across builds on
@@ -492,6 +494,15 @@ untouched.
   `get_version()` with no `dist_name`, so the `_FOR_VLLM` suffix has nothing to
   match. It sat in the container/Dockerfile doing nothing for as long as `.git` was present
   to cover for it.
+
+  The `COPY` excludes only govern the layer. BuildKit still *transfers* each whole
+  context first, and only the context's own `.dockerignore` filters that transfer.
+  So every build, even a fully cached one, re-sent pytorch's 7.57 GB context (6.0 GB of
+  it `.git`, 4.3 GB of that submodule history) over NFS, which took ~2 min.
+  `./container/build` now rsyncs each tree minus `.git` into `$CTX_DIR` and passes those
+  as the contexts: ~2.6 GB for all four instead of ~9.5 GB. The copies hold exactly the
+  files the `COPY`s already took, so the cache keys don't change. `CTX_DIR=` turns
+  staging off.
 
 Note `docker build --check` reports `unknown flag: exclude` here. That is a false
 alarm: the checker lints with a non-labs frontend (`dockerfile:1.8.1`) instead of
