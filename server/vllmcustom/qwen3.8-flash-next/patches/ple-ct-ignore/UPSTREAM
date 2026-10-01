@@ -11,6 +11,12 @@
 # nvidia/ngram_embedding.py into common/ngram_embedding.py in vLLM 267eee5
 # (vllm#57497, 2026-09-24); nvidia/ now imports the classes from ../common.
 # BASE_REF is provenance only (the commit the overlay was last re-derived at).
+#
+# RETIRED UPSTREAM: vllm#59431 (main c32513b, 2026-09-30) added the same branch
+# (get_scheme_dict() is None, i.e. should_ignore_layer() matched -> unquantized),
+# so this overlay is only for snapshots before it (VLLM_MAIN_SHA <= 2b9b55c).
+# The launcher greps the image's file for that branch and skips the mount, so
+# do NOT re-derive it on a hash mismatch past c32513b.
 UPSTREAM_PATH=vllm/models/qwen4_exp/common/ngram_embedding.py
 BASE_REF=a44d7b51511fff6fde2bafb9c4715433a7627d1c
 BASE_SHA256=1392f51ccf0b610542bf05c3021271bf6754221d9616ff92831b94f79fc3a892

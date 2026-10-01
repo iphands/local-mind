@@ -27,8 +27,8 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at 2b9b55c, 2026-09-27;
-#     was a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#   - main snapshot (VLLM_REF=main in ./build, pinned at 47de9d4, 2026-10-01;
+#     was 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
 #     and 1ee4be4, 2026-09-12):
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
@@ -73,6 +73,19 @@
 #     b59532f -> 17a037d (it builds for 12.0f here; only Kimi/GLM use it at
 #     runtime); vllm#58586 drops all_reduce_mhc.cu from the stable extension
 #     (now CuTe DSL). The PLE overlay's upstream file is byte-identical.
+#     2b9b55c -> 47de9d4 (2026-10-01, 300 commits, past the v0.31.0 branch cut
+#     so the snapshot version moves to 0.32.0.dev): flashinfer 0.7.0 ->
+#     0.7.0.post1 (python + cubin; cubin published at flashinfer.ai/whl), so
+#     flashinfer-build recompiles. post1 is two commits, both SM100/SM103 AOT
+#     module selection (flashinfer#5544); the sm120f provider build is
+#     unaffected. Runtime resolve: xgrammar 0.2.7 -> 0.2.8, openai-harmony ->
+#     oss-harmony (a fork shipping the same module), raised floors on
+#     setuptools (>=78.1.1, also in requirements/build/cuda.txt), requests,
+#     aiohttp, pillow, filelock -- uv dry-run of the 47de9d4 requirements/
+#     cuda.txt in the g2b9b55c image keeps torch 2.13.0 / torchaudio and
+#     changes only flashinfer, xgrammar and oss-harmony. CMake: only
+#     cpu_extension.cmake changed (vllm_flash_attn.cmake and every external-
+#     project pin are untouched, so the sm120 hook below still lands).
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,

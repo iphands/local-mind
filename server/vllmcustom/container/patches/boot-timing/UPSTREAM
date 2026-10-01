@@ -13,6 +13,9 @@
 #   Targets re-grepped present at 2b9b55c (2026-09-27) in the source tree;
 #   gpu_worker.py, gpu/model_runner.py and api_server/app_state.py changed
 #   since a44d7b5, but no hooked name or signature did.
+#   Re-grepped present at 47de9d4 (2026-10-01): entry.py, renderers/base.py,
+#   core.py, core_client.py, gpu_worker.py, gpu/model_runner.py and
+#   kernel_warmup.py changed since 2b9b55c; every hooked name is still defined.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client

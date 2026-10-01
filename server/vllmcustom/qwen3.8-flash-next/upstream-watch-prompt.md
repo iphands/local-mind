@@ -109,13 +109,12 @@ The owner's build fails or degrades if these move; check them from the raw files
      (the owner sets it via `PYTORCH_CUDA_ALLOC_CONF`). Report when upstream allocates the table
      without that rounding (chunked, `cudaHostRegister`, or setting the threshold itself), or
      documents the requirement; then the env var can go.
-   - **Upstream:** `Qwen4ExpPLEEmbeddingMethod.from_quant_config` in
+   - **Upstream, RESOLVED:** `Qwen4ExpPLEEmbeddingMethod.from_quant_config` in
      https://github.com/vllm-project/vllm/blob/main/vllm/models/qwen4_exp/common/ngram_embedding.py
-     only handles `Fp8Config` / ModelOpt and raises `NotImplementedError` for a
-     compressed-tensors quant config (as of `VLLM_MAIN_SHA` in `server/vllmcustom/container/versions.env`; last checked at `2b9b55c`, 2026-09-27). The owner overlays a
-     one-branch patch (`server/vllmcustom/qwen3.8-flash-next/patches/ple-ct-ignore/`). Report
-     when `main` handles `CompressedTensorsConfig` (an `ignore` match on the PLE prefix →
-     unquantized) there, with the commit; then the overlay can go.
+     handles a compressed-tensors `ignore` match on the PLE prefix since vllm#59431 (main
+     `c32513b`, 2026-09-30; pinned from `47de9d4`). The launcher now skips the owner's overlay
+     (`server/vllmcustom/qwen3.8-flash-next/patches/ple-ct-ignore/`) on such images. Only report
+     a regression: that branch disappearing from `from_quant_config` again.
    - **The checkpoint:** its `config.json` declares `text_config.ple_embedding_dtype =
      "float8_e4m3fn"` while its `ple-bf16-*.safetensors` shards are BF16, which makes main pick
      the FP8 PLE method and fail with `FP8 PLE checkpoint is missing its global scale`. The

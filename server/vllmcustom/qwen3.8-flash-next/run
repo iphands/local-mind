@@ -24,9 +24,9 @@
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Last verified against main @ 2b9b55c (2026-09-27, VLLM_MAIN_SHA in
+# Last verified against main @ 47de9d4 (2026-10-01, VLLM_MAIN_SHA in
 # container/versions.env at the time; first verified at 1ee4be4, 2026-09-12, re-checked at
-# 468663a, 826e300, 36f94d5, a44d7b5 and on each bump): vllm/config/engram.py with
+# 468663a, 826e300, 36f94d5, a44d7b5, 2b9b55c and on each bump): vllm/config/engram.py with
 # cpu_offload, Qwen4ExpPLEPinnedHostEmbedding (in qwen4_exp/common/ since
 # vllm#57497) selected when it is set, Qwen4ExpForConditionalGeneration +
 # Qwen4ExpMTP in the registry, VLLM_GDN_DECODE_KERNEL still an env, the qwen3
@@ -58,6 +58,9 @@
 #      patches/ple-ct-ignore/UPSTREAM before mounting it.
 #      Verified in the image: from_quant_config(<this checkpoint's CT config>,
 #      <ple prefix>) -> Qwen4ExpPLEUnquantizedEmbeddingMethod.
+#      Fixed upstream by vllm#59431 (main c32513b, 2026-09-30): from 47de9d4 on
+#      the image's own file has the compressed-tensors branch, the launcher
+#      sees it and skips the overlay; it is only mounted on older snapshots.
 # SECOND BOOT (2026-09-13): past the PLE method, the pinned-host table itself
 # failed to allocate, 3 s into layer construction:
 #   ngram_embedding.py allocate_embedding_weight -> torch.empty(..., device="cpu",
@@ -196,7 +199,17 @@ if [[ "$PATCH_PLE" != "0" ]]; then
   # vLLM 267eee5), so the mount target comes from UPSTREAM too.
   PATCH_DST=/opt/venv/lib/python3.12/site-packages/$UPSTREAM_PATH
   _img_sum=$(docker run --rm --entrypoint sha256sum "$CONTAINER" "$PATCH_DST" 2>/dev/null | cut -d' ' -f1 || true)
-  if [[ "$_img_sum" != "$BASE_SHA256" ]]; then
+  # vllm#59431 (main c32513b, 2026-09-30) made the overlay redundant: upstream's
+  # from_quant_config now returns the unquantized method when
+  # CompressedTensorsConfig.get_scheme_dict() is None, which it is for an
+  # `ignore` match -- the same should_ignore_layer() call the overlay makes.
+  # Detected by content, like the hash, so older snapshots still get the overlay.
+  if [[ "$_img_sum" != "$BASE_SHA256" ]] &&
+     docker run --rm --entrypoint grep "$CONTAINER" -qF \
+       'isinstance(quant_config, CompressedTensorsConfig)' "$PATCH_DST" 2>/dev/null; then
+    echo "## PLE overlay: not mounted, the image's ngram_embedding.py already handles a compressed-tensors ignore (vllm#59431)"
+    PATCH_PLE=0
+  elif [[ "$_img_sum" != "$BASE_SHA256" ]]; then
     _img_ref=$(docker image inspect -f '{{index .Config.Labels "ai.vllmcustom.vllm.ref"}}' "$CONTAINER")
     echo "$CONTAINER (vLLM ${_img_ref:-<no ai.vllmcustom.vllm.ref label>}) ships a different"
     echo "$PATCH_DST than the overlay was derived from (sha256 ${_img_sum:-<unreadable>}, overlay"
@@ -241,7 +254,7 @@ PY
   esac
 fi
 
-# --block-size for the QSA key ring (upstream gap, vLLM 2b9b55c). With MTP,
+# --block-size for the QSA key ring (upstream gap, vLLM 47de9d4). With MTP,
 # qwen4_exp/common/qsa_cache.py sizes each QSA layer's key ring as
 # capacity = cr * ceil((cr + k) / cr)   (cr = indexer_compress_ratio, k = SPEC_TOKENS)
 # and asserts block_size % capacity == 0 -- its comment says the ring joins

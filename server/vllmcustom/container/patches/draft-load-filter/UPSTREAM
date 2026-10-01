@@ -8,7 +8,11 @@
 # upstream does. Nothing to re-derive on snapshot bumps.
 #
 # Hook table (module -> attr), confirmed present at vLLM a44d7b5 (2026-09-26)
-# and re-grepped at 2b9b55c (2026-09-27; none of the hooked files changed):
+# re-grepped at 2b9b55c (2026-09-27; none of the hooked files changed) and at
+# 47de9d4 (2026-10-01; weight_utils and default_loader unchanged, mtp.py and
+# model.py only lost the mamba_cache_mode=="all" guard (vllm#58997) and gained
+# warmup / mm-norm hooks -- _remap_mtp_weight_name and the "mtp.": None
+# mapper entry are untouched):
 #   vllm.model_executor.model_loader.weight_utils
 #       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
 #                               safetensors_weights_iterator resolves it as a

@@ -165,7 +165,9 @@ the tag typed in. `./container/push` pushes whatever the last successful build p
 3. `VLLM_REF=main ./container/build && ./container/push`
 4. `./qwen3.8-flash-next/run` — picks the new image up by label. The PLE overlay is checked by the
    upstream file's content hash (`qwen3.8-flash-next/patches/ple-ct-ignore/UPSTREAM`), so it needs
-   attention only if that upstream file changed; the launcher says so if it did.
+   attention only if that upstream file changed; the launcher says so if it did. From vLLM
+   `c32513b` on (vllm#59431) upstream handles the compressed-tensors `ignore` itself, and the
+   launcher skips the overlay rather than refusing.
 
 Any other untagged ref works the same way but has to bring its own
 flashinfer pin: `VLLM_REF=<sha> FLASHINFER_REF=<its requirements/cuda.txt pin> ./container/build`;
