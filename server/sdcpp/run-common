@@ -1,0 +1,84 @@
+#!/bin/bash
+set -ue
+
+# usage: run-XXXX [cpu|mixed] [model]
+#   cpu   - diffusion on GPU, text encoder + VAE computed and stored on CPU
+#   mixed - everything computes on GPU, all weights in RAM, streamed into VRAM on demand
+#   model - quant shorthand (Q8_0 -> qwen-image-2.1-Q8_0.gguf) or a .gguf filename in MODEL_DIR
+PLACEMENT=${1:-cpu}
+MODEL=${2:-Q5_K_M}
+
+MODEL_DIR=${MODEL_DIR:-/mnt/noir/scratch/ai/llm/models/gguf/image}
+TE=${TE:-Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf}
+VAE=${VAE:-qwen_image_2.1_vae_bf16.safetensors}
+THREADS=${THREADS:-}
+VERBOSE=${VERBOSE:-}
+
+# ghcr only publishes the moving master-cuda tag, so pin by digest; IMAGE=...:master-cuda to float
+IMAGE=${IMAGE:-ghcr.io/leejet/stable-diffusion.cpp:master-cuda@sha256:bc12de387c5def38f4bb826912d8c8a1d3d7c7c2cb2ccbe2423280aa50a0a636}
+RUNNER=docker
+
+[[ "$MODEL" == *.gguf ]] || MODEL="qwen-image-2.1-${MODEL}.gguf"
+for f in "$MODEL" "$TE" "$VAE"; do
+  [[ -f "$MODEL_DIR/$f" ]] || {
+    echo "[FATAL] missing $MODEL_DIR/$f"
+    echo "## Available diffusion models:"
+    ls -1 "$MODEL_DIR" | grep -E '^qwen-image-2\.1-.*\.gguf$' || true
+    exit 1
+  }
+done
+
+CONTAINER_ARGS=(
+  run -it --rm --init
+  --name $NAME
+  -p 0.0.0.0:${PORT}:8799
+  -v "$MODEL_DIR":/models:ro
+  --entrypoint /sd-server
+)
+
+SD_ARGS=(
+  --diffusion-model /models/$MODEL
+  --llm /models/$TE
+  --vae /models/$VAE
+  --listen-ip 0.0.0.0
+  --listen-port 8799
+  --fa
+
+  # server defaults, per the unsloth model card
+  --cfg-scale 6.0
+  --sampling-method euler
+  --steps 20
+  -W 1024 -H 1024
+)
+[[ -n "$THREADS" ]] && SD_ARGS+=(-t $THREADS)
+[[ -n "$VERBOSE" ]] && SD_ARGS+=(-v)
+
+case $PLACEMENT in
+"cpu")
+  SD_ARGS+=(--backend diffusion=cuda0,te=cpu,vae=cpu)
+  ;;
+"mixed")
+  SD_ARGS+=(--backend cuda0 --offload-to-cpu)
+  ;;
+*)
+  echo "[FATAL] bad mode: $PLACEMENT (want cpu|mixed)"
+  exit 1
+esac
+
+echo
+echo "## Detected settings:
+PORT:  $PORT
+MODE:  $PLACEMENT
+MODEL: $MODEL
+TE:    $TE
+VAE:   $VAE
+NAME:  $NAME
+IMAGE: $IMAGE
+"
+
+function run_server() {
+  echo
+  echo "## Running $IMAGE"
+  echo "$RUNNER" "${CONTAINER_ARGS[@]}" "$IMAGE" "${SD_ARGS[@]}"
+  "$RUNNER" "${CONTAINER_ARGS[@]}" "$IMAGE" "${SD_ARGS[@]}"
+}

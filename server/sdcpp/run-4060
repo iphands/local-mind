@@ -1,0 +1,7 @@
+#!/bin/bash
+export PORT=8702          # 8701 = llama 4060; same GPU, don't run both
+export NAME=sd-server-4060
+source ./run-common "$@"
+
+CONTAINER_ARGS+=(--gpus '"device=1"')   # 4060, shows up as cuda0 in the container
+run_server
