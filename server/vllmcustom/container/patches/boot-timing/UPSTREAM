@@ -19,6 +19,8 @@
 #   Re-grepped present at 84bcbc6 (2026-10-03): only gpu_worker.py (sleep-mode
 #   memory pools around workspace / KV init) and gpu/model_runner.py (one new
 #   method) changed since 47de9d4; no hooked name or signature did.
+#   Re-grepped present at bdd31c3 (2026-10-04): none of the hooked files
+#   changed since 84bcbc6.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client

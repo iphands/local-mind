@@ -27,8 +27,8 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at 84bcbc6, 2026-10-03;
-#     was 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#   - main snapshot (VLLM_REF=main in ./build, pinned at bdd31c3, 2026-10-04;
+#     was 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
 #     and 1ee4be4, 2026-09-12):
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
@@ -103,8 +103,13 @@
 #     is just 12.0 (as before, when it was part of the stable-extension
 #     sources), and the MSA (fmha_sm100) pin moves; it only installs sources
 #     for runtime JIT, nothing compiles here. vllm_flash_attn.cmake is
-#     untouched, so the sm120 hook below
-#     still lands.
+#     untouched, so the sm120 hook below still lands.
+#     84bcbc6 -> bdd31c3 (2026-10-04, 12 commits): requirements/cuda.txt,
+#     requirements/build/ and CMake are unchanged, so only vllm-build/vllm-openai
+#     rebuild. vllm#59621 lifts the transformers ceiling to < 5.19.0, so the
+#     fresh vllm-openai resolve takes 5.18.0 again (an in-place dry-run in the
+#     g84bcbc6 image changes nothing, since its 5.17.0 still satisfies the range;
+#     forcing transformers to re-resolve moves only it, 5.17.0 -> 5.18.0).
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,

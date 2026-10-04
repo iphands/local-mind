@@ -25,20 +25,22 @@
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Last verified against main @ 84bcbc6 (2026-10-03, VLLM_MAIN_SHA in
+# Last verified against main @ bdd31c3 (2026-10-04, VLLM_MAIN_SHA in
 # container/versions.env at the time; first verified at 1ee4be4, 2026-09-12, re-checked at
-# 468663a, 826e300, 36f94d5, a44d7b5, 2b9b55c, 47de9d4 and on each bump): vllm/config/engram.py with
+# 468663a, 826e300, 36f94d5, a44d7b5, 2b9b55c, 47de9d4, 84bcbc6 and on each bump): vllm/config/engram.py with
 # cpu_offload, Qwen4ExpPLEPinnedHostEmbedding (in qwen4_exp/common/ since
 # vllm#57497) selected when it is set, Qwen4ExpForConditionalGeneration +
 # Qwen4ExpMTP in the registry, VLLM_GDN_DECODE_KERNEL still an env, the qwen3
 # reasoning parser and qwen3_coder tool parser still registered.
 # From 84bcbc6 on (vllm#57387) the config class is transformers' Qwen4ExpConfig
 # (transformers >= 5.16.1), not vLLM's, and the model code only accepts the
-# qwen_sparse_attention layer type. This checkpoint still says full_attention
-# (12 layers, indexer_n_heads set); checked with transformers 5.17.0 (what the
-# 84bcbc6 resolve picks): the config relabels them qwen_sparse_attention on
-# load and keeps text_config.ple_embedding_dtype as an attribute, so the
-# --hf-overrides below still lands.
+# relabelled QSA layer type. Both Flash-Next checkpoints (nvidia NVFP4 and
+# primitive-ai) still say full_attention (12 layers, indexer_n_heads set); the
+# config relabels them on load -- qwen_sparse_attention under transformers
+# 5.17.0, indexed_attention under 5.18.0 (what the bdd31c3 resolve picks; vLLM
+# accepts both since vllm#59621) -- and keeps text_config.ple_embedding_dtype as
+# an attribute, so the --hf-overrides below still lands. Checked for both
+# checkpoints under both versions.
 #
 # FIRST BOOT (2026-09-13): weights loaded (417 s), then the engine died in
 # ngram_embedding.py process_weights_after_loading with
@@ -265,7 +267,7 @@ PY
 fi
 
 # --block-size for the QSA key ring (upstream gap, vLLM 47de9d4; qsa_cache.py and
-# platforms/interface.py are unchanged at 84bcbc6, so still needed). With MTP,
+# platforms/interface.py are unchanged at bdd31c3, so still needed). With MTP,
 # qwen4_exp/common/qsa_cache.py sizes each QSA layer's key ring as
 # capacity = cr * ceil((cr + k) / cr)   (cr = indexer_compress_ratio, k = SPEC_TOKENS)
 # and asserts block_size % capacity == 0 -- its comment says the ring joins
