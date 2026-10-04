@@ -4,8 +4,9 @@
 # ./qwen3.8-flash-next/run-legacy is the upstream PR-branch image it replaced.
 #
 #   VLLM_REF=main ./container/build                # build the snapshot first (the VLLM_MAIN_SHA pinned in container/versions.env)
-#   ./qwen3.8-flash-next/run                       # primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8 (default)
-#   ./qwen3.8-flash-next/run <path-or-name>        # another Flash-Next checkpoint under models/vllm
+#   ./qwen3.8-flash-next/run                       # nvidia/Qwen3.8-Flash-Next-NVFP4 (default; MTP 3, humming MoE, fp8 KV, util 0.96)
+#   ./qwen3.8-flash-next/run <path-or-name>        # another Flash-Next checkpoint under models/vllm,
+#                                                  # e.g. primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8
 #
 # WHY A SEPARATE LAUNCHER FROM run-legacy
 #
@@ -92,9 +93,10 @@
 #     draft load (vllm#54788)" were both observed on the PR-branch image. Neither
 #     is refused here; both print a warning so a hang is not a mystery.
 #   - MoE backend: the card notes that on early-September nightlies the sm120
-#     NVFP4 selector already picks Marlin for the target model, so the default
-#     (empty = auto) may land on marlin here where it landed on FLASHINFER_CUTLASS
-#     there. Check the "moe_backend" line in the boot log.
+#     NVFP4 selector already picks Marlin for the target model, so auto
+#     (MOE_BACKEND=) may land on marlin here where it landed on FLASHINFER_CUTLASS
+#     there. Check the "moe_backend" line in the boot log. The default is
+#     humming (with MTP 3, fp8 KV and util 0.96), the daily-driver set.
 #   - Memory: the table is now PINNED (page-locked) host memory, not anonymous.
 #     Pinned pages cannot be swapped or reclaimed, and the allocation happens in
 #     the engine worker during weight load rather than in a side process, so a
@@ -116,9 +118,10 @@
 #   EXECUTOR=mp ...                                # --distributed-executor-backend (default EMPTY = vLLM's choice; mp was PR-image-only)
 #   SPEC_TOKENS=0 ./qwen3.8-flash-next/run         # MTP off (default 3)
 #   BLOCK_SIZE=64 / BLOCK_SIZE= ...                # force --block-size / pass none (default auto: only when the QSA ring needs it, see below)
-#   MOE_BACKEND=marlin ...                         # force it either way (see above)
+#   MOE_BACKEND=marlin / MOE_BACKEND= ...          # force another backend / auto (default humming; see above)
 #   ATTN_BACKEND=flashinfer ...                    # default EMPTY = let vLLM pick
-#   KV_FP8=1 ...                                   # --kv-cache-dtype fp8 (A/B only)
+#   KV_FP8=0 ...                                   # BF16 KV cache (default 1 = --kv-cache-dtype fp8)
+#   GPU_MEM_UTIL=0.955 ...                         # the card value (default 0.96)
 #   VISION=0 ...                                   # --language-model-only (drops the ViT)
 #   MAX_NUM_SEQS=36 MAX_MODEL_LEN=32768 ...        # the card's exact measured config
 #   IMAGE_TAG=cu1321-sm120-main ...                # the MOVING snapshot tag (newest VLLM_REF=main build) instead of the VLLM_MAIN_SHA lookup
@@ -158,22 +161,22 @@ fi
 vllm_image
 
 # shellcheck disable=SC2034  # read by resolve_model in common/_model-lib.sh
-DEFAULT_MODEL=primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8   # relative to MODEL_ROOT (./models/vllm)
+DEFAULT_MODEL=nvidia/Qwen3.8-Flash-Next-NVFP4   # relative to MODEL_ROOT (./models/vllm)
 resolve_model "${1:-}"
 
 PORT=${PORT:-8700}
 ATTN_BACKEND=${ATTN_BACKEND-}                    # EMPTY = vLLM auto-select
-MOE_BACKEND=${MOE_BACKEND:-}                     # empty = auto (may already be marlin on main; see header)
+MOE_BACKEND=${MOE_BACKEND-humming}               # EMPTY = auto (may already be marlin on main; see header)
 NVFP4_BACKEND=${NVFP4_BACKEND:-}                 # --linear-backend; the linear layers here are FP8, so leave it
-SPEC_TOKENS=${SPEC_TOKENS:-0}                    # MTP speculative tokens; 3 = card optimum on the PR image; 0 = off
+SPEC_TOKENS=${SPEC_TOKENS:-3}                    # MTP speculative tokens; 3 = card optimum on the PR image; 0 = off
 BLOCK_SIZE=${BLOCK_SIZE-auto}                    # auto = --block-size lcm(16, QSA ring) only when needed; a number = forced; EMPTY = none
-GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.955}              # card value; the Mamba-block budget was measured at it
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.96}               # 0.955 = card value (the Mamba-block budget was measured at it)
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}           # native; the PR image needed <=135168 beside the MTP draft head
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-8}                 # see ./qwen3.8-flash-next/run-legacy
 MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-8192}
 CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-}               # e.g. FULL_AND_PIECEWISE (A/B)
 FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-}     # 1 = FlashInfer autotuning during warmup (A/B)
-KV_FP8=${KV_FP8:-}                               # 1 = --kv-cache-dtype fp8
+KV_FP8=${KV_FP8-1}                               # 1 = --kv-cache-dtype fp8; 0 or EMPTY = BF16
 VISION=${VISION:-1}                              # 0 = --language-model-only
 PLE_OFFLOAD=${PLE_OFFLOAD:-1}                    # 1 = --engram-config cpu_offload (the single-GPU path)
 PATCH_PLE=${PATCH_PLE:-1}                        # mount patches/ple-ct-ignore over the image's ngram_embedding.py (see header)
@@ -385,7 +388,7 @@ VLLM_ARGS+=(
 [[ "$PLE_OFFLOAD" != "0" ]] && VLLM_ARGS+=( --engram-config '{"cpu_offload": true}' )
 [[ -n "$HF_OVERRIDES" ]] && VLLM_ARGS+=( --hf-overrides "$HF_OVERRIDES" )
 [[ -n "$EXECUTOR" ]] && VLLM_ARGS+=( --distributed-executor-backend "$EXECUTOR" )
-[[ -n "$KV_FP8" ]] && VLLM_ARGS+=( --kv-cache-dtype fp8 )
+[[ -n "$KV_FP8" && "$KV_FP8" != "0" ]] && VLLM_ARGS+=( --kv-cache-dtype fp8 )
 [[ "$VISION" == "0" ]] && VLLM_ARGS+=( --language-model-only )
 # SPEC_TOKENS=0 disables MTP entirely (clean no-speculation baseline); else add it.
 [[ "$SPEC_TOKENS" != "0" ]] && VLLM_ARGS+=( --speculative-config '{"method":"mtp","num_speculative_tokens":'"$SPEC_TOKENS"'}' )
