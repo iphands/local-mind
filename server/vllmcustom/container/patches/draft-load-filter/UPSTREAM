@@ -12,7 +12,10 @@
 # 47de9d4 (2026-10-01; weight_utils and default_loader unchanged, mtp.py and
 # model.py only lost the mamba_cache_mode=="all" guard (vllm#58997) and gained
 # warmup / mm-norm hooks -- _remap_mtp_weight_name and the "mtp.": None
-# mapper entry are untouched):
+# mapper entry are untouched) and at 84bcbc6 (2026-10-03; weight_utils and
+# default_loader unchanged, mtp.py and model.py only moved to transformers'
+# Qwen4Exp config classes (vllm#57387) -- _remap_mtp_weight_name and the
+# "mtp.": None mapper entry are untouched):
 #   vllm.model_executor.model_loader.weight_utils
 #       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
 #                               safetensors_weights_iterator resolves it as a

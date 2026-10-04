@@ -16,6 +16,9 @@
 #   Re-grepped present at 47de9d4 (2026-10-01): entry.py, renderers/base.py,
 #   core.py, core_client.py, gpu_worker.py, gpu/model_runner.py and
 #   kernel_warmup.py changed since 2b9b55c; every hooked name is still defined.
+#   Re-grepped present at 84bcbc6 (2026-10-03): only gpu_worker.py (sleep-mode
+#   memory pools around workspace / KV init) and gpu/model_runner.py (one new
+#   method) changed since 47de9d4; no hooked name or signature did.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client
