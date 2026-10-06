@@ -27,8 +27,8 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at bdd31c3, 2026-10-04;
-#     was 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#   - main snapshot (VLLM_REF=main in ./build, pinned at b6d8e8a, 2026-10-06;
+#     was bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
 #     and 1ee4be4, 2026-09-12):
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
@@ -110,6 +110,20 @@
 #     fresh vllm-openai resolve takes 5.18.0 again (an in-place dry-run in the
 #     g84bcbc6 image changes nothing, since its 5.17.0 still satisfies the range;
 #     forcing transformers to re-resolve moves only it, 5.17.0 -> 5.18.0).
+#     bdd31c3 -> b6d8e8a (2026-10-06, 124 commits): requirements/cuda.txt,
+#     common.txt and build/ are unchanged (in-place dry-run: no changes), so
+#     only vllm-build/vllm-openai rebuild. Build-side: vllm#48962 moves
+#     DeepGEMM (e1f418c -> 1e1842a, still built for 12.0f) from per-Python
+#     pybind _C.so to one TORCH_LIBRARY _C_extension.abi3.so, built by
+#     DeepGEMM's own `setup.py build_ext` (a C++-only CUDAExtension; needs
+#     wheel/setuptools/ninja/torch, all in this stage; its git-clean check falls
+#     back to a +local version). python_api.cpp still reaches deep_jit's
+#     utils/exception.hpp (via backend/cuda/*.hpp), so the libdw-dev step below
+#     stays. A maintainer pushed a revert branch for #48962 the same day (no PR
+#     or reason yet) -- if vllm-build fails in DeepGEMM, that is the suspect.
+#     setup.py drops the optional PyO3 tool-parser Rust extension (vllm#59744;
+#     no Rust toolchain needed, as before) and keeps flashinfer-jit-cache out of
+#     the wheel's Requires-Dist (vllm#60052; layer 1 installs it from /wheels).
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,

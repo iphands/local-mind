@@ -7,6 +7,7 @@
 #   ./qwen3.8-flash-next/run                       # nvidia/Qwen3.8-Flash-Next-NVFP4 (default; MTP 3, humming MoE, fp8 KV, util 0.96)
 #   ./qwen3.8-flash-next/run <path-or-name>        # another Flash-Next checkpoint under models/vllm,
 #                                                  # e.g. primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8
+#                                                  # (does NOT boot on vLLM 042ab03 or later; see below)
 #
 # WHY A SEPARATE LAUNCHER FROM run-legacy
 #
@@ -25,9 +26,9 @@
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Last verified against main @ bdd31c3 (2026-10-04, VLLM_MAIN_SHA in
+# Last verified against main @ b6d8e8a (2026-10-06, VLLM_MAIN_SHA in
 # container/versions.env at the time; first verified at 1ee4be4, 2026-09-12, re-checked at
-# 468663a, 826e300, 36f94d5, a44d7b5, 2b9b55c, 47de9d4, 84bcbc6 and on each bump): vllm/config/engram.py with
+# 468663a, 826e300, 36f94d5, a44d7b5, 2b9b55c, 47de9d4, 84bcbc6, bdd31c3 and on each bump): vllm/config/engram.py with
 # cpu_offload, Qwen4ExpPLEPinnedHostEmbedding (in qwen4_exp/common/ since
 # vllm#57497) selected when it is set, Qwen4ExpForConditionalGeneration +
 # Qwen4ExpMTP in the registry, VLLM_GDN_DECODE_KERNEL still an env, the qwen3
@@ -41,6 +42,14 @@
 # accepts both since vllm#59621) -- and keeps text_config.ple_embedding_dtype as
 # an attribute, so the --hf-overrides below still lands. Checked for both
 # checkpoints under both versions.
+# primitive-ai does NOT boot from vLLM 042ab03 on (vllm#59533, 2026-10-05):
+# qkv_proj now also packs indexer.index_qk_proj, and that checkpoint stores
+# q/k/v_proj in FP8 but ignores the indexer ('re:.*indexer.*', BF16), so
+# compressed-tensors refuses at model init: "Found different quantization
+# schemes for the shards of ...qkv_proj". The nvidia checkpoint (the default)
+# has all four BF16, in the MTP layer too, and is unaffected. No upstream fix
+# yet; serve primitive-ai from an older image, e.g.
+# IMAGE_TAG=cu1321-sm120-main-vllm0.32.0.dev20261004-gbdd31c3.
 #
 # FIRST BOOT (2026-09-13): weights loaded (417 s), then the engine died in
 # ngram_embedding.py process_weights_after_loading with
@@ -267,7 +276,7 @@ PY
 fi
 
 # --block-size for the QSA key ring (upstream gap, vLLM 47de9d4; qsa_cache.py and
-# platforms/interface.py are unchanged at bdd31c3, so still needed). With MTP,
+# platforms/interface.py still do not fold it in at b6d8e8a, so still needed). With MTP,
 # qwen4_exp/common/qsa_cache.py sizes each QSA layer's key ring as
 # capacity = cr * ceil((cr + k) / cr)   (cr = indexer_compress_ratio, k = SPEC_TOKENS)
 # and asserts block_size % capacity == 0 -- its comment says the ring joins

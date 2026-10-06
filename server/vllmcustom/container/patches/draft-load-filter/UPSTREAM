@@ -17,7 +17,11 @@
 # Qwen4Exp config classes (vllm#57387) -- _remap_mtp_weight_name and the
 # "mtp.": None mapper entry are untouched) and at bdd31c3 (2026-10-04; only
 # model.py changed, to accept transformers 5.18's indexed_attention layer
-# type (vllm#59621); load_weights and the mapper are untouched):
+# type (vllm#59621); load_weights and the mapper are untouched) and at
+# b6d8e8a (2026-10-06; only model.py changed: qkv_proj's packed mapping gains
+# indexer.index_qk_proj (vllm#59533), remapped inside the QSA module's own
+# load_weights after the filter has run; _remap_mtp_weight_name and the
+# "mtp.": None mapper are untouched):
 #   vllm.model_executor.model_loader.weight_utils
 #       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
 #                               safetensors_weights_iterator resolves it as a

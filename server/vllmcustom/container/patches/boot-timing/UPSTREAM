@@ -21,6 +21,9 @@
 #   method) changed since 47de9d4; no hooked name or signature did.
 #   Re-grepped present at bdd31c3 (2026-10-04): none of the hooked files
 #   changed since 84bcbc6.
+#   Re-grepped present at b6d8e8a (2026-10-06): core.py, core_client.py,
+#   gpu_worker.py, gpu/model_runner.py and kernel_warmup.py changed since
+#   bdd31c3; no hooked name or signature did (only the unhooked profile()).
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client
