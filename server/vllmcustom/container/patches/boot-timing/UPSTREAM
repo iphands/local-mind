@@ -24,6 +24,11 @@
 #   Re-grepped present at b6d8e8a (2026-10-06): core.py, core_client.py,
 #   gpu_worker.py, gpu/model_runner.py and kernel_warmup.py changed since
 #   bdd31c3; no hooked name or signature did (only the unhooked profile()).
+#   Re-grepped present at 187a0eb (2026-10-10): entry.py, app_state.py,
+#   renderers/base.py, core.py, core_client.py, gpu_worker.py, gpu/model_runner.py
+#   and kernel_warmup.py changed since b6d8e8a; every hooked name is still defined
+#   (gpu_worker.py only gained a warn_if_flashinfer_kernels_missing() call in
+#   init_device, vllm#58765). test_boot_timing.py passes.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client

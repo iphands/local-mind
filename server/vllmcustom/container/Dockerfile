@@ -27,8 +27,8 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at b6d8e8a, 2026-10-06;
-#     was bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#   - main snapshot (VLLM_REF=main in ./build, pinned at 187a0eb, 2026-10-10;
+#     was b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
 #     and 1ee4be4, 2026-09-12):
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
@@ -124,6 +124,29 @@
 #     setup.py drops the optional PyO3 tool-parser Rust extension (vllm#59744;
 #     no Rust toolchain needed, as before) and keeps flashinfer-jit-cache out of
 #     the wheel's Requires-Dist (vllm#60052; layer 1 installs it from /wheels).
+#     b6d8e8a -> 187a0eb (2026-10-10, 259 commits): torch 2.13.0 / torchaudio
+#     2.11.0 / torchvision 0.28.0 / flashinfer 0.7.0.post1 and requirements/build/
+#     are unchanged, so torch/torchaudio/flashinfer layers are reused and only
+#     vllm-build/vllm-openai rebuild. requirements/cuda.txt drops flashinfer-cubin
+#     and the flashinfer.ai/whl --extra-index-url (vllm#58765, `vllm
+#     download-kernels`). Nothing here depended on that line: flashinfer-build and
+#     vllm-openai install the cubin wheel themselves, from their own
+#     --extra-index-url, and the wheel's Requires-Dist never carried it. The inline
+#     comments in those two RUNs that say cuda.txt pins the cubin are now
+#     historical; they are left as written so the RUN text (and the layer cache)
+#     does not change. The new startup warning (warn_if_flashinfer_kernels_missing)
+#     stays quiet: the image has flashinfer-python, -cubin and -jit-cache all at
+#     0.7.0.post1. Runtime resolve: an in-place dry-run changes nothing;
+#     vllm#60381 lifts the transformers ceiling to < 5.20.0, so the fresh
+#     vllm-openai resolve takes 5.19.0 (forcing transformers to re-resolve in the
+#     gb6d8e8a image moves only it, 5.18.0 -> 5.19.0; both Flash-Next checkpoints
+#     load under 5.19.0 with their 12 QSA layers relabelled indexed_attention).
+#     CMake: vllm#60259 makes GCC >= 13 a hard error for CUDA builds (DeepGEMM and
+#     DeepSelect use C++20 <format>); this image's ubuntu24.04 gcc is 13.3.0.
+#     vllm#60402 drops Python 3.10 (we run 3.12) and builds spinloop / fs_io_C
+#     unconditionally (they were already built on 3.12). vllm_flash_attn.cmake and
+#     every external-project pin are untouched, so the sm120 hook below still
+#     lands, and no CUDA source was added.
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,

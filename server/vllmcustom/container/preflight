@@ -41,9 +41,12 @@ reqs=$(git -C "$SRC_DIR/vllm" show "$VLLM_REF:requirements/cuda.txt" 2>/dev/null
 }
 
 # Strip trailing comments (`torchvision==0.28.0 # Required for phi3v ...`).
+# `|| true`: a dist vLLM does not pin makes grep exit 1, which pipefail + set -e would
+# turn into a silent exit of the whole script; check() reports it as "not pinned".
+# (flashinfer-cubin since vLLM 187a0eb, vllm#58765.)
 pin() {
   printf '%s\n' "$reqs" | sed -e 's/[[:space:]]*#.*//' -e 's/[[:space:]]*$//' \
-    | grep -E "^$1==" | head -1 | sed "s/^$1==//"
+    | grep -E "^$1==" | head -1 | sed "s/^$1==//" || true
 }
 
 check() { # $1=dist  $2=our value  $3=consequence if it differs
