@@ -49,8 +49,8 @@ NVFP4_BACKEND=${NVFP4_BACKEND:-cutlass}          # default cutlass = bench-faste
 # gpu_model_runner.execute_model. Decode here is bandwidth-bound on expert weights,
 # which is why speculation is the only knob that moves: every kernel backend tested
 # landed inside 1.4% of each other.
-SPEC_TOKENS=${SPEC_TOKENS:-3}                    # MTP speculative tokens
-GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.90}
+SPEC_TOKENS=${SPEC_TOKENS:-6}                    # MTP speculative tokens
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.85}
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}
 # 3 would queue the 4th of 4 concurrent requests, so the box would look like it
 # stops scaling at 3. Measured at 8: 451 tok/s aggregate at concurrency 4 vs 158
