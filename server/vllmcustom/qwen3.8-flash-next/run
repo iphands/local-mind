@@ -107,7 +107,7 @@
 #     NVFP4 selector already picks Marlin for the target model, so auto
 #     (MOE_BACKEND=) may land on marlin here where it landed on FLASHINFER_CUTLASS
 #     there. Check the "moe_backend" line in the boot log. The default is
-#     humming (with MTP 3, fp8 KV and util 0.96), the daily-driver set.
+#     humming (with MTP 3, fp8 KV and util 0.95), the daily-driver set.
 #   - Memory: the table is now PINNED (page-locked) host memory, not anonymous.
 #     Pinned pages cannot be swapped or reclaimed, and the allocation happens in
 #     the engine worker during weight load rather than in a side process, so a
@@ -132,7 +132,10 @@
 #   MOE_BACKEND=marlin / MOE_BACKEND= ...          # force another backend / auto (default humming; see above)
 #   ATTN_BACKEND=flashinfer ...                    # default EMPTY = let vLLM pick
 #   KV_FP8=0 ...                                   # BF16 KV cache (default 1 = --kv-cache-dtype fp8)
-#   GPU_MEM_UTIL=0.955 ...                         # the card value (default 0.96)
+#   KV_NVFP4=1 / KV_NVFP4=4over6 ...              # --kv-cache-dtype nvfp4 / nvfp4_4over6, overrides KV_FP8 (EXPERIMENTAL: this model's QSA rejects it, see below)
+#   KV_SKIP_MTP=1 ...                              # under KV_FP8/KV_NVFP4, keep the MTP layer's own KV cache BF16 (see below; default off)
+#   DRAFT_SAMPLE=probabilistic ...                 # MTP draft_sample_method (default EMPTY = vLLM's greedy; see below)
+#   GPU_MEM_UTIL=0.955 ...                         # the card value (default 0.95)
 #   VISION=0 ...                                   # --language-model-only (drops the ViT)
 #   MAX_NUM_SEQS=36 MAX_MODEL_LEN=32768 ...        # the card's exact measured config
 #   IMAGE_TAG=cu1321-sm120-main ...                # the MOVING snapshot tag (newest VLLM_REF=main build) instead of the VLLM_MAIN_SHA lookup
@@ -179,15 +182,18 @@ PORT=${PORT:-8700}
 ATTN_BACKEND=${ATTN_BACKEND-}                    # EMPTY = vLLM auto-select
 MOE_BACKEND=${MOE_BACKEND-humming}               # EMPTY = auto (may already be marlin on main; see header)
 NVFP4_BACKEND=${NVFP4_BACKEND:-}                 # --linear-backend; the linear layers here are FP8, so leave it
-SPEC_TOKENS=${SPEC_TOKENS:-3}                    # MTP speculative tokens; 3 = card optimum on the PR image; 0 = off
+SPEC_TOKENS=${SPEC_TOKENS:-4}                    # MTP speculative tokens; 3 = card optimum on the PR image; 0 = off
 BLOCK_SIZE=${BLOCK_SIZE-auto}                    # auto = --block-size lcm(16, QSA ring) only when needed; a number = forced; EMPTY = none
-GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.96}               # 0.955 = card value (the Mamba-block budget was measured at it)
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.95}               # 0.955 = card value (the Mamba-block budget was measured at it)
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}           # native; the PR image needed <=135168 beside the MTP draft head
-MAX_NUM_SEQS=${MAX_NUM_SEQS:-8}                 # see ./qwen3.8-flash-next/run-legacy
-MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-8192}
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-4}                  # see ./qwen3.8-flash-next/run-legacy
+MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-4096}
 CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-}               # e.g. FULL_AND_PIECEWISE (A/B)
 FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-}     # 1 = FlashInfer autotuning during warmup (A/B)
 KV_FP8=${KV_FP8-1}                               # 1 = --kv-cache-dtype fp8; 0 or EMPTY = BF16
+KV_NVFP4=${KV_NVFP4:-}                           # 1 = --kv-cache-dtype nvfp4; 4over6 = nvfp4_4over6; overrides KV_FP8 (see the KV_NVFP4 note below)
+KV_SKIP_MTP=${KV_SKIP_MTP:-1}                    # 1 = MTP layer(s) skip fp8 KV (--kv-cache-dtype-skip-layers)
+DRAFT_SAMPLE=${DRAFT_SAMPLE:-}                   # greedy | probabilistic; EMPTY = vLLM default (greedy)
 VISION=${VISION:-1}                              # 0 = --language-model-only
 PLE_OFFLOAD=${PLE_OFFLOAD:-1}                    # 1 = --engram-config cpu_offload (the single-GPU path)
 PATCH_PLE=${PATCH_PLE:-1}                        # mount patches/ple-ct-ignore over the image's ngram_embedding.py (see header)
@@ -325,6 +331,66 @@ if [[ "$SPEC_TOKENS" == "1" ]]; then
   echo "## WARNING: SPEC_TOKENS=1 hung the PR-branch image at boot (engine blocked in shm_broadcast). Watch for a silent stall."
 fi
 
+# Draft-acceptance knobs (both off by default; A/B them).
+# KV_SKIP_MTP: --kv-cache-dtype fp8 also quantizes the MTP layer's own QSA KV.
+# vllm#60023 (4ff028d, 2026-10-05) made QSA honor --kv-cache-dtype-skip-layers
+# and measured the drafter's fp8 KV costing acceptance at depth (GB10, NVFP4,
+# K=6, greedy: accept length 3.215 all fp8, 3.473 with only the MTP layer BF16,
+# 3.504 all BF16; ~7% of the KV pool). MTP layers are numbered from
+# text_config.num_hidden_layers (Qwen4ExpMTP.mtp_start_layer_idx; 48 here),
+# so the indices are read from config.json rather than hard-coded.
+#
+# KV_NVFP4: picks --kv-cache-dtype nvfp4 (or nvfp4_4over6) and wins over KV_FP8.
+# EXPERIMENTAL, and expected to FAIL at engine init on this model: the QSA
+# attention backend only accepts auto/bfloat16/fp8/fp8_e4m3
+# (models/qwen4_exp/nvidia/qsa.py: supported_kv_cache_dtypes, and the impl
+# constructor raises "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache").
+# vllm#60452 (NVFP4 KV + XQA on SM12x) only touches the FlashInfer backend, which
+# the QSA layers do not use. The knob is here so the flag reaches vLLM unchanged
+# once QSA grows NVFP4 support. Warn, don't refuse: the engine decides.
+KV_DTYPE=""
+case "$KV_NVFP4" in
+  "")      [[ -n "$KV_FP8" && "$KV_FP8" != "0" ]] && KV_DTYPE=fp8 ;;
+  1)       KV_DTYPE=nvfp4 ;;
+  4over6)  KV_DTYPE=nvfp4_4over6 ;;
+  0)       [[ -n "$KV_FP8" && "$KV_FP8" != "0" ]] && KV_DTYPE=fp8 ;;
+  *) echo "KV_NVFP4 must be 1, 4over6 or empty (got '$KV_NVFP4')"; exit 1 ;;
+esac
+if [[ "$KV_DTYPE" == nvfp4* ]]; then
+  [[ -n "$KV_FP8" && "$KV_FP8" != "0" ]] && echo "## KV_NVFP4=$KV_NVFP4 overrides KV_FP8 (using --kv-cache-dtype $KV_DTYPE)."
+  echo "## WARNING: --kv-cache-dtype $KV_DTYPE: this model's QSA backend only supports BF16/FP8 KV; expect NotImplementedError at engine init."
+fi
+KV_SKIP_ARG=()
+if [[ "$KV_SKIP_MTP" == "1" ]]; then
+  if [[ -z "$KV_DTYPE" ]]; then
+    echo "## KV_SKIP_MTP=1 ignored: the KV cache is already BF16 (KV_FP8 off)."
+  elif [[ "$SPEC_TOKENS" == "0" ]]; then
+    echo "## KV_SKIP_MTP=1 ignored: MTP is off (SPEC_TOKENS=0)."
+  else
+    _mtp_layers=$(python3 - "$MODEL_ROOT/$MODEL" <<'PY'
+import json, pathlib, sys
+cfg = json.load(open(pathlib.Path(sys.argv[1]) / "config.json"))
+t = cfg.get("text_config") or cfg
+start, n = t["num_hidden_layers"], t.get("mtp_num_hidden_layers", 1)
+print(" ".join(str(i) for i in range(start, start + n)))
+PY
+    ) || { echo "MTP layer index lookup failed"; exit 1; }
+    read -ra KV_SKIP_ARG <<< "$_mtp_layers"
+    echo "## KV skip: MTP layer(s) $_mtp_layers keep a BF16 KV cache (--kv-cache-dtype-skip-layers)"
+  fi
+fi
+# DRAFT_SAMPLE: vLLM drafts greedily by default (draft_sample_method "greedy":
+# argmax, one-hot draft probs in rejection sampling), so at temperature 0.95 a
+# draft is accepted with ~the target's probability of that argmax token.
+# "probabilistic" samples drafts at the request temperature and uses the full
+# draft logits in the ratio test (more GPU memory). Until vllm#56724 lands the
+# drafts ignore the request's top_k/top_p, so draws outside top_k=20 get rejected.
+case "$DRAFT_SAMPLE" in
+  ""|greedy|probabilistic) ;;
+  *) echo "DRAFT_SAMPLE must be greedy or probabilistic (got '$DRAFT_SAMPLE')"; exit 1 ;;
+esac
+[[ -n "$DRAFT_SAMPLE" && "$SPEC_TOKENS" == "0" ]] && echo "## DRAFT_SAMPLE=$DRAFT_SAMPLE ignored: MTP is off (SPEC_TOKENS=0)."
+
 # The table is 95.4 GB of PINNED host memory, allocated in the engine worker
 # during weight load. Warn, don't refuse: the kernel decides.
 _avail_gb=$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo)
@@ -399,14 +465,18 @@ VLLM_ARGS+=(
 [[ "$PLE_OFFLOAD" != "0" ]] && VLLM_ARGS+=( --engram-config '{"cpu_offload": true}' )
 [[ -n "$HF_OVERRIDES" ]] && VLLM_ARGS+=( --hf-overrides "$HF_OVERRIDES" )
 [[ -n "$EXECUTOR" ]] && VLLM_ARGS+=( --distributed-executor-backend "$EXECUTOR" )
-[[ -n "$KV_FP8" && "$KV_FP8" != "0" ]] && VLLM_ARGS+=( --kv-cache-dtype fp8 )
+[[ -n "$KV_DTYPE" ]] && VLLM_ARGS+=( --kv-cache-dtype "$KV_DTYPE" )
+(( ${#KV_SKIP_ARG[@]} )) && VLLM_ARGS+=( --kv-cache-dtype-skip-layers "${KV_SKIP_ARG[@]}" )
 [[ "$VISION" == "0" ]] && VLLM_ARGS+=( --language-model-only )
 # SPEC_TOKENS=0 disables MTP entirely (clean no-speculation baseline); else add it.
-[[ "$SPEC_TOKENS" != "0" ]] && VLLM_ARGS+=( --speculative-config '{"method":"mtp","num_speculative_tokens":'"$SPEC_TOKENS"'}' )
+_spec='{"method":"mtp","num_speculative_tokens":'"$SPEC_TOKENS"
+[[ -n "$DRAFT_SAMPLE" ]] && _spec+=',"draft_sample_method":"'"$DRAFT_SAMPLE"'"'
+_spec+='}'
+[[ "$SPEC_TOKENS" != "0" ]] && VLLM_ARGS+=( --speculative-config "$_spec" )
 [[ -n "$BLOCK_ARG" ]] && VLLM_ARGS+=( --block-size "$BLOCK_ARG" )
 nvfp4_backend_args
 vllm_extra_args
 
 echo
-echo "## Running $CONTAINER  (attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS block=${BLOCK_ARG:-auto} load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0, PLE table pinned in host RAM via --engram-config)"
+echo "## Running $CONTAINER  (attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS${DRAFT_SAMPLE:+/$DRAFT_SAMPLE}${KV_SKIP_ARG[*]:+ kv-bf16-layers=${KV_SKIP_ARG[*]}} block=${BLOCK_ARG:-auto} load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0, PLE table pinned in host RAM via --engram-config)"
 vllm_launch
