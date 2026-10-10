@@ -23,6 +23,8 @@ CONTAINER_ARGS=(
   -v ${ROOT}/opencode/container_data/.bash_history:/home/iphands/.bash_history:rw
   -v ${HOME}/prog:/home/iphands/prog:rw
   -v ${HOME}/.gitignore:/home/iphands/.gitignore:ro
+  -v ${HOME}/.claude/skills:/home/iphands/.claude/skills:ro
+  -v ${ROOT}/opencode/container_data/claude_transcripts:/home/iphands/.claude/transcripts:rw
 
   -v /mnt/noir/scratch:/mnt/noir/scratch:ro
 
