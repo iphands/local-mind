@@ -516,9 +516,12 @@ Preflight flags it precisely because the build won't.
   creates the directory root-owned, and the uid-1000 serve then dies `EACCES` on its
   first cache write.
   Every docker call goes through `${DOCKER[@]}` (`sudo -n docker` by default; `DOCKER=docker`
-  on a host where you are in the `docker` group), and the launcher probes `${DOCKER[@]} version`
-  once before anything else, because a dead socket or a lost NOPASSWD rule otherwise surfaces
-  as `Image … not found` — which sends you to rebuild 12 GB for a socket problem.
+  on a host where you are in the `docker` group) — `container/build`, the launchers and, since
+  Plan 01 T6, `container/archs` too, which is the command the gate's arch check runs and which
+  therefore no longer needs a hand-written `sudo -n` in front of it. `container/push` is the one
+  script still calling bare `docker`. Probing first matters because a dead socket or a lost
+  NOPASSWD rule otherwise surfaces as `Image … not found` — which sends you to rebuild 12 GB for
+  a socket problem.
   `./container/build` follows the same contract now (Plan 01 T5): it refuses to run as root,
   checks that every path it will write is writable by *you* — the four source trees and the
   staged contexts, not just their parent — probes the socket, and only then starts. Order

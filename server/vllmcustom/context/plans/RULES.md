@@ -228,16 +228,25 @@ set -a; . container/versions.env; . container/.last-build; set +a
 WANT=${WANT:-$VLLM_MAIN_SHA}
 [ "$VLLM_REF" = "$WANT" ] && echo "last-build == $WANT" || echo "FAIL last=$VLLM_REF want=$WANT"
 sudo -n docker images --filter "label=ai.vllmcustom.vllm.ref=$WANT" -q | sort -u | wc -l
-sudo -n ./container/archs "$IMAGE:$VTAG"      # minutes of cuobjdump; no GPU, no model
+./container/archs "$IMAGE:$VTAG"           # minutes of cuobjdump; no GPU, no model; as yourself
 ```
 Compare **image IDs** (`-q`), not tags, and require exactly one: a rebuild of the same sha retags,
 so a tag alone proves nothing, and a multi-line filter result makes any string compare arbitrary.
 In the arch table the only tolerated non-120 entries are the documented Marlin PTX fallbacks and
 the deliberately empty `_vllm_fa3_C` stub; `sm_80` SASS under `_vllm_fa2_C` means the fetch patch
-stopped applying and is a **fail**. `container/archs` and `container/push` call bare `docker`, which
-you are not grouped for — every docker line in this gate needs `sudo -n`. The launchers do not: as
-of Plan 01 T1 they invoke `${DOCKER[@]}` (`sudo -n docker` by default) and **refuse to run under
-sudo**, so a gate step that shells out to `./qwen/run` must be run as the invoking user.
+stopped applying and is a **fail**. `container/archs` goes through `${DOCKER[@]}` as of Plan 01 T6
+(`sudo -n docker` by default, `DOCKER=docker` where the account is grouped), so step 5 runs it
+**bare** — and putting `sudo -n` in front of it is not merely redundant but harmful: sudo's
+`env_reset` drops your `DOCKER`, the script falls back to its sudo default, root is authorized on
+this host, and the step goes green while exercising none of T6. A silently un-executed gate step is
+worse than a failing one. `container/push` is the script still calling bare `docker` (deferred to
+Follow-ups), so every **raw** docker line in this gate keeps its `sudo -n` — the `docker images`
+line above, step 6's `docker ps`, step 7's `docker image inspect`. Raw lines stay literal on
+purpose: the gate is pasted shell with no array parsed, and `${DOCKER[@]}` expands to *nothing* in
+a fresh interactive shell, turning the line into `images --filter …`. The launchers do not call
+bare docker: as of Plan 01 T1 they invoke `${DOCKER[@]}` (`sudo -n docker` by default) and **refuse
+to run under sudo**, so a gate step that shells out to `./qwen/run` must be run as the invoking
+user.
 
 **6. Runtime / measurement tier — NOT part of the per-commit gate** (owner decision, 2026-10-13:
 a model reload is too heavy to demand at every task boundary). It runs only when a plan task names

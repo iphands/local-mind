@@ -6,9 +6,65 @@
 #
 #   ./container/archs                       # iphands/vllm-blackwell:latest
 #   ./container/archs iphands/vllm-blackwell:cu1321-sm120
+#   DOCKER=docker ./container/archs         # only needed where the account IS in the docker
+#                                           # group; the default is 'sudo -n docker', the same
+#                                           # contract container/build and common/_run-lib.sh use
+#
+# Read-only: cuobjdump inside the image, nothing written on the host or in it — so no root
+# guard here, unlike the launchers. Takes minutes; Ctrl-C is safe, though without a TTY the
+# CLI does not forward SIGINT and the read-only container keeps running until it finishes
+# (--rm collects it; `sudo -n docker ps` shows it). Do not prefix this script with `sudo -n`:
+# env_reset drops DOCKER, so it would silently take the sudo path regardless of what you set.
 set -euo pipefail
 IMAGE=${1:-${IMAGE:-iphands/vllm-blackwell}:${IMAGE_TAG:-latest}}
-docker run --rm --entrypoint bash "$IMAGE" -c '
+
+# Same DOCKER contract as common/_run-lib.sh and container/build: a plain string split on
+# spaces, `sudo -n docker` by default, `DOCKER=docker` where the account is grouped. Until
+# Plan 01 T6 this script called bare `docker`, which is why gate step 5 carried a hand-written
+# `sudo -n` in front of it. Byte-identical to the copy in container/build on purpose — see
+# context/pitfalls.md for why the predicate tests for a/A anywhere (`@a` answers with attribute
+# FLAGS, not a type letter: an exported plain string reports `x`). Note `DOCKER=` (empty) takes
+# the default; the zero-word check below only catches whitespace-only values.
+if [[ -n ${DOCKER+set} && ${DOCKER@a} == *[aA]* ]]; then
+  echo "## DOCKER must be a plain string (DOCKER='sudo -n docker'), not an array." >&2
+  exit 1
+fi
+IFS=' ' read -r -a DOCKER <<< "${DOCKER:-sudo -n docker}"
+if (( ${#DOCKER[@]} == 0 )); then
+  echo "## DOCKER is set but holds no words; use DOCKER=docker or unset it." >&2
+  exit 1
+fi
+
+# Probe anyway, even though a DEAD socket makes `docker run` fail instantly with "Cannot
+# connect" and this script is read-only: a WEDGED dockerd accepts the connect and never
+# answers, `docker run` has no client-side timeout, and the banner below says "minutes" — so a
+# wedge would be indistinguishable from a healthy slow start. Same reasoning as
+# common/_run-lib.sh:86. tail never `| head` (the SIGPIPE/pipefail/141 trap, context/pitfalls.md).
+_probe_rc=0
+_probe=$(timeout 15 "${DOCKER[@]}" version 2>&1) || _probe_rc=$?
+if (( _probe_rc != 0 )); then
+  {
+    printf '## docker is not reachable via %s — stopping before a minutes-long run.\n' "${DOCKER[*]}"
+    tail -3 <<<"$_probe" | sed 's/^/##   it said: /'
+    printf '##   reproduce: %s version\n' "${DOCKER[*]}"
+    # The exit code already says which failure this is; `if (( ))` is errexit-safe, a bare
+    # `(( ))` in this brace group would abort on its own false branch.
+    if (( _probe_rc == 124 )); then
+      printf '##   exit 124: killed at the 15 s limit — dockerd is wedged, not down.\n'
+    else
+      printf '##   exit %d: a dead socket says "Cannot connect"; 127 means DOCKER points at nothing.\n' \
+        "$_probe_rc"
+    fi
+  } >&2
+  exit 1
+fi
+
+# Identity line, on stderr so stdout stays a pure parseable table for `| tail -3` and for the
+# gate's sm_ greps — which is why this line deliberately contains no sm_ tokens. Without it the
+# table is anonymous: nothing in the output says which image was inspected.
+echo "## inspecting $IMAGE via ${DOCKER[*]} — every compiled .so through cuobjdump: minutes. Read-only." >&2
+
+"${DOCKER[@]}" run --rm --entrypoint bash "$IMAGE" -c '
 sp=/opt/venv/lib/python3.12/site-packages
 summ() { cuobjdump --list-elf "$1" 2>/dev/null | grep -oE "sm_[0-9a-z]+" | sort | uniq -c | awk "{printf \"%s x%s  \", \$2, \$1}"; }
 ptx()  { cuobjdump --list-ptx "$1" 2>/dev/null | grep -oE "sm_[0-9a-z]+" | sort -u | tr "\n" " "; }
