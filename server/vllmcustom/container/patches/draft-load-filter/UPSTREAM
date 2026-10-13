@@ -30,7 +30,9 @@
 # df6c7ad (2026-10-13; model.py +102/-22 and mtp.py +42/-2, both from the Qwen4Exp
 # Sequence-Parallelism work (vllm#56322) -- _remap_mtp_weight_name (mtp.py:97, called
 # at :473) and orig_to_new_substr={"mtp.": None} (model.py:925, :1128) are still
-# defined and appear on no +/- line, so the mapper is untouched):
+# defined and appear on no +/- line, so the mapper is untouched) and at 698e79f
+# (2026-10-13; none of the four hooked files changed since df6c7ad -- weight_utils,
+# default_loader, mtp.py and model.py are all byte-identical over the window):
 #   vllm.model_executor.model_loader.weight_utils
 #       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
 #                               safetensors_weights_iterator resolves it as a

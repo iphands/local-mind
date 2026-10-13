@@ -155,8 +155,8 @@ re-check its `requirements/cuda.txt` when you do. What differs from the release 
 | runtime deps (from PyPI) | — | + `instanttensor`, cutlass-dsl 4.7.1, quack 0.6.5, transformers ≥ 5.10.4, `xgrammar==0.2.7` (was a range), `humming-kernels[cu13]==0.1.16` (0.1.12 at `468663a`, 0.1.15 at `826e300`), and via flashinfer 0.7.0 `nccl-extensions` / `nccl4py>=0.4.1`; the full `36f94d5` `requirements/cuda.txt` resolves against torch 2.13.0 (`uv pip install --dry-run` in the g468663a image, 2026-09-24; torch stays 2.13.0) |
 | system packages | — | **`libdw-dev`** in vllm-build, **`libdw1`** in vllm-openai: vllm#56876 repinned DeepGEMM (built for sm120) to the `vllm-project` fork, whose `deep_jit` submodule includes `<elfutils/libdwfl.h>` and `dlopen`s `libdw.so.1` for stack traces. Deliberately not in `base`, so torch/flashinfer layers stay cached |
 | new CUDA extensions | — | `_deepselect_C` (10.0f only → empty target on sm120, nothing compiled); FlashMLA repinned, still 9.0/10.x only |
-| vllm-flash-attention commit | `06bdd47` | `9cd61de` (was `506341a`) — `CMakeLists.txt` byte-identical, the sm120 patch applies (dry-run 2026-09-22) |
-| wheel version | `0.29.0` | `0.31.0.dev<commit date>+g<sha7>` (`VLLM_NEXT_VERSION`; 0.31 because the v0.30.0 release branch was cut at `f2aad6a`, 2026-09-15, before this sha) (`VLLM_VERSION_OVERRIDE`; `vllm --version` names the commit) |
+| vllm-flash-attention commit | `06bdd47` | `b273a02` (was `9cd61de`, before that `506341a`) — `CMakeLists.txt` byte-identical across the move, the sm120 patch applies (re-run against the new tag, 2026-10-13) |
+| wheel version | `0.29.0` | `0.33.0.dev<commit date>+g<sha7>` (`VLLM_NEXT_VERSION`; 0.33 because the v0.32.0 release branch was cut at `fe341a5`, 2026-10-12, before this sha) (`VLLM_VERSION_OVERRIDE`; `vllm --version` names the commit) |
 
 The snapshot is tagged `cu1321-sm120-main` and `cu1321-sm120-main-vllm<next>.dev<commit date>-g<sha7>`
 (the `+` of the PEP 440 local segment is not tag-legal, so it becomes `-`) and **never** `:latest`,

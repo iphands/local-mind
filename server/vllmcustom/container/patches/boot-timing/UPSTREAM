@@ -34,6 +34,10 @@
 #   is still defined (12 hooked attrs grep to 15 defs at both shas). The kernel_warmup
 #   change is vllm#60684's MSA warmup for MiniMax-M3, not a hooked attr.
 #   test_boot_timing.py passes.
+#   Re-grepped present at 698e79f (2026-10-13): of the hooked files only
+#   renderers/base.py changed since df6c7ad, and warmup_mm still greps to 1 at both
+#   shas; every other hooked file is byte-identical over the window.
+#   test_boot_timing.py passes.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client

@@ -27,8 +27,8 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at df6c7ad, 2026-10-13;
-#     was 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#   - main snapshot (VLLM_REF=main in ./build, pinned at 698e79f, 2026-10-13;
+#     was df6c7ad, 2026-10-13, 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
 #     and 1ee4be4, 2026-09-12):
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
@@ -167,6 +167,32 @@
 #     this file builds -- whether the new msa_warmup / q8kv4_prefill_adapter import
 #     cleanly on sm_120 is unverified until a boot. vllm_flash_attn.cmake is
 #     untouched, so the sm120 hook below still lands.
+#     df6c7ad -> 698e79f (2026-10-13, 64 commits): torch 2.13.0 / torchaudio
+#     2.11.0 / torchvision 0.28.0 / flashinfer 0.7.0.post1 and requirements/ are
+#     unchanged -- cuda.txt, common.txt and build/cuda.txt are byte-identical over
+#     the window, and the only requirements file that moves at all is the unused
+#     kv_connectors_cu12.txt -- so torch/torchaudio/flashinfer layers are reused
+#     and only vllm-build/vllm-openai rebuild. Two external pins moved, so this
+#     vllm-build does real work: vllm-flash-attention 9cd61de -> b273a02, whose
+#     CMakeLists is byte-identical and where the sm120 patch below was run against
+#     the new tag (exit 0, both anchors matching exactly once), and DeepGEMM
+#     1e1842a -> a981d8e (the fork's 26/09/30 2.8.1-based tag; #21 moves it from
+#     TORCH_LIBRARY to TORCH_STABLE_LIBRARY, so _C recompiles and the install list
+#     gains deep_gemm/locality_domain.py). libdw handling is unchanged: both tags
+#     pin the same deep_jit (3732a3b), whose exception.hpp still includes
+#     <elfutils/libdwfl.h> and dlopens libdw.so.1, so the libdw-dev / libdw1 steps
+#     below stay. One CUDA source is added -- csrc/moe/fused_globalize_align_block_size.cu
+#     joins VLLM_MOE_EXT_SRC with no arch guard and no arch-specific intrinsics, so
+#     it compiles for 12.0 like the rest of _moe_C; whether it runs on sm_120 is
+#     unverified until a boot. Runtime resolve: the in-place dry-run changes nothing
+#     and no requirement line moved, so there is nothing to --upgrade-package; a
+#     *fresh* resolve takes 7 newer packages (cuda-pathfinder 1.8.3, filelock 4.1.1,
+#     instanttensor 0.2.2, markupsafe 3.0.4, numpy 2.3.5, nvidia-cudnn-frontend
+#     1.31.0, starlette 1.8.0) -- that is the index ageing since the image was
+#     built, not this snapshot moving them, since the pins are identical. Only
+#     cudnn-frontend is on the Flash-Next path; nvidia-cutlass-dsl stays 4.8.0
+#     (still PyPI's latest) and transformers stays 5.19.0, under which both
+#     checkpoints load with their 12 QSA layers relabelled indexed_attention.
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,
