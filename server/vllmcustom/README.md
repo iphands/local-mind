@@ -16,6 +16,9 @@ qwen3.8-flash-next/  run — Qwen3.8-Flash-Next 180B on one GPU from OUR image b
 muse/        run — Muse Glimmer, plus patches/ (the shims it mounts at /vllm-patches)
 bench/       the measurement harness: bench, the sweeps, lib/, and all run artifacts
 scripts/     one-off probes and per-model sweeps (mostly Muse)
+context/     living memory — read context/AGENTS.md before new work
+  plans/     the plan system: RULES.md is authoritative (gate, commit format, plan/tracker shape),
+             SERIES.md holds the plan list, status and the north star
 notes/ plans/ vendor/ models/
 ```
 

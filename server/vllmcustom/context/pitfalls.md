@@ -1,0 +1,96 @@
+# Pitfalls & Gotchas — vllmcustom
+
+Every bug, gotcha and trap — **especially anything that took more than one attempt to fix.** Read
+before new work. Tag entries that actually bit `[OBSERVED YYYY-MM-DD]`; untagged entries are
+hazards seeded from reading, not incidents.
+
+Cross-cutting entries also go up to `../../../context/pitfalls.md`; project-specific ones stay here.
+(The parent context is empty as of 2026-10-13 — create it only once a lesson is genuinely not about
+this project.)
+
+# Extensionless scripts are Python, and `bash -n` passes them silently [OBSERVED 2026-10-13]
+
+## Problem
+`bench/bench`, `bench/make-test-convo`, `scripts/decode-rate` and `scripts/qwen-conc-report` have no
+extension and are Python. A file set built by glob or by "everything executable" therefore fails in
+**both** directions: `bash -n bench/bench` dies with
+`syntax error near unexpected token \`0,'\` (a false failure that looks like real breakage), while
+`bash -n` on a `.py` file that *is* bash-free exits 0 and reports a clean bill of health it never
+checked (a false pass — this one is the dangerous direction, because the gate goes green).
+
+## How to avoid
+Classify by **shebang on line 1**, never by extension, glob or mode. Gate step 1 of
+`context/plans/RULES.md` does exactly that. Exclude `*.pth` — those are import shims
+(`container/patches/*/*.pth`), not lintable source. And always print the count: a file list that
+comes back empty makes every loop in the gate pass.
+
+## Sources
+- vllmcustom: `bench/bench`, `scripts/decode-rate` (shebang `#!/usr/bin/env python3`)
+- vllmcustom: `container/patches/*.pth`
+
+# Docker reaches nothing without sudo, and it fails as "no images" [OBSERVED 2026-10-13]
+
+## Problem
+`docker images` as the user prints
+`permission denied while trying to connect to the docker API at unix:///var/run/docker.sock`.
+Worse, several call sites swallow it: `require_image` in `common/_run-lib.sh` ends in
+`docker image inspect … || { echo "Image … not found. Run ./container/build first."; exit 1; }`,
+so an access failure is reported as a **missing image** and sends you off to rebuild an image that
+is sitting right there.
+
+## How to avoid
+Prefix every docker call from an agent shell with `sudo -n`. When a script claims an image is
+missing, confirm with `sudo -n docker images` before believing it — the error text is about the
+socket, not the tag.
+
+## Sources
+- vllmcustom: `common/_run-lib.sh` (`require_image`), `container/archs`, `container/push`
+
+# `PREFLIGHT_ONLY=1 ./container/build` force-checks-out trees the owner edits by hand [REPO]
+
+## Problem
+The documented "checks the pins in seconds" command first runs `sync_src` on all four trees under
+`$BUILD_DIR/src`, each ending in `git checkout --force` plus a recursive submodule update. The
+README explicitly invites working in those trees ("Patch or `git checkout` in place to iterate"),
+so the routine-looking check destroys uncommitted hand edits — outside the repo, so `git status`
+never warned you.
+
+## How to avoid
+For a routine pin check use the read-only form (gate step 4): export `SRC_DIR` and the version vars
+from `container/versions.env` and call `./container/preflight` directly — it reads
+`git show "$VLLM_REF:requirements/cuda.txt"`, which needs no checkout. Run the `container/build`
+form only as part of a pin change, and only after this prints nothing
+(`--untracked-files=no` because flashinfer legitimately carries an untracked `3rdparty/nccl/`):
+
+```bash
+for t in pytorch flashinfer vllm torchaudio; do
+  git -C /mnt/noir/scratch/ai/vllm/build/src/$t status --porcelain --untracked-files=no \
+    | sed "s/^/DIRTY $t: /"
+done
+```
+
+## Sources
+- vllmcustom: `container/build` (`sync_src`), `container/preflight`
+- vllmcustom: `README.md` § *Caching — why builds aren't from scratch every time*
+
+# Shared launcher state breaks silently, not loudly [REPO, seeded from reading]
+
+## Problem
+`common/_run-lib.sh` documents three rules whose violation produces **no error**: appending anything
+after `env_extra_args` / `vllm_extra_args` makes the caller's `ENV_EXTRA` / `EXTRA_ARGS` override
+stop working with no message; calling a core builder after appending throws the additions away; and
+a bare (non-`--`) token appended to `VLLM_ARGS` is swallowed as an extra `--served-model-name`
+alias rather than read as a positional. Every one of those yields a server that starts and is
+configured differently from what the launcher appears to say.
+
+## How to avoid
+Follow the call order printed at the top of that file. The cheap proof is the launcher's own echo:
+`vllm_launch` prints the complete `docker … serve …` line before running it, so diff that line
+against the same launcher's output on `HEAD` after any plumbing change. The strongest version of
+this check is a `DRY_RUN=1` short-circuit in `vllm_launch` and a golden-file diff — proposed as the
+first plan, not yet true.
+
+## Sources
+- vllmcustom: `common/_run-lib.sh` (header comment, `vllm_launch`)
+
+---
