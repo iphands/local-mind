@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 33% complete (2/6 tasks)
+- Status: 50% complete (3/6 tasks)
 - Start date: 2026-10-13
 - Plan: `context/plans/02_no_sudo.md`
 - Evidence: the gate's own stdout (`/tmp/gate_all.sh` captured per run), the `grep -ci sudo` counts
@@ -41,7 +41,7 @@
 |---|------|---------------|--------|-------|
 | 1 | T1: launcher lib stops knowing about privilege | `common/_run-lib.sh` | done | `bash -n` clean; guard matrix refuse/refuse/pass/pass; no `:-sudo`, `sudo -n`, `sudo chown` or `ALLOW_ROOT` left. Root refusal kept, reworded |
 | 2 | T2: build contract, remedies, BuildKit pin | `container/build` | done | 9 hunks. `PREFLIGHT_ONLY=1 CTX_DIR=` → rc 0 unprivileged; `DOCKER='sudo -n docker'` → rc 1 before any write; uid-0 refusal proven by `docker run -u 0` on a `:ro` mount; `env`-pinned `DOCKER_BUILDKIT=1` |
-| 3 | T3: archs follows | `container/archs` | pending | Replace the wrapper warning, do not delete it |
+| 3 | T3: archs follows | `container/archs` | done | Guard matrix refuse/refuse/pass; `./container/archs nonexistent:nope` → rc 125 (docker's own "no such image"), so it reaches `docker run` unprivileged. Wrapper warning replaced, not deleted |
 | 4 | T4: gate drops the sudo requirement | `context/plans/RULES.md` | pending | 7a slot re-filled, sweep unconditional |
 | 5 | T5: docs that assert the opposite | 6 files | pending | Ranked by how badly each misleads |
 | 6 | T6: full gate, harvest, close | `context/` | pending | Step 6 named-skipped: no runtime change |

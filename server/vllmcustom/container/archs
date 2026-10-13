@@ -6,32 +6,42 @@
 #
 #   ./container/archs                       # iphands/vllm-blackwell:latest
 #   ./container/archs iphands/vllm-blackwell:cu1321-sm120
-#   DOCKER=docker ./container/archs         # only needed where the account IS in the docker
-#                                           # group; the default is 'sudo -n docker', the same
+#   DOCKER=/path/to/wrapper ./container/archs # optional; default is plain 'docker', the same
 #                                           # contract container/build and common/_run-lib.sh use
 #
 # Read-only: cuobjdump inside the image, nothing written on the host or in it — so no root
 # guard here, unlike the launchers. Takes minutes; Ctrl-C is safe, though without a TTY the
 # CLI does not forward SIGINT and the read-only container keeps running until it finishes
-# (--rm collects it; `sudo -n docker ps` shows it). Do not prefix this script with `sudo -n`:
-# env_reset drops DOCKER, so it would silently take the sudo path regardless of what you set.
+# (--rm collects it; `docker ps` shows it). Do not wrap this script in anything that scrubs the
+# environment (`env -i`, a login shell, any privilege helper with env_reset): scrubbing drops
+# DOCKER, so the run silently falls back to the default instead of what you set — and a gate step
+# that runs the wrong command still exits 0, which is how a check stops being a check.
 set -euo pipefail
 IMAGE=${1:-${IMAGE:-iphands/vllm-blackwell}:${IMAGE_TAG:-latest}}
 
-# Same DOCKER contract as common/_run-lib.sh and container/build: a plain string split on
-# spaces, `sudo -n docker` by default, `DOCKER=docker` where the account is grouped. Until
-# Plan 01 T6 this script called bare `docker`, which is why gate step 5 carried a hand-written
-# `sudo -n` in front of it. Byte-identical to the copy in container/build on purpose — see
-# context/pitfalls.md for why the predicate tests for a/A anywhere (`@a` answers with attribute
-# FLAGS, not a type letter: an exported plain string reports `x`). Note `DOCKER=` (empty) takes
-# the default; the zero-word check below only catches whitespace-only values.
+# Same DOCKER contract as common/_run-lib.sh and container/build: a plain string split on spaces,
+# plain `docker` by default, overridable for a wrapper. Until Plan 01 T6 this script called bare
+# `docker`, which is why gate step 5 carried a hand-written privilege prefix in front of it; Plan 02
+# made the default match what that step wanted anyway. Kept identical to the other two copies on
+# purpose — see context/pitfalls.md for why the predicate tests for a/A anywhere (`@a` answers with
+# attribute FLAGS, not a type letter: an exported plain string reports `x`). Note `DOCKER=` (empty)
+# takes the default; the zero-word check below only catches whitespace-only values.
 if [[ -n ${DOCKER+set} && ${DOCKER@a} == *[aA]* ]]; then
-  echo "## DOCKER must be a plain string (DOCKER='sudo -n docker'), not an array." >&2
+  echo "## DOCKER must be a plain string (DOCKER=docker), not an array." >&2
   exit 1
 fi
-IFS=' ' read -r -a DOCKER <<< "${DOCKER:-sudo -n docker}"
+IFS=' ' read -r -a DOCKER <<< "${DOCKER:-docker}"
 if (( ${#DOCKER[@]} == 0 )); then
   echo "## DOCKER is set but holds no words; use DOCKER=docker or unset it." >&2
+  exit 1
+fi
+# Whole-word match, so a wrapper legitimately named /opt/sudo-docker/bin/docker still passes.
+if [[ ' '"${DOCKER[*]}"' ' == *' sudo '* || ' '"${DOCKER[*]}"' ' == */sudo ]]; then
+  {
+    echo "## DOCKER names 'sudo'. This project does not use it — nothing here needs a privilege helper." >&2
+    echo "##   fix:    unset DOCKER      (the default is plain 'docker')" >&2
+    echo "##   wrapper? name it directly: DOCKER=/usr/local/bin/my-docker" >&2
+  } >&2
   exit 1
 fi
 
