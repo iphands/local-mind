@@ -372,7 +372,8 @@ recorded, not fatal); and in `convo` mode read **TG**, not TTFT (prefix caching)
 > Re-run the sweeps for trustworthy TG-vs-depth curves.
 
 ### Host tuning (outside the container)
-- `sudo nvidia-smi -pm 1` then set max power limit (`sudo nvidia-smi -pl <max>`).
+- Set persistence and the max power limit — a root operation, and this project uses no `sudo`, so:
+  `su -c "nvidia-smi -pm 1"` then `su -c "nvidia-smi -pl <max>"`.
   Note: single-stream **decode is memory-bandwidth-bound and memory clock is
   power-limit-invariant** on these SKUs, so this mostly helps prefill/TTFT — don't
   expect decode gains.
@@ -516,29 +517,32 @@ Preflight flags it precisely because the build won't.
   it cost a quarter-million warm files and bought nothing. **That sharing property is gone with
   it**: two users pointing `$CACHE_DIR` at the same directory now contend for one tree and the
   first to boot owns it. Give each user their own `CACHE_DIR=` if that ever becomes real here.
-  The launchers refuse to run under `sudo` for the same reason — a root-run launcher
+  The launchers refuse to run **privileged** for the same reason — a root-run launcher
   creates the directory root-owned, and the serve, pinned to uid 1000, then dies `EACCES` on its
   first cache write.
-  Every docker call goes through `${DOCKER[@]}` (`sudo -n docker` by default; `DOCKER=docker`
-  on a host where you are in the `docker` group) — `container/build`, the launchers and, since
-  Plan 01 T6, `container/archs` too, which is the command the gate's arch check runs and which
-  therefore no longer needs a hand-written `sudo -n` in front of it. `container/push` is the one
-  script still calling bare `docker`. Probing first matters because a dead socket or a lost
-  NOPASSWD rule otherwise surfaces as `Image … not found` — which sends you to rebuild 12 GB for
-  a socket problem.
+  Every docker call goes through `${DOCKER[@]}`, which defaults to plain `docker` — `container/build`,
+  the launchers and, since Plan 01 T6, `container/archs` too, which is the command the gate's arch
+  check runs and which therefore carries no prefix of any kind. `container/push` is the one
+  `container/` script still calling `docker` directly, which since Plan 02 is simply the same thing —
+  `bench/` and `scripts/*` do it too, see § *Notes / caveats*. Probing first
+  matters because a dead socket otherwise surfaces as `Image … not found` — which sends you to rebuild
+  12 GB for a socket problem.
   `./container/build` follows the same contract now (Plan 01 T5): it refuses to run as root,
   checks that every path it will write is writable by *you* — the four source trees and the
   staged contexts, not just their parent — probes the socket, and only then starts. Order
   matters: a root-owned `$SRC_DIR` discovered at the `docker build` line means four
   `checkout --force`s already mutated trees that are hand-editable by design and cannot be
-  recovered mid-checkout. It is the one guard in the project with an escape hatch
-  (`sudo env ALLOW_ROOT=1 ./container/build`), because a root *build* leaves fixable
-  ownership damage where a root *launcher* breaks the serve it is about to start; the hatch
-  silences the check only, and the next unprivileged run refuses again. Where a remedy is
-  printed it is copy-pasteable as-is and names the directory that is actually in the way
-  (with the `-n` dropped — that flag is for the script's own non-interactive sudo, never for
-  a command a human pastes), which is why the build refuses before it writes rather than
-  after: a fix you cannot run is not a fix.
+  recovered mid-checkout. Since Plan 02 this guard has **no escape hatch**: `ALLOW_ROOT` is deleted,
+  and exporting it makes the next `./container/build` print a line saying it does nothing. The hatch
+  never changed the damage — it
+  only silenced the check, and the writes still landed root-owned. Being blunt about one thing:
+  **"no sudo" is not "no privilege."** This repo runs `container/slice-setup` and `container/gc-setup`
+  under `su -c`, so a privileged invocation is one password away, and `_writable` cannot catch it — it
+  tests `-w`, which root satisfies by definition. That is precisely why the root refusal outlived the
+  sudo removal. Where a remedy is printed, it is one you can run as yourself where such a fix exists;
+  where none does the text says so and offers `su -c`, a `mv` aside, or a relocation — never a bare
+  `chown` on a directory you do not own, and never `rm -rf` into a root-owned tree. Which is why the
+  build refuses before it writes rather than after: a fix you cannot run is not a fix.
   `run-legacy` is the one launcher that serves as **root**, so it defaults to its own cache
   root, `/mnt/noir/scratch/ai/vllm/cache-legacy`: a root container writing into the shared tree
   would leave root-owned files that the ownership guard cannot see (it checks the leaf, which
@@ -551,7 +555,8 @@ Preflight flags it precisely because the build won't.
 - **The pre-split tree *is* the live tree now.** The six directories directly under `$CACHE_DIR`
   (`ccache`, `flashinfer`, `huggingface`, `torch`, `uv`, `vllm`) were written by root, because the
   containers ran as root before Plan 01. T1's `uid-1000` leaf orphaned them behind a cold empty
-  directory; T11 mounted them again and one `sudo chown -R iphands:iphands` took them back. They
+  directory; T11 mounted them again and one privileged `chown -R iphands:iphands` (a `sudo` run, as
+  the host then allowed; the same job today is `su -c "chown -R 1000 -- $CACHE_DIR"`) took them back. They
   are the warm cache, and **deleting them costs every model family a cold boot** — HF metadata
   re-downloads and FlashInfer re-JITs, 20-60 min per family. Census re-taken 2026-10-13 after the
   chown:
@@ -567,9 +572,10 @@ Preflight flags it precisely because the build won't.
   19× low. `du -sh` is worse than useless on this mount — it did not return in over ten minutes,
   which is why every figure here comes from `find`. Gate step 7e walks this same tree, unbounded,
   in about 11 s.
-  Two earlier versions of this paragraph are withdrawn. It used to say the tree was "abandoned…
-  removing it needs `sudo rm -rf`": after the inversion that command deletes the live cache, so the
-  sentence was a loaded foot-gun. It also pointed at `./container/cache-migrate` (T9), which copied
+  Two earlier versions of this paragraph are withdrawn, and appear here only to be retracted — they are
+  history, not instructions. It used to say the tree was "abandoned… removing it needs `sudo rm -rf`":
+  after the inversion that command deletes the live cache, so the sentence was a loaded foot-gun. It
+  also pointed at `./container/cache-migrate` (T9), which copied
   the tree into the per-uid leaf; once the leaf is gone the script would duplicate 35 GiB into a
   directory nothing reads, and `chown` does the real job in one metadata pass with no data movement.
   The script is deleted. Its measured cost stands as history: 205,953 files / 35.05 GiB, counted in
@@ -789,10 +795,13 @@ parallelism; if it brushes the ceiling, raise it.
   `run-legacy` is the exception — it appends `--user 0:0`, so `exec` there is still root.
 - **`bench/` and `scripts/` still call bare `docker`.** `bench/_bench-lib.sh`, `bench/bench-wrapper`,
   `bench/bench-context` and the `scripts/*` that shell out (plus `container/push`) use plain `docker` for
-  `logs`, `ps`, `rm`, `inspect` — and none of them reads `DOCKER`, so `DOCKER=docker` does nothing for
+  `logs`, `ps`, `rm`, `inspect` — and none of them reads `DOCKER`, so `DOCKER=` does nothing for
   them. They write no host files, so the run-as-uid-1000 contract above does not apply; what breaks is
   the error
-  reporting. On an ungrouped account a failed boot prints `NOT READY` with an **empty** `crash-*.log`,
-  because the denial goes to stderr and the redirect still creates the file. Until they route through
-  `${DOCKER[@]}` (Plan 02), run them with `sudo -n` or a PATH stub. `container/gc-setup` is deliberately
+  reporting. When the socket is unreachable a failed boot prints `NOT READY` with an **empty**
+  `crash-*.log`, because the denial goes to stderr and the redirect still creates the file. Since
+  Plan 02 they need no special handling at all: they call plain `docker`, exactly like every other
+  script now does, so they work precisely when the rest of the project works — and a `sudo` prefix
+  would no longer help even if one were installed. Routing them through `${DOCKER[@]}` would only buy
+  the crash-log error reporting, and stays a follow-up. `container/gc-setup` is deliberately
   excluded — it edits `/etc/docker/daemon.json` and is meant to run under `su -c`.

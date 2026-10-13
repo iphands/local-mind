@@ -100,7 +100,7 @@ is the entire plan.
 
 ### Why keep a root refusal in a project that forbids sudo
 
-Because the guard protects something unrecoverable and nothing else does. `container/build:313`
+Because the guard protects something unrecoverable and nothing else does. `container/build:354`
 runs `git checkout --force` on the four hand-editable trees; RULES.md:493 says a force-checkout in
 them "is destroying the owner's work"; `AGENTS.md` says a `checkout --force` in one of them "is not
 recoverable". `_writable` tests `-w`, which is always true for root, so it reports success on a tree
@@ -309,7 +309,9 @@ Expected: `PASS(7a rejects a sudo in DOCKER)` present in the output; no step FAI
 ### T5: Docs that currently assert the opposite
 
 **Files**: `AGENTS.md`, `README.md`, `context/distilled.md`, `context/pitfalls.md`,
-`context/plans/SERIES.md`, `repin.md`
+`context/plans/SERIES.md`, `repin.md`, plus two found during verification:
+`context/plans/NN_example_tracker.md` (the skeleton every future plan is copied from — it asserted the
+old sudo contract) and `context/AGENTS.md` (stale line-count pointer).
 
 **What to do**: Ranked by how badly each misleads — i.e. by whether an agent trusts it and then
 *acts* wrong. `README.md` § *Caching* first: it claims "the launchers refuse to run under `sudo`"
@@ -326,13 +328,18 @@ agent steps on it) and lose only the mitigation sentences.
 
 **Verify**:
 ```bash
-grep -rn -i 'sudo' --include='*.md' . | grep -v '^\./context/plans/01_\|^\./notes/\|^\./vendor/'
-grep -rn 'sudo -n\|sudo env\|sudo chown\|with `sudo\|run it with sudo\|DOCKER=.*sudo' \
-     --include='*.md' --include='AGENTS.md' . | grep -v '^\./context/plans/01_\|^\./notes/'   # → empty
+# Hunt INSTRUCTIONS and forbidden host-fact claims, not raw mentions.
+# Exclusions: context/plans/0[12]_ (they narrate the removal), notes/ (raw captures), vendor/.
+grep -rn 'sudo -n\|sudo env\|sudo chown\|sudo rm -rf\|sudo apt\|sudo nvidia\|with `sudo\|run it with sudo\|need `sudo\|none is installed\|none installed\|this box has no' \
+      --include='*.md' --include='*.sh' . \
+  | grep -v '^\./context/plans/0[12]_\|^\./notes/\|^\./vendor/'
 ```
-Expected: the first grep may still hit — every hit must be a sentence stating the project does **not**
-use sudo, or a dated historical note. The second grep hunts *instructions* and must print nothing.
-Counting matches is the wrong test: the refusal guard in three scripts necessarily contains the word.
+Expected: every surviving line is a **gate test input**, a **dated historical note**, or a
+**retraction** — that is 8 hits as of this writing, each self-labelled in place. The assertion is
+"nothing instructs a reader to run sudo", never "no file contains the word": a guard that refuses `sudo`
+must name it, so a zero-count test is unsatisfiable. The three host-fact patterns are here because the
+repo's own dated measurement records `sudo -n -l` → `(ALL) NOPASSWD: ALL`; asserting absence is a claim
+that measurement refutes.
 
 **Commit**: `[P2][T5][no-sudo] docs: socket is reached directly, privilege machinery gone`
 

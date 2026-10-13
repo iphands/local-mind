@@ -41,22 +41,37 @@ section**, which always stays last. Keep it dense.
 - Consequence: "add a check that the patches match upstream" is mostly a no-op here. The check that
   matters is `./container/archs` for the compiled extensions, and the launcher's own refusal.
 
-## This host reaches the docker socket through sudo, and its scripts do that themselves [LIVE 2026-10-13, amended 2026-10-13]
+## This project reaches the docker socket directly — it uses no privilege helper [LIVE 2026-10-13, amended 2026-10-13 (Plan 02)]
 
-- `docker info` as the user: `permission denied while trying to connect to the docker API at
-  unix:///var/run/docker.sock`. `sudo -n docker info` → `29.7.2`. The account is in groups
-  `iphands,sudo`, not `docker`.
-- The scripts that touch files reach the socket themselves: `container/build`, `container/archs` and
-  every launcher define a `DOCKER` array (`sudo -n docker` by default, honoured as `DOCKER=docker`) and
-  probe `docker version` before the first call that could misreport.
-- **Amended 2026-10-13 (Plan 01 T2/T5/T6/T8).** This entry used to say every script calls bare `docker`
-  and needs a `sudo -n` prefix from an agent shell. That is now false, and the consequence **inverted**:
-  prefixing one of those scripts with `sudo` *disables* the override — `env_reset` strips `DOCKER`
-  (`container/archs:16`) — and `container/build` plus every launcher refuse uid 0 outright. Still bare,
-  and none of them reads `DOCKER`, so `DOCKER=` does nothing for them: `container/push`,
-  `container/gc-setup` (runs under `su -c` by design), `bench/_bench-lib.sh`, `bench/bench-wrapper`,
-  `bench/bench-context` and the ten `scripts/*` that shell out to docker. What *is* still true
-  unprivileged is that raw docker fails here — `sudo -n docker images` remains the way to ask.
+- Socket ownership after the owner's host fix, measured 2026-10-13: `iphands:iphands 660` — owned by
+  the invoking uid, **not group-owned**, so there is no group to join and no re-login step. Plain
+  `docker version` returns `29.7.2` at rc 0 with no privilege of any kind.
+- **`sudo` is absent from the normal operating environment** and must not be expected: the documented
+  `VLLM_REF=main ./container/build` died on `timeout: failed to run command 'sudo': No such file or
+  directory` (exit 127). Two provenance warnings: the *agent's* container ships `/usr/sbin/sudo` and
+  `/usr/sbin/docker`, so never infer host facts from that shell; and Plan 01's tracker carries a dated
+  row measuring `sudo -n -l` → `(ALL) NOPASSWD: ALL`. Both were true of their own environment on the
+  same date. The durable statement is "this project uses no privilege helper", not "this box has no
+  sudo".
+- `container/build`, `container/archs` and every launcher define a `DOCKER` array defaulting to plain
+  `docker`, **refuse a value naming `sudo`**, and probe `docker version` before the first call that
+  could misreport why it did not. `container/build` also refuses uid 0, with no escape hatch.
+- **History, in order, because each version was once correct.** (1) Every script called bare `docker`
+  and an agent shell had to prefix it. (2) Plan 01 routed all of it through `${DOCKER[@]}`, default
+  `sudo -n docker`, and the consequence *inverted*: prefixing a script **disables** the override,
+  because `env_reset` drops `DOCKER`, so the script silently takes its own default — a gate step that
+  runs the wrong command and still exits 0. `container/build` and the launchers began refusing uid 0.
+  (3) **Plan 02 (2026-10-13) removed the sudo machinery entirely**: default is plain `docker`,
+  `ALLOW_ROOT` is deleted (and announces itself if set), the gate's raw docker lines lost their
+  prefix, and 7a's freed assertion slot now asserts the new guard. What survived from (2) is the shape
+  — `${DOCKER[@]}` everywhere, probe before first use, never run privileged — **and the root refusal**,
+  kept deliberately because `_writable` tests `-w`, which is always true for root, so nothing else in
+  the tree can catch a privileged run before it force-checks-out the four hand-editable trees.
+- Bare and not `DOCKER`-aware, unchanged: `container/push`, `bench/_bench-lib.sh`, `bench/bench-wrapper`,
+  `bench/bench-context`, the ten `scripts/*` that shell out. Since Plan 02 that is no longer a
+  difference worth tracking — plain `docker` is now what everything uses, so they work or fail exactly
+  when everything else does. The two root-side scripts remain `container/gc-setup` and
+  `container/slice-setup`, by design, both via `su -c`.
 
 ---
 

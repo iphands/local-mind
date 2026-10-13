@@ -43,7 +43,7 @@
 | 2 | T2: build contract, remedies, BuildKit pin | `container/build` | done | 9 hunks. `PREFLIGHT_ONLY=1 CTX_DIR=` → rc 0 unprivileged; `DOCKER='sudo -n docker'` → rc 1 before any write; uid-0 refusal proven by `docker run -u 0` on a `:ro` mount; `env`-pinned `DOCKER_BUILDKIT=1` |
 | 3 | T3: archs follows | `container/archs` | done | Guard matrix refuse/refuse/pass; `./container/archs nonexistent:nope` → rc 125 (docker's own "no such image"), so it reaches `docker run` unprivileged. Wrapper warning replaced, not deleted |
 | 4 | T4: gate drops the sudo requirement | `context/plans/RULES.md` | done | Full gate rc 0: 9 PASS / 3 named SKIP / 0 FAIL. `PASS(7a rejects a sudo in DOCKER)` + `PASS(7a left nothing root-owned)`. 7e still root-free (244,890 entries, 10 s) |
-| 5 | T5: docs that assert the opposite | 6 files | pending | Ranked by how badly each misleads |
+| 5 | T5: docs that assert the opposite | 8 files | done | Instruction-hunt clean: 8 surviving hits, each a gate test input, dated history, or a retraction. Reviewer-found defects all fixed: 4 banned host-fact claims, `README:525` "one script" contradiction, `AGENTS.md` socket mis-pointer, template constraint duplication |
 | 6 | T6: full gate, harvest, close | `context/` | pending | Step 6 named-skipped: no runtime change |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid`.
@@ -62,11 +62,16 @@
 | 2026-10-13 | step 5 `./container/archs` as run inside that gate | identity line reads `… via docker`; `_vllm_fa2_C 384M sm_120 x76`, no `sm_80` SASS | 1 | Step 5 prints no verdict token, so it was checked for its table — a silently un-executed step is the failure RULES.md names |
 | 2026-10-13 | `docker run --rm -u 0:0 -v $PWD:/repo:ro ./container/build` | `## REFUSED: running as root`, in-container rc 1, host repo unchanged | 1 | Proves the kept root guard fires before any write |
 | 2026-10-13 | `DOCKER_BUILDKIT=0` vs pinned `=1`, empty context, missing Dockerfile | legacy builder (`DEPRECATED: The legacy builder…`) vs BuildKit (`failed to solve`) | 1 | Confirms ambient `=0` reaches the CLI now the privilege helper is gone; justifies the `env` pin |
+| 2026-10-13 | `grep -rn 'none is installed\|this box has no'` over my own T5 text | 4 hits: `AGENTS.md:15`, `SERIES.md:67`, `README:375`, `distilled.md:44` heading | 5 | **Self-inflicted, found by neckbeard.** All four assert a host fact the 01 tracker's dated `sudo -n -l` row refutes, and that `02_no_sudo.md:146-148` explicitly bans. Reworded to "none is expected" / project-scoped |
+| 2026-10-13 | `grep -n 'systemctl restart docker' container/gc-setup` | `gc-setup:150` | 5 | hoodie's hazard is real: `AGENTS.md` pointed socket errors at § Caching, whose first imperative is `su -c gc-setup` — a script that restarts docker and kills live containers. `AGENTS.md` now answers the socket error inline and names `gc-setup` as **not** the fix |
+| 2026-10-13 | `grep -c 'docker\.sock' AGENTS.md README.md` | `0` and `0` before the fix | 5 | The auto-loaded file and the README never contained the string an agent would grep for, and `AGENTS.md`'s only `EACCES` was the cache-root failure — a false lead for a socket problem |
+| 2026-10-13 | `grep -n 'build:313'` vs `grep -n 'checkout --force' container/build` | cited `:313`; actual `git checkout --force` at `:354` (`sync_src`) | 5 | My citation slipped into the plan and this tracker; both corrected. Line numbers were shifted by T2's own added lines |
+| 2026-10-13 | instruction-hunt after all T5 fixes | 8 hits: `RULES.md:291` (gate input), `README:576` (retraction), `distilled:53,61` + `pitfalls:46,191,241,260` (dated history) | 5 | T5 acceptance. Every survivor is self-labelled in place; the shipped `→ empty` assertion was unsatisfiable and is replaced |
 
 ## Notes / Deviations
 
 - **Instruction vs. finding.** The literal instruction was "delete all root/sudo machinery". The
-  root half was NOT safe to delete: `container/build:313` force-checks-out four hand-editable trees,
+  root half was NOT safe to delete: `container/build:354` force-checks-out four hand-editable trees,
   RULES.md:493 calls that destroying the owner's work, and `_writable` (`:206`) tests `-w` — always
   true for root — so it reports success on the exact tree it is about to ruin. Owner decided
   (2026-10-13): keep a root refusal, purge all sudo wording. That is what T1-T3 implement.
@@ -121,6 +126,20 @@
   47) runs before any preflight/build invocation, so running the gate whole cannot repeat it.
 - Step 6 of the gate (boot a model) is named-skipped by design: no runtime behaviour changes. The
   tracker says so rather than pretending the box went green.
+- **T5 shipped a draft that broke this plan's own rule, and only review caught it.** Four lines I wrote
+  asserted "no `sudo` is installed" / "this box has no `sudo`" — the exact phrasing `02_no_sudo.md:146-148`
+  bans, and which the 01 tracker's dated `sudo -n -l` → `(ALL) NOPASSWD: ALL` row refutes. The failure mode
+  is instructive: I wrote the ban and then wrote the banned sentence in the highest-leverage file in the
+  repo (`AGENTS.md`, auto-loaded every session), because the grep I trusted hunted *command* shapes
+  (`sudo -n`, `sudo chown`) and a prose assertion matches none of them. Lesson kept where it bites: the
+  assertion in T5's Verify now hunts claims as well as commands, and the two remaining prose risks
+  (`distilled.md` heading, `README` host-tuning line) are named there. A doc sweep needs a grep for what
+  the docs *assert*, not just for what they *tell you to run*.
+- Two files joined T5 that the plan did not list, both found by running the Verify rather than by reading
+  the plan: `context/plans/NN_example_tracker.md` (the skeleton every future plan is copied from still
+  said "docker calls need `sudo -n`", which would have re-injected the deleted contract into every plan
+  written after this one) and `context/AGENTS.md` (claimed a README line count that T5's own edits
+  invalidated — now phrased without a number so it cannot go stale again).
 
 ## Follow-ups
 
@@ -131,3 +150,6 @@
 | Add a `container/diag` that prints socket owner:group/mode, `id -nG`, `DOCKER`, `DOCKER_HOST`, `docker version` rc, `EUID`, and the uid of each writable root | One pasteable block replaces the four separate advice blocks this plan had to keep | Backlog |
 | Report the true `SocketGroup` once the owner settles how the socket is provisioned | Socket is user-owned today (`660 iphands:iphands`); if it ever becomes group-owned the advice text in `_run-lib.sh` should read the group off the socket rather than assume | Backlog — do not speculatively implement |
 | Rootless-daemon audit | If `DOCKER_HOST` ever points at a rootless daemon, `--user 1000:1000` maps through subuid and Plan 01's cache contract changes shape entirely | Before any rootless switch, not before |
+| One-line precondition in README § Quick start: you must be able to open the docker socket | A cold reader's first command is `./container/build`, and nothing above it states the access precondition | Next README pass — hoodie (Plan 02 T5), deferred to keep T5 inside the sudo purge |
+| Reorder `repin.md:184-189` | It reads as "pass `DOCKER=docker` even though that is the default", which sounds pointless until the next sentence; the real point is the *literal string* is what makes the PATH stub run | Next `repin.md` touch — hoodie (Plan 02 T5) |
+| `## Symptom → section` table at the top of `pitfalls.md` | A grep for a quoted error string would land on the fix without reading 400+ lines; the socket entry already carries the exact text | Backlog — hoodie (Plan 02 T5) |

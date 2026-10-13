@@ -63,12 +63,15 @@ doesn't know it failed.)*
 
 - **`shellcheck` is not installed.** Gate step 2 reports `skip`, and a task that needs it is
   `blocked`, not `done`. It is the project's own bar already (`repin.md:181`).
-- **Run our docker scripts bare — no `sudo -n` prefix.** The account is not in the `docker` group and
-  the scripts handle that themselves through `${DOCKER[@]}`; prefixing one with `sudo` *defeats* it,
-  because `env_reset` drops your `DOCKER` (`container/archs:16`), and `container/build` plus every
-  launcher refuse uid 0 outright. Gate lines of **raw** docker keep `sudo -n`: outside those scripts
-  `${DOCKER[@]}` is unset, so a pasted one runs nothing. `container/push`, `bench/*` and `scripts/*`
-  are the scripts still calling bare `docker`.
+- **No `sudo` anywhere; everything runs as yourself over plain `docker`.** Nothing in this project
+  invokes a privilege helper and none is expected. `DOCKER` defaults to plain `docker` and stays
+  overridable with a wrapper *path*. Do not wrap a script in anything that scrubs the environment
+  (`env -i`, a login shell): that drops `DOCKER`, the run silently takes the default, and a gate step
+  that exercised the wrong command still exits 0. Gate lines of **raw** docker are bare too — since
+  Plan 02 the scripts and the raw lines say the same thing, so `permission denied` means your socket
+  access has not landed (`stat -c '%U:%G %a' /var/run/docker.sock`), not that a prefix is missing.
+  `container/push`, `bench/*` and `scripts/*` call bare `docker`; the only root-side scripts are
+  `container/slice-setup` and `container/gc-setup`, both invoked with `su -c`.
 - **`pytest`, `uv` and `rsync` are absent.** The four host patch tests are stdlib-only and run with
   `python3 <file>`.
 - **No model load in the per-commit gate** (owner decision 2026-10-13). The runtime tier is gate

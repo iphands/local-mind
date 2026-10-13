@@ -21,7 +21,7 @@ full before writing or executing a plan.
 | `high_level.md` | Why these pins and this shape, and what was rejected | Before touching the version set or adding a dependency |
 | `loop.md` | One research write-up: looped / recurrent-depth transformers in vLLM — what runs, what pays off, which model to test on | Before any looped-model or depth-recurrence work |
 | `../repin.md` | The runbook for moving `VLLM_MAIN_SHA` | **Before any pin change.** Follow it; do not paraphrase it |
-| `../README.md` | The dense source of truth. Read the section you need, not all 701 lines: § *sm120-only: what the build actually emits*, § *Preflight*, § *Caching*, § *Memory-capped builds*, § *Performance tuning*, § *Notes / caveats* | Before build, tuning, launcher or cache work |
+| `../README.md` | The dense source of truth. Read the section you need, not the whole file: § *sm120-only: what the build actually emits*, § *Preflight*, § *Caching*, § *Memory-capped builds*, § *Performance tuning*, § *Notes / caveats* | Before build, tuning, launcher or cache work |
 | `../container/patches/*/UPSTREAM`, `../muse/patches/*/UPSTREAM`, `../qwen3.8-flash-next/patches/*/UPSTREAM` | The convention, not a file list: each names the upstream file an overlay or `.diff` was derived from, and the ones that copy a file carry its content hash. They rotate on every repin | Before editing an overlay or a diff — the launcher refuses on a mismatch and says so |
 
 ## Where Findings Go <!-- hp:context-routing -->

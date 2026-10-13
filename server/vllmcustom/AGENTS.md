@@ -12,10 +12,16 @@ throughput. `README.md` is the detailed reference; this file is the working cont
 - `./qwen/run` · `./muse/run` · `./laguna/run` · `./qwen3.8-flash-next/run` serve on `:8700`
   (one model at a time, by design — that is why every bench finds the right server).
   `./bench/bench <label>` measures whatever is currently up.
-- **Never `sudo` our scripts — they carry their own.** The account is not in the `docker` group, and
-  `container/build`, `container/archs` and every launcher handle that internally via `${DOCKER[@]}`
-  (`sudo -n docker`; `DOCKER=docker` where grouped). A `sudo` prefix strips your `DOCKER` and the
-  guarded ones refuse uid 0. Still bare: `container/push`, `bench/`, `scripts/*`. README § Caching.
+- **Run everything as yourself — nothing here uses `sudo`, and none is expected.** `DOCKER` defaults to
+  plain `docker` and takes **one executable path**; a value naming `sudo` is refused. **Never wrap these
+  scripts in anything that scrubs the environment (`env -i`, a login shell): it drops `DOCKER`, the run
+  silently takes the default, and the gate step that exercised the wrong command still exits 0.**
+  `container/build`, `container/archs` and every launcher **refuse to run privileged**, with no escape
+  hatch since Plan 02: root is one `su -c` away and `-w` is always true for root, so the writability
+  preflight cannot catch it and the refusal outlived the sudo. Root-side steps are only
+  `container/slice-setup` and `container/gc-setup`, both via `su -c`. On `permission denied …
+  /var/run/docker.sock`, read the socket — `stat -c '%U:%G %a' /var/run/docker.sock` — and do **not** run
+  `gc-setup`: it restarts docker and kills live containers. README § Caching.
 - **The pre-commit gate is `context/plans/RULES.md` § Project gate, steps 1–5** — all of them
   model-free. Booting a model is step 6 and happens only when a task names it.
 

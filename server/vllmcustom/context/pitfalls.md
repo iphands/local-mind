@@ -28,7 +28,7 @@ comes back empty makes every loop in the gate pass.
 - vllmcustom: `bench/bench`, `scripts/decode-rate` (shebang `#!/usr/bin/env python3`)
 - vllmcustom: `container/patches/*.pth`
 
-# Docker reaches nothing without sudo, and it fails as "no images" [OBSERVED 2026-10-13]
+# A socket you may not open is reported as "no images", and it fails that way silently [OBSERVED 2026-10-13, amended 2026-10-13]
 
 ## Problem
 `docker images` as the user prints
@@ -39,11 +39,14 @@ so an access failure is reported as a **missing image** and sends you off to reb
 is sitting right there.
 
 ## How to avoid
-Ask the socket before believing any "image not found": `sudo -n docker images`. Note this trap is now
-**closed in code**, not just documented: since Plan 01 T2 the scripts carry their own prefix via
-`${DOCKER[@]}` and probe it at source time, printing docker's own last lines before anything can
-misreport. So `sudo`-prefixing one of those scripts is no longer the fix, it is the *bug* — `env_reset`
-strips your `DOCKER` and the guarded ones refuse uid 0. Raw read-only calls still want `sudo -n` here.
+Ask the socket before believing any "image not found": plain `docker images` — this project uses no
+privilege helper, so there is no prefix to add. The trap is **closed in code**, not just documented:
+the scripts route every call through `${DOCKER[@]}` and probe `docker version` before the first call
+that could misreport, printing docker's own last lines first. Two history notes, because both were
+true here at the time: under Plan 01 the default was `sudo -n docker` and *prefixing* a script was the
+bug, since `env_reset` stripped `DOCKER` and the script silently took its own default; since Plan 02
+there is no prefix to add and none to strip, so `permission denied` on any docker line means your
+socket access has not landed. Read `stat -c '%U:%G %a' /var/run/docker.sock` before assuming a group.
 
 ## Sources
 - vllmcustom: `common/_run-lib.sh` (`require_image`), `container/archs`, `container/push`
@@ -262,9 +265,12 @@ operation instead of from its edge cases.**
   for any unwritable path; when the owner uid is not 0 the real cause is a mode or a mistyped
   override, and the wrong diagnosis sends the reader off to fix sudoers. Print the uid, then branch
   the explanation on it.
-- Drop `-n` from a sudo you *print* but keep it in a sudo you *run*: the flag exists so an
-  in-script sudo can never hang, and a one-time fix is a human at a keyboard, who should get a
-  password prompt on a host with no NOPASSWD rule rather than a failure.
+- **Withdrawn by Plan 02 (2026-10-13): the `-n` rule.** This bullet used to read "drop `-n` from a sudo
+  you *print* but keep it in a sudo you *run*", on the logic that the flag stops an in-script sudo from
+  hanging while a human pasting a one-time fix should get a password prompt. There is no in-script sudo
+  left to apply it to. The principle underneath it survives and generalises: **print only remedies the
+  reader can actually run**, which is why `_writable` now offers `su -c`, a `mv` aside, or a relocation
+  instead of a `chown` on a directory they do not own.
 
 ## Sources
 - vllmcustom: `container/build` § "refuse a root run, then prove every path and the socket"
@@ -316,19 +322,26 @@ detect overwrites, compare content hashes; there is no ownership signal in one.
 
 ---
 
-# `sudo ./qwen/run` poisons the cache it is about to mount, and the serve dies minutes later [OBSERVED 2026-10-13]
+# Running a launcher privileged poisons the cache it is about to mount, and the serve dies minutes later [OBSERVED 2026-10-13, amended 2026-10-13]
 
 ## Problem
-Every launcher does `mkdir -p` on its cache leaf and then mounts it. Run it under `sudo` and that leaf is
-created **root-owned**, the container starts anyway (the mount itself succeeds), and the failure lands
-minutes later as `EACCES` from inside vLLM's first cache write — in a message that mentions neither sudo,
-nor ownership, nor the launcher. This is the trap the whole plan exists to close: half a fix (pin the
-container uid, keep launching with sudo) produces a *worse* bug than no fix at all.
+Every launcher does `mkdir -p` on its cache leaf and then mounts it. Run it **privileged** — via `su`,
+or from a root shell; no `sudo` is involved any more, and that changes nothing about this failure — and
+that leaf is created **root-owned**, the container starts anyway (the mount itself succeeds), and the
+failure lands minutes later as `EACCES` from inside vLLM's first cache write, in a message that names
+neither the privilege, nor the ownership, nor the launcher. This is the trap the whole plan exists to
+close: half a fix (pin the container uid, keep launching privileged) produces a *worse* bug than no fix
+at all.
 
 ## How to avoid
-Never sudo a launcher. The launchers now refuse a sudo'd start and `container/build` refuses uid 0
-(`ALLOW_ROOT=1` is its only escape, and it silences the *check*, not the damage). A poisoned tree is
-named by `find "$CACHE_DIR" -user root` and fixed once by `sudo chown -R 1000:1000 -- "$CACHE_DIR"`.
+Never run a launcher privileged. The launchers refuse uid 0, and so does `container/build` — now with
+**no escape hatch**: `ALLOW_ROOT` was deleted in Plan 02, and exporting it prints a line saying it does
+nothing. The refusal deliberately outlived the sudo removal, because `_writable` tests `-w`, which root
+satisfies by definition, so nothing else in the tree can catch a privileged run before it
+force-checks-out the four hand-editable trees. A poisoned tree is named by
+`find "$CACHE_DIR" -not -user 1000` and fixed once by `su -c "chown -R 1000:1000 -- $CACHE_DIR"`; with
+no root available there is **no privilege-free fix** — point `CACHE_DIR=` at a directory you own and
+pay the cold boot.
 Since Plan 01 T11 that path **is** the cache root, because the root is what gets mounted; the advice
 here used to insist the fix stay "bounded to the offending directory, never to the cache root", which
 belonged to the per-leaf mount and is withdrawn with it. Gate step 7e prints the command and its wording

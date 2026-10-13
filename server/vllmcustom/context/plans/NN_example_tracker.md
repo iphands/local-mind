@@ -14,8 +14,8 @@
 
 1. Read the project's root `AGENTS.md`/`CLAUDE.md` (and the parent's, in a sub-project),
    `context/plans/RULES.md` (in full), then `NN_name.md`.
-2. Environment: <env knobs the plan depends on (`SPEC_TOKENS`, `NVFP4_BACKEND`, `IMAGE_TAG`), and
-   the fact that docker calls need `sudo -n`>.
+2. Environment: <env knobs the plan depends on (`SPEC_TOKENS`, `NVFP4_BACKEND`, `IMAGE_TAG`), plus any
+   **Standing Constraint** in `SERIES.md` this plan touches — cite the bullet, do not restate it>.
 3. Ordering: <which task is next and why; constraints between tasks>.
 4. Commit per task as `[P<n>][T<n>][<topic>] <summary>`, with **this tracker's row in the same
    commit**.

@@ -182,10 +182,11 @@ bash -n qwen3.8-flash-next/run && shellcheck -x qwen3.8-flash-next/run
 ```
 
 Launcher args, with the final launch stubbed out (the new image isn't built yet, so point
-`IMAGE_TAG` at the old one). `DOCKER=docker` is load-bearing: the launcher calls `sudo -n docker`
-by default, and `sudo` resolves ahead of `PATH`, so without it the stub is skipped and the stubbed
-step boots the real model. The stub therefore has to answer `image inspect` itself rather than
-forward it — forwarding reaches the real socket, which refuses an ungrouped account.
+`IMAGE_TAG` at the old one). `DOCKER=docker` is still passed explicitly even though it is now the
+default: it pins this step to the fake docker on `PATH` rather than to whatever the default becomes
+next, and leaving `DOCKER` unset would let the launcher reach the real daemon. The stub therefore has
+to answer `image inspect` itself rather than forward it — forwarding reaches the real socket and
+answers with an image that is not the one under test.
 
 ```bash
 mkdir -p <scratchpad>/stub; cat > <scratchpad>/stub/docker <<'EOF'
@@ -196,12 +197,13 @@ exit 0
 EOF
 chmod +x <scratchpad>/stub/docker
 DOCKER=docker PATH=<scratchpad>/stub:$PATH IMAGE_TAG=${OLD_IMG#*:} ./qwen3.8-flash-next/run 2>&1 \
-  | grep -E '^## |^(sudo -n )?docker '
+  | grep -E '^## |^docker '
 ```
 
-The anchor accepts an optional privilege prefix since 2026-10-13: `vllm_launch` echoes whatever
-`$DOCKER` expands to, so `^docker ` only matches under `DOCKER=docker` and silently matches
-nothing otherwise — a filter that passes having verified nothing.
+The anchor is `^docker ` exactly: Plan 02 removed the optional privilege prefix it used to tolerate.
+`vllm_launch` echoes whatever `$DOCKER` expands to, so if the default ever changes this filter silently
+matches nothing — a grep that passes having verified nothing. Keep `DOCKER=docker` explicit above, and
+if the default moves, move this anchor with it.
 
 Expect: PLE overlay not mounted (vllm#59431), PLE dtype override `float8_e4m3fn`, no `--block-size`
 at MTP 3, and `--kv-cache-dtype fp8 --speculative-config ...3 --moe-backend humming
