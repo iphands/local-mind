@@ -255,22 +255,45 @@ Expected: one `USER`, in the runtime stage. **Status `done`; the image-level ass
 **Verify**:
 ```bash
 IMG=$(set -a; . container/versions.env; . container/.last-build; set +a; echo "$IMAGE:$VTAG")
+# (1) Existence FIRST, asked as the image's own (root) identity, with no mount and no payload.
+#     If root sees nothing, uid 1000 certainly sees nothing, and nothing you ran made it.
+sudo -n docker run --rm --entrypoint sh "$IMG" -c \
+  'test -e /home/ubuntu/.cache && { echo "MOUNT HIDES CONTENT:"; ls -A /home/ubuntu/.cache; } || echo "mount target clean"'
+# (2) Does the base already ship the home dir with T3's bits? If it prints
+#     `drwxr-x--- ubuntu ubuntu`, the RUN below is a no-op — delete it (see T3).
+sudo -n docker run --rm --entrypoint ls "$IMG" -ld /home/ubuntu
 printf 'FROM %s\nRUN install -d -m 0750 -o 1000 -g 1000 /home/ubuntu\nUSER 1000:1000\n' "$IMG" \
   | sudo -n docker build -q -t uidprobe -
-sudo -n docker run --rm uidprobe id                                    # → uid=1000(ubuntu)
-sudo -n docker run --rm -e HOME=/home/ubuntu uidprobe bash -lc '
+# (3) --entrypoint IS MANDATORY. ENTRYPOINT is ["vllm","serve"] (container/Dockerfile:588),
+#     so a bare `docker run uidprobe id` parses `id` as the MODEL TAG and dies with a 401
+#     from huggingface.co — a probe bug reporting a network bug. [OBSERVED 2026-10-13]
+sudo -n docker run --rm --entrypoint id uidprobe                             # → uid=1000(ubuntu)
+sudo -n docker image inspect -f '{{.Config.User}}' uidprobe                  # → 1000:1000 (T3b rehearsal)
+sudo -n docker run --rm uidprobe --help                                      # real entrypoint, no --entrypoint
+sudo -n docker run --rm -e HOME=/home/ubuntu --entrypoint bash uidprobe -c '
   python -c "import vllm, flashinfer, triton, torchaudio; print(\"imports ok\")"
   test -r /opt/venv/lib/python3.12/site-packages/vllm/__init__.py && echo "site-packages traversable"
-  touch /home/ubuntu/.probe && echo "HOME writable"
-  ls -A /home/ubuntu/.cache 2>/dev/null | sed "s/^/WARN hidden-by-mount: /"
+  touch /home/ubuntu/.probe && echo "HOME writable (container layer — EPHEMERAL)"
+  echo "CCACHE_DIR=$CCACHE_DIR"; command -v cc; printf "int main(){}\n" >/tmp/a.c && cc /tmp/a.c -o /tmp/a; echo "cc exit=$?"
   ls -ld /root/.cache 2>&1'
-sudo -n docker rmi uidprobe
+# (4) The headline metric: nested dirs + 1 GiB written THROUGH the real bind mount, then
+#     verified by OWNER ON THE HOST. Mount source must be created by the same namespace that
+#     dockerd sees — the production cache tree is on NFS; a source dockerd cannot see gets
+#     auto-created root-owned and uid 1000 is denied, which is the very failure this plan is
+#     about (measured that way by accident on 2026-10-13).
+install -d -m 0750 /mnt/noir/scratch/ai/vllm/cache/uidprobe
+sudo -n docker run --rm --user 1000:1000 -e HOME=/home/ubuntu \
+  -v /mnt/noir/scratch/ai/vllm/cache/uidprobe:/home/ubuntu/.cache:rw \
+  --entrypoint bash uidprobe -c 'mkdir -p /home/ubuntu/.cache/vllm/deep_gemm && touch /home/ubuntu/.cache/vllm/deep_gemm/k.cubin && echo "mount write ok"'
+find /mnt/noir/scratch/ai/vllm/cache/uidprobe -printf '%u:%g %m %p\n' | sort -k3   # want: all 1000:1000
+rm -rf /mnt/noir/scratch/ai/vllm/cache/uidprobe && sudo -n docker rmi uidprobe    # rmi: gate step 5 counts images
 ```
 **Expected observation**:
-- **Confirms if**: `imports ok`, `site-packages traversable`, `HOME writable`, and nothing listed under `.cache`.
-- **Refutes if**: an import raises `EACCES`, or `site-packages` is unreadable → the plan needs a `PYTHONPYCACHEPREFIX=/tmp` env or a group-readable mode on that tree, and T3's comment must say which.
+- **Confirms if**: `mount target clean`, `imports ok`, `site-packages traversable`, `HOME writable`, `cc exit=0`, and every entry written through the mount owned by `1000:1000`.
+- **Refutes if**: an import raises `EACCES`, or `site-packages` is unreadable → the plan needs `PYTHONPYCACHEPREFIX=/home/ubuntu/.cache/pycache` (inside the mount — **not `/tmp`**, which is fresh per container and so would make the loss permanent) or a group-readable mode on that tree, and T3's comment must say which.
 - **Within noise if**: nothing here is timed; import latency is not a signal.
-- A `WARN hidden-by-mount` line means the image already ships `~/.cache` content and the mount point must move (e.g. `/home/ubuntu/vllm-cache`) — decide before the rebuild, not after.
+- A `MOUNT HIDES CONTENT` line means the image ships content at the mount target and the mount point must move (e.g. `/home/ubuntu/vllm-cache`) — decide before the rebuild, not after.
+- *Corrected 2026-10-13 at T4.* The block previously ran `docker run --rm uidprobe id` (no `--entrypoint`, so the probe argument was eaten by `vllm serve`) and listed `~/.cache` **after** the import in the same shell, so it observed the directory that very import created — while the "Expected observation" section wired that false positive to "move the mount point". Both are the same bug: the intervention preceded the observation. See `context/pitfalls.md`.
 
 **Commit**: `[P1][T4][verify] prove uid 1000 serve path on the current image`
 

@@ -132,3 +132,44 @@ PLE branches, the probe and the sudo refusal, with no daemon, no GPU and no mode
 - vllmcustom: `context/plans/01_uid_parity_tracker.md` § Evidence, "T2 branch harness"
 
 ---
+
+# A probe whose own setup is the thing it measures [OBSERVED 2026-10-13]
+
+## Problem
+Two Plan 01 T4 probes each produced a confident, wrong verdict, and neither failure looked like a
+broken probe:
+
+1. `docker run --rm uidprobe id` — the image's `ENTRYPOINT` is `["vllm","serve"]`
+   (`container/Dockerfile:588`), so `id` was parsed as a **model tag** and vLLM died on
+   `RepositoryNotFoundError: 401 … huggingface.co/id/resolve/main/config.json`. A mistake in the
+   probe was reported as a network/authentication fault, and the natural (wrong) conclusion was
+   "uid 1000 cannot run this image".
+2. `ls -A ~/.cache` run **after** `import flashinfer`, in the same shell — it listed the directory
+   that very import had just created. `context/plans/01_uid_parity.md` reads a line there as
+   *"the image ships cache content, move the mount point"*, so the false positive was wired directly
+   to a launcher change plus a Rule B.6 README rewrite. The probe was observing its own
+   instrumentation.
+
+Both are one bug: **the intervention happened before the observation.**
+
+## How to avoid
+- **Arguing with a container? Neutralize its `ENTRYPOINT` first.** Any `docker run` that passes a
+  command must pass `--entrypoint` (`--entrypoint id`, `--entrypoint bash … -c`). Otherwise your
+  arguments are that program's stdin. Note the corollary: probing *without* `--entrypoint` is a
+  valid test of the real entrypoint — but only when that is what you meant to test.
+- **For an existence question, use the most privileged identity available, nothing mounted, no
+  payload run.** Ask as the image's default root: if root sees nothing there, uid 1000 certainly
+  sees nothing, and no code you ran can have created it. Reserve the real identity for *writability*
+  questions. Ordering the snapshot before the action also works, but asking the stronger question
+  makes the ordering moot.
+- **Before running a probe, write down what a wrong answer would look like.** If the wrong answer
+  resembles an unrelated subsystem — a 401, an "image not found", a slow boot — the probe is not
+  safe to run; rewrite it first. This is the same failure class the `docker version` probe in
+  `common/_run-lib.sh` exists to kill: a dead socket that reports as a missing image.
+
+## Sources
+- vllmcustom: `context/plans/01_uid_parity.md` § T4, corrected in place 2026-10-13
+- vllmcustom: `container/Dockerfile:588` (`ENTRYPOINT ["vllm","serve"]`)
+- vllmcustom: `context/plans/01_uid_parity_tracker.md` § Notes / Deviations, "T4 was run with the plan's own Verify block"
+
+---

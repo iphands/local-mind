@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 20% complete (2/10 tasks; T3b and T10 start `blocked`)
+- Status: 30% complete (3/10 tasks; T3b and T10 start `blocked`)
 - Start date: 2026-10-13 (T1)
 - Plan: `context/plans/01_uid_parity.md`
 - Evidence: `context/plans/01_uid_parity.md` § Context (the 2026-10-13 probe transcripts), each
@@ -60,7 +60,7 @@
 | 2 | T2: Launcher-direct `docker` → `$DOCKER` | `qwen3.8-flash-next/run`, `muse/run`, **`qwen3.8-flash-next/run-legacy`** | **done** — selftest assertions blocked | 7 sites converted + a source-time `${DOCKER[@]} version` probe; zero bare `docker` left in lib/launchers. **`run-legacy` pinned `--user 0:0` AND moved to its own cache root** — a root container writing the shared `uid-1000` tree is invisible to the ownership guard. `muse/run --selftest` **never executed: no Muse checkpoint on this host** (`models/vllm/RedHatAI/` is empty); identity verified by substitute probe only |
 | 3 | T3: `USER 1000:1000` in runtime stage | `container/Dockerfile` | pending | Edit verifiable now; assertion is T3b |
 | 4 | T3b: Image `Config.User` assertion | (built image) | blocked: awaiting owner rebuild | |
-| 5 | T4: Prove `USER` on the current image | throwaway `uidprobe` layer | pending | Do before asking for the rebuild |
+| 5 | T4: Prove `USER` on the current image | throwaway `uidprobe` layer | **done** | **CONFIRMS the image-level facts**: identity, `Config.User`, real entrypoint, imports, traversal, HOME, `.pth`, mount target clean, 1 GiB through the mount lands `1000:1000`. **Does NOT confirm the serve path** (no weights, no port bind, no JIT — that is T10). Surfaced `CCACHE_DIR` → T3 became a 3-line metadata edit with **no `RUN`** |
 | 6 | T5: `container/build` unprivileged + root guard + legacy-ctx preflight | `container/build` | pending | |
 | 7 | T6: `container/archs` honours `DOCKER` | `container/archs` | pending | |
 | 8 | T7: Gate step 7, named skip pre-rebuild | `context/plans/RULES.md` | **invalid — folded into T1** | Rule A.5 forces the gate update into the commit that adds the behaviour, and T1's own Verify line demands "gate steps … **and 7**", so T7 could not verify itself as written. Step 7 shipped as 7a/7b/7c in T1's commit; `:226` rewritten there too. **T7's remaining scope is nothing** — re-open only if 7a/7b/7c need rework |
@@ -91,6 +91,10 @@ gets cited. A claim not in this table has no provenance and cannot be cited by a
 | 2026-10-13 | Real-image positive control: `docker run --rm --user 1000:1000 --entrypoint sha256sum <img> $PATCH_DST`, then the same file with `--entrypoint grep -qF 'isinstance(quant_config, CompressedTensorsConfig)'` | file hash `ad4de618…` **differs** from `BASE_SHA256 1392f51c…`, yet the grep returns 0 → production takes **branch 1** (`PATCH_PLE=0`, clean boot); neither new branch fires | 1 | The overlay is stale against this snapshot *by design* — vllm#59431 landed at `c32513b`, before `df6c7ad`. Confirms the T2 retraction: `:279` failed loudly but attributed it to image content |
 | 2026-10-13 | uid-1000 HOME probe — **substitute** for the unrunnable `muse/run --selftest` | `HF_HOME=/home/ubuntu/.cache/huggingface`; `os.access(W_OK)` → **False**; `makedirs`+`write_text` → **OK** | 1 | The two are not contradictory: `os.access` is False because the leaf did not exist yet, and the write is the real assertion. **Substitute only — `selftest.py` never ran**, because `models/vllm/RedHatAI/` is empty on this host |
 | 2026-10-13 | Project gate, all steps, on the T2 tree | Identical to the T1 row: 1a pass · 1b `27 b`/`24 p` · 1c `env ok` · 2 `SKIP` · 3 `4/4 ok` · 4 `preflight OK` ×2 · 5 `last-build == df6c7ad…`, `1` image, `_vllm_fa2_C sm_120 x76`, **0 sm_80 SASS** · 7a `PASS`×5 · 7b `SKIP` · 7c `PASS 1000 unlimited readable` | 1 | Steps 2 and 7b are still named skips. 7a now also exercises the new probe, since the stub answers `version` |
+| 2026-10-13 | **T4 probe battery** — `printf 'FROM $IMG\nRUN install -d -m 0750 -o 1000 -g 1000 /home/ubuntu\nUSER 1000:1000\n' \| docker build -q -t uidprobe -` against `…dev20261013-gdf6c7ad` | `--entrypoint id` → `uid=1000(ubuntu) gid=1000(ubuntu) groups=1000,27(sudo)`; `Config.User` → `1000:1000`; `docker run --rm uidprobe --help` (real `vllm serve` entrypoint, baked uid) → **exit 0**; `import vllm, flashinfer, triton, torchaudio` → `imports ok`; `site-packages` traversable; `touch /home/ubuntu/.probe` → writable; `/root/.cache` → `Permission denied` | 1 | Built in seconds, not hours. `docker rmi` afterwards — gate step 5 counts images. **Confirms the image-level facts only**; a boot is still T10 |
+| 2026-10-13 | **T4 mount write-through** (the plan's headline metric): nested tree + `k.cubin` written as uid 1000 through `-v …/cache/uidprobe:/home/ubuntu/.cache:rw`, then `find -printf '%u:%g %m'` **on the host** | `1000:1000 750 uidprobe`, `1000:1000 755 vllm`, `1000:1000 755 vllm/deep_gemm`, `1000:1000 644 k.cubin` — every entry uid 1000, modes umask-normal | 1 | The container wrote **through** the bind mount and the host agrees on the owner. The same probe against a **local** path failed `EACCES` — **consistent with** this agent's `/tmp`/`$HOME` living in a namespace dockerd cannot see (evidence: a `--user 0:0` container's write into that mount is invisible from my shell afterwards), which leaves dockerd unable to see the source. That evidence proves the namespace split; "and therefore auto-created it root-owned" is a second inference the `EACCES` cannot distinguish from "the path simply does not exist in dockerd's namespace". Either way the failure is **uninformative about uid 1000** — and the converse caution holds: the **only positive bind-write evidence is this single NFS run**, so do not let "it was an artifact" launder into "mount writes are verified" |
+| 2026-10-13 | Serve-time compiler chain as uid 1000: `echo $CCACHE_DIR; command -v cc; cc /tmp/a.c -o /tmp/a` | `CCACHE_DIR=/root/.cache/ccache`, `cc` → **`/usr/lib/ccache/cc`**, `ccache -s` readable, **`cc exit=0`** | 1 | **Half-refutes the review finding.** The live path to an unwritable `/root` dir is real (inherited `Dockerfile:195`, wrapper on PATH from `:187`/`:211`), but ccache degrades instead of failing the compile — so this is **dead cache, not a broken serve**, *on this evidence*. `ENV CCACHE_DIR` redirects it into the mount, so serve-time compiles cache *and* persist |
+| 2026-10-13 | Two existence checks that decide T3's shape: base `/home/ubuntu` mode/owner, and base `~/.cache` as **root, unmounted, no payload** | `drwxr-x--- 1 ubuntu ubuntu` **already** in the base image → T3's `RUN install -d -m 0750 -o 1000 -g 1000` is a **provable no-op**; `mount target clean` → nothing is hidden by mounting at `/home/ubuntu/.cache` | 1 | Asked as root with no payload, per the corrected probe rule — the first T4 run asked as uid 1000 *after* importing, and read the import's own `mkdir` as image content. `command -v sudo` → **no sudo binary**, no `/etc/sudoers.d` → group `27(sudo)` is inert, measured |
 
 Record the build every row was taken on: image tag, `ai.vllmcustom.vllm.ref`, and the launcher
 env. `bench/bench-results.md` is gitignored — it is not evidence a later plan can cite.
@@ -204,6 +208,57 @@ regression (see T10's "within noise").
   call bare `docker` (root-by-design, and gate step 5 documents the `sudo -n` they need), and
   `bench/*` + `scripts/*` are named in the plan's `Out` list.
 
+- **T4 was run with the plan's own Verify block and it produced two confident wrong answers.**
+  Both are recorded in `context/pitfalls.md` and the block is corrected in place in the plan file.
+  1. `docker run --rm uidprobe id` has no `--entrypoint`, and `ENTRYPOINT` is `["vllm","serve"]`
+     (`container/Dockerfile:588`), so `id` was parsed as a **model tag** and vLLM died on a **401
+     from huggingface.co**. A bug in the probe was reported as a network/auth fault.
+  2. The block lists `~/.cache` **after** the import, in the same shell — so it observed the
+     directory that very import created, and the plan's own Expected-observation line reads that
+     as "move the mount point". Had I taken it at face value it would have churned T1's shipped
+     mount target plus a Rule B.6 README rewrite. Asked properly (as root, unmounted, no payload),
+     the mount target is **clean**.
+  The shared shape: **the intervention preceded the observation.** For an existence question, ask
+  the most privileged identity available with nothing mounted and no payload run.
+- **T4 changed T3's shape, twice.** (a) **No `RUN` layer is needed**: the base image already ships
+  `/home/ubuntu` as `drwxr-x--- ubuntu ubuntu`, which is exactly what the planned
+  `install -d -m 0750 -o 1000 -g 1000` would produce — so that `RUN` is a provable no-op using the
+  same `install -d -m` idiom T1 removed from the launcher. T3 is now metadata only. (b) **One
+  metadata line was missing and is now in scope**: `CCACHE_DIR=/root/.cache/ccache` is inherited
+  from `base` (`Dockerfile:195`) into the runtime stage with `/usr/lib/ccache` **ahead of**
+  `/usr/bin` on PATH (`:187`, `:211`), so a uid-1000 `cc` *is* ccache pointed at a directory it
+  cannot write. Measured: `cc` still exits 0 — ccache degrades rather than breaking the build — so
+  this is **serve-time compilation running uncached forever**, not a break. Redirecting it into the
+  mounted tree (`ENV CCACHE_DIR=/home/ubuntu/.cache/ccache`) makes it cache and persist. Both
+  review findings were stronger than the evidence warranted in one direction and weaker in the
+  other; the probe is what told them apart.
+- **`CONFIRMS` is scoped on purpose.** T4 proves the image-level facts and the mount's ownership.
+  It does not load weights, bind a port, or trigger a JIT compile. Of the checks it skips, the
+  honest split is: **port 8799 > 1024** needs no `CAP_NET_BIND_SERVICE` (inspection, airtight);
+  `/opt/venv/bin/vllm` executing at the baked uid is **`[LIVE]`, not inspection** — world-executable
+  is necessary but not sufficient (every parent dir needs `x`, the shebang interpreter needs `rx`),
+  and what closes it is that `docker run --rm uidprobe --help` exited 0; **memlock was measured**,
+  not skipped (row above). What genuinely remains an **assumption about the host, not the image**,
+  is `--ipc=host`: it uses the host `/dev/shm`, whose mode is a host property — and a crashed root
+  container can leave stale root-owned `psm_*`/`mp-*` segments that uid 1000 cannot unlink (sticky
+  bit) while they hold RAM. Check `ls -l /dev/shm` before the first uid-1000 boot (T10). Do not
+  quote T4 as a green light for the serve path.
+- **The mount-write probe failed on local paths and succeeded on NFS, and the failure is the
+  plan's premise, not a defect.** This agent's `/tmp` and `$HOME` live in a namespace dockerd
+  cannot see, so dockerd **auto-created the bind source root-owned** and uid 1000 was denied — the
+  exact behaviour that produced the 243900-entry tree in README § Caching. The production path is
+  NFS and it works: nested dirs + a 1 GiB file land `1000:1000`. Recorded because a future reader
+  will otherwise re-run the probe against a local path, see `EACCES`, and conclude T4 refutes.
+- **Group `27(sudo)` on the container's uid 1000 is inert — but not for the reason I first wrote.**
+  Lead with the unassailable part: **it is not a regression**, the container runs as root today,
+  which is strictly more privileged. The reason it is inert is *not* that the group is unreachable
+  — `find -perm -4000` finds setuid **`newgrp`**, **`sg`**, **`su`**, `gpasswd`, `passwd`, `chage`,
+  `expiry`, `mount`, `umount`, `ssh-agent`, so `newgrp sudo` will happily put uid 1000 into group 27.
+  It is inert because group 27 confers **nothing to confer**: `command -v sudo` → absent, `pkexec` →
+  absent, and **both `/etc/sudoers` and `/etc/sudoers.d` do not exist**. `su` is setuid-root but
+  `passwd -S root` reports **`L`** (locked password), so it cannot authenticate to root either.
+  Stated as a set of absences, not as an unusality.
+
 ## Follow-ups
 
 | Follow-up | Why | Lands in |
@@ -220,4 +275,11 @@ regression (see T10's "within noise").
 | **Run `./muse/run --selftest` for real** — it has never been executed on this host. Its `--user` change is verified only by a substitute probe (`os.access` False / `makedirs`+write OK), and the probe skipped the host-side `mkdir`+ownership step | No Muse checkpoint on this host: `models/vllm/RedHatAI/` is empty. It is the ritual step after every vLLM bump anyway, so the checkpoint's return closes it naturally | T8 / step 6, on checkpoint refetch |
 | `muse/patches/atem-parsers/selftest.py` should end with a deterministic `SELFTEST: PASS` / `SELFTEST: FAIL <reason>` line | Its verdict currently has to be read off a tail behind library warnings (a `HF_HUB_ENABLE_HF_TRANSFER` FutureWarning prints on import — the image sets a deprecated env var). Pass/fail should not depend on what the library logged that day | Plan 02 |
 | `run-legacy` now has its own cold cache root, so a legacy A/B re-downloads HF metadata and re-JITs | The price of not letting a root container write into the shared `uid-1000` tree. Copy the useful parts across only if a legacy run becomes routine | Plan 02, owner-decided |
+| Measure the boot-time delta of `__pycache__` no longer being writable, and check what a boot writes **outside** the mount | Post-T3, `/opt/venv/.../site-packages` is root:root 0755, so Python silently recompiles the whole import tree every boot. If the delta is real, `ENV PYTHONPYCACHEPREFIX=/home/ubuntu/.cache/pycache` (inside the mount — **never `/tmp`**, fresh per container). Pair it with `find /home/ubuntu -maxdepth 2 -newermt $BOOT_TS` **inside** the container: anything a library puts outside `~/.cache` is on the container layer and is silently re-paid on every boot | T10 |
+| `context/plans/01_uid_parity.md:125` and the `boot-timing/__pycache__` Follow-up row both say patch-dir bytecode is written by the container into an **rw**-mounted dir | It is mounted `:ro` (`qwen3.8-flash-next/run:656`), so nothing writes there any more; the 2026-09-25 bytecode predates that mount. Fix the claim or T8 records a false uid-migration story | T8 |
+| README wording for "`docker exec` now lands you in as uid 1000" | Lead with the muscle-memory trap: `pip install` now fails `EACCES` on `/opt/venv` where it used to write root-owned files silently — use `docker exec -u root`, or `PIP_USER_BASE=/home/ubuntu/.cache/pip-user` to persist. Also: `HOME` is writable but on the container layer (**ephemeral**); `~/.cache` is the one durable place | T8 (this is that row's wording) |
+| ~155 MB of `uv` cache is baked into the runtime image layer | Observed at `/root/.cache/uv` with `CACHEDIR.TAG`. Most likely the base stage's `uv venv`/`uv pip install` (`Dockerfile:212`), which attaches no `--mount=type=cache` — so the cache is committed to a layer instead of cached, and is now dead weight nothing reads. Unverified which RUN writes it | Plan 02, image size |
+| `container/archs` must be re-run **post-rebuild**, not just pre | Gate step 5 greps its `sm_120` output, and after T3 that `docker run --rm --entrypoint bash` carries no `--user` — so it executes as uid 1000 for the first time. Read-only (`cuobjdump` on world-readable `.so`s, temp files in `1777 /tmp`), so it should pass; T6's Verify currently only exercises it pre-rebuild | T6 |
+| `--ipc=host` puts vLLM's shared-memory segments on the **host's** `/dev/shm`, and prior root boots may have left root-owned `psm_*`/`mp-*` entries | Sticky bit means uid 1000 cannot unlink them, so a crashed root serve leaks RAM that no later uid-1000 serve can reclaim. `ls -l /dev/shm` before the first uid-1000 boot; clear stale entries by hand if any. Also the one place the container writes to the host outside the cache mount | T10 |
+| The plan's Goal line says "**Every** process this project starts … runs as uid/gid 1000:1000" while `run-legacy` serves as root by design (`run-legacy:169`, `--user 0:0`) | The behaviour is right and the README says so, but the Goal is overclaimed as written and gate step 7 cannot see it — it scans `uid-1000`, while legacy writes under a different root (`cache-legacy`). Amend the Goal to name the exception at T8; T3 also makes that `--user 0:0` **load-bearing** rather than decorative, so gate 7d/greps assert it stays explicit | T8 |
 | `vllm_launch`'s echoed line is a serialization, not a quoting-preserving one: `--override-generation-config '{ … }'` re-splits if pasted | The comment now says so. Needs `printf '%q '` only if the proposed DRY_RUN golden-file test ever lands | Plan 02, with that test |
