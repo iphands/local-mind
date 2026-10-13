@@ -510,7 +510,9 @@ Derive the range every time from the section markers, never from memory:
 `A=$(grep -n '^### Rule A' RULES.md | cut -d: -f1); B=$(grep -n '^### Rule B —' RULES.md | cut -d: -f1);
 awk -v a="$A" -v b="$B" 'NR>a && NR<b' RULES.md`. Anchor `Rule B` **with its em dash**: `^### Rule B` also
 matches `### Rule B2`, which silently makes `$B` two lines and leaves awk to read the leading number —
-right answer by luck, and luck is not a verification step. Then prove the extraction is whole — count the
+right answer by luck, and luck is not a verification step. Anchor `Rule A` identically if a `Rule A2` is
+ever added — today it matches one line only because no such heading exists, which is a fact about the
+file, not about the recipe. Then prove the extraction is whole — count the
 `PASS(`/`FAIL(` verdict tokens, or check that the last step you expect is present — and print the line
 count of the generated script so a shrink is visible in the log. Same lesson applies to any fence
 extracted by line range, including the step-7 sub-fence.

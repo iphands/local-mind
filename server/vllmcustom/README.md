@@ -73,7 +73,9 @@ resolved before doing anything slow:
 
 You must be able to open `/var/run/docker.sock` **as yourself**. Nothing in this project uses a
 privilege helper, so `permission denied` on any docker line is a host-side access problem: read who
-may open it (`stat -c '%U:%G %a' /var/run/docker.sock`) before guessing at a group name.
+may open it (`stat -c '%U:%G %a' /var/run/docker.sock`) before guessing at a group name. If that group
+isn't yours, the remedy is host-side too (`su -c "usermod -aG <group> $USER"`, then a **new login** —
+groups never apply to a running shell); no script in this repo can fix it for you.
 
 `models` is a symlink to `/mnt/noir/scratch/ai/llm/models`, so paths match the
 old `server/vllm` scripts:
