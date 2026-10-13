@@ -126,25 +126,37 @@ Every step reports **pass / fail / skip**, and **skip is not pass**: no task is 
 where an applicable step was skipped. Until Plan 01 lands `./check`, run the blocks from the
 project root.
 
-**1. Syntax + pin-file shape.** Files are classified by **shebang**, never by glob: `bench/bench`,
-`bench/make-test-convo`, `scripts/decode-rate` and `scripts/qwen-conc-report` are **Python** with
-no extension, and `bash -n` happily *passes* any `.py` file — a glob both false-fails and
-false-passes. Pass: no `FAIL` line, counts `27 b` / `24 p`, `env ok`.
+**1. Syntax + pin-file shape.** Files are classified by **shebang first, extension second**. Shebang
+first: `bench/bench`, `bench/make-test-convo`, `scripts/decode-rate` and `scripts/qwen-conc-report`
+are **Python** with no extension, and `bash -n` happily *passes* any `.py` file — a glob alone both
+false-fails and false-passes. Extension second: 16 of the 20 tracked `.py` files are imported modules
+with no shebang at all, and the three sourced libs (`common/_run-lib.sh`, `common/_model-lib.sh`,
+`bench/_bench-lib.sh`) open with `# shellcheck shell=bash` instead of one. A shebang-only classifier
+syntax-checks none of those nineteen and still prints a green run — it reported `24 b / 8 p` here on
+2026-10-13 while the true set was `27 b / 24 p`. Pass: no `FAIL` line, counts `27 b` / `24 p`, `env ok`.
 
 ```bash
 # 1a — syntax, over tracked files only (in-memory compile: no __pycache__ written)
 git ls-files -z | while IFS= read -r -d '' f; do
   case "$f" in vendor/*) continue ;; esac
-  case "$(head -n1 "$f")" in
+  case "$(head -n1 "$f" 2>/dev/null)" in   # 2>: `models` is a tracked symlink to a directory
     \#!*bash*|\#!*/sh) bash -n "$f" || echo "FAIL(bash) $f" ;;
     \#!*python*) python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$f" \
                    || echo "FAIL(py) $f" ;;
+    # No shebang: the file says what it is by its extension. Both orders land here — a sourced
+    # lib and an imported module alike — so neither can hide from the gate.
+    *) case "$f" in
+         *.sh) bash -n "$f" || echo "FAIL(bash) $f" ;;
+         *.py) python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$f" \
+                 || echo "FAIL(py) $f" ;;
+       esac ;;
   esac
 done
 # 1b — the counts, so an empty file list can never read green. Bump both numbers when a file
 #      is added or removed on purpose; a count that silently drops IS the failure.
-git ls-files -z | while IFS= read -r -d '' f; do case "$(head -n1 "$f")" in
-  \#!*bash*|\#!*/sh) echo b ;; \#!*python*) echo p ;; esac; done | sort | uniq -c
+git ls-files -z | while IFS= read -r -d '' f; do case "$(head -n1 "$f" 2>/dev/null)" in
+  \#!*bash*|\#!*/sh) echo b; continue ;; \#!*python*) echo p; continue ;; esac
+  case "$f" in *.sh) echo b ;; *.py) echo p ;; esac; done | sort | uniq -c
 # 1c — container/versions.env stays plain KEY=value: it is `source`d by three scripts and is
 #      meant to be valid to `docker run --env-file`. A quoted value or a trailing comment fails
 #      the source silently in one of the two readers.
@@ -222,8 +234,10 @@ Compare **image IDs** (`-q`), not tags, and require exactly one: a rebuild of th
 so a tag alone proves nothing, and a multi-line filter result makes any string compare arbitrary.
 In the arch table the only tolerated non-120 entries are the documented Marlin PTX fallbacks and
 the deliberately empty `_vllm_fa3_C` stub; `sm_80` SASS under `_vllm_fa2_C` means the fetch patch
-stopped applying and is a **fail**. `container/archs`, `container/push` and `require_image` call
-bare `docker`, which you are not grouped for — every docker line in this gate needs `sudo -n`.
+stopped applying and is a **fail**. `container/archs` and `container/push` call bare `docker`, which
+you are not grouped for — every docker line in this gate needs `sudo -n`. The launchers do not: as
+of Plan 01 T1 they invoke `${DOCKER[@]}` (`sudo -n docker` by default) and **refuse to run under
+sudo**, so a gate step that shells out to `./qwen/run` must be run as the invoking user.
 
 **6. Runtime / measurement tier — NOT part of the per-commit gate** (owner decision, 2026-10-13:
 a model reload is too heavy to demand at every task boundary). It runs only when a plan task names
@@ -240,6 +254,56 @@ it or the human asks. When it does:
   image tag and vLLM version. `bench/bench-results.md` is gitignored — an appended row there is
   **not** an assertion; the jsonl provenance fields are.
 - Per Rule P1: ≥3 runs, mean and spread, and a delta inside the spread written as **within noise**.
+
+**7. Run identity (Plan 01).** Every process this project starts runs as uid/gid 1000, and the cache
+directory the container writes is *owned* by 1000 — not merely named `uid-1000`. Three assertions,
+named separately on purpose: bundled under one step number, a legitimate `SKIP` on the image check
+would hide a genuine `FAIL` on the launcher check.
+
+```bash
+# 7a — the identity reaches the emitted command line, and a sudo'd launcher refuses. Stub docker
+#      plus a two-byte fake model: no GPU, no image, no model. About 2 s. NEVER skippable.
+install -d /tmp/gate7/stub /tmp/gate7/cache /tmp/gate7/model/Fake
+printf '%s\n' '#!/bin/bash' '[[ $1 == image && $2 == inspect ]] && exit 0' \
+  'for a in "$@"; do [[ $a == serve ]] && exit 0; done' 'exit 0' > /tmp/gate7/stub/docker
+chmod +x /tmp/gate7/stub/docker; echo '{}' > /tmp/gate7/model/Fake/config.json
+R="DOCKER=docker PATH=/tmp/gate7/stub:$PATH CACHE_DIR=/tmp/gate7/cache MODEL_ROOT=/tmp/gate7/model"
+OUT=$(env $R ./qwen/run Fake 2>&1)          # DOCKER=docker: `sudo` resolves ahead of PATH, so the
+grep -qE -- '--user 1000:1000'         <<<"$OUT" && echo 'PASS(7a --user)' || echo 'FAIL(7a --user)'
+grep -qE -- 'HOME=/home/ubuntu'        <<<"$OUT" && echo 'PASS(7a HOME)'   || echo 'FAIL(7a HOME)'
+grep -qE -- ':/home/ubuntu/\.cache:rw' <<<"$OUT" && echo 'PASS(7a mount)'  || echo 'FAIL(7a mount)'
+[ "$(stat -c '%u' /tmp/gate7/cache/uid-1000)" = 1000 ] && echo 'PASS(7a owner)' || echo 'FAIL(7a owner)'
+SUDO_OUT=$(sudo -n env $R ./qwen/run Fake 2>&1)   # assert the TEXT, not the exit code: a sudo that
+grep -q 'run it as yourself' <<<"$SUDO_OUT" \
+  && { [ -e /tmp/gate7/cache/uid-0 ] && echo 'FAIL(7a left a uid-0 dir)' || echo 'PASS(7a refuses sudo)'; } \
+  || echo 'FAIL(7a no refusal text (did `sudo -n true` work at all?))'
+rm -rf /tmp/gate7
+
+# 7b — the image declares the identity itself, so a hand-run `docker run` cannot regress it.
+set -a; . container/versions.env 2>/dev/null; . container/.last-build 2>/dev/null; set +a
+if [ -z "${VTAG:-}" ]; then echo 'SKIP(7b: no container/.last-build — nothing built on this host)'
+else
+  U=$(sudo -n docker image inspect -f '{{.Config.User}}' "$IMAGE:$VTAG" 2>/dev/null)
+  if   [ -z "$U" ]; then echo 'SKIP(7b: image declares no USER — Plan 01 T3 rebuild pending)'
+  elif [ "$U" = 1000:1000 ]; then echo 'PASS(7b USER 1000:1000)'
+  else echo "FAIL(7b USER=$U, want 1000:1000)"; fi
+
+  # 7c — the image WORKS at uid 1000. Runs on today's pre-T3 image, and it is the fact the whole
+  #      plan rests on, so it is never skippable while an image exists.
+  sudo -n docker run --rm --user 1000:1000 --ulimit memlock=-1 -e HOME=/home/ubuntu \
+    --entrypoint bash "$IMAGE:$VTAG" \
+    -c 'id -u; ulimit -l; test -r /opt/venv/lib/python3.12/site-packages/vllm/__init__.py && echo readable' \
+    | tr '\n' ' ' | sed 's/^/PASS(7c) /; $!s/$//; s/$/\n/'   # want: 1000 unlimited readable
+fi
+```
+
+`7c` must read `1000 unlimited readable`: the uid, because vLLM imports its own package tree;
+`unlimited`, because the Qwen3.8 PLE table is a ~95 GiB `pin_memory` allocation and `--ulimit
+memlock=-1` is the only thing between it and `EACCES` — and `--user` is exactly the flag that could
+have taken memlock away, since `dockerd` grants the rlimit to the process it starts; `readable`,
+because `/opt/venv` is traversable by uid 1000 only by luck of its mode, and a `0700` there would
+break the serve at import rather than at first cache write. Measured on the `gdf6c7ad` image
+2026-10-13: `soft,hard = (-1, -1)` and a 2 GiB `pin_memory` allocation succeeds.
 
 **What this gate cannot see.** Steps 1–2 catch syntax, not behavior. Step 3 tests each patch
 against a *fake* vLLM shaped like the real seam — it proves the patch degrades safely, never that

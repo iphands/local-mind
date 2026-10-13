@@ -181,18 +181,27 @@ PREFLIGHT_ONLY=1 VLLM_REF=main ./container/build      # syncs src trees to $NEW,
 bash -n qwen3.8-flash-next/run && shellcheck -x qwen3.8-flash-next/run
 ```
 
-Launcher args, with the final `docker run` stubbed out (the new image isn't built yet, so point
-`IMAGE_TAG` at the old one):
+Launcher args, with the final launch stubbed out (the new image isn't built yet, so point
+`IMAGE_TAG` at the old one). `DOCKER=docker` is load-bearing: the launcher calls `sudo -n docker`
+by default, and `sudo` resolves ahead of `PATH`, so without it the stub is skipped and the stubbed
+step boots the real model. The stub therefore has to answer `image inspect` itself rather than
+forward it — forwarding reaches the real socket, which refuses an ungrouped account.
 
 ```bash
-mkdir -p <scratchpad>/stub; REAL=$(command -v docker); cat > <scratchpad>/stub/docker <<EOF
+mkdir -p <scratchpad>/stub; cat > <scratchpad>/stub/docker <<'EOF'
 #!/bin/bash
-for a in "\$@"; do [[ \$a == serve ]] && { echo "STUB: launch suppressed"; exit 0; }; done
-exec $REAL "\$@"
+[[ $1 == image && $2 == inspect ]] && exit 0          # satisfy require_image
+for a in "$@"; do [[ $a == serve ]] && { echo "STUB: launch suppressed"; exit 0; }; done
+exit 0
 EOF
 chmod +x <scratchpad>/stub/docker
-PATH=<scratchpad>/stub:$PATH IMAGE_TAG=${OLD_IMG#*:} ./qwen3.8-flash-next/run 2>&1 | grep -E '^## |^docker '
+DOCKER=docker PATH=<scratchpad>/stub:$PATH IMAGE_TAG=${OLD_IMG#*:} ./qwen3.8-flash-next/run 2>&1 \
+  | grep -E '^## |^(sudo -n )?docker '
 ```
+
+The anchor accepts an optional privilege prefix since 2026-10-13: `vllm_launch` echoes whatever
+`$DOCKER` expands to, so `^docker ` only matches under `DOCKER=docker` and silently matches
+nothing otherwise — a filter that passes having verified nothing.
 
 Expect: PLE overlay not mounted (vllm#59431), PLE dtype override `float8_e4m3fn`, no `--block-size`
 at MTP 3, and `--kv-cache-dtype fp8 --speculative-config ...3 --moe-backend humming

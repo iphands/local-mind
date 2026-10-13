@@ -496,8 +496,37 @@ Preflight flags it precisely because the build won't.
   installs and exports the second (~3.3 GB). The single install it replaced made every
   bump rewrite a 12.4 GB layer. `uv pip check` guards the two-step resolve.
 - **Runtime caches** (HF downloads, `torch.compile`, FlashInfer JIT) bind-mount
-  from `/mnt/noir/scratch/ai/vllm/cache` into the container, so model loads and
-  JIT compiles persist between `./qwen/run`s.
+  from `$CACHE_DIR/uid-1000` (default `/mnt/noir/scratch/ai/vllm/cache/uid-1000`) to
+  `/home/ubuntu/.cache` in the container, so model loads and JIT compiles persist
+  between `./qwen/run`s. The container serves as `--user 1000:1000` and the launcher
+  creates that directory itself before mounting it, because dockerd would otherwise
+  auto-create a missing bind source *as root*. The `uid-1000` leaf is why two users can
+  share `$CACHE_DIR`: each gets its own writable tree instead of fighting over one.
+  The launchers refuse to run under `sudo` for the same reason — a root-run launcher
+  creates the directory root-owned, and the uid-1000 serve then dies `EACCES` on its
+  first cache write.
+- **The flat tree above it is abandoned, not deleted.** Everything the launchers mounted
+  before the per-uid split lives directly under `$CACHE_DIR` (`ccache`, `flashinfer`,
+  `huggingface`, `torch`, `uv`, `vllm`), written by root because the containers ran as
+  root then. Census taken 2026-10-13, root-owned entries only, the live per-uid tree
+  pruned out:
+
+  ```bash
+  find "$CACHE_DIR" -path "$CACHE_DIR/uid-*" -prune -o \( -user root -print \) | wc -l
+  #   243900 entries, of which 205142 regular files, totalling 33.0 GiB:
+  find "$CACHE_DIR" -path "$CACHE_DIR/uid-*" -prune -o \( -user root -type f -printf '%s\n' \) \
+    | awk '{n++; s+=$1} END {printf "%d files, %.1f GiB\n", n, s/1073741824}'
+  ```
+
+  Count it **without** `-maxdepth`: the same search limited to six levels reports 13027,
+  which is 19× low. `du -sh` is worse than useless on this mount — it did not return in
+  over ten minutes, which is why the figure above comes from `find`.
+  Nothing reads that tree now. Deleting it costs one cold boot per model family — HF
+  metadata re-downloads and FlashInfer re-JITs — and nothing else, because the weights
+  come from the read-only `/models` mount and never from the cache. It is root-owned, so
+  removing it needs `sudo rm -rf`. If any of it looks worth keeping, copy it into the
+  per-uid tree first (a `./container/cache-migrate` helper for exactly this is planned as
+  of 2026-10-13 under Plan 01 T9 and does not exist yet).
 
 To inspect/relocate the ccache on disk, export it:
 `docker buildx build ... --cache-to type=local,dest=$BUILD_DIR/ccache`.

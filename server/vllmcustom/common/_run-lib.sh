@@ -41,6 +41,41 @@
 # shellcheck source-path=SCRIPTDIR source=./_model-lib.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_model-lib.sh"
 
+# ------------------------------------------------------------ run identity
+
+# The container's uid/gid, and the name of the cache directory it may write. One
+# constant feeds both so the flag and the path can never drift apart. Never derive
+# either from `id -u`: the launcher can be started under sudo, and a root-run
+# launcher would then hand a root-owned `uid-0` directory to a container pinned to
+# 1000 — an EACCES minutes into boot naming neither cause.
+RUN_UID=${RUN_UID:-1000}
+
+# Only the docker CLI needs privilege on this host: the socket is root-owned and the
+# invoking account is in no docker group. Everything a launcher *writes* is written as
+# the invoking user, which is the point. A string, split on spaces: DOCKER=docker works
+# on a host where the account IS grouped.
+if [[ -n ${DOCKER+set} && ${DOCKER@a} == a ]]; then
+  echo "## DOCKER must be a plain string (DOCKER='sudo -n docker'), not an array." >&2
+  exit 1
+fi
+IFS=' ' read -r -a DOCKER <<< "${DOCKER:-sudo -n docker}"
+
+# Refuse a sudo'd launcher HERE, at source time, rather than inside
+# docker_core_args: every launcher touches the socket before it (qwen3.8-flash-next/run
+# resolves its image by label, require_image inspects it), so a guard placed later is
+# reached only after the first docker call has already failed with a misleading
+# "image not found". File scope, so $0 is the launcher as the user typed it.
+if [[ $EUID == 0 ]]; then
+  {
+    echo "## run it as yourself — drop the sudo:  $0"
+    echo "##   it needs no root: it runs 'sudo -n docker' by itself."
+    echo "##   why sudo breaks it: a root launcher creates the cache dir root-owned, and the"
+    echo "##   serve runs as uid $RUN_UID, so it dies EACCES on its first cache write."
+    echo "##   the one thing that does want sudo:  sudo ./container/build"
+  } >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------- image
 
 vllm_image() {
@@ -51,16 +86,51 @@ vllm_image() {
 }
 
 require_image() {
-  docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
+  "${DOCKER[@]}" image inspect "$CONTAINER" >/dev/null 2>&1 || {
     echo "Image $CONTAINER not found. Run ./container/build first."; exit 1; }
   return 0
 }
 
 # ---------------------------------------------------------------- docker run
 
-# Assigns CONTAINER_ARGS. Reads NAME, PORT, MODEL_FOLDER, CACHE_DIR, DETACH.
+# Assigns CONTAINER_ARGS, CACHE_HOST_DIR and CACHE_WAS_NEW.
+# Reads NAME, PORT, MODEL_FOLDER, CACHE_DIR, DETACH, RUN_UID.
 docker_core_args() {
   : "${NAME:?}" "${PORT:?}" "${MODEL_FOLDER:?}" "${CACHE_DIR:?}"
+
+  # Created BEFORE the mount, because dockerd auto-creates a missing bind source as
+  # root — which is how the pre-split tree under $CACHE_DIR got its 243900 root-owned
+  # entries. The directory is named after RUN_UID but owned by whoever ran the script;
+  # those are different facts and the container writes as RUN_UID, so assert ownership
+  # rather than trusting the name. Owner only, never group: write access comes from the
+  # uid, and demanding gid == RUN_UID would reject a perfectly usable directory on any
+  # host where uid 1000's primary group is not 1000 — with advice you cannot follow.
+  CACHE_HOST_DIR="$CACHE_DIR/uid-$RUN_UID"
+  CACHE_WAS_NEW=0
+  [[ -w $CACHE_DIR ]] || {
+    echo "## $CACHE_DIR is not writable by uid $EUID — it does not exist, or is not yours." >&2
+    echo "##   fix: create it, or point CACHE_DIR= at a directory you own." >&2
+    return 1
+  }
+  # mkdir, not `install -d -m`: install chmods a directory that ALREADY EXISTS, so a
+  # cache tree deliberately locked to 0700 would be widened back to 0750 on every boot.
+  # mkdir sets the mode only when it creates. Its error is swallowed, so the `-d` test
+  # below is what tells "already there" apart from "cannot be made".
+  if mkdir -m 0750 "$CACHE_HOST_DIR" 2>/dev/null; then
+    CACHE_WAS_NEW=1
+  elif [[ ! -d $CACHE_HOST_DIR ]]; then
+    echo "## cannot create $CACHE_HOST_DIR, and it is not a directory either." >&2
+    echo "##   fix: remove that path, or point CACHE_DIR= somewhere else." >&2
+    return 1
+  fi
+  CACHE_UID=$(stat -c '%u' "$CACHE_HOST_DIR" 2>/dev/null) \
+    || { echo "## cannot stat $CACHE_HOST_DIR" >&2; return 1; }
+  if [[ $CACHE_UID != "$RUN_UID" ]]; then
+    echo "## $CACHE_HOST_DIR is owned by uid $CACHE_UID; the container writes as uid $RUN_UID." >&2
+    echo "##   fix: chown $RUN_UID $CACHE_HOST_DIR, or point CACHE_DIR= at a directory you own." >&2
+    return 1
+  fi
+
   local -a _runmode
   # DETACH=1 -> run backgrounded (-d) for scripted benchmarking (bench-wrapper,
   # scripts/muse-*-sweep); interactive (-it) otherwise.
@@ -75,6 +145,11 @@ docker_core_args() {
     # fails with "Unsupported speculative method". --entrypoint REPLACES the image
     # ENTRYPOINT, so this works whether or not the image has been rebuilt.
     --entrypoint vllm
+    # Pinned identity. The image declares no USER directive yet (Plan 01 T3 adds it),
+    # so until that rebuild this flag is the ONLY assertion that the serve is
+    # unprivileged — a hand-run `docker run` or `docker exec` is still root.
+    --user "$RUN_UID:$RUN_UID"
+    -e HOME=/home/ubuntu                           # set, not inferred from /etc/passwd
     --gpus device=0                                # RTX PRO 6000 only — never the 4060
     -e CUDA_DEVICE_ORDER=PCI_BUS_ID
     -e VLLM_WORKER_MULTIPROC_METHOD=spawn
@@ -82,7 +157,10 @@ docker_core_args() {
     -e VLLM_LOG_STATS_INTERVAL=1                   # log tok/s + acceptance every 1s (tuning)
     -p "0.0.0.0:${PORT}:8799"
     -v "$MODEL_FOLDER":/models:ro
-    -v "$CACHE_DIR":/root/.cache:rw
+    # Was /root/.cache, which is 0700 and unreadable to uid 1000. The pre-split tree
+    # above this path is root-owned and stays that way by owner choice — see README
+    # § Caching.
+    -v "$CACHE_HOST_DIR":/home/ubuntu/.cache:rw
     --ipc=host
     --shm-size=32g
     --ulimit memlock=-1
@@ -179,9 +257,23 @@ vllm_extra_args() {
 
 # ---------------------------------------------------------------- launch
 
-# The echo is the record of what actually ran: it is a complete serialization of
-# the command, and it is what the refactor test diffs. Keep them adjacent.
+# The echo is the record of what actually ran, privilege prefix included. It is a
+# serialization, not a quoting-preserving one: VLLM_ARGS carries JSON with spaces
+# (--override-generation-config), so re-pasting the line re-splits that one argument.
+# There is no test in this repo that diffs it — the DRY_RUN short-circuit + golden file
+# that would do so is still only proposed (context/pitfalls.md). Anything greping this
+# line must anchor on '^([^ ]+ )*docker ' now, not '^docker '.
 vllm_launch() {
-  echo docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
-  docker "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
+  # Printed last, immediately before the long silence it explains, so it is what is
+  # still on screen when the boot looks stuck. docker_core_args set the flag.
+  if [[ ${CACHE_WAS_NEW:-0} == 1 ]]; then
+    echo "## cache: $CACHE_HOST_DIR  (NEW — cold start as uid $RUN_UID)"
+    echo "##        est. 20-60 min to 'startup complete' (unmeasured): HF metadata + FlashInfer JIT."
+    echo "##        kernel names scrolling past means it is alive; Ctrl-C restarts the JIT from zero."
+    echo "##        the pre-split tree is still under $CACHE_DIR, untouched — see README § Caching."
+  else
+    echo "## cache: $CACHE_HOST_DIR"
+  fi
+  echo "${DOCKER[@]}" "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
+  "${DOCKER[@]}" "${CONTAINER_ARGS[@]}" "$CONTAINER" serve "${VLLM_ARGS[@]}"
 }
