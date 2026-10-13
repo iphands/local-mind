@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 50% complete (3/6 tasks)
+- Status: 67% complete (4/6 tasks)
 - Start date: 2026-10-13
 - Plan: `context/plans/02_no_sudo.md`
 - Evidence: the gate's own stdout (`/tmp/gate_all.sh` captured per run), the `grep -ci sudo` counts
@@ -42,7 +42,7 @@
 | 1 | T1: launcher lib stops knowing about privilege | `common/_run-lib.sh` | done | `bash -n` clean; guard matrix refuse/refuse/pass/pass; no `:-sudo`, `sudo -n`, `sudo chown` or `ALLOW_ROOT` left. Root refusal kept, reworded |
 | 2 | T2: build contract, remedies, BuildKit pin | `container/build` | done | 9 hunks. `PREFLIGHT_ONLY=1 CTX_DIR=` → rc 0 unprivileged; `DOCKER='sudo -n docker'` → rc 1 before any write; uid-0 refusal proven by `docker run -u 0` on a `:ro` mount; `env`-pinned `DOCKER_BUILDKIT=1` |
 | 3 | T3: archs follows | `container/archs` | done | Guard matrix refuse/refuse/pass; `./container/archs nonexistent:nope` → rc 125 (docker's own "no such image"), so it reaches `docker run` unprivileged. Wrapper warning replaced, not deleted |
-| 4 | T4: gate drops the sudo requirement | `context/plans/RULES.md` | pending | 7a slot re-filled, sweep unconditional |
+| 4 | T4: gate drops the sudo requirement | `context/plans/RULES.md` | done | Full gate rc 0: 9 PASS / 3 named SKIP / 0 FAIL. `PASS(7a rejects a sudo in DOCKER)` + `PASS(7a left nothing root-owned)`. 7e still root-free (244,890 entries, 10 s) |
 | 5 | T5: docs that assert the opposite | 6 files | pending | Ranked by how badly each misleads |
 | 6 | T6: full gate, harvest, close | `context/` | pending | Step 6 named-skipped: no runtime change |
 
@@ -58,6 +58,10 @@
 | 2026-10-13 | `VLLM_REF=main ./container/build` (pre-plan) | `timeout: failed to run command 'sudo': No such file or directory`, 127 | 1 | The trigger. Probe refused before any write |
 | 2026-10-13 | `grep -rn 'su -c' README.md container/` | 8 hits incl. `build:400`, `:404` | 1 | Root reachable without sudo, by the repo's own instruction |
 | 2026-10-13 | `grep -n EUID container/slice-setup container/gc-setup` | `slice-setup:49`, `gc-setup:86` both require 0 | 1 | Why the root refusal stays |
+| 2026-10-13 | full gate: `awk NR 101-459` → `/tmp/gate_all.sh` → `bash` | **rc 0**, 9 PASS / 3 named SKIP / **0 FAIL** | 1 | `PASS(7a rejects a sudo in DOCKER)`, `PASS(7a left nothing root-owned)`, `PASS(7c) 1000 unlimited readable`, 7e 244,890 entries root-free in 10 s. Skips: shellcheck (permanent), 7b + 7b env (Plan 01 T3b rebuild) |
+| 2026-10-13 | step 5 `./container/archs` as run inside that gate | identity line reads `… via docker`; `_vllm_fa2_C 384M sm_120 x76`, no `sm_80` SASS | 1 | Step 5 prints no verdict token, so it was checked for its table — a silently un-executed step is the failure RULES.md names |
+| 2026-10-13 | `docker run --rm -u 0:0 -v $PWD:/repo:ro ./container/build` | `## REFUSED: running as root`, in-container rc 1, host repo unchanged | 1 | Proves the kept root guard fires before any write |
+| 2026-10-13 | `DOCKER_BUILDKIT=0` vs pinned `=1`, empty context, missing Dockerfile | legacy builder (`DEPRECATED: The legacy builder…`) vs BuildKit (`failed to solve`) | 1 | Confirms ambient `=0` reaches the CLI now the privilege helper is gone; justifies the `env` pin |
 
 ## Notes / Deviations
 
@@ -105,6 +109,16 @@
   `[[ ${ALLOW_ROOT+set} == set ]]` prints a warning and continues. The plan text only said "warn"; the
   wording landed stronger, and the reasoning is in the guard comment — a flag that silently does nothing
   is worse than a refusal, because whoever set it believes it is protecting them.
+- **The recorded gate-extraction range is now stale, by this plan's own doing.** It read
+  `awk 'NR>=101 && NR<=438'`; Rule A now ends at 459, so that range silently drops the tail of the
+  gate — the exact "un-executed step that looks green" failure RULES.md names. Recompute the range
+  from the `### Rule A` / `### Rule B` markers after **any** RULES.md edit rather than reusing a
+  remembered pair of numbers. This run used 101-459 and extracted 199 lines, step 1 through 7e.
+- Two comments in the 7a fence ended **mid-sentence** (`… so the`, `… a sudo that`). Checked against
+  `git show HEAD:…`: identical there, `len=98`, so long-standing in the repo rather than damage from
+  this session. Both were on lines T4 had to rewrite anyway, so they are now complete sentences.
+- The T2 process slip is structurally covered: the gate's own step-4 porcelain guard (extracted line
+  47) runs before any preflight/build invocation, so running the gate whole cannot repeat it.
 - Step 6 of the gate (boot a model) is named-skipped by design: no runtime behaviour changes. The
   tracker says so rather than pretending the box went green.
 

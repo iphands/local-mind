@@ -227,32 +227,33 @@ set -a; . container/versions.env; . container/.last-build; set +a
 # fail on the day someone builds the other set and reports a broken gate to a healthy tree.
 WANT=${WANT:-$VLLM_MAIN_SHA}
 [ "$VLLM_REF" = "$WANT" ] && echo "last-build == $WANT" || echo "FAIL last=$VLLM_REF want=$WANT"
-sudo -n docker images --filter "label=ai.vllmcustom.vllm.ref=$WANT" -q | sort -u | wc -l
+docker images --filter "label=ai.vllmcustom.vllm.ref=$WANT" -q | sort -u | wc -l
 ./container/archs "$IMAGE:$VTAG"           # minutes of cuobjdump; no GPU, no model; as yourself
 ```
 Compare **image IDs** (`-q`), not tags, and require exactly one: a rebuild of the same sha retags,
 so a tag alone proves nothing, and a multi-line filter result makes any string compare arbitrary.
 In the arch table the only tolerated non-120 entries are the documented Marlin PTX fallbacks and
 the deliberately empty `_vllm_fa3_C` stub; `sm_80` SASS under `_vllm_fa2_C` means the fetch patch
-stopped applying and is a **fail**. `container/archs` goes through `${DOCKER[@]}` as of Plan 01 T6
-(`sudo -n docker` by default, `DOCKER=docker` where the account is grouped), so step 5 runs it
-**bare** — and putting `sudo -n` in front of it is not merely redundant but harmful: sudo's
-`env_reset` drops your `DOCKER`, the script falls back to its sudo default, root is authorized on
-this host, and the step goes green while exercising none of T6. A silently un-executed gate step is
-worse than a failing one. `container/push` is the script still calling bare `docker` (deferred to
-Follow-ups), so every **raw** docker line in this gate keeps its `sudo -n` — the `docker images`
-line above, step 6's `docker ps`, step 7's `docker image inspect`. Raw lines stay literal on
-purpose: the gate is pasted shell with no array parsed, and `${DOCKER[@]}` expands to *nothing* in
-a fresh interactive shell, turning the line into `images --filter …`. The launchers do not call
-bare docker: as of Plan 01 T1 they invoke `${DOCKER[@]}` (`sudo -n docker` by default) and **refuse
-to run under sudo**, so a gate step that shells out to `./qwen/run` must be run as the invoking
-user.
+stopped applying and is a **fail**. `container/archs` goes through `${DOCKER[@]}` (plain `docker` by
+default since Plan 02), so step 5 runs it **bare** — and wrapping it in anything that scrubs the
+environment is not merely redundant but harmful: `env -i`, a login shell, or any privilege helper with
+`env_reset` drops your `DOCKER`, the script falls back to its own default, and the step goes green while
+exercising something other than what you set. A silently un-executed gate step is worse than a failing
+one. `container/push` calls bare `docker` and always has. Every **raw** docker line in this gate is
+bare too — the `docker images` line above, step 6's `docker ps`, step 7's `docker image inspect`. Raw
+lines stay literal on purpose: the gate is pasted shell with no array parsed, and `${DOCKER[@]}`
+expands to *nothing* in a fresh interactive shell, turning the line into `images --filter …`. Since
+Plan 02 there is nothing left to bridge: the scripts and the raw lines all say plain `docker`, so
+`permission denied` on any of them means your socket access has not landed (`stat -c '%U:%G %a'
+/var/run/docker.sock`, then `id -nG`) rather than that a prefix is missing. The launchers likewise call
+plain `docker` and **refuse to run privileged**, so a gate step that shells out to `./qwen/run` must be
+run as the invoking user.
 
 **6. Runtime / measurement tier — NOT part of the per-commit gate** (owner decision, 2026-10-13:
 a model reload is too heavy to demand at every task boundary). It runs only when a plan task names
 it or the human asks. When it does:
 
-- **Assert the server is the build under test first.** `sudo -n docker ps --filter name=^vllm$
+- **Assert the server is the build under test first.** `docker ps --filter name=^vllm$
   --format '{{.Image}}'` must equal the image you mean to measure — the container name and port
   `8700` are shared by every launcher, so a server left up from an earlier run answers for a build
   it is not, and the sweep measures the wrong model.
@@ -270,30 +271,41 @@ it or the human asks. When it does:
  would hide a genuine `FAIL` on the launcher check.
 
 ```bash
-# 7a — the identity reaches the emitted command line, and a sudo'd launcher refuses. Stub docker
+# 7a — the identity reaches the emitted command line, and a DOCKER naming sudo is refused. Stub docker
 #      plus a two-byte fake model: no GPU, no image, no model. About 2 s. NEVER skippable.
 install -d /tmp/gate7/stub /tmp/gate7/cache /tmp/gate7/model/Fake
 printf '%s\n' '#!/bin/bash' '[[ $1 == image && $2 == inspect ]] && exit 0' \
   'for a in "$@"; do [[ $a == serve ]] && exit 0; done' 'exit 0' > /tmp/gate7/stub/docker
 chmod +x /tmp/gate7/stub/docker; echo '{}' > /tmp/gate7/model/Fake/config.json
 R="DOCKER=docker PATH=/tmp/gate7/stub:$PATH CACHE_DIR=/tmp/gate7/cache MODEL_ROOT=/tmp/gate7/model"
-OUT=$(env $R ./qwen/run Fake 2>&1)          # DOCKER=docker: `sudo` resolves ahead of PATH, so the
+OUT=$(env $R ./qwen/run Fake 2>&1)          # DOCKER=docker stays explicit even though it is now the
+                                            # default: the step must pin the value it means, not drift
+                                            # with whatever the script's default becomes next.
 grep -qE -- '--user 1000:1000'         <<<"$OUT" && echo 'PASS(7a --user)' || echo 'FAIL(7a --user)'
 grep -qE -- 'HOME=/home/ubuntu'        <<<"$OUT" && echo 'PASS(7a HOME)'   || echo 'FAIL(7a HOME)'
 grep -qE -- ':/home/ubuntu/\.cache:rw' <<<"$OUT" && echo 'PASS(7a mount)'  || echo 'FAIL(7a mount)'
 [ "$(stat -c '%u' /tmp/gate7/cache)" = 1000 ] && echo 'PASS(7a owner)' || echo 'FAIL(7a owner)'
-SUDO_OUT=$(sudo -n env $R ./qwen/run Fake 2>&1)   # assert the TEXT, not the exit code: a sudo that
-grep -q 'run it as yourself' <<<"$SUDO_OUT" \
-  && { [ -z "$(find /tmp/gate7/cache -user root)" ] \
-       && echo 'PASS(7a refuses sudo)' || echo 'FAIL(7a refused but left root-owned files)'; } \
-  || echo 'FAIL(7a no refusal text (did `sudo -n true` work at all?))'
+# Fifth assertion. It used to start the launcher privileged and assert the refusal text; Plan 02
+# removed that privilege path, so the slot asserts the guard that replaced it. One assertion in, one
+# assertion out — coverage must not quietly shrink just because the machinery it tested went away.
+env DOCKER='sudo -n docker' PATH=/tmp/gate7/stub:$PATH CACHE_DIR=/tmp/gate7/cache \
+    MODEL_ROOT=/tmp/gate7/model ./qwen/run Fake >/tmp/gate7/refuse.out 2>&1
+grep -q 'does not use it' /tmp/gate7/refuse.out \
+  && echo 'PASS(7a rejects a sudo in DOCKER)' \
+  || echo 'FAIL(7a a sudo in DOCKER is not rejected (guard deleted?))'
+# Unconditional on purpose, and deliberately NOT folded into the line above. The four greps test for
+# the PRESENCE of --user 1000:1000, and docker's last-wins rule means a launcher that APPENDED a
+# second `--user 0:0` would still satisfy every one of them. Ownership of the directory the run
+# touched is the only assertion here that catches that, so it may not hide behind another result.
+[ -z "$(find /tmp/gate7/cache -user root)" ] \
+  && echo 'PASS(7a left nothing root-owned)' || echo 'FAIL(7a left root-owned files in the cache dir)'
 rm -rf /tmp/gate7
 
 # 7b — the image declares the identity itself, so a hand-run `docker run` cannot regress it.
 set -a; . container/versions.env 2>/dev/null; . container/.last-build 2>/dev/null; set +a
 if [ -z "${VTAG:-}" ]; then echo 'SKIP(7b: no container/.last-build — nothing built on this host)'
 else
-  U=$(sudo -n docker image inspect -f '{{.Config.User}}' "$IMAGE:$VTAG" 2>/dev/null)
+  U=$(docker image inspect -f '{{.Config.User}}' "$IMAGE:$VTAG" 2>/dev/null)
   if   [ -z "$U" ]; then echo 'SKIP(7b: image declares no USER — Plan 01 T3 rebuild pending)'
                        echo 'SKIP(7b env: same rebuild — the Env defaults ship with the USER)'
   elif [ "$U" = 1000:1000 ]; then echo 'PASS(7b USER 1000:1000)'
@@ -303,7 +315,7 @@ else
   #    CCACHE_DIR line is the only canary for it: if it regresses, serve-time compiles go silently
   #    uncached and NOTHING else in the gate or at runtime ever notices.
   if [ -n "$U" ]; then
-    E=$(sudo -n docker image inspect -f '{{json .Config.Env}}' "$IMAGE:$VTAG" 2>/dev/null)
+    E=$(docker image inspect -f '{{json .Config.Env}}' "$IMAGE:$VTAG" 2>/dev/null)
     grep -q '"HOME=/home\/ubuntu"'                     <<<"$E" && echo 'PASS(7b HOME env)' \
       || echo 'FAIL(7b HOME env — docker gives a numeric user no HOME, so a hand-run serve gets HOME=/)'
     grep -q '"CCACHE_DIR=/home/ubuntu/\.cache/ccache"' <<<"$E" && echo 'PASS(7b CCACHE_DIR)' \
@@ -312,7 +324,7 @@ else
 
   # 7c — the image WORKS at uid 1000. Runs on today's pre-T3 image, and it is the fact the whole
   #      plan rests on, so it is never skippable while an image exists.
-  sudo -n docker run --rm --user 1000:1000 --ulimit memlock=-1 -e HOME=/home/ubuntu \
+  docker run --rm --user 1000:1000 --ulimit memlock=-1 -e HOME=/home/ubuntu \
     --entrypoint bash "$IMAGE:$VTAG" \
     -c 'id -u; ulimit -l; test -r /opt/venv/lib/python3.12/site-packages/vllm/__init__.py && echo readable' \
     | tr '\n' ' ' | sed 's/^/PASS(7c) /; $!s/$//; s/$/\n/'   # want: 1000 unlimited readable
@@ -365,14 +377,17 @@ else
       echo "     one-time fix (this tree: 244,892 entries / 205,953 files / 35.05 GiB, 2026-10-13 —"
       echo "     minutes of NFS metadata, not bytes. Run it to completion: a half-done chown just"
       echo "     reads as a smaller FAIL, and the launcher refuses the same tree until it is done):"
-      echo "         sudo chown -R $(id -u):$(id -g) -- $C"
-      echo "     done when this prints 0:  find $C -user root | wc -l"
+      echo "         su -c \"chown -R $(id -u):$(id -g) -- $C\""
+      echo "     no root available? there is NO privilege-free fix for this one: it is the warm cache,"
+      echo "     so point CACHE_DIR= at a directory you own and accept a cold boot per model family."
+      echo "     done when this prints 0:  find $C -not -user $(id -u) | wc -l"
       echo "     cache-legacy is a SIBLING of $C and stays root-owned on purpose — run-legacy serves"
       echo "     as root and writes that one itself. The command above cannot reach it, and must not."
     else
       _d=$(dirname "$_f"); [[ $_d == "$C"/* ]] || _d=$_f   # never widen past the cache root
       echo "FAIL(7e: $_m root-owned under $C — first: $_f)"
-      echo "     one-time fix:   sudo chown -R $(id -u):$(id -g) -- $(printf '%q' "$_d")"
+      echo "     one-time fix:   su -c \"chown -R $(id -u):$(id -g) -- $(printf '%q' "$_d")\""
+      echo "     no root? relocate instead: CACHE_DIR= a directory you own (cold boot, but certifiable)"
       echo "     then re-count:  find $C -user root | wc -l"
     fi
     exit 1
@@ -385,7 +400,11 @@ else
     # very failure this step hunts makes itself unreadable — silence here is not innocence.
     echo "FAIL(7e: sweep of $C incomplete (exit $_7e, $_w stderr lines) — not a pass:"
     if [ -n "$_eh" ]; then printf '%s\n' "$_eh"; fi
-    echo "     re-read the unreadable parts as:  sudo -n find $C -user root -print"
+    echo "     an unreadable entry IS the finding, not a gap in the check: a directory a root container"
+    echo "     wrote is routinely mode 0700, so the exact failure this step hunts is what hides itself."
+    echo "     A partial sweep certifies nothing — do not read this as a pass. Take the tree, or move off it:"
+    echo "         su -c \"chown -R $(id -u):$(id -g) -- $C\"   # then re-run this step"
+    echo "         CACHE_DIR=<somewhere you own>                # cold boot, but the sweep can finish"
     exit 1
   else
     echo "PASS(7e: $C root-free — $_n entries swept, no -maxdepth, $(( SECONDS - _t0 )) s)"
@@ -423,9 +442,11 @@ rather than being quietly skipped. Never mark a launcher, patch or Dockerfile ta
 1–5 alone if its behavior was runtime: say in the tracker that step 6 did not run.
 
 **Prerequisites.** `shellcheck` (absent → step 2 is `skip`; a task needing it is `blocked`, not
-`done`; install with your package manager, e.g. `sudo dnf install ShellCheck` /
-`sudo apt install shellcheck`) · passwordless `sudo docker` (the account is not in the `docker`
-group) · the four `$BUILD_DIR/src` trees for step 4 · `pytest`, `uv` and `rsync` are **not**
+`done`; install it host-side, e.g. `su -c "dnf install ShellCheck"` / `su -c "apt-get install shellcheck"`
+— this project uses no `sudo`, so a `sudo`-based install hint is a dead end here) · the invoking account
+can open `/var/run/docker.sock` (read who owns it before naming a group: `stat -c '%U:%G %a'
+/var/run/docker.sock`; after any membership change, start a new login shell — groups never apply to a
+running one) · the four `$BUILD_DIR/src` trees for step 4 · `pytest`, `uv` and `rsync` are **not**
 installed — the four host tests are stdlib-only and run with `python3 <file>`; pytest is not the
 runner. GPU + models are needed for step 6 only.
 
