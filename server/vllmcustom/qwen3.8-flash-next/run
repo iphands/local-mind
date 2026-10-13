@@ -31,9 +31,10 @@
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Last verified against main @ 187a0eb (2026-10-10, VLLM_MAIN_SHA in
+# Last verified against main @ df6c7ad (2026-10-13, VLLM_MAIN_SHA in
 # container/versions.env at the time; first verified at 1ee4be4, 2026-09-12, re-checked at
-# 468663a, 826e300, 36f94d5, a44d7b5, 2b9b55c, 47de9d4, 84bcbc6, bdd31c3, b6d8e8a and on each bump): vllm/config/engram.py with
+# 468663a, 826e300, 36f94d5, a44d7b5, 2b9b55c, 47de9d4, 84bcbc6, bdd31c3, b6d8e8a, 187a0eb
+# and on each bump): vllm/config/engram.py with
 # cpu_offload, Qwen4ExpPLEPinnedHostEmbedding (in qwen4_exp/common/ since
 # vllm#57497) selected when it is set, Qwen4ExpForConditionalGeneration +
 # Qwen4ExpMTP in the registry, VLLM_GDN_DECODE_KERNEL still an env, the qwen3
@@ -43,8 +44,9 @@
 # relabelled QSA layer type. Both Flash-Next checkpoints (nvidia NVFP4 and
 # primitive-ai) still say full_attention (12 layers, indexer_n_heads set); the
 # config relabels them on load -- qwen_sparse_attention under transformers
-# 5.17.0, indexed_attention under 5.18.0 and 5.19.0 (5.19.0 is what the 187a0eb
-# resolve picks; vLLM accepts both since vllm#59621) -- and keeps
+# 5.17.0, indexed_attention under 5.18.0 and 5.19.0 (5.19.0 is what the df6c7ad
+# resolve picks -- requirements/cuda.txt is byte-identical to the 187a0eb one, so the
+# resolve is unchanged; vLLM accepts both since vllm#59621) -- and keeps
 # text_config.ple_embedding_dtype as an attribute, so the --hf-overrides below
 # still lands. Checked for both checkpoints under 5.17.0 / 5.18.0 on the earlier
 # bumps and under 5.19.0 at 187a0eb.
@@ -331,7 +333,8 @@ PY
 fi
 
 # --block-size for the QSA key ring (upstream gap, vLLM 47de9d4; qsa_cache.py and
-# platforms/interface.py still do not fold it in at 187a0eb, so still needed). With MTP,
+# platforms/interface.py still do not fold it in at df6c7ad -- neither file changed
+# between 187a0eb and df6c7ad -- so still needed). With MTP,
 # qwen4_exp/common/qsa_cache.py sizes each QSA layer's key ring as
 # capacity = cr * ceil((cr + k) / cr)   (cr = indexer_compress_ratio, k = SPEC_TOKENS)
 # and asserts block_size % capacity == 0 -- its comment says the ring joins

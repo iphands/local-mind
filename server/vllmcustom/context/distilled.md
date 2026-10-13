@@ -53,7 +53,8 @@ section**, which always stays last. Keep it dense.
 
 ## Open Questions
 
-- `./container/archs` has not been run against the current `187a0eb` snapshot image — the arch
+- `./container/archs` has not been run against the current `df6c7ad` snapshot image (nor against
+  `187a0eb`, its predecessor) — the arch
   table is asserted by the build's own patch script, not re-measured. Confirm before trusting it.
 - Whether the FA2 `_vllm_fa2_C` extension is still sm_120-native on the main snapshot (the README
   verified the *patch anchors* on 2026-09-22, not the emitted SASS).

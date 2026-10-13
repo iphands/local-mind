@@ -15,6 +15,14 @@
 # is sized for the maximum -- so the patch only replaces the batch-size lookup
 # with one live value and adds the control path.
 #
+# Re-grepped present at df6c7ad (2026-10-13): scheduler.py, core.py and
+# api_server/routers.py all changed since 187a0eb, and every seam is still there --
+# dynamic_sd_lookup (scheduler.py:307), num_spec_tokens_to_schedule still taken from
+# dynamic_sd_lookup[batch] (:1486-1488), the UTILITY dispatch's
+# getattr(self, method_name) with _convert_msgspec_args (core.py ~1694),
+# call_utility_async (core_client.py:1259) and register_api_routers (routers.py:12).
+# test_spec_live.py passes. The in-container import check below has NOT been repeated
+# at df6c7ad: that image is not built yet.
 # Verified at vLLM 187a0eb (2026-10-10), by reading the source, by the host test
 # (test_spec_live.py: fakes shaped like these seams), and by importing the three
 # targets with the hook in a throwaway container of the b6d8e8a image (no GPU):

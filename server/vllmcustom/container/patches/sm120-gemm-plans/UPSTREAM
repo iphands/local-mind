@@ -15,6 +15,11 @@
 # TP=1 in vllm#59753, including this model's lm_head 248320x2560, GDN 16384x2560, QSA
 # 13952x2560, HC 10240x320, shared expert and router shapes).
 #
+# Re-grepped at df6c7ad (2026-10-13): low_latency_gemm.py is unchanged since 187a0eb
+# and QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY still keys exactly (10, 3) (10, 0) (9, 0)
+# (12, 1) -- upstream still ships no (12, 0) table, so the overlay is still required.
+# test_sm120_gemm_plans.py passes. The in-container check below has NOT been repeated
+# at df6c7ad: that image is not built yet.
 # Verified at vLLM 187a0eb (2026-10-10) and in a throwaway container of the b6d8e8a image
 # (no GPU): the capability key type is a tuple subclass (DeviceCapability(12, 0) == (12, 0),
 # equal hash), the existing keys are exactly (10, 0) (10, 3) (12, 1) (9, 0), the hook applies

@@ -29,6 +29,11 @@
 #   and kernel_warmup.py changed since b6d8e8a; every hooked name is still defined
 #   (gpu_worker.py only gained a warn_if_flashinfer_kernels_missing() call in
 #   init_device, vllm#58765). test_boot_timing.py passes.
+#   Re-grepped present at df6c7ad (2026-10-13): app_state.py, core.py, gpu_worker.py,
+#   gpu/model_runner.py and kernel_warmup.py changed since 187a0eb; every hooked name
+#   is still defined (12 hooked attrs grep to 15 defs at both shas). The kernel_warmup
+#   change is vllm#60684's MSA warmup for MiniMax-M3, not a hooked attr.
+#   test_boot_timing.py passes.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client

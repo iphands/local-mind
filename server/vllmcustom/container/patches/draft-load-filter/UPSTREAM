@@ -26,7 +26,11 @@
 # load_weights(self, model, model_config) are untouched: vllm#60152 adds a
 # shard-level is_unused_checkpoint_weight skip that Qwen4ExpMTP does not define
 # (only other MTP heads do), vllm#57108's stricter weight tracking stays off by
-# default for quantized models, and mtp.py / model.py are unchanged):
+# default for quantized models, and mtp.py / model.py are unchanged) and at
+# df6c7ad (2026-10-13; model.py +102/-22 and mtp.py +42/-2, both from the Qwen4Exp
+# Sequence-Parallelism work (vllm#56322) -- _remap_mtp_weight_name (mtp.py:97, called
+# at :473) and orig_to_new_substr={"mtp.": None} (model.py:925, :1128) are still
+# defined and appear on no +/- line, so the mapper is untouched):
 #   vllm.model_executor.model_loader.weight_utils
 #       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
 #                               safetensors_weights_iterator resolves it as a

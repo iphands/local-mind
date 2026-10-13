@@ -27,8 +27,8 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at 187a0eb, 2026-10-10;
-#     was b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#   - main snapshot (VLLM_REF=main in ./build, pinned at df6c7ad, 2026-10-13;
+#     was 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
 #     and 1ee4be4, 2026-09-12):
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
@@ -147,6 +147,26 @@
 #     unconditionally (they were already built on 3.12). vllm_flash_attn.cmake and
 #     every external-project pin are untouched, so the sm120 hook below still
 #     lands, and no CUDA source was added.
+#     187a0eb -> df6c7ad (2026-10-13, 104 commits): torch 2.13.0 / torchaudio
+#     2.11.0 / torchvision 0.28.0 / flashinfer 0.7.0.post1 and requirements/build/
+#     are unchanged -- requirements/cuda.txt and requirements/common.txt are
+#     byte-identical across the window, and xpu.txt is the only requirements file
+#     that moved at all -- so torch/torchaudio/flashinfer layers are reused and only
+#     vllm-build/vllm-openai rebuild. Runtime resolve: an in-place dry-run changes
+#     nothing and no requirement line moved, so there is nothing to --upgrade-package
+#     and the fresh vllm-openai resolve takes the same set. CMake: vllm#60721 hoists
+#     csrc/libtorch_stable/** into csrc/** -- paths, not content -- so vllm-build
+#     reconfigures and recompiles, but the ccache mount re-keys on content and most of
+#     it only re-links. No CUDA source is added or removed and the extension target
+#     list is unchanged; the one non-path hunk drops a
+#     target_compile_definitions(_C CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL) that was
+#     already dead on CUDA builds (_C is ROCm-only here, as it was at 187a0eb), while
+#     _C_stable_libtorch and _moe_C_stable_libtorch keep the define. vllm#60684 bumps
+#     the MSA (fmha_sm100) pin and adds prefill_q8kv4/ install rules; that target only
+#     installs sources for runtime JIT and compiles nothing, so it cannot change what
+#     this file builds -- whether the new msa_warmup / q8kv4_prefill_adapter import
+#     cleanly on sm_120 is unverified until a boot. vllm_flash_attn.cmake is
+#     untouched, so the sm120 hook below still lands.
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,
