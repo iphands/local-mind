@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `01`.** <!-- hp:next-free -->
+**Next free plan number: `02`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-10-13):** single-stream decode throughput on one RTX PRO 6000
 > (sm_120), from a vLLM stack we build ourselves — torch, FlashInfer and vLLM all compiled from
@@ -21,7 +21,8 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
 
 ## Currently Active <!-- hp:active -->
 
-None yet — start with `/hands-plan new <first piece of work>`.
+**01 — Run everything as uid/gid 1000:1000, host and container** (`pending`, T3b + T10 blocked on an
+image rebuild). Wave 1 needs no GPU and no rebuild; do T4 before asking the owner to rebuild.
 
 ## Plans <!-- hp:plans -->
 
@@ -29,8 +30,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
-
-_(none yet)_
+| 01 | Run everything as uid/gid 1000:1000, host and container | — | pending | Containers run as root today; cache mount target is unreadable to uid 1000, so identity and mount must move together. |
 
 ## Pre-existing material <!-- hp:pre-existing -->
 
