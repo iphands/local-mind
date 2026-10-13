@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 17% complete (1/6 tasks)
+- Status: 33% complete (2/6 tasks)
 - Start date: 2026-10-13
 - Plan: `context/plans/02_no_sudo.md`
 - Evidence: the gate's own stdout (`/tmp/gate_all.sh` captured per run), the `grep -ci sudo` counts
@@ -40,7 +40,7 @@
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 1 | T1: launcher lib stops knowing about privilege | `common/_run-lib.sh` | done | `bash -n` clean; guard matrix refuse/refuse/pass/pass; no `:-sudo`, `sudo -n`, `sudo chown` or `ALLOW_ROOT` left. Root refusal kept, reworded |
-| 2 | T2: build contract, remedies, BuildKit pin | `container/build` | pending | `ALLOW_ROOT` deleted and self-announcing |
+| 2 | T2: build contract, remedies, BuildKit pin | `container/build` | done | 9 hunks. `PREFLIGHT_ONLY=1 CTX_DIR=` → rc 0 unprivileged; `DOCKER='sudo -n docker'` → rc 1 before any write; uid-0 refusal proven by `docker run -u 0` on a `:ro` mount; `env`-pinned `DOCKER_BUILDKIT=1` |
 | 3 | T3: archs follows | `container/archs` | pending | Replace the wrapper warning, do not delete it |
 | 4 | T4: gate drops the sudo requirement | `context/plans/RULES.md` | pending | 7a slot re-filled, sweep unconditional |
 | 5 | T5: docs that assert the opposite | 6 files | pending | Ranked by how badly each misleads |
@@ -84,6 +84,27 @@
   (`' '"${DOCKER[*]}"' ' == *' sudo '*`). `bash -n` found it; the guard had looked correct. Verified
   as a 4-case matrix, not one case — accept-and-reject both have to be exercised or the guard could
   pass by refusing everything.
+- **Process slip at T2, no damage.** `PREFLIGHT_ONLY=1 ./container/build` was run to verify the new
+  preamble without first running gate step 4's porcelain guard — and that path force-checks-out the
+  four hand-editable trees, which `AGENTS.md` says to guard first. Checked after: the only dirty entry
+  anywhere is `?? 3rdparty/nccl/` in flashinfer, untracked since 2026-06-19, and `checkout --force`
+  does not remove untracked directories. Nothing of the owner's was lost. Run step 4 BEFORE any
+  build invocation, including preflight-only ones.
+- **The `DOCKER_BUILDKIT=0` claim was reasoned in the plan and is now observed.** An empty context
+  with a missing Dockerfile fails either way, but the builder identity is legible in the error:
+  `DOCKER_BUILDKIT=0` answers `DEPRECATED: The legacy builder is deprecated` (classic builder), pinned
+  `DOCKER_BUILDKIT=1` answers `failed to solve: failed to read dockerfile` (BuildKit). So the Key Fact
+  in the plan titled "confirm in T2 before relying on it" is confirmed: with the privilege helper gone,
+  an ambient `DOCKER_BUILDKIT=0` really does reach the CLI. The pin is applied at the build line.
+- **The kept root guard was proven, not assumed.** `docker run --rm -u 0:0` with the repo mounted `:ro`
+  prints the REFUSED block and exits 1, and the host repo stayed clean afterwards (0 root-owned files,
+  no new porcelain entries). This is the evidence for overriding the literal "delete all root
+  machinery" instruction — the guard is the only thing between `su -c ./container/build` and the four
+  trees, and it demonstrably works.
+- `ALLOW_ROOT` **announces itself** rather than being silently ignored (reviewer suggestion, adopted):
+  `[[ ${ALLOW_ROOT+set} == set ]]` prints a warning and continues. The plan text only said "warn"; the
+  wording landed stronger, and the reasoning is in the guard comment — a flag that silently does nothing
+  is worse than a refusal, because whoever set it believes it is protecting them.
 - Step 6 of the gate (boot a model) is named-skipped by design: no runtime behaviour changes. The
   tracker says so rather than pretending the box went green.
 

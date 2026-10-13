@@ -135,19 +135,24 @@ CTX_DIR=${CTX_DIR-$BUILD_DIR/ctx}                       # EMPTY = contexts strai
 # probe: past those, failures are paid for in minutes, in hours, or — for the four trees
 # under $SRC_DIR — irrecoverably.
 #
-# The launcher guard (common/_run-lib.sh) has NO escape hatch and this one does, on
-# purpose. A root launcher breaks the serve it is about to start, immediately, and has no
-# legitimate root use. A root build leaves root-owned trees instead, which the sweep below
-# catches at the front door with the exact fix printed. ALLOW_ROOT only SILENCES this
-# check — the writes still land root-owned, and the next unprivileged run refuses.
-if [[ $EUID == 0 && ${ALLOW_ROOT:-0} != 1 ]]; then
+# No escape hatch, same as the launcher guard in common/_run-lib.sh. Plan 02 removed the one
+# this had (ALLOW_ROOT): it silenced the check without changing the damage, and a flag that
+# now silently does nothing is worse than a refusal — whoever exports it believes it is doing
+# something. Set it and this says so out loud. The check itself STAYS: _writable below cannot
+# stand in for it, because _writable tests `-w` and root is writable by definition, so a
+# privileged run passes every one of those checks on its way to ruining the four trees.
+if [[ ${ALLOW_ROOT+set} == set ]]; then
+  printf '## ALLOW_ROOT no longer does anything: this project has no root machinery.\n' >&2
+  printf '##   Remove it from your env or CI. Continuing as uid %s without it.\n' "$EUID" >&2
+fi
+if [[ $EUID == 0 ]]; then
   {
     printf '## REFUSED: running as root. Run it as yourself:\n'
     printf '##     %s\n' "$0"
     printf '##   why: this git-fetches and "checkout --force"s the four hand-editable trees under\n'
     printf '##   %s. They are hand-editable by design; as root they land root-owned and the next\n' "$SRC_DIR"
     printf '##   unprivileged run cannot touch them — half-way through a checkout that is unrecoverable.\n'
-    printf '##   root is needed for the docker socket only, and this script sudo-s for that itself.\n'
+    printf '##   this script needs no privilege to run: it calls docker directly, as you.\n'
     if [[ -n $CTX_DIR ]]; then
       printf '##   it also rsyncs staged contexts into %s (same ownership problem).\n' "$CTX_DIR"
     else
@@ -155,18 +160,15 @@ if [[ $EUID == 0 && ${ALLOW_ROOT:-0} != 1 ]]; then
       printf '##   this run writes to.\n'
     fi
     printf '##\n'
-    printf '## on a host where you are in the docker group:  DOCKER=docker %s\n' "$0"
-    printf '## to really mean root (silences this check only):  sudo env ALLOW_ROOT=1 %s\n' "$0"
-    printf '##   (`env` rather than `ALLOW_ROOT=1 sudo …`: that form needs sudoers to permit setting\n'
-    printf '##    variables. It works on this host — its rule is (ALL) NOPASSWD: ALL — but that is\n'
-    printf '##    not the rule every host runs, and the `env` form works on all of them. No `-n`\n'
-    printf '##    here: this line is for a human to paste, so it may prompt.)\n'
+    printf '##   if a privileged build already left damage here, the next unprivileged run prints\n'
+    printf '##   what is actually runnable: su -c chown, mv the tree aside, or relocate BUILD_DIR=.\n'
   } >&2
   exit 1
 fi
 
-# Same contract as common/_run-lib.sh: a plain string, split on spaces, so a host where
-# the account IS grouped says DOCKER=docker and never sudo's.
+# Same contract as common/_run-lib.sh: a plain string, split on spaces, defaulting to plain
+# `docker`. This project uses no privilege helper; DOCKER exists so an operator can point it at
+# a wrapper. Byte-identical to the copies in common/_run-lib.sh and container/archs on purpose.
 #
 # `@a` answers with attribute FLAGS, not a type letter. Measured on bash 5.2: an exported
 # plain string reports `x`, a shell-local one reports nothing, an indexed array reports
@@ -175,20 +177,31 @@ fi
 # `DOCKER=docker` that arrives from the environment (the only way anyone sets it), and it
 # misses an exported array. Test for an a/A anywhere in the flags.
 if [[ -n ${DOCKER+set} && ${DOCKER@a} == *[aA]* ]]; then
-  echo "## DOCKER must be a plain string (DOCKER='sudo -n docker'), not an array." >&2
+  echo "## DOCKER must be a plain string (DOCKER=docker), not an array." >&2
   exit 1
 fi
-IFS=' ' read -r -a DOCKER <<< "${DOCKER:-sudo -n docker}"
+IFS=' ' read -r -a DOCKER <<< "${DOCKER:-docker}"
 if (( ${#DOCKER[@]} == 0 )); then
   echo "## DOCKER is set but holds no words; use DOCKER=docker or unset it." >&2
   exit 1
 fi
+# Whole-word match, so a wrapper legitimately named /opt/sudo-docker/bin/docker still passes.
+# Refused rather than obeyed: with no sudo installed the value fails at exit 127 and the probe
+# below would report "DOCKER points at nothing", pointing at a perfectly good `docker`.
+if [[ ' '"${DOCKER[*]}"' ' == *' sudo '* || ' '"${DOCKER[*]}"' ' == */sudo ]]; then
+  {
+    printf '## DOCKER names '"'"'sudo'"'"'. This project does not use it — nothing here needs a privilege helper.\n'
+    printf '##   fix:    unset DOCKER      (the default is plain '"'"'docker'"'"')\n'
+    printf '##   wrapper? name it directly: DOCKER=/usr/local/bin/my-docker\n'
+  } >&2
+  exit 1
+fi
 
-# Legacy-root leftovers: full builds here ran under sudo before Plan 01, so the paths this
-# run writes may be root-owned. Found mid-flight that is EACCES minutes into a fetch, or at
-# the very LAST line, when .last-build is written after a build that already succeeded. So
-# prove them first. A path that does not exist yet is gated by its nearest existing
-# ANCESTOR — that is where $BUILD_DIR's ownership actually hides.
+# Root-owned leftovers: full builds here ran privileged before Plan 01, so the paths this run
+# writes may be root-owned. Found mid-flight that is EACCES minutes into a fetch, or at the very
+# LAST line, when .last-build is written after a build that already succeeded. So prove them
+# first. A path that does not exist yet is gated by its nearest existing ANCESTOR — that is where
+# $BUILD_DIR's ownership actually hides.
 _writable() {   # $1 = path this run writes, $2 = what lives there, $3 = remedy: chown|rm|rmf
   local probe=$1 kind=$3 owner
   # Absolute BEFORE the walk. `${x%/*}` on a slash-less component returns it UNCHANGED, so a
@@ -209,26 +222,50 @@ _writable() {   # $1 = path this run writes, $2 = what lives there, $3 = remedy:
   {
     printf '## REFUSED: %s is not writable by uid %s.\n' "$2" "$EUID"
     printf '##   %s is owned by uid %s.\n' "$probe" "$owner"
-    # Say the cause only when the evidence is the cause. uid 0 is the sudo leftover;
-    # anything else is a mode problem or a mistyped override, and calling that a sudo
-    # leftover sends the reader to fix the wrong thing.
+    # Say the cause only when the evidence is the cause. uid 0 means a privileged run
+    # (pre-Plan-01, or someone reaching this script via su); anything else is a mode problem or a
+    # mistyped override, and calling that a leftover sends the reader to fix nothing.
     if [[ $owner == 0 ]]; then
-      printf '##   a build run under sudo, left here before Plan 01.\n'
+      printf '##   owned by root — written by a privileged run, before this project stopped needing one.\n'
     else
-      printf '##   not a sudo leftover: a mode problem, or a mistyped BUILD_DIR/CTX_DIR.\n'
+      printf '##   not a root leftover: a mode problem, or a mistyped BUILD_DIR/CTX_DIR.\n'
     fi
     [[ $1 == "$probe" ]] \
       || printf '##   %s does not exist yet — the gate is its parent, so the fix below names the parent.\n' "$1"
     # The remedy names $probe, never $1. `chown -R` on a path that is not there fails with
-    # "cannot access", and owning the parent IS the fix: mkdir/rsync then recreate the leaf
-    # with correct ownership. Printed remedies drop the `-n` the script's own sudo calls use
-    # — `-n` exists so an in-script sudo can never hang; a one-time fix a human pastes at a
-    # keyboard should prompt for a password on a host with no NOPASSWD rule rather than fail.
+    # "cannot access", and owning the parent IS the fix: mkdir/rsync then recreate the leaf with
+    # correct ownership. Every branch below states what an operator with NO privilege can actually
+    # run, because that is the only kind this project has — printing an unrunnable "one-time fix"
+    # is worse than printing none, and printing a destructive one that only half-works is worse
+    # than both. Hence: no chown you cannot perform, and no `rm -rf` into a root-owned tree.
     case $kind in
-      chown) printf '##   one-time fix:  sudo chown -R %s:%s -- %q\n' "$(id -u)" "$(id -g)" "$probe" ;;
-      rm)    printf '##   one-time fix:  sudo rm -rf -- %q\n' "$probe" ;;
-      rmf)   printf '##   one-time fix:  rm -f -- %q\n' "$probe" ;;  # unlink needs write on the
-                                             # DIRECTORY, not on the file — so no sudo for this one
+      chown)
+        # Hand-editable or irreplaceable, so there is no privilege-free fix. Say that first
+        # instead of implying one, then rank: keep-the-tree, move-it-aside, relocate.
+        printf '##   no privilege on this box, so nothing you run as yourself can take it. Pick one:\n'
+        printf '##     a) with root:  su -c "chown -R %s:%s -- %q"\n' "$(id -u)" "$(id -g)" "$probe"
+        printf '##     b) rename it aside — a rename needs write on the PARENT only, so it works:\n'
+        printf '##        mv -- %q %q.uid%s\n' "$probe" "$probe" "$owner"
+        printf '##     c) relocate: BUILD_DIR= a path you own.\n'
+        printf '##   CAREFUL with b) and c) on a source tree: hand-editable by design. Look first:\n'
+        printf '##     git -C %q status --short\n' "$probe"
+        ;;
+      rm)
+        # Regenerable staging — but `rm -rf` into a root-owned 0755 leaf fails partway, because
+        # unlinking inside a directory needs write ON THAT DIRECTORY. A rename needs the parent
+        # only, so mv always succeeds where rm cannot. Never print rm -rf for this class.
+        printf '##   regenerable staging, but root-owned inside, so rm -rf would fail partway.\n'
+        printf '##   rename it aside instead — write on the parent is enough, and the rsync\n'
+        printf '##   below recreates it owned by you:\n'
+        printf '##     mv -- %q %q.uid%s\n' "$probe" "$probe" "$owner"
+        printf '##   or relocate the whole staging root with CTX_DIR= (CTX_DIR= disables staging).\n'
+        ;;
+      rmf)
+        # The one remedy that genuinely needs no privilege: unlink is governed by write on the
+        # DIRECTORY, not by the file's own owner. Keep this branch copy-pasteable.
+        printf '##   one-step fix, no privilege needed:\n'
+        printf '##     rm -f -- %q\n' "$probe"
+        ;;
     esac
   } >&2
   exit 1
@@ -236,21 +273,22 @@ _writable() {   # $1 = path this run writes, $2 = what lives there, $3 = remedy:
 
 _writable "$SRC_DIR" 'the source tree root' chown
 for _tree in pytorch flashinfer vllm torchaudio; do
-  # $SRC_DIR writable does NOT imply its children are: a mixed tree (you made the top level,
-  # a later sudo run made the clone) is exactly the case that abandons a `checkout --force`
+  # $SRC_DIR writable does NOT imply its children are: a mixed tree (you made the top level, a
+  # later privileged run made the clone) is exactly the case that abandons a `checkout --force`
   # half-finished. These four trees are the thing RULES.md calls unrecoverable.
   if [[ -e "$SRC_DIR/$_tree" ]]; then
     _writable "$SRC_DIR/$_tree" "the $_tree source tree" chown
   fi
 done
 if [[ -n $CTX_DIR ]]; then
-  # The ROOT gets chown, never rm. `%q` quotes a token, not a SCOPE: a mistyped
-  # CTX_DIR=/mnt/noir/scratch/ai/vllm (the `/ctx` tail dropped) is root-owned enough to trip
-  # this check and would print a pasteable `sudo rm -rf` over the build root *including*
-  # $SRC_DIR — the four trees RULES.md calls unrecoverable — on a host where sudo is
-  # (ALL) NOPASSWD: ALL. chown is safe here and sufficient: own the directory and the rsync
-  # below reconciles the rest. The four leaves below have names this script chose, so rm is
-  # bounded there, and deleting beats chowning GB of regenerable staging.
+  # The ROOT gets the chown class, never the rm class. `%q` quotes a token, not a SCOPE: a
+  # mistyped CTX_DIR=/mnt/noir/scratch/ai/vllm (the `/ctx` tail dropped) is root-owned enough to
+  # trip this check, and the rm class prints a pasteable recursive delete. Removing the privilege
+  # helper makes that command EASIER to run, not harder — no password stands between the paste and
+  # the damage — so the root of anything that can contain $SRC_DIR must never be offered for
+  # deletion. chown/mv/relocate is safe here and sufficient: own the directory and the rsync below
+  # reconciles the rest. The four leaves below have names this script chose, so the rm class is
+  # bounded there, and moving regenerable staging aside beats chowning gigabytes of it.
   _writable "$CTX_DIR" 'the staged-context root' chown
   for _ctx in pytorch flashinfer vllm torchaudio; do
     if [[ -e "$CTX_DIR/$_ctx" ]]; then
@@ -260,10 +298,10 @@ if [[ -n $CTX_DIR ]]; then
 fi
 _writable "$here/.last-build" 'container/.last-build' rmf
 
-# Prove dockerd answers before anything here is paid for — the same probe and the same
-# reasoning common/_run-lib.sh:86 already applies to the launchers. Without it a lost
-# NOPASSWD rule surfaces at the `docker build` line: after four `checkout --force`s have
-# mutated the trees RULES.md calls unrecoverable, and after GB of context crossed NFS.
+# Prove dockerd answers before anything here is paid for — the same probe and the same reasoning
+# common/_run-lib.sh already applies to the launchers. Without it a dead socket surfaces at the
+# `docker build` line: after four `checkout --force`s have mutated the trees RULES.md calls
+# unrecoverable, and after GB of context crossed NFS.
 # Runs even under PREFLIGHT_ONLY, which costs ~0.1 s and still never invokes a build.
 _probe_rc=0
 _docker_probe=$(timeout 15 "${DOCKER[@]}" version 2>&1) || _probe_rc=$?
@@ -281,10 +319,13 @@ if (( _probe_rc != 0 )); then
       printf '##   exit 124: killed at the 15 s limit — dockerd is wedged.\n'
     elif (( _probe_rc == 127 )); then
       printf '##   exit 127: %s is not a runnable command — DOCKER points at nothing.\n' "${DOCKER[0]}"
-    elif grep -qi password <<<"$_docker_probe"; then
-      printf '##   sudo asked for a password: the NOPASSWD rule is gone.\n'
+      printf '##   fix: unset DOCKER   (the default is plain '"'"'docker'"'"')\n'
+    elif grep -qi 'permission denied' <<<"$_docker_probe"; then
+      printf '##   you may not open the socket. Read who can, do not guess a group name:\n'
+      printf "##     stat -c '%%U:%%G %%a' /var/run/docker.sock\n"
+      printf '##   nothing in this project fixes that with a privilege helper; it is host-side.\n'
     else
-      printf "##   'Cannot connect'/'permission denied' -> dockerd is down, or the socket needs sudo.\n"
+      printf "##   'Cannot connect' -> dockerd is not running.\n"
     fi
     printf '## nothing was written by this run; your source trees are untouched.\n'
   } >&2
@@ -425,12 +466,16 @@ else
 fi
 echo "## building $IMAGE:$TAG  (cuda=$CUDA_VERSION torch=$TORCH_REF flashinfer=$FLASHINFER_REF vllm=$VLLM_REF torchaudio=$TORCHAUDIO_REF arch=$TORCH_CUDA_ARCH_LIST mem=${BUILD_MEM_GB}G jobs=$MAX_JOBS)"
 
-# No `DOCKER_BUILDKIT=1` prefix. It is read by the docker CLI client-side, so under the
-# default DOCKER='sudo -n docker' sudo's env_reset strips it before docker ever sees it —
-# which made the one flag mean two different things on the two supported hosts. BuildKit
-# is the default builder on this project's dockerd (29.7.2), and every sudo'd build run
-# here so far already ran with the variable stripped: the output cannot change.
-"${DOCKER[@]}" build \
+# `DOCKER_BUILDKIT=1` is pinned here, and the reason for pinning it INVERTED when Plan 02 dropped
+# the privilege helper. The prefix used to be pointless: sudo's env_reset stripped the variable
+# before the CLI ever saw it, so every build here ran on the daemon default and the flag could not
+# mean anything. With DOCKER defaulting to plain `docker` nothing strips it any more, so a stray
+# `export DOCKER_BUILDKIT=0` in a profile or CI image now reaches the CLI and selects the LEGACY
+# builder. Observed on this dockerd (29.7.2): `DOCKER_BUILDKIT=0 docker build` answers "DEPRECATED:
+# The legacy builder is deprecated" and cannot read the Dockerfile at all — and this line sits BELOW
+# four `checkout --force`s and GB of staged context, so that is the worst possible place to discover
+# it. Pinning costs nothing and makes the one flag mean one thing on every host.
+env DOCKER_BUILDKIT=1 "${DOCKER[@]}" build \
   ${cgroup_args[@]+"${cgroup_args[@]}"} \
   -f "$here/Dockerfile" \
   --build-context pytorch="$CTX_ROOT/pytorch" \
