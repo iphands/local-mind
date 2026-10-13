@@ -288,11 +288,16 @@ grep -qE -- ':/home/ubuntu/\.cache:rw' <<<"$OUT" && echo 'PASS(7a mount)'  || ec
 # Fifth assertion. It used to start the launcher privileged and assert the refusal text; Plan 02
 # removed that privilege path, so the slot asserts the guard that replaced it. One assertion in, one
 # assertion out — coverage must not quietly shrink just because the machinery it tested went away.
-env DOCKER='sudo -n docker' PATH=/tmp/gate7/stub:$PATH CACHE_DIR=/tmp/gate7/cache \
-    MODEL_ROOT=/tmp/gate7/model ./qwen/run Fake >/tmp/gate7/refuse.out 2>&1
-grep -q 'does not use it' /tmp/gate7/refuse.out \
-  && echo 'PASS(7a rejects a sudo in DOCKER)' \
-  || echo 'FAIL(7a a sudo in DOCKER is not rejected (guard deleted?))'
+# TWO values, because the predicate has two arms: `sudo -n docker` exercises the word arm, `/usr/bin/sudo`
+# the path arm. One case per guard instead of one per BRANCH is exactly how the path arm shipped dead for
+# an entire plan with this gate green — see the padded-operand entry in `context/pitfalls.md`.
+for _7a_docker in 'sudo -n docker' '/usr/bin/sudo'; do
+  env DOCKER="$_7a_docker" PATH=/tmp/gate7/stub:$PATH CACHE_DIR=/tmp/gate7/cache \
+      MODEL_ROOT=/tmp/gate7/model ./qwen/run Fake >/tmp/gate7/refuse.out 2>&1
+  grep -q 'does not use it' /tmp/gate7/refuse.out \
+    && echo "PASS(7a rejects a sudo in DOCKER: $_7a_docker)" \
+    || echo "FAIL(7a DOCKER=$_7a_docker not rejected — guard deleted, or that arm is dead)"
+done
 # Unconditional on purpose, and deliberately NOT folded into the line above. The four greps test for
 # the PRESENCE of --user 1000:1000, and docker's last-wins rule means a launcher that APPENDED a
 # second `--user 0:0` would still satisfy every one of them. Ownership of the directory the run

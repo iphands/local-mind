@@ -168,7 +168,8 @@ fi
 
 # Same contract as common/_run-lib.sh: a plain string, split on spaces, defaulting to plain
 # `docker`. This project uses no privilege helper; DOCKER exists so an operator can point it at
-# a wrapper. Byte-identical to the copies in common/_run-lib.sh and container/archs on purpose.
+# a wrapper. The three guard predicates are byte-identical to common/_run-lib.sh and container/archs on
+# purpose (the message blocks differ only in echo vs printf).
 #
 # `@a` answers with attribute FLAGS, not a type letter. Measured on bash 5.2: an exported
 # plain string reports `x`, a shell-local one reports nothing, an indexed array reports
@@ -185,10 +186,14 @@ if (( ${#DOCKER[@]} == 0 )); then
   echo "## DOCKER is set but holds no words; use DOCKER=docker or unset it." >&2
   exit 1
 fi
-# Whole-word match, so a wrapper legitimately named /opt/sudo-docker/bin/docker still passes.
+# Refuse a DOCKER that names sudo, per word. The glob must be CONTAINED (`*'/sudo '*`), not
+# end-anchored: the operand is padded with a trailing space, so `== */sudo` cannot match any input
+# at all — measured 2026-10-13, that arm was dead in all three copies and let `DOCKER=/usr/bin/sudo`
+# through. Containment also catches sudo as a non-final word. A wrapper legitimately named
+# /opt/sudo-docker/bin/docker still passes, because what follows its "sudo" is "-", not a space.
 # Refused rather than obeyed: with no sudo installed the value fails at exit 127 and the probe
 # below would report "DOCKER points at nothing", pointing at a perfectly good `docker`.
-if [[ ' '"${DOCKER[*]}"' ' == *' sudo '* || ' '"${DOCKER[*]}"' ' == */sudo ]]; then
+if [[ ' '"${DOCKER[*]}"' ' == *' sudo '* || ' '"${DOCKER[*]}"' ' == *'/sudo '* ]]; then
   {
     printf '## DOCKER names '"'"'sudo'"'"'. This project does not use it — nothing here needs a privilege helper.\n'
     printf '##   fix:    unset DOCKER      (the default is plain '"'"'docker'"'"')\n'

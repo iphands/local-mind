@@ -72,8 +72,12 @@ if (( ${#DOCKER[@]} == 0 )); then
   echo "## DOCKER is set but holds no words; use DOCKER=docker or unset it." >&2
   exit 1
 fi
-# Whole-word match, so a wrapper legitimately named /opt/sudo-docker/bin/docker still passes.
-if [[ ' '"${DOCKER[*]}"' ' == *' sudo '* || ' '"${DOCKER[*]}"' ' == */sudo ]]; then
+# Refuse a DOCKER that names sudo, per word. The glob must be CONTAINED (`*'/sudo '*`), not
+# end-anchored: the operand is padded with a trailing space, so `== */sudo` cannot match any input
+# at all — measured 2026-10-13, that arm was dead in all three copies and let `DOCKER=/usr/bin/sudo`
+# through. Containment also catches sudo as a non-final word. A wrapper legitimately named
+# /opt/sudo-docker/bin/docker still passes, because what follows its "sudo" is "-", not a space.
+if [[ ' '"${DOCKER[*]}"' ' == *' sudo '* || ' '"${DOCKER[*]}"' ' == *'/sudo '* ]]; then
   {
     echo "## DOCKER names 'sudo'. This project does not use it — nothing here needs a privilege helper." >&2
     echo "##   fix:    unset DOCKER      (the default is plain 'docker')" >&2

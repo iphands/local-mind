@@ -71,6 +71,10 @@ resolved before doing anything slow:
 ./bench/bench baseline                         # measure tok/s of the running server
 ```
 
+You must be able to open `/var/run/docker.sock` **as yourself**. Nothing in this project uses a
+privilege helper, so `permission denied` on any docker line is a host-side access problem: read who
+may open it (`stat -c '%U:%G %a' /var/run/docker.sock`) before guessing at a group name.
+
 `models` is a symlink to `/mnt/noir/scratch/ai/llm/models`, so paths match the
 old `server/vllm` scripts:
 
@@ -471,7 +475,9 @@ Preflight flags it precisely because the build won't.
   Anything unused for 48 h is deleted once they're over that budget. On 2026-09-27 the
   ccache mount was 302 MB despite `CCACHE_MAXSIZE=40G`, and the uv mount was 12.7 MB. A vLLM
   bump then recompiled FA2 (~6 min) and re-downloaded 187 packages (65 s instead of
-  15 s), for 13.5 min where ~5 would do. The fix is `su -c "$PWD/container/gc-setup"`.
+  15 s), for 13.5 min where ~5 would do. For **that** eviction the fix is `su -c "$PWD/container/gc-setup"`
+  — and only for that: it is a cache-GC remedy, not a remedy for a socket permission error, and it
+  restarts docker, which stops running containers.
   It merges a GC policy into `/etc/docker/daemon.json` and keeps every other key (the
   nvidia default runtime lives in that file). It backs up the old file, checks the
   result, and asks before restarting docker. If docker doesn't come back, it restores
@@ -533,9 +539,8 @@ Preflight flags it precisely because the build won't.
   matters: a root-owned `$SRC_DIR` discovered at the `docker build` line means four
   `checkout --force`s already mutated trees that are hand-editable by design and cannot be
   recovered mid-checkout. Since Plan 02 this guard has **no escape hatch**: `ALLOW_ROOT` is deleted,
-  and exporting it makes the next `./container/build` print a line saying it does nothing. The hatch
-  never changed the damage — it
-  only silenced the check, and the writes still landed root-owned. Being blunt about one thing:
+  and exporting it makes the next `./container/build` print a line saying it does nothing. The hatch never
+  changed the damage — it only silenced the check, and the writes still landed root-owned.
   **"no sudo" is not "no privilege."** This repo runs `container/slice-setup` and `container/gc-setup`
   under `su -c`, so a privileged invocation is one password away, and `_writable` cannot catch it — it
   tests `-w`, which root satisfies by definition. That is precisely why the root refusal outlived the

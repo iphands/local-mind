@@ -425,30 +425,48 @@ the *number* was the thing to re-check, not the guard.
 
 ---
 
-# A `[[ x == *' word '* ]]` guard dies at *parse* time if the padding isn't quoted — and a syntax error is the one failure your test won't explain [OBSERVED 2026-10-13]
+# A padded `[[ x == pat ]]` guard fails two ways: unquoted padding dies at parse, and an end-anchored pattern matches *nothing* [OBSERVED 2026-10-13]
 
 ## Problem
 Matching a word inside a space-joined array needs padding so a leading/trailing word still matches, and
-writing that padding unquoted on the left of `==` makes bash parse `==` as a fresh command:
-`syntax error near unexpected token 'sudo', conditional binary operator expected`. This bit three times in
-one plan because the guard exists in three copies (`common/_run-lib.sh`, `container/build`,
+that padding breaks the guard twice over.
+
+**(1) Parse death.** Write the padding unquoted on the left of `==` and bash parses `==` as a fresh
+command: `syntax error near unexpected token 'sudo', conditional binary operator expected`. This bit three
+times in one plan because the guard lives in three copies (`common/_run-lib.sh`, `container/build`,
 `container/archs`) and the same typo was in all three. The trap is not the error — it is that a script
 dying at **parse** time and a script **refusing** at guard time both exit non-zero with nothing on
-stdout, so a test that asserts "a bad `DOCKER` is refused" passes on a script that never ran.
+stdout, so a test asserting "a bad `DOCKER` is refused" passes on a script that never ran.
+
+**(2) The dead arm — worse, because it passes every test.** The same guard carries a second alternative
+for a path-valued sudo, written `== */sudo`. Glob matching in `[[ ]]` is **whole-string**, and the operand
+is padded with a *trailing space*, so no possible input can end in `/sudo`: the arm is unreachable for
+every value, and `DOCKER=/usr/bin/sudo` walks straight past it to the probe, which then reports "DOCKER
+points at nothing" — the exact misleading diagnosis the refusal was written to prevent. Found in review
+2026-10-13, *after* the guard had been declared green by a four-case matrix, because no case in that
+matrix exercised the second arm. A dead guard arm is invisible to any test that doesn't target it.
 
 ## How to avoid
-Quote the padding as its own operand: `[[ ' '"${DOCKER[*]}"' ' == *' sudo '* || ' '"${DOCKER[*]}"' ' ==
-*/sudo ]]`. Then split the two failure modes in the test: `bash -n` first (parse), then the guard matrix
-(refuse / refuse / pass / pass). When a guard is duplicated across files, `bash -n` every copy — one
-`bash -n` on the file you happen to be editing proves nothing about the others.
+Use a **contained** pattern, not an end-anchored one: `*'/sudo '*`, which matches the path in any word
+position. Shipped form, identical in all three copies:
+`[[ ' '"${DOCKER[*]}"' ' == *' sudo '* || ' '"${DOCKER[*]}"' ' == *'/sudo '* ]]`. A wrapper legitimately
+named `/opt/sudo-docker/bin/docker` still passes, since what follows its `sudo` is `-`, not a space.
+
+Then fix the test, not just the code: **derive the matrix from the guard's branches, not from the bug you
+remember.** Every `||` in a predicate needs a case that would fail if that branch were deleted — here
+`/usr/bin/sudo` and `/usr/bin/sudo -n docker` for arm two. `bash -n` every copy (one `bash -n` on the file
+you happen to be editing proves nothing about the others), and assert the refusal *message*, since
+parse-fail, refuse and probe-fail all just look like a non-zero exit.
 
 ## Sources
-- vllmcustom: Plan 02 T1-T3, 2026-10-13 — found by `bash -n` before commit in all three copies; the
-  correct form is in `common/_run-lib.sh`'s `DOCKER` guard, `container/build` and `container/archs`
+- vllmcustom: Plan 02 T1-T3, 2026-10-13 — parse death found by `bash -n` before commit in all three copies
+- vllmcustom: Plan 02 final review, 2026-10-13 — dead arm found by reading the predicate, one commit after
+  the plan closed green; fixed forward in the guard at `common/_run-lib.sh:80`, `container/build:195`,
+  `container/archs:43`, with a 12-case matrix run against the shipped form first
 
 ---
 
-# A docs sweep that greps for command shapes misses what the docs *assert* — I wrote a ban and then wrote the banned sentence [OBSERVED 2026-10-13]
+# A docs sweep that greps for command shapes misses what the docs *assert* — grep the claims, not only the commands [OBSERVED 2026-10-13]
 
 ## Problem
 Plan 02's job was to remove every instruction that tells a reader to run `sudo`, and its own text bans the
@@ -489,8 +507,10 @@ failure ("a silently un-executed step").
 
 ## How to avoid
 Derive the range every time from the section markers, never from memory:
-`A=$(grep -n '^### Rule A' RULES.md | cut -d: -f1); B=$(grep -n '^### Rule B' RULES.md | cut -d: -f1);
-awk -v a="$A" -v b="$B" 'NR>a && NR<b' RULES.md`. Then prove the extraction is whole — count the
+`A=$(grep -n '^### Rule A' RULES.md | cut -d: -f1); B=$(grep -n '^### Rule B —' RULES.md | cut -d: -f1);
+awk -v a="$A" -v b="$B" 'NR>a && NR<b' RULES.md`. Anchor `Rule B` **with its em dash**: `^### Rule B` also
+matches `### Rule B2`, which silently makes `$B` two lines and leaves awk to read the leading number —
+right answer by luck, and luck is not a verification step. Then prove the extraction is whole — count the
 `PASS(`/`FAIL(` verdict tokens, or check that the last step you expect is present — and print the line
 count of the generated script so a shrink is visible in the log. Same lesson applies to any fence
 extracted by line range, including the step-7 sub-fence.
