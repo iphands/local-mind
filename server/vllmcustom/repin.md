@@ -127,14 +127,25 @@ done
 
 ## 4. Overlays (hook by name, no-op on drift)
 
-Re-grep every name in the hook tables of `container/patches/boot-timing/UPSTREAM` and
-`container/patches/draft-load-filter/UPSTREAM` at `$NEW`, and say which hooked files changed
-(`git -C $V diff --stat $OLD $NEW -- <those files>`). For draft-load-filter, `_remap_mtp_weight_name`
-and the `"mtp.": None` mapper entry must be untouched.
+Re-grep every name in the hook tables of `container/patches/boot-timing/UPSTREAM`,
+`container/patches/draft-load-filter/UPSTREAM`, `container/patches/spec-live/UPSTREAM` and
+`container/patches/sm120-gemm-plans/UPSTREAM` at `$NEW`,
+and say which hooked files changed (`git -C $V diff --stat $OLD $NEW -- <those files>`). For
+draft-load-filter, `_remap_mtp_weight_name` and the `"mtp.": None` mapper entry must be untouched.
+For spec-live (`SPEC_LIVE=1`, optional; not on the daily-driver path) check `Scheduler.dynamic_sd_lookup`
+is still indexed by batch size at the `num_spec_tokens_to_schedule` computation in `scheduler.py`,
+that `EngineCoreProc` still dispatches UTILITY requests with `getattr(self, name)` and the API side
+still calls `engine_client.engine_core.call_utility_async`, and that `register_api_routers` still
+lives in `vllm/entrypoints/launchers/api_server/routers.py`. For sm120-gemm-plans (`SM120_SKINNY=1`,
+optional) check `QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY` / `QWEN4_EXP_SM121_GEMM_PLANS` still exist in
+`vllm/models/qwen4_exp/nvidia/low_latency_gemm.py`, and whether upstream now ships a `(12, 0)` table
+itself (then drop the overlay).
 
 ```bash
 python3 container/patches/boot-timing/test_boot_timing.py
 python3 container/patches/draft-load-filter/test_draft_load_filter.py
+python3 container/patches/spec-live/test_spec_live.py
+python3 container/patches/sm120-gemm-plans/test_sm120_gemm_plans.py
 ```
 
 ## 5. Version prefix
