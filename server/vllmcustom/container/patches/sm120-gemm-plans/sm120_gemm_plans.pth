@@ -1,0 +1,7 @@
+# sm120-gemm-plans: mounted into the venv's site-packages by ./qwen3.8-flash-next/run when
+# SM120_SKINNY=1 (a NEW file there, not an overlay). site processes it in every
+# interpreter: the path line puts the module on sys.path, the import line installs the hook
+# (which itself does nothing unless SM120_SKINNY=1). A failure prints one line and leaves
+# the interpreter untouched.
+/opt/sm120-gemm-plans
+import sys; exec("try:\n import sm120_gemm_plans; sm120_gemm_plans.install()\nexcept Exception as e:\n print('[sm120-gemm-plans] disabled (install failed: %r)' % (e,), file=sys.stderr)")

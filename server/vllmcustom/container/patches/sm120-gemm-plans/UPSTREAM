@@ -1,0 +1,45 @@
+# sm120-gemm-plans overlay notes. NO BASE_SHA256 here, deliberately: like boot-timing,
+# draft-load-filter and spec-live this NEVER replaces an upstream file. sm120_gemm_plans.pth
+# is a new file mounted into site-packages; it installs a sys.meta_path hook that edits one
+# module-level dict post-import, looked up by name. If upstream renames or removes a target,
+# or starts shipping an SM120 table itself, the hook no-ops and prints
+# "[sm120-gemm-plans] NOT applied ..." -- the server then runs exactly as upstream does.
+# Nothing to re-derive on snapshot bumps, but re-grep the names below on each repin
+# (repin.md section 4).
+#
+# What it does: on SM120 (RTX PRO 6000 Blackwell), vllm/models/qwen4_exp/nvidia/
+# low_latency_gemm.py finds no plan table (QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY has only
+# (10, 3), (10, 0), (9, 0), (12, 1)), so enable_qwen4_exp_low_latency_gemm() returns at
+# `not plans` and the BF16 projections and the lm_head run as plain F.linear. The overlay sets
+# QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY[(12, 0)] = QWEN4_EXP_SM121_GEMM_PLANS (16 shapes, added for
+# TP=1 in vllm#59753, including this model's lm_head 248320x2560, GDN 16384x2560, QSA
+# 13952x2560, HC 10240x320, shared expert and router shapes).
+#
+# Verified at vLLM 187a0eb (2026-10-10) and in a throwaway container of the b6d8e8a image
+# (no GPU): the capability key type is a tuple subclass (DeviceCapability(12, 0) == (12, 0),
+# equal hash), the existing keys are exactly (10, 0) (10, 3) (12, 1) (9, 0), the hook applies
+# to the real module, the lookup for (12, 0) then returns the 16-shape table with the
+# lm_head plan, the CuTe-DSL package is installed (shape_dynamic_skinny_gemm.is_available()
+# is True), and enable_qwen4_exp_low_latency_gemm() runs on an empty module afterwards.
+# Host test: python3 container/patches/sm120-gemm-plans/test_sm120_gemm_plans.py
+# NOT verified: anything on the GPU -- that the CuTe-DSL kernels compile for sm_120, that
+# the GB10-tuned tiles help (or at least do not hurt) on a 1.8 TB/s card, and the effect on
+# decode tok/s. A/B it: SM120_SKINNY=1 vs 0 on identical settings.
+#
+# Hook table (module -> attr):
+#   vllm.models.qwen4_exp.nvidia.low_latency_gemm
+#       QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY   dict[capability tuple -> dict[(N, K) -> dict[M -> cfg]]]
+#       QWEN4_EXP_SM121_GEMM_PLANS            the table that is copied
+#   Both upstream lookups read the module-level dict at call time:
+#       enable_qwen4_exp_low_latency_gemm()   at model init (also for the MTP drafter)
+#       _qwen4_exp_low_latency_gemm()         the custom op, at runtime
+#
+# Interplay: the skinny path only takes layers whose quant method is UnquantizedLinearMethod
+# / UnquantizedEmbeddingMethod. With ONLINE_FP8 the quantized projections leave it; the
+# lm_head, HyperConnection and router shapes remain.
+#
+# Drift signals, printed to the container log:
+#   "SM120 skinny-GEMM plans on: reusing the SM121 table (N shapes)"   hook active
+#   "NOT applied: ... not found / no plan table for capability (12, 1)" upstream renamed it
+#   "NOT applied: capability (12, 0) already has a plan table upstream" upstream fixed it:
+#                                                                      drop SM120_SKINNY
