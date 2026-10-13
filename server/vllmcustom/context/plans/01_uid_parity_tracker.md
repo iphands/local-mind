@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 40% complete (4/10 tasks; T3b and T10 start `blocked`)
+- Status: 50% complete (5/10 tasks; T3b and T10 start `blocked`)
 - Start date: 2026-10-13 (T1)
 - Plan: `context/plans/01_uid_parity.md`
 - Evidence: `context/plans/01_uid_parity.md` § Context (the 2026-10-13 probe transcripts), each
@@ -61,7 +61,7 @@
 | 3 | T3: `USER 1000:1000` in runtime stage | `container/Dockerfile` | **done** | **Metadata only — no `RUN` layer** (base already ships `/home/ubuntu` 0750 `ubuntu:ubuntu`, so `install -d` was a provable no-op). Shipped as the file's **last two instructions** with `ENV HOME` + `ENV CCACHE_DIR` alongside `USER`. New gate 7d PASS; 7b stays a named SKIP until T3b's rebuild |
 | 4 | T3b: Image `Config.User` assertion | (built image) | blocked: awaiting owner rebuild | |
 | 5 | T4: Prove `USER` on the current image | throwaway `uidprobe` layer | **done** | **CONFIRMS the image-level facts**: identity, `Config.User`, real entrypoint, imports, traversal, HOME, `.pth`, mount target clean, 1 GiB through the mount lands `1000:1000`. **Does NOT confirm the serve path** (no weights, no port bind, no JIT — that is T10). Surfaced `CCACHE_DIR` → T3 became a 3-line metadata edit with **no `RUN`** |
-| 6 | T5: `container/build` unprivileged + root guard + legacy-ctx preflight | `container/build` | pending | |
+| 6 | T5: `container/build` unprivileged + root guard + legacy-ctx preflight | `container/build`, **`common/_run-lib.sh`** | **done** | Root guard + writability sweep + **socket probe**, all above the first write. `DOCKER_BUILDKIT=1` dropped. Two shipped defects fell out of it: `${DOCKER@a}` and `_run-lib.sh:74`. Legacy tree measured **clean** |
 | 7 | T6: `container/archs` honours `DOCKER` | `container/archs` | pending | |
 | 8 | T7: Gate step 7, named skip pre-rebuild | `context/plans/RULES.md` | **invalid — folded into T1** | Rule A.5 forces the gate update into the commit that adds the behaviour, and T1's own Verify line demands "gate steps … **and 7**", so T7 could not verify itself as written. Step 7 shipped as 7a/7b/7c in T1's commit; `:226` rewritten there too. **T7's remaining scope is nothing** — re-open only if 7a/7b/7c need rework |
 | 9 | T8: Docs + correct stale `sudo` notes + harvest | `AGENTS.md`, `README.md`, `context/*` | pending | |
@@ -92,6 +92,10 @@ gets cited. A claim not in this table has no provenance and cannot be cited by a
 | 2026-10-13 | uid-1000 HOME probe — **substitute** for the unrunnable `muse/run --selftest` | `HF_HOME=/home/ubuntu/.cache/huggingface`; `os.access(W_OK)` → **False**; `makedirs`+`write_text` → **OK** | 1 | The two are not contradictory: `os.access` is False because the leaf did not exist yet, and the write is the real assertion. **Substitute only — `selftest.py` never ran**, because `models/vllm/RedHatAI/` is empty on this host |
 | 2026-10-13 | Project gate, all steps, on the T2 tree | Identical to the T1 row: 1a pass · 1b `27 b`/`24 p` · 1c `env ok` · 2 `SKIP` · 3 `4/4 ok` · 4 `preflight OK` ×2 · 5 `last-build == df6c7ad…`, `1` image, `_vllm_fa2_C sm_120 x76`, **0 sm_80 SASS** · 7a `PASS`×5 · 7b `SKIP` · 7c `PASS 1000 unlimited readable` | 1 | Steps 2 and 7b are still named skips. 7a now also exercises the new probe, since the stub answers `version` |
 | 2026-10-13 | Project gate, all steps, on the **T3** tree (`container/Dockerfile` + `RULES.md` step 7 edited) | 1a pass · 1b `27 b`/`24 p` · 1c `env ok` · 2 `SKIP` (named) · 3 `4/4 ok` · 4 `preflight OK` ×2 · 5 `last-build == df6c7ad…`, `1` image, `_vllm_fa2_C sm_120 x76` with **0 `sm_80`** · 7a `PASS`×5 · **7b `SKIP`×2** (image predates the edit) · 7c `PASS 1000 unlimited readable` · **7d `PASS`** · **7e `PASS`** | 1 | Two assertions added at this commit (Rule A.5: the gate moves with the behaviour). `_C_stable_libtorch`/`_moe_C_stable_libtorch` do carry `sm_80/89/90` entries — those are the documented Marlin PTX fallbacks, tolerated; the fail condition is `sm_80` **under `_vllm_fa2_C`**, which is 0 |
+| 2026-10-13 | **T5 guard matrix**, each path triggered for real: `sudo -n ./container/build`; `BUILD_DIR=/tmp/fakeroot` over a `chown root:root` synthetic tree; `DOCKER=docker` and `DOCKER=/nonexistent/docker`; `sudo -n env CTX_DIR= ./container/build` | root run → `REFUSED: running as root` (`grep -c` → **1**), zero writes; root-owned tree → `REFUSED: the source tree root is not writable by uid 1000 / /tmp/fakeroot/src is owned by uid 0 / one-time fix: sudo -n chown -R 1000:1000 -- /tmp/fakeroot/src`, **exit 1 before any write**; bad `DOCKER` → probe names the transport (`permission denied … unix:///var/run/docker.sock`); `CTX_DIR=` branch prints "no staged copies are made", **no phantom rsync claim** | 1 | Every remedy line was executed, not inspected. The `DOCKER=docker` run exits **141** — that is my own `\| head -5` SIGPIPE-killing the script, the exact trap the probe's comment documents; the script itself exits 1 |
+| 2026-10-13 | **`${var@a}` truth table** on bash 5.2, measured because a review suggestion depended on it: exported string / shell string / `declare -a` / `declare -ax` / `declare -Ax` | `x` / *(empty)* / `a` / `ax` / `ax` → **`@a` returns attribute FLAGS, not a type letter** | 1, 6 | **Refutes my own edit and refines the review finding.** `!= ''` (what I wrote) rejects every `DOCKER=docker` arriving from the environment — the only way anyone sets it. `== a` (what T1 shipped) misses an exported array. Correct predicate is `== *[aA]*`, now in both `container/build` and `_run-lib.sh`. Caveat: across an `exec` bash flattens an array to a scalar, so the array branch is reachable only for a same-shell array — the guard is defensive, not an exploit seam. In `context/pitfalls.md` |
+| 2026-10-13 | **T5's mandated legacy probe** + the two host facts the reviews rested on inference for: `find $BUILD_DIR/ctx -maxdepth 2 -user root`; `stat` on `build`/`src`/`ctx`/`.last-build`; `sudo -n -l`; `cat /sys/fs/cgroup/vllmbuild.slice/memory.max` | **0 root-owned entries**; all four paths `1000:1000` (`.last-build` 644); `sudo -n -l` → **`(ALL) NOPASSWD: ALL`**; cgroup path → **`No such file or directory`** | 1 | The legacy-root problem **does not exist on this host** — recorded as a non-result, since the plan asks for the number either way, and the sweep is written for the host where it does. `NOPASSWD: ALL` **refutes the review's sudoers inference**: `-n` is fine, so `ALLOW_ROOT=1 sudo -n …` would work here; the printed `sudo -n env ALLOW_ROOT=1 …` is kept because it also works under a docker-only rule. The missing cgroup file means the WARN branch is already the status quo (slice never installed), unchanged by T5 |
+| 2026-10-13 | Project gate, all steps, on the **T5** tree (`container/build` + `common/_run-lib.sh`) | 1a pass · 1b `27 b`/`24 p` · 1c `env ok` · 2 `SKIP` · 3 `4/4 ok` · 4 `preflight OK` ×2 · 5 `last-build == df6c7ad…`, `1` image, `_vllm_fa2_C sm_120 x76`, **0 `sm_80`** · 7a `PASS`×5 · 7b `SKIP`×2 · 7c `PASS 1000 unlimited readable` · 7d `PASS` · 7e `PASS` | 1 | Plus the plan's own Verify: `env PREFLIGHT_ONLY=1 VLLM_REF=main ./container/build` unprivileged → `## pre-write checks pass: every target writable, docker reachable via sudo -n docker` → `## preflight OK` → `PREFLIGHT_ONLY=1 — stopping before docker build`. 7a re-run matters: it sources the `_run-lib.sh` guard edited here |
 | 2026-10-13 | **T3 as written** — `ENV HOME=/home/ubuntu` + `ENV CCACHE_DIR=/home/ubuntu/.cache/ccache` + `USER 1000:1000`, appended after `ENTRYPOINT`, **no `RUN`** | `awk '/^USER /{u=NR} /^RUN \| ^COPY /{r=NR} END{exit !(u&&u>r)}'` → **PASS**; `Config.User` of the *current* image still empty (correct: the edit is source-only until someone rebuilds) | 1 | The `RUN install -d -m 0750 -o 1000 -g 1000` the plan prescribed is **deliberately absent**: T4 measured the base shipping that exact mode/owner, and `install -d -m` is the idiom T1 removed for chmod'ing existing dirs. Placement after `ENTRYPOINT` is what makes 7d a meaningful text check |
 | 2026-10-13 | **T4 probe battery** — `printf 'FROM $IMG\nRUN install -d -m 0750 -o 1000 -g 1000 /home/ubuntu\nUSER 1000:1000\n' \| docker build -q -t uidprobe -` against `…dev20261013-gdf6c7ad` | `--entrypoint id` → `uid=1000(ubuntu) gid=1000(ubuntu) groups=1000,27(sudo)`; `Config.User` → `1000:1000`; `docker run --rm uidprobe --help` (real `vllm serve` entrypoint, baked uid) → **exit 0**; `import vllm, flashinfer, triton, torchaudio` → `imports ok`; `site-packages` traversable; `touch /home/ubuntu/.probe` → writable; `/root/.cache` → `Permission denied` | 1 | Built in seconds, not hours. `docker rmi` afterwards — gate step 5 counts images. **Confirms the image-level facts only**; a boot is still T10 |
 | 2026-10-13 | **T4 mount write-through** (the plan's headline metric): nested tree + `k.cubin` written as uid 1000 through `-v …/cache/uidprobe:/home/ubuntu/.cache:rw`, then `find -printf '%u:%g %m'` **on the host** | `1000:1000 750 uidprobe`, `1000:1000 755 vllm`, `1000:1000 755 vllm/deep_gemm`, `1000:1000 644 k.cubin` — every entry uid 1000, modes umask-normal | 1 | The container wrote **through** the bind mount and the host agrees on the owner. The same probe against a **local** path failed `EACCES` — **consistent with** this agent's `/tmp`/`$HOME` living in a namespace dockerd cannot see (evidence: a `--user 0:0` container's write into that mount is invisible from my shell afterwards), which leaves dockerd unable to see the source. That evidence proves the namespace split; "and therefore auto-created it root-owned" is a second inference the `EACCES` cannot distinguish from "the path simply does not exist in dockerd's namespace". Either way the failure is **uninformative about uid 1000** — and the converse caution holds: the **only positive bind-write evidence is this single NFS run**, so do not let "it was an artifact" launder into "mount writes are verified" |
@@ -260,6 +264,53 @@ regression (see T10's "within noise").
   absent, and **both `/etc/sudoers` and `/etc/sudoers.d` do not exist**. `su` is setuid-root but
   `passwd -S root` reports **`L`** (locked password), so it cannot authenticate to root either.
   Stated as a set of absences, not as an unusality.
+- **T5 departed from its own task row in five ways, and the row was rewritten to match** — most
+  of them found by review, all of them verified by triggering the failure rather than reasoning
+  about it:
+  1. **`common/_run-lib.sh` is in the commit.** The task row named `container/build` only. T5
+     duplicates the launcher's `DOCKER` contract, and duplicating it would have duplicated a
+     **shipped bug** in T1's `${DOCKER@a} == a` guard (see § Evidence, "`${var@a}` truth table").
+     Fixing the contract in one file and not the other leaves two files that disagree about the
+     same variable. The row's file list now names both.
+  2. **The guards sit above the `PREFLIGHT_ONLY` exit, not above the first write only.** This is a
+     real behaviour change: `PREFLIGHT_ONLY=1 ./container/build` now needs a live dockerd, so it is
+     no longer the socket-free offline check README § Preflight advertised. That sentence is now
+     fixed in the same commit (Rule B.5: the gate moves with behaviour; B.6: docs ride with code),
+     and the distinction is recorded there — `./container/preflight` run directly is still offline.
+  3. **`DOCKER_BUILDKIT=1` was dropped** from the `docker build` line. It is read client-side, so
+     under the default `sudo -n docker` sudo's `env_reset` stripped it anyway: the flag meant two
+     different things on the two supported hosts. BuildKit is the default builder on this project's
+     dockerd (29.7.2), and every build run here so far already ran with it stripped, so no output
+     can change. Accepted residual: on a `DOCKER=docker` host an ambient `DOCKER_BUILDKIT=0` now
+     goes unopposed — it fails loudly (`--build-context`/`--secret` are BuildKit-only), not
+     silently, so it stays a note rather than a check.
+  4. **Printed remedies lost their `-n`** (`sudo chown …`, not `sudo -n chown …`), against the
+     convention everywhere else in the project. The convention exists so an in-script sudo can never
+     hang. A remedy line is pasted by a human, who should get a password prompt rather than a
+     failure on a host with no NOPASSWD rule. Rule adopted: **`-n` for what the script runs, plain
+     `sudo` for what it prints.**
+  5. **The root guard has an escape hatch the launcher guard does not** (`sudo env ALLOW_ROOT=1`).
+     Deliberate asymmetry, documented in both files: a root *launcher* breaks the serve it is about
+     to start and has no legitimate use; a root *build* leaves ownership damage that the sweep
+     catches at the front door with the fix printed. The hatch silences the check only — the writes
+     still land root-owned and the next unprivileged run refuses again.
+- **Two of T5's review suggestions were refuted by measurement, not by argument.** The `${DOCKER@a}`
+  widening (`!= ''`) would have rejected `DOCKER=docker` from the environment — i.e. every use — and
+  the `ALLOW_ROOT=1 sudo …` form the first review called broken **works on this host**, because its
+  rule is `(ALL) NOPASSWD: ALL` rather than the docker-only rule the review assumed. Both printed
+  claims were rewritten to say what is actually true here and why the chosen form is still the
+  portable one. Recorded because both would have shipped as confident falsehoods about sudoers and
+  about bash.
+- **Testing the guards mutated the working tree twice, and both times the tree was checked
+  afterwards rather than assumed clean.** `DOCKER=(…)` in a test array reached `sync_src` before the
+  intended failure (SIGPIPE from `| head -2` killed it mid-`git fetch`), and `BUILD_DIR=build` — a
+  test meant to prove the relative-path hang — turned out to *legitimately pass* the check (`.` is
+  writable) and began cloning pytorch into the repo before `timeout 10` killed it. All four source
+  trees verified afterwards at their pinned refs with `dirty=0`; the stray `./build` was removed.
+  The lesson is in the Verify block, not the guard: any test that runs `container/build` past its
+  pre-write banner is running `sync_src`, which `checkout --force`s trees RULES.md calls
+  unrecoverable. That is why every T5 test is now run against either a synthetic `BUILD_DIR` under
+  `/tmp` or a `DOCKER=` that fails the probe.
 
 ## Follow-ups
 
@@ -285,3 +336,5 @@ regression (see T10's "within noise").
 | `--ipc=host` puts vLLM's shared-memory segments on the **host's** `/dev/shm`, and prior root boots may have left root-owned `psm_*`/`mp-*` entries | Sticky bit means uid 1000 cannot unlink them, so a crashed root serve leaks RAM that no later uid-1000 serve can reclaim. `ls -l /dev/shm` before the first uid-1000 boot; clear stale entries by hand if any. Also the one place the container writes to the host outside the cache mount | T10 |
 | The plan's Goal line says "**Every** process this project starts … runs as uid/gid 1000:1000" while `run-legacy` serves as root by design (`run-legacy:169`, `--user 0:0`) | The behaviour is right and the README says so, but the Goal is overclaimed as written and gate step 7 cannot see it — it scans `uid-1000`, while legacy writes under a different root (`cache-legacy`). Amend the Goal to name the exception at T8; T3 also makes that `--user 0:0` **load-bearing** rather than decorative, so gate 7d/greps assert it stays explicit | T8 |
 | `vllm_launch`'s echoed line is a serialization, not a quoting-preserving one: `--override-generation-config '{ … }'` re-splits if pasted | The comment now says so. Needs `printf '%q '` only if the proposed DRY_RUN golden-file test ever lands | Plan 02, with that test |
+| The four-tree list is written **four** times (`sync_src` calls, the `--build-context` args, T5's `_tree` loop, T5's `_ctx` loop) | A fifth tree would be built and staged but **silently skip the ownership guard** — the failure is invisible, which is the worst kind for a guard whose whole job is refusing. One `TREES=(…)` array consumed by all four sites. Loop vars `_tree`/`_ctx` also leak as globals and `_ctx` is reused later | Plan 02 or a drive-by |
+| Refuse `CTX_DIR` equal to `$SRC_DIR`, `$BUILD_DIR` or an ancestor of either | The staging loop then `rsync --delete`s a tree **onto itself**. Pre-existing, not introduced by T5; T5 removed only the lethal half of it (the printed `rm -rf` no longer names a user-settable root, so a mistyped `CTX_DIR` cannot print a pasteable delete of the build root) | Plan 02, or T8 as a documented caveat if no code lands |

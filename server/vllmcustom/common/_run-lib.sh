@@ -54,7 +54,12 @@ RUN_UID=${RUN_UID:-1000}
 # invoking account is in no docker group. Everything a launcher *writes* is written as
 # the invoking user, which is the point. A string, split on spaces: DOCKER=docker works
 # on a host where the account IS grouped.
-if [[ -n ${DOCKER+set} && ${DOCKER@a} == a ]]; then
+# `@a` returns attribute FLAGS, not a type letter: an exported plain string reports `x`,
+# an array reports `a`, an exported array `ax`. `== a` — what this shipped as in T1 — is
+# therefore wrong twice over: it would reject an exported array and, if widened to mere
+# truthiness, it rejects `DOCKER=docker` from the environment, which is the only way
+# anyone sets it. Match an a/A anywhere in the flags. Measured on bash 5.2, 2026-10-13.
+if [[ -n ${DOCKER+set} && ${DOCKER@a} == *[aA]* ]]; then
   echo "## DOCKER must be a plain string (DOCKER='sudo -n docker'), not an array." >&2
   exit 1
 fi
@@ -71,7 +76,8 @@ if [[ $EUID == 0 ]]; then
     echo "##   it needs no root: it runs 'sudo -n docker' by itself."
     echo "##   why sudo breaks it: a root launcher creates the cache dir root-owned, and the"
     echo "##   serve runs as uid $RUN_UID, so it dies EACCES on its first cache write."
-    echo "##   the one thing that does want sudo:  sudo ./container/build"
+    echo "##   nothing here wants sudo: ./container/build refuses root too (Plan 01 T5) and sudo's"
+    echo "##   for the socket itself, exactly like this launcher does."
   } >&2
   exit 1
 fi

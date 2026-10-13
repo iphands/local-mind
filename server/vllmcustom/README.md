@@ -430,7 +430,12 @@ and vLLM's 404 CUDA targets:
 `./container/build` now runs `container/preflight` first, which compares every pin against
 the target vLLM's `requirements/cuda.txt` and confirms the `flashinfer-cubin`
 wheel is actually published. It runs **entirely on the host** — it never invokes
-`docker build`, so it cannot invalidate a layer.
+`docker build`, so it cannot invalidate a layer. Run that way it is also offline-safe
+(`PREFLIGHT_OFFLINE=1` skips the index lookup); note that going through
+`./container/build` is *not* — since Plan 01 T5 the build proves the docker socket answers
+and that every path it will write is writable **before** it does anything, and it does that
+on the way to preflight too. So `PREFLIGHT_ONLY=1 ./container/build` needs dockerd up,
+while `./container/preflight` on its own never does.
 
 ```bash
 PREFLIGHT_ONLY=1 ./container/build                      # sync + check, then stop
@@ -514,6 +519,19 @@ Preflight flags it precisely because the build won't.
   on a host where you are in the `docker` group), and the launcher probes `${DOCKER[@]} version`
   once before anything else, because a dead socket or a lost NOPASSWD rule otherwise surfaces
   as `Image … not found` — which sends you to rebuild 12 GB for a socket problem.
+  `./container/build` follows the same contract now (Plan 01 T5): it refuses to run as root,
+  checks that every path it will write is writable by *you* — the four source trees and the
+  staged contexts, not just their parent — probes the socket, and only then starts. Order
+  matters: a root-owned `$SRC_DIR` discovered at the `docker build` line means four
+  `checkout --force`s already mutated trees that are hand-editable by design and cannot be
+  recovered mid-checkout. It is the one guard in the project with an escape hatch
+  (`sudo env ALLOW_ROOT=1 ./container/build`), because a root *build* leaves fixable
+  ownership damage where a root *launcher* breaks the serve it is about to start; the hatch
+  silences the check only, and the next unprivileged run refuses again. Where a remedy is
+  printed it is copy-pasteable as-is and names the directory that is actually in the way
+  (with the `-n` dropped — that flag is for the script's own non-interactive sudo, never for
+  a command a human pastes), which is why the build refuses before it writes rather than
+  after: a fix you cannot run is not a fix.
   `run-legacy` is the one launcher that serves as **root**, so it defaults to its own cache
   root, `/mnt/noir/scratch/ai/vllm/cache-legacy`: a root container writing into the shared
   `uid-1000` tree would leave root-owned files that the ownership guard cannot see (it checks

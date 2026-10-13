@@ -173,3 +173,101 @@ Both are one bug: **the intervention happened before the observation.**
 - vllmcustom: `context/plans/01_uid_parity_tracker.md` § Notes / Deviations, "T4 was run with the plan's own Verify block"
 
 ---
+
+# `${var@a}` answers with attribute flags, not a type letter [OBSERVED 2026-10-13]
+
+## Problem
+`container/build` and `common/_run-lib.sh` both guard against `DOCKER` being passed as an array
+instead of a string, with `${DOCKER@a} == a`. That test is wrong, and the obvious fix is wrong in
+the opposite direction. Measured on bash 5.2:
+
+| how `DOCKER` was set | `${DOCKER@a}` | `== a` | `!= ''` |
+|---|---|---|---|
+| `export DOCKER="sudo -n docker"` (i.e. `DOCKER=docker ./container/build`) | `x` | passes | **rejects** |
+| `DOCKER="docker"` shell-local | *(empty)* | passes | **rejects** |
+| `declare -a DOCKER=(…)` | `a` | rejects | rejects |
+| `declare -ax DOCKER=(…)` | `ax` | **misses** | rejects |
+| `declare -Ax DOCKER=([k]=v)` | `ax` | **misses** | rejects |
+
+`@a` is a **flag set**, so an exported variable always reports at least `x` whatever it holds.
+Widening the test to "is it non-empty" — the natural reading of "`@a` tells you it's an array", and
+the direction a review suggested here — rejects `DOCKER=docker` arriving from the environment,
+which is the *only* way anyone ever sets it: the guard fires on every legitimate invocation and the
+script becomes unusable. `== a` meanwhile passes every string, exported or not, but misses an
+array once it is exported.
+
+## How to avoid
+- Test for the flag **inside** the set: `[[ ${DOCKER@a} == *[aA]* ]]`. Nothing else.
+- Read `@a` as "what is true of this variable" (`a` array, `A` assoc, `x` exported, `r` readonly,
+  `n` nameref, `i` integer), not as "what type is this variable". Any `-n`/`==` test on it is
+  suspect.
+- **Measure before you "fix" a guard on someone's say-so.** This went into a commit as `!= ''` and
+  was only caught because the verification step triggered the failure path (`DOCKER=docker
+  ./container/build`) instead of assuming the happy path. A review suggestion about semantics is a
+  hypothesis, and a one-line `bash -c` settles it.
+- Residual, accepted: `declare -i`/`-n` still slip past `*[aA]*`. Neither is reachable from the
+  environment (neither survives export as that type), so the guard stays a plain "is it an array".
+- Know the limit of the test itself: bash flattens an array to its first element across an `exec`
+  boundary, so a child process can never see an array. This guard only bites on a same-shell array
+  (a sourced script) — defensive, not a live exploit seam.
+
+## Sources
+- vllmcustom: measured matrix 2026-10-13, bash 5.2; recorded in
+  `context/plans/01_uid_parity_tracker.md` § Evidence, "`${var@a}` truth table"
+- vllmcustom: `common/_run-lib.sh` (the guard as shipped in Plan 01 T1), `container/build` (T5)
+
+---
+
+# A writability guard is itself two bugs waiting [OBSERVED 2026-10-13]
+
+## Problem
+Plan 01 T5 added "prove every path is writable before writing anything" to `container/build`. The
+first version shipped two defects that only appear in the exact failure the guard exists for, so
+neither shows up in a happy-path test:
+
+1. **The path walk has a fixed point.** `probe=${probe%/*}` walks to the parent, but `%/*` on a
+   component with no `/` returns it **unchanged**. `BUILD_DIR=build ./container/build` (relative,
+   not yet created) therefore never shortens, never reaches `/`, and hangs forever with no output —
+   a silently wedged terminal in place of the fast refusal the block exists to give. It is not a
+   single-word-only bug: *any* relative path hangs once it reaches its last slash-less component.
+2. **The diagnosis and the remedy named different paths.** The check tests the nearest existing
+   *ancestor* (that is where ownership actually hides when the leaf doesn't exist yet), but the
+   printed one-time fix named the *leaf*. So a legacy root-owned `/mnt/noir/scratch/ai/vllm/build`
+   with no `src/` yet printed `sudo chown -R 1000:1000 -- …/build/src` — a path that does not
+   exist. `chown: cannot access`. Every other line of the message was right, and the one line the
+   user pastes was wrong.
+
+Both are the same shape as the `@a` entry above: **a guard written from a mental model of an
+operation instead of from its edge cases.**
+
+## How to avoid
+- **Absolute-ize before reducing a path**: `[[ $p == /* ]] || p=$PWD/$p`. One line, and it makes the
+  printed path unambiguous as a bonus. Any loop that shrinks a string must prove it always
+  shrinks — `${x%/*}`, `${x%/*}`-alikes, and `${x%.*}` all have a no-match fixed point.
+- **The remedy must name the path the check actually tested.** If your guard substitutes an
+  ancestor/parent/fallback on the way to its verdict, the advice has to follow the substitution.
+  Chowning the parent is also the *semantically* correct fix here — `mkdir -p` then recreates the
+  leaf with the right ownership.
+- **Execute every remedy string you print, at least once, in the state that prints it.** T5's
+  verification is now "parse the printed line, `eval` it, assert exit 0, assert the next run
+  passes" — not "read the message and nod". A fix that cannot run is not a fix.
+- **Prefer a non-destructive remedy for a path you did not create.** `%q` quotes a *token*, never a
+  *scope*: `sudo rm -rf -- %q` over a user-settable `CTX_DIR` turns a mistyped
+  `CTX_DIR=/mnt/noir/scratch/ai/vllm` into one pasteable command that deletes the build root
+  including the source trees, on a host where sudo is `(ALL) NOPASSWD: ALL`. So: `chown` for the
+  user-settable root, `rm` only for directories whose names the script chose.
+- **Don't assert a cause you did not observe.** "left over from a build run under sudo" was printed
+  for any unwritable path; when the owner uid is not 0 the real cause is a mode or a mistyped
+  override, and the wrong diagnosis sends the reader off to fix sudoers. Print the uid, then branch
+  the explanation on it.
+- Drop `-n` from a sudo you *print* but keep it in a sudo you *run*: the flag exists so an
+  in-script sudo can never hang, and a one-time fix is a human at a keyboard, who should get a
+  password prompt on a host with no NOPASSWD rule rather than a failure.
+
+## Sources
+- vllmcustom: `container/build` § "refuse a root run, then prove every path and the socket"
+  (Plan 01 T5, 2026-10-13); both defects found in review before commit and reproduced after the fix
+- vllmcustom: `context/plans/01_uid_parity_tracker.md` § Evidence, "T5 guard matrix"
+- vllmcustom: README § Caching ("a fix you cannot run is not a fix")
+
+---
