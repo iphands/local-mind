@@ -1,0 +1,7 @@
+# spec-live: mounted into the venv's site-packages by ./qwen3.8-flash-next/run when
+# SPEC_LIVE=1 (a NEW file there, not an overlay). site processes it in every
+# interpreter: the path line puts the module on sys.path, the import line installs
+# the hook (which itself does nothing unless SPEC_LIVE=1). A failure prints one
+# line and leaves the interpreter untouched.
+/opt/spec-live
+import sys; exec("try:\n import spec_live; spec_live.install()\nexcept Exception as e:\n print('[spec-live] disabled (install failed: %r)' % (e,), file=sys.stderr)")

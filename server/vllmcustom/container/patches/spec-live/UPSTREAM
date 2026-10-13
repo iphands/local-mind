@@ -1,0 +1,70 @@
+# spec-live overlay notes. NO BASE_SHA256 here, deliberately: like
+# container/patches/boot-timing and draft-load-filter (and unlike
+# qwen3.8-flash-next/patches/ple-ct-ignore) this NEVER replaces an upstream file.
+# spec_live.pth is a new file mounted into site-packages; it installs a
+# sys.meta_path hook that wraps/extends upstream objects post-import, looked up by
+# name. If upstream renames or removes a target the hook no-ops and prints
+# "[spec-live] NOT applied ..." -- the server then runs with its static draft depth,
+# exactly as upstream does. Nothing to re-derive on snapshot bumps, but re-grep the
+# names below on each repin (repin.md section 4).
+#
+# What it does: lets the MTP draft depth change on a running server
+# (GET/POST /spec_tokens) by feeding vLLM's Dynamic SD (vllm#32374) a mutable K.
+# The scheduler already picks K per step below num_speculative_tokens, the V2
+# worker obeys scheduler_output.num_spec_tokens_to_schedule, and every allocation
+# is sized for the maximum -- so the patch only replaces the batch-size lookup
+# with one live value and adds the control path.
+#
+# Verified at vLLM 187a0eb (2026-10-10), by reading the source, by the host test
+# (test_spec_live.py: fakes shaped like these seams), and by importing the three
+# targets with the hook in a throwaway container of the b6d8e8a image (no GPU):
+# all three hooks applied, EngineCoreProc._convert_msgspec_args passes the int
+# through, and the real FastAPI resolves the routes with the right status codes.
+# NOT verified: anything at runtime on the GPU (boot with Dynamic SD on MTP /
+# hybrid GDN + QSA, K-specialised CUDA graphs, behaviour when K changes mid-run).
+# Upstream documents Dynamic SD as tested with Eagle, Eagle-3 and DFlash only.
+#
+# Hook table (module -> attr):
+#   vllm.v1.core.sched.scheduler          Scheduler.__init__ (wrapped; AsyncScheduler
+#                                         calls super().__init__, so it is covered).
+#                                         Reads self.dynamic_sd_lookup (list indexed by
+#                                         batch size, scheduler.py:1485-1489) and
+#                                         self.num_spec_tokens; swaps the list for a
+#                                         subclass answering one live K.
+#   vllm.v1.engine.core                   EngineCore: adds set_spec_tokens(k) /
+#                                         get_spec_tokens(). Reached through the generic
+#                                         utility RPC: EngineCoreProc dispatches UTILITY
+#                                         requests with getattr(self, name) and the API
+#                                         side calls engine_client.engine_core.
+#                                         call_utility_async(name, *args) (same path as
+#                                         reset_prefix_cache). They run on the engine
+#                                         loop between steps.
+#   vllm.entrypoints.launchers.api_server.routers
+#                                         register_api_routers (wrapped): after the
+#                                         original, app.include_router(GET/POST
+#                                         /spec_tokens). Handlers read
+#                                         request.app.state.engine_client.engine_core.
+#
+# Not hooked, relied on:
+#   scheduler.py          num_spec_tokens_to_schedule goes into SchedulerOutput
+#   gpu/model_runner.py   passes it to propose(num_speculative_tokens=...)
+#   gpu/cudagraph_utils.py  captures K-specialised graphs for the K values in the
+#                         BOOT schedule (num_speculative_tokens_per_batch_size);
+#                         any other K falls back to PIECEWISE (dispatch())
+#
+# Caveats:
+#   * Enabling it turns on Dynamic SD, which also stops the scheduler padding new
+#     decode requests to 1+K tokens (scheduler.py:1124) -- a full-CUDA-graph
+#     optimisation, not a correctness matter.
+#   * The /spec_tokens route is unauthenticated (like every non-/v1 route here).
+#   * K=0 turns drafting off for new steps (the MTP weights stay resident).
+#
+# Drift signals, printed to the container log:
+#   "NOT applied: ... not running Dynamic SD"   the boot schedule was not passed
+#   "NOT applied: ... not found"                a hooked name vanished upstream
+#   "registered GET/POST /spec_tokens"          route attached (API server process)
+#   "live draft depth on: K=<k> (max <m>)"      scheduler hook active (EngineCore)
+#   "draft depth <a> -> <b> (max <m>)"          each change
+#
+# Drift check (host, stdlib only):
+#   python3 container/patches/spec-live/test_spec_live.py
