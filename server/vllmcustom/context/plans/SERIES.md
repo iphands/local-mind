@@ -21,14 +21,13 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
 
 ## Currently Active <!-- hp:active -->
 
-**02 — No sudo anywhere: plain `docker` is the only privilege path** (`in-progress`). Supersedes the
-privilege half of 01: same uid-1000 contract, no `sudo` in any file. The root refusal stays — root is
-reachable by `su` and `_writable` cannot see a root run.
-
 **01 — Run everything as uid/gid 1000:1000, host and container** (`pending`, T3b + T10 blocked on an
 image rebuild). Wave 1 needs no GPU and no rebuild; do T4 before asking the owner to rebuild.
 Superseded in part by 02 (`sudo` machinery removed 2026-10-13); the uid contract and its gate steps
 still stand — see `context/distilled.md`.
+
+**02 — No sudo anywhere** is **done** (2026-10-13, `completed/`). Nothing left active: the next move is
+Plan 01's T4, or a new plan against the north star.
 
 ## Plans <!-- hp:plans -->
 
@@ -37,7 +36,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
 | 01 | Run everything as uid/gid 1000:1000, host and container | — | pending | Containers run as root today; cache mount target is unreadable to uid 1000, so identity and mount must move together. |
-| 02 | No sudo anywhere: plain `docker` is the only privilege path | 01 | in-progress | Socket is user-owned since 2026-10-13; `sudo` default fails 127. Root refusal kept — `su` still reaches root. |
+| 02 | No sudo anywhere: plain `docker` is the only privilege path | 01 | done | Closed 2026-10-13, gate rc 0. Root refusal kept — `su` still reaches root; `ALLOW_ROOT` deleted, no escape hatch. |
 
 ## Pre-existing material <!-- hp:pre-existing -->
 

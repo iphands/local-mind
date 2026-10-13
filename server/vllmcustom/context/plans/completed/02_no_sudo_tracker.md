@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 67% complete (4/6 tasks)
+- Status: 100% complete (6/6 tasks) — closed 2026-10-13
 - Start date: 2026-10-13
 - Plan: `context/plans/02_no_sudo.md`
 - Evidence: the gate's own stdout (`/tmp/gate_all.sh` captured per run), the `grep -ci sudo` counts
@@ -44,7 +44,7 @@
 | 3 | T3: archs follows | `container/archs` | done | Guard matrix refuse/refuse/pass; `./container/archs nonexistent:nope` → rc 125 (docker's own "no such image"), so it reaches `docker run` unprivileged. Wrapper warning replaced, not deleted |
 | 4 | T4: gate drops the sudo requirement | `context/plans/RULES.md` | done | Full gate rc 0: 9 PASS / 3 named SKIP / 0 FAIL. `PASS(7a rejects a sudo in DOCKER)` + `PASS(7a left nothing root-owned)`. 7e still root-free (244,890 entries, 10 s) |
 | 5 | T5: docs that assert the opposite | 8 files | done | Instruction-hunt clean: 8 surviving hits, each a gate test input, dated history, or a retraction. Reviewer-found defects all fixed: 4 banned host-fact claims, `README:525` "one script" contradiction, `AGENTS.md` socket mis-pointer, template constraint duplication |
-| 6 | T6: full gate, harvest, close | `context/` | pending | Step 6 named-skipped: no runtime change |
+| 6 | T6: full gate, harvest, close | `context/` | done | Gate rc 0 (9 PASS / 3 named SKIP / 0 FAIL), step 6 named-skipped: no runtime change. Rule D harvest: 3 new pitfall entries, all four findings verified on disk |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid`.
 
@@ -67,6 +67,9 @@
 | 2026-10-13 | `grep -c 'docker\.sock' AGENTS.md README.md` | `0` and `0` before the fix | 5 | The auto-loaded file and the README never contained the string an agent would grep for, and `AGENTS.md`'s only `EACCES` was the cache-root failure — a false lead for a socket problem |
 | 2026-10-13 | `grep -n 'build:313'` vs `grep -n 'checkout --force' container/build` | cited `:313`; actual `git checkout --force` at `:354` (`sync_src`) | 5 | My citation slipped into the plan and this tracker; both corrected. Line numbers were shifted by T2's own added lines |
 | 2026-10-13 | instruction-hunt after all T5 fixes | 8 hits: `RULES.md:291` (gate input), `README:576` (retraction), `distilled:53,61` + `pitfalls:46,191,241,260` (dated history) | 5 | T5 acceptance. Every survivor is self-labelled in place; the shipped `→ empty` assertion was unsatisfiable and is replaced |
+| 2026-10-13 | gate re-extracted **from markers** (`^### Rule A`=101, `^### Rule B`=460) → 199-line script → `bash` | **rc 0**, 9 PASS / 3 named SKIP / 0 FAIL; step 5 `via docker` + sm_120 tables | 6 | Range recomputed, not remembered: T4 had moved the fence end 438→460. Skips are the same three as T4 (shellcheck permanent; 7b ×2 awaiting Plan 01 T3b) |
+| 2026-10-13 | Rule D audit: `grep -rl` each tracker-named finding in `context/` | quoting trap / prose-vs-command / fence range were **tracker-only, not in pitfalls**; `-w`-for-root already in 3 files | 6 | Three entries written (`pitfalls.md` 428/451/480, file 15 → 18 entries), then re-grepped to confirm the bytes landed |
+| 2026-10-13 | `grep -Fn "== *' sudo '*"` across the three guard copies | byte-identical at `_run-lib.sh:76`, `build:191`, `archs:39` | 6 | The pitfall's citation is true, and the guard survives in sudo-free form in every copy |
 
 ## Notes / Deviations
 

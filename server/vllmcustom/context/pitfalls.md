@@ -424,3 +424,79 @@ the *number* was the thing to re-check, not the guard.
   the same commit, `context/plans/RULES.md` § step 7e carries the coverage-only wording
 
 ---
+
+# A `[[ x == *' word '* ]]` guard dies at *parse* time if the padding isn't quoted — and a syntax error is the one failure your test won't explain [OBSERVED 2026-10-13]
+
+## Problem
+Matching a word inside a space-joined array needs padding so a leading/trailing word still matches, and
+writing that padding unquoted on the left of `==` makes bash parse `==` as a fresh command:
+`syntax error near unexpected token 'sudo', conditional binary operator expected`. This bit three times in
+one plan because the guard exists in three copies (`common/_run-lib.sh`, `container/build`,
+`container/archs`) and the same typo was in all three. The trap is not the error — it is that a script
+dying at **parse** time and a script **refusing** at guard time both exit non-zero with nothing on
+stdout, so a test that asserts "a bad `DOCKER` is refused" passes on a script that never ran.
+
+## How to avoid
+Quote the padding as its own operand: `[[ ' '"${DOCKER[*]}"' ' == *' sudo '* || ' '"${DOCKER[*]}"' ' ==
+*/sudo ]]`. Then split the two failure modes in the test: `bash -n` first (parse), then the guard matrix
+(refuse / refuse / pass / pass). When a guard is duplicated across files, `bash -n` every copy — one
+`bash -n` on the file you happen to be editing proves nothing about the others.
+
+## Sources
+- vllmcustom: Plan 02 T1-T3, 2026-10-13 — found by `bash -n` before commit in all three copies; the
+  correct form is in `common/_run-lib.sh`'s `DOCKER` guard, `container/build` and `container/archs`
+
+---
+
+# A docs sweep that greps for command shapes misses what the docs *assert* — I wrote a ban and then wrote the banned sentence [OBSERVED 2026-10-13]
+
+## Problem
+Plan 02's job was to remove every instruction that tells a reader to run `sudo`, and its own text bans the
+claim "this host has no sudo" as too strong, because the Plan 01 tracker carries a dated measurement of
+`sudo -n -l` → `(ALL) NOPASSWD: ALL`. The rewrite pass then produced `AGENTS.md`: "nothing here uses
+`sudo`, **and none is installed**", with the same claim in `SERIES.md`, plus "this box has no `sudo`" in a
+`README` host-tuning bullet. None of it was caught by the plan's own Verify, because that grep hunted
+*commands* — `sudo -n`, `sudo chown`, `sudo env` — and a prose assertion contains no flag and no
+subcommand, so it matches nothing. Two independent reviewers found all four instances; the machine found
+none. The stakes are asymmetric: `AGENTS.md` is auto-loaded into every session on this tree, so a single
+host fact that the repo's own measurement refutes teaches the next agent to distrust the whole doc set —
+including the root refusal whose justification rests on exactly that measurement.
+
+## How to avoid
+Grep the **claims**, not only the commands. Add the forbidden predicates to the same alternation as the
+command forms — for this plan: `none is installed\|none installed\|this box has no`. Prefer a claim about
+the project to a claim about the host: "this project uses no privilege helper, and none is expected"
+survives a host change; "is not installed" is a fact you did not measure and someone else's `command -v`
+will refute. The general shape: **a docs task's verification must assert what the docs mean, not what they
+contain** — counting occurrences of a word is never the test, because a guard that refuses `sudo` must
+name it.
+
+## Sources
+- vllmcustom: Plan 02 T5, 2026-10-13 — four instances removed, found only in review; the assertion in
+  `context/plans/02_no_sudo.md` § T5 Verify was rewritten to hunt claims as well as commands
+
+---
+
+# Extracting a fenced block by remembered line numbers silently drops its tail — recompute the range from the markers [OBSERVED 2026-10-13]
+
+## Problem
+The project gate is a bash fence inside `context/plans/RULES.md`, extracted with
+`awk 'NR>=101 && NR<=459'` before the ` ```bash ` scan. Plan 02 T4 edited that file and the fence's end
+moved from 438 to 459-460. A remembered range does not fail: it extracts a *shorter* gate, which runs,
+prints its verdicts, and exits 0 — the missing steps simply never execute. A green gate that skipped the
+ownership checks is indistinguishable from a green gate that ran them, and RULES.md names precisely this
+failure ("a silently un-executed step").
+
+## How to avoid
+Derive the range every time from the section markers, never from memory:
+`A=$(grep -n '^### Rule A' RULES.md | cut -d: -f1); B=$(grep -n '^### Rule B' RULES.md | cut -d: -f1);
+awk -v a="$A" -v b="$B" 'NR>a && NR<b' RULES.md`. Then prove the extraction is whole — count the
+`PASS(`/`FAIL(` verdict tokens, or check that the last step you expect is present — and print the line
+count of the generated script so a shrink is visible in the log. Same lesson applies to any fence
+extracted by line range, including the step-7 sub-fence.
+
+## Sources
+- vllmcustom: Plan 02 T4, 2026-10-13 — range moved 438 → 460 mid-plan; recomputed-from-markers form used
+  for the T5/T6 gate runs, which reported 9 PASS / 3 named SKIP / 0 FAIL
+
+---
