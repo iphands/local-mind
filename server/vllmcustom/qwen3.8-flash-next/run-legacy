@@ -112,13 +112,19 @@ KV_FP8=${KV_FP8:-}                               # 1 = --kv-cache-dtype fp8 (car
 VISION=${VISION:-1}                              # 0 = --language-model-only
 PATCH_CONNECTOR=${PATCH_CONNECTOR:-1}            # mount connector_mrv2.py over the image's (see below)
 PLE_READY_TIMEOUT=${PLE_READY_TIMEOUT:-1800}     # VLLM_PLE_OFFLOAD_READY_TIMEOUT; card: 1800 RAM, 3600 NVMe
-CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
+# Its own cache root, deliberately NOT the shared one. docker_core_args mounts
+# $CACHE_DIR/uid-1000 into the container and this launcher runs that container as root
+# (see --user 0:0 below), so every file a legacy boot writes lands root-owned inside the
+# tree every other launcher mounts as uid 1000. The CACHE_UID ownership guard cannot catch
+# it — it checks the leaf directory, which stays 1000-owned — so the next ./qwen/run would
+# pass the guard and die EACCES minutes into a boot, with nothing pointing here.
+CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache-legacy}
 
 # require_image's hint ("run ./container/build") is wrong for this launcher: the
 # image is pulled, not built.
-docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
+"${DOCKER[@]}" image inspect "$CONTAINER" >/dev/null 2>&1 || {
   echo "Image $CONTAINER not found. Pull the model card's PR-branch image first:"
-  echo "  docker pull $CONTAINER"; exit 1; }
+  echo "  ${DOCKER[*]} pull $CONTAINER"; exit 1; }
 
 # Marlin applies to the draft head too, and its experts are unquantized BF16, so
 # the engine dies at draft load ("moe_backend='marlin' is not supported for
@@ -151,6 +157,16 @@ if [[ "$PATCH_CONNECTOR" != "0" ]]; then
 fi
 
 docker_core_args
+# The plan's one deliberate exception. This image is upstream's PR-branch build, not ours:
+# it declares no USER, was never verified on this host, and the model card's tok/s were
+# measured with it running as root. Serving it as uid 1000 would leave this launcher as the
+# "legacy baseline" for a configuration the card never ran, so the A/B would be measuring
+# the uid rather than the image. Docker takes the LAST --user (pflag overwrites a flag that
+# is not repeatable) and nothing lands after it, so this is not overridable from the
+# environment — env_extra_args below only ever emits -e. Changing it means editing this line.
+# Re-verify and drop it if the image is ever proven to boot as 1000 — tracked in
+# context/plans/01_uid_parity_tracker.md.
+CONTAINER_ARGS+=( --user 0:0 )
 CONTAINER_ARGS+=(
   -e VLLM_PLE_CPU_OFFLOAD=1                                # table in host RAM (the single-GPU path)
   -e VLLM_PLE_OFFLOAD_READY_TIMEOUT="$PLE_READY_TIMEOUT"   # 95 GB load at boot; ~300 s warm, longer cold

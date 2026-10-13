@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 10% complete (1/10 tasks; T3b and T10 start `blocked`)
+- Status: 20% complete (2/10 tasks; T3b and T10 start `blocked`)
 - Start date: 2026-10-13 (T1)
 - Plan: `context/plans/01_uid_parity.md`
 - Evidence: `context/plans/01_uid_parity.md` § Context (the 2026-10-13 probe transcripts), each
@@ -57,7 +57,7 @@
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 1 | T1: Pin identity in `_run-lib.sh` + README in same commit | `common/_run-lib.sh`, `README.md` | **done** | Refused-sudo + no `uid-0` proven; `--user`/`HOME`/mount proven; dir owner proven. Deviations below |
-| 2 | T2: Launcher-direct `docker` → `$DOCKER` | `qwen3.8-flash-next/run`, `muse/run`, **`qwen3.8-flash-next/run-legacy`** | pending | :279 swallows failure today. **Scope gap: `run-legacy:119` is a live bare-`docker` call in a file this plan's T2 list omits** — it sources `_run-lib.sh`, so it inherits T1 and must not be left half-converted |
+| 2 | T2: Launcher-direct `docker` → `$DOCKER` | `qwen3.8-flash-next/run`, `muse/run`, **`qwen3.8-flash-next/run-legacy`** | **done** — selftest assertions blocked | 7 sites converted + a source-time `${DOCKER[@]} version` probe; zero bare `docker` left in lib/launchers. **`run-legacy` pinned `--user 0:0` AND moved to its own cache root** — a root container writing the shared `uid-1000` tree is invisible to the ownership guard. `muse/run --selftest` **never executed: no Muse checkpoint on this host** (`models/vllm/RedHatAI/` is empty); identity verified by substitute probe only |
 | 3 | T3: `USER 1000:1000` in runtime stage | `container/Dockerfile` | pending | Edit verifiable now; assertion is T3b |
 | 4 | T3b: Image `Config.User` assertion | (built image) | blocked: awaiting owner rebuild | |
 | 5 | T4: Prove `USER` on the current image | throwaway `uidprobe` layer | pending | Do before asking for the rebuild |
@@ -87,6 +87,10 @@ gets cited. A claim not in this table has no provenance and cannot be cited by a
 | 2026-10-13 | T1 Verify against a stub `docker`, `CACHE_DIR=/tmp/p1cache`, `MODEL_ROOT=/tmp/p1models` | emitted line carries `--user 1000:1000`, `HOME=/home/ubuntu`, `…/uid-1000:/home/ubuntu/.cache:rw`; `stat -c %u` → `1000`; `sudo -n … ./qwen/run` → exit 1, **no `uid-0` created** | 1 | Cold banner printed once, silent on warm boot; `/root/.cache` occurrences in the emitted line: 0 |
 | 2026-10-13 | `chmod 700 uid-1000` then boot; and a root-owned `uid-1000` planted in a parent I own | mode **stays 700** across a boot; foreign-owned dir → refused, **0 docker calls reached**, mode/owner untouched | 1 | Proves `mkdir -m` ≠ `install -d -m` (measured: `install -d -m 0750` on a 0700 dir → **750**) |
 | 2026-10-13 | Project gate, all steps, on the T1 tree | 1a pass · **1b `27 b` / `24 p`** · 1c `env ok` · **2 `SKIP(shellcheck not installed)`** · 3 `4/4 ok` · 4 `## preflight OK` ×2 · 5 `last-build == df6c7ad…`, `1` image, arch table `_vllm_fa2_C sm_120 x76` no sm_80 SASS · 7a `PASS`×5 · **7b `SKIP`** · 7c `PASS(7c) 1000 unlimited readable` | 1 | Steps 2 and 7b are **named skips, not passes**: shellcheck is absent from this host, and the image predates T3 |
+| 2026-10-13 | **T2 branch harness** — `DOCKER=/tmp/t2stub/docker-stub.sh STUB_MODE=<m> ./qwen3.8-flash-next/run <real model>`, 8 modes | `probe_sudo`/`probe_daemon` → full 7-line refusal, **exit 1, not 141**; `hash_good`/`hash_noise` → launch proceeds with overlay mounted; `hash_wrong`+`STUB_GREP=1` → mismatch message carrying a real 64-hex digest; `hash_wrong`+`STUB_GREP=0` → `PLE overlay: not mounted … (vllm#59431)`; `hash_noexist`/`hash_nothing` → the new no-hash branch | 1 each | **`DOCKER` is a space-split string, so a stub script drives every branch with no daemon, GPU or model.** This is what proves the errexit/SIGPIPE fix and the branch ordering; the two real-image runs alone could not |
+| 2026-10-13 | Real-image positive control: `docker run --rm --user 1000:1000 --entrypoint sha256sum <img> $PATCH_DST`, then the same file with `--entrypoint grep -qF 'isinstance(quant_config, CompressedTensorsConfig)'` | file hash `ad4de618…` **differs** from `BASE_SHA256 1392f51c…`, yet the grep returns 0 → production takes **branch 1** (`PATCH_PLE=0`, clean boot); neither new branch fires | 1 | The overlay is stale against this snapshot *by design* — vllm#59431 landed at `c32513b`, before `df6c7ad`. Confirms the T2 retraction: `:279` failed loudly but attributed it to image content |
+| 2026-10-13 | uid-1000 HOME probe — **substitute** for the unrunnable `muse/run --selftest` | `HF_HOME=/home/ubuntu/.cache/huggingface`; `os.access(W_OK)` → **False**; `makedirs`+`write_text` → **OK** | 1 | The two are not contradictory: `os.access` is False because the leaf did not exist yet, and the write is the real assertion. **Substitute only — `selftest.py` never ran**, because `models/vllm/RedHatAI/` is empty on this host |
+| 2026-10-13 | Project gate, all steps, on the T2 tree | Identical to the T1 row: 1a pass · 1b `27 b`/`24 p` · 1c `env ok` · 2 `SKIP` · 3 `4/4 ok` · 4 `preflight OK` ×2 · 5 `last-build == df6c7ad…`, `1` image, `_vllm_fa2_C sm_120 x76`, **0 sm_80 SASS** · 7a `PASS`×5 · 7b `SKIP` · 7c `PASS 1000 unlimited readable` | 1 | Steps 2 and 7b are still named skips. 7a now also exercises the new probe, since the stub answers `version` |
 
 Record the build every row was taken on: image tag, `ai.vllmcustom.vllm.ref`, and the launcher
 env. `bench/bench-results.md` is gitignored — it is not evidence a later plan can cite.
@@ -148,6 +152,58 @@ regression (see T10's "within noise").
   root at container init, before the uid drop. Risk 4 removed from the plan; recorded here so the
   reasoning is not lost.
 
+- **T2 shipped six departures from its own Before/After block**, all reviewer-driven and all
+  verified rather than reasoned about:
+  1. **A `${DOCKER[@]} version` probe at source time, which the plan never asked for.** Every
+     downstream docker call is `|| true`, `2>/dev/null` or a `:-<default>`, so a dead socket is
+     reported as a missing image — and `qwen3.8-flash-next/run:185` turns that into "rebuild the
+     12 GB snapshot". One probe makes all of them honest. Kept despite a per-launch round trip:
+     tens of ms against a sweep of eight 122B reloads, and a cached sentinel was explicitly
+     rejected because it would hide the mid-sweep failures (dockerd restarted, sudoers revoked)
+     that are the probe's whole purpose.
+  2. **The probe prints docker's own output, and prints the LAST three lines, via no pipeline.**
+     Both are fixes to my own first draft, caught in review. `docker version` emits its 8-line
+     Client block *before* it fails on the socket, so `head -3` showed `Client:`/`Version:` and
+     hid `Cannot connect …` — the line the message exists to surface. And `sed … <<<"$x" | head -3`
+     sits in a live errexit scope (the `if` suppresses errexit for the *condition* only): `head`
+     closes the pipe, `sed` takes SIGPIPE, `pipefail` returns 141, errexit kills the script there,
+     so the three hint lines never print and the launcher exits **141 instead of 1** — a harness
+     reads that as a crash, not a refusal. It fails on *chatty* errors, and a chained sudo refusal
+     is already three lines. `tail -3 | sed` has no early-exiting consumer.
+  3. **The PLE digest is matched (`[0-9a-f]{64}`), not taken as the first token.** The capture is
+     stdout+stderr merged, so `%% *` turns an `ld.so: warning:` into "sha256 ld.so: warning:" in the
+     mismatch message — the precise misattribution the block exists to prevent.
+  4. **`run-legacy` is pinned to root, not to 1000, and given its own cache root.** The plan says
+     pin everything; this image is upstream's, was never booted here, and the model card's numbers
+     are root numbers — pinning it would make the A/B a comparison of uids. Root in the container
+     then writes into the mounted `uid-1000` cache tree, and the `CACHE_UID` guard cannot see it
+     (it checks the leaf, which stays 1000-owned), so the *next* `./qwen/run` would pass the guard
+     and die `EACCES` minutes into boot naming nothing. `cache-legacy` is the fix; a warning line
+     was rejected as invisible. Cost: the legacy launcher starts cold and is not uid-pinned — both
+     deliberate, both in the file's own comment.
+  5. **`muse/run --selftest` gets `--user` + the cache mount, with hand-rolled flags.** A selftest
+     that runs as root passes on a configuration the server never runs in. Flags are written out
+     rather than reusing `CONTAINER_ARGS` because `docker_core_args` adds `-it` whenever `DETACH` is
+     unset, and a selftest piped to a log or run from CI has no TTY.
+  6. **The no-hash case got its own branch.** The plan's diagnosis (a socket denial skipped the
+     check silently) was **wrong and is retracted**: it failed loudly, but blamed image content.
+     The real gap was that "could not read it" and "differs" shared one message.
+- **The two reviewers split on T2's status, and the split is recorded rather than averaged.**
+  neckbeard: leave row 2 `blocked` — the substitute probe never runs `selftest.py`, so the parser
+  assertions stay unverified. hoodie: mark it done and annotate — the substitute covers the entire
+  failure surface the diff introduces. Taken as **done, with the blocked half named in the cell**:
+  T2's own DoD (convert the call sites, no bare `docker`, make `:279` honest) is met and verified,
+  and the missing item is a step-6 runtime assertion, which the owner's 2026-10-13 gate decision
+  keeps out of the per-commit bar. The dissent stands, and the substitute *did* under-test — it
+  skipped the host-side `mkdir`/ownership step the real path performs.
+- **There is no Muse checkpoint on this host.** `models/vllm/RedHatAI/` is empty and no `*Glimmer*`
+  directory exists under `models`. Nothing in the tree distinguishes "`./muse/run --selftest`
+  failed" from "there are no weights to test", so write it down before anyone debugs the selftest.
+- **T2's audit boundary, stated so the gap is a decision and not an oversight:** `common/_run-lib.sh`
+  and the five `*/run` launchers. `container/build`, `container/push` and `container/archs` still
+  call bare `docker` (root-by-design, and gate step 5 documents the `sudo -n` they need), and
+  `bench/*` + `scripts/*` are named in the plan's `Out` list.
+
 ## Follow-ups
 
 | Follow-up | Why | Lands in |
@@ -159,6 +215,9 @@ regression (see T10's "within noise").
 | `container/patches/boot-timing/__pycache__/` in `.gitignore` | Container-written bytecode inside the repo tree; regenerates as uid 1000 after T1 | T8, if not already covered |
 | `repin.md:197-199` predicts MTP 3 / util 0.96; the launcher emits MTP 4 / 0.95 | Stale expectation found during the repin run, deliberately left alone | Plan 02 |
 | The cold-boot banner prints **after** `[[ -w ]]` and `mkdir`, the only two calls in the launcher that can block indefinitely on a hard NFS mount — so the one boot where a stall is likeliest prints nothing | Found at T1 review; the fix is to emit the first banner line before `mkdir`, or wrap it in `timeout` and name the mount | T8 or Plan 02 |
-| `require_image` still reports `Image … not found. Run ./container/build first` when the real cause is that `sudo -n` did not answer | `context/pitfalls.md` names this exact lie; T1 fixed the socket-access half by routing through `${DOCKER[@]}`, not the message. A one-call `${DOCKER[@]} version` probe at source time kills the whole class | T2 (which touches the same call sites) |
-| `muse/run`'s `--selftest` path is `exec docker run` with **no `--user`**, so it runs the container as root while every other path is pinned to 1000 | Sits inside T2's file list; noted so T2 does not convert the privilege prefix and leave the identity inconsistent | T2 |
+| ~~`require_image` still reports `Image … not found` when the real cause is that `sudo -n` did not answer~~ | **Closed by T2**: a `${DOCKER[@]} version` probe at source time now refuses before any call that could misreport, and prints docker's own last three lines. `context/pitfalls.md` names this lie | done 2026-10-13 |
+| ~~`muse/run`'s `--selftest` path runs the container as root while every other path is pinned to 1000~~ | **Closed by T2**: it now runs `--user 1000:1000` with `HOME` and the per-uid cache mount | done 2026-10-13 |
+| **Run `./muse/run --selftest` for real** — it has never been executed on this host. Its `--user` change is verified only by a substitute probe (`os.access` False / `makedirs`+write OK), and the probe skipped the host-side `mkdir`+ownership step | No Muse checkpoint on this host: `models/vllm/RedHatAI/` is empty. It is the ritual step after every vLLM bump anyway, so the checkpoint's return closes it naturally | T8 / step 6, on checkpoint refetch |
+| `muse/patches/atem-parsers/selftest.py` should end with a deterministic `SELFTEST: PASS` / `SELFTEST: FAIL <reason>` line | Its verdict currently has to be read off a tail behind library warnings (a `HF_HUB_ENABLE_HF_TRANSFER` FutureWarning prints on import — the image sets a deprecated env var). Pass/fail should not depend on what the library logged that day | Plan 02 |
+| `run-legacy` now has its own cold cache root, so a legacy A/B re-downloads HF metadata and re-JITs | The price of not letting a root container write into the shared `uid-1000` tree. Copy the useful parts across only if a legacy run becomes routine | Plan 02, owner-decided |
 | `vllm_launch`'s echoed line is a serialization, not a quoting-preserving one: `--override-generation-config '{ … }'` re-splits if pasted | The comment now says so. Needs `printf '%q '` only if the proposed DRY_RUN golden-file test ever lands | Plan 02, with that test |

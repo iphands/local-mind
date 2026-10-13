@@ -182,7 +182,7 @@ NAME=vllm
 source "$HERE/../container/versions.env"
 IMAGE=${IMAGE:-iphands/vllm-blackwell}
 if [[ -z ${IMAGE_TAG:-} ]]; then
-  IMAGE_TAG=$(docker images "$IMAGE" --filter "label=ai.vllmcustom.vllm.ref=$VLLM_MAIN_SHA" \
+  IMAGE_TAG=$("${DOCKER[@]}" images "$IMAGE" --filter "label=ai.vllmcustom.vllm.ref=$VLLM_MAIN_SHA" \
                 --format '{{.Tag}}' | grep -m1 "^cu${DEFAULT_CUDA_VERSION//./}-sm120-main-vllm" || true)
   if [[ -z $IMAGE_TAG ]]; then
     echo "No $IMAGE image built from vLLM $VLLM_MAIN_SHA (VLLM_MAIN_SHA in container/versions.env)."
@@ -258,7 +258,7 @@ CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
 
 # require_image's hint names a plain ./container/build, which would produce the
 # release image, not this tag.
-docker image inspect "$CONTAINER" >/dev/null 2>&1 || {
+"${DOCKER[@]}" image inspect "$CONTAINER" >/dev/null 2>&1 || {
   echo "Image $CONTAINER not found. Build the main snapshot first:"
   echo "  VLLM_REF=main ./container/build"; exit 1; }
 
@@ -276,22 +276,42 @@ if [[ "$PATCH_PLE" != "0" ]]; then
   # Where upstream keeps the file moves between commits (nvidia/ -> common/ at
   # vLLM 267eee5), so the mount target comes from UPSTREAM too.
   PATCH_DST=/opt/venv/lib/python3.12/site-packages/$UPSTREAM_PATH
-  _img_sum=$(docker run --rm --entrypoint sha256sum "$CONTAINER" "$PATCH_DST" 2>/dev/null | cut -d' ' -f1 || true)
+  # Captured rather than discarded. The reachability probe and the image check above have
+  # already ruled out "no socket" and "no image", so a failure here means upstream's file is
+  # not at $PATCH_DST (its path does move — nvidia/ -> common/ at vLLM 267eee5) or the
+  # inspection container could not start. Neither of those is "the hash differs", which is
+  # the only thing the message below is allowed to claim.
+  _img_sum=''
+  # Matched, not split: the capture is stdout+stderr merged, so the first token is the hash
+  # only if nothing else printed. `${_img_out%% *}` would put an `ld.so: warning:` into the
+  # mismatch message as `sha256 ld.so: warning:` — the exact misattribution this block exists
+  # to prevent. No digest found (even on exit 0) leaves it empty, which is the no-hash case.
+  if _img_out=$("${DOCKER[@]}" run --rm --entrypoint sha256sum "$CONTAINER" "$PATCH_DST" 2>&1) &&
+     [[ "$_img_out" =~ (^|[^0-9a-fA-F])([0-9a-f]{64})[[:space:]] ]]; then
+    _img_sum=${BASH_REMATCH[2]}
+  fi
+  _img_err=${_img_out%%$'\n'*}
   # vllm#59431 (main c32513b, 2026-09-30) made the overlay redundant: upstream's
   # from_quant_config now returns the unquantized method when
   # CompressedTensorsConfig.get_scheme_dict() is None, which it is for an
   # `ignore` match -- the same should_ignore_layer() call the overlay makes.
   # Detected by content, like the hash, so older snapshots still get the overlay.
-  if [[ "$_img_sum" != "$BASE_SHA256" ]] &&
-     docker run --rm --entrypoint grep "$CONTAINER" -qF \
+  if [[ -n "$_img_sum" ]] && [[ "$_img_sum" != "$BASE_SHA256" ]] &&
+     "${DOCKER[@]}" run --rm --entrypoint grep "$CONTAINER" -qF \
        'isinstance(quant_config, CompressedTensorsConfig)' "$PATCH_DST" 2>/dev/null; then
     echo "## PLE overlay: not mounted, the image's ngram_embedding.py already handles a compressed-tensors ignore (vllm#59431)"
     PATCH_PLE=0
+  elif [[ -z "$_img_sum" ]]; then
+    echo "$CONTAINER gave no hash for $PATCH_DST — the inspection container said:"
+    echo "  ${_img_err:-<no output at all>}"
+    echo "So the upstream file moved, or no container can be started from this image. The"
+    echo "overlay can be neither checked nor mounted: correct the path in"
+    echo "$PATCH_ROOT/UPSTREAM, or set PATCH_PLE=0 to boot without it."; exit 1
   elif [[ "$_img_sum" != "$BASE_SHA256" ]]; then
-    _img_ref=$(docker image inspect -f '{{index .Config.Labels "ai.vllmcustom.vllm.ref"}}' "$CONTAINER")
+    _img_ref=$("${DOCKER[@]}" image inspect -f '{{index .Config.Labels "ai.vllmcustom.vllm.ref"}}' "$CONTAINER")
     echo "$CONTAINER (vLLM ${_img_ref:-<no ai.vllmcustom.vllm.ref label>}) ships a different"
-    echo "$PATCH_DST than the overlay was derived from (sha256 ${_img_sum:-<unreadable>}, overlay"
-    echo "expects $BASE_SHA256 from $BASE_REF). Re-derive the patch (see $PATCH_ROOT/UPSTREAM),"
+    echo "$PATCH_DST than the overlay was derived from (sha256 $_img_sum, overlay expects"
+    echo "$BASE_SHA256 from $BASE_REF). Re-derive the patch (see $PATCH_ROOT/UPSTREAM),"
     echo "or PATCH_PLE=0 to boot without it."; exit 1
   fi
 fi

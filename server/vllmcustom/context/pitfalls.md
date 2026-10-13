@@ -94,3 +94,41 @@ first plan, not yet true.
 - vllmcustom: `common/_run-lib.sh` (header comment, `vllm_launch`)
 
 ---
+
+# `| head` in a `then` branch eats your own error message and changes the exit code [OBSERVED 2026-10-13]
+
+## Problem
+The docker reachability probe in `common/_run-lib.sh` printed the daemon's own output with
+`sed 's/^/##   it said: /' <<<"$_DOCKER_PROBE" | head -3`. Three things are wrong with that line, and
+two of them are invisible:
+
+1. `head -3` exits after three lines and closes the pipe → `sed` is killed by `SIGPIPE` (status 141) →
+   `pipefail` makes the *pipeline* fail → **errexit is live in a `then` branch** (`if` suppresses
+   errexit for the *condition* only, never the body) → the script dies at that line, so every hint
+   line below it never prints, and the launcher exits **141 instead of 1**. A bench harness reads 141
+   as "the launcher crashed", not "the launcher refused".
+2. It only triggers when the captured text is longer than three lines — i.e. on the *chatty* errors,
+   which are exactly the ones worth reading. `sudo`'s own chained refusal is three lines by itself.
+3. `docker version` writes its whole 8-line `Client:` block to stdout **before** it fails on the
+   socket, so with `2>&1` the first three lines are always `Client:` / `Version:` / `API version:`
+   and the actual diagnosis (`Cannot connect to the Docker daemon…`) is last. `head` reads the wrong
+   end, in the one case the message exists for.
+
+## How to avoid
+In a diagnostic path, never put an **early-exiting consumer** (`head`, `head -c`, anything that quits
+before EOF) downstream of a command inside a pipeline that runs under `set -eo pipefail`. Either
+capture, then print (`_t=$(tail -3 <<<"$x"; ); printf '%s\n' "$_t"`) or let the tool exit itself
+(`sed -e '3q'`), so nothing is ever signalled. Prefer **`tail` over `head` for error text** — the
+diagnosis is at the end. And assert the **exit code** in verification, not just the text: a stub
+`DOCKER` harness with `probe_sudo` / `probe_daemon` modes is how this was caught, and the same
+harness proves both modes now return 1.
+
+That harness is worth keeping in mind generally: `DOCKER` is a space-split string, so
+`DOCKER=/tmp/stub/docker-stub.sh` routes every docker call in every launcher to a script — all four
+PLE branches, the probe and the sudo refusal, with no daemon, no GPU and no model boot.
+
+## Sources
+- vllmcustom: `common/_run-lib.sh` (the probe), caught in review before commit, 2026-10-13
+- vllmcustom: `context/plans/01_uid_parity_tracker.md` § Evidence, "T2 branch harness"
+
+---

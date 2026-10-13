@@ -76,6 +76,32 @@ if [[ $EUID == 0 ]]; then
   exit 1
 fi
 
+# Prove dockerd answers before anything downstream can misreport why it did not. Without
+# this, a dead socket or a missing NOPASSWD rule surfaces as `Image … not found. Run
+# ./container/build first` (require_image) or `No image built from vLLM $VLLM_MAIN_SHA`
+# (qwen3.8-flash-next/run:185) — the second sends you to rebuild 12 GB for a socket problem.
+# `version` is the cheapest call that exercises the sudo prefix AND the socket; `info` is
+# slower and can fail for reasons that are not "socket dead". `sudo -n` never prompts, but
+# a wedged dockerd blocks a unix-socket connect indefinitely, hence the timeout.
+if ! _DOCKER_PROBE=$(timeout 15 "${DOCKER[@]}" version 2>&1); then
+  {
+    echo "## docker is not reachable via '${DOCKER[*]}' — stopping here so nothing below guesses."
+    # LAST lines, not first: `docker version` prints its whole Client block to stdout
+    # before it fails on the socket, so the first lines are always `Client:`/`Version:`
+    # and the diagnosis is the error at the end. tail rather than head|sed because a
+    # `| head` here would sit in a live errexit scope: head closes the pipe, sed dies of
+    # SIGPIPE, pipefail turns it into 141, errexit kills the script at that line and the
+    # hints below never print. Do not "simplify" this back into a pipeline.
+    tail -3 <<<"$_DOCKER_PROBE" | sed 's/^/##   it said: /'
+    echo "##   reproduce it:  ${DOCKER[*]} version"
+    echo "##   'a password is required' -> the NOPASSWD sudoers rule for docker is gone."
+    echo "##   'Cannot connect'/'denied' -> dockerd is down, or the socket needs sudo (this host:"
+    echo "##   it is root-owned and the account is in no docker group, so 'sudo -n docker' is it)."
+    echo "##   nothing at all above -> the probe was killed by its 15 s timeout: dockerd is wedged."
+  } >&2
+  exit 1
+fi
+
 # ---------------------------------------------------------------- image
 
 vllm_image() {

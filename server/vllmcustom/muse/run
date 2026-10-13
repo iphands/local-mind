@@ -343,7 +343,20 @@ require_image
 # API and it does move. Deliberately ahead of the SPEC checks below: this is an
 # offline parser test and must not need the drafter to be present.
 if [[ "$SELFTEST" == "1" ]]; then
-  exec docker run --rm --entrypoint python \
+  # Same identity as the serve. A selftest running as root passes on a configuration the
+  # server never runs in, which is the one thing a selftest must not do.
+  docker_core_args   # called only for $CACHE_HOST_DIR, which it mkdirs 0750/uid-1000 first —
+                     # that host-side create is what stops dockerd auto-creating the source root-owned
+  # The cache mount is load-bearing, not cosmetic: this imports huggingface_hub, which
+  # makedirs() under $HOME at import time, and $HOME/.cache is the one path uid 1000 can
+  # write here (probed 2026-10-13, see context/plans/01_uid_parity_tracker.md — not assumed).
+  # Flags are hand-rolled instead of reusing CONTAINER_ARGS on purpose: docker_core_args adds
+  # -it whenever DETACH is unset, and a selftest piped to a log or run from CI has no TTY.
+  echo "${DOCKER[@]} run --rm --entrypoint python --user $RUN_UID:$RUN_UID -e HOME=/home/ubuntu -v $CACHE_HOST_DIR:/home/ubuntu/.cache:rw -v $PATCH_ROOT:/vllm-patches:ro -v $MODEL_FOLDER:/models:ro $CONTAINER /vllm-patches/atem-parsers/selftest.py /models/$MODEL"
+  exec "${DOCKER[@]}" run --rm --entrypoint python \
+    --user "$RUN_UID:$RUN_UID" \
+    -e HOME=/home/ubuntu \
+    -v "$CACHE_HOST_DIR":/home/ubuntu/.cache:rw \
     -v "$PATCH_ROOT":/vllm-patches:ro \
     -v "$MODEL_FOLDER":/models:ro \
     "$CONTAINER" /vllm-patches/atem-parsers/selftest.py "/models/$MODEL"

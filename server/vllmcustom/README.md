@@ -505,6 +505,17 @@ Preflight flags it precisely because the build won't.
   The launchers refuse to run under `sudo` for the same reason — a root-run launcher
   creates the directory root-owned, and the uid-1000 serve then dies `EACCES` on its
   first cache write.
+  Every docker call goes through `${DOCKER[@]}` (`sudo -n docker` by default; `DOCKER=docker`
+  on a host where you are in the `docker` group), and the launcher probes `${DOCKER[@]} version`
+  once before anything else, because a dead socket or a lost NOPASSWD rule otherwise surfaces
+  as `Image … not found` — which sends you to rebuild 12 GB for a socket problem.
+  `run-legacy` is the one launcher that serves as **root**, so it defaults to its own cache
+  root, `/mnt/noir/scratch/ai/vllm/cache-legacy`: a root container writing into the shared
+  `uid-1000` tree would leave root-owned files that the ownership guard cannot see (it checks
+  the leaf, which stays 1000-owned) and that break the *next* `./qwen/run` minutes into its boot.
+  It is also the only launcher whose uid is not overridable from the environment — it is a
+  `--user 0:0` append, kept so the A/B against the model card stays a comparison of images
+  rather than of uids.
 - **The flat tree above it is abandoned, not deleted.** Everything the launchers mounted
   before the per-uid split lives directly under `$CACHE_DIR` (`ccache`, `flashinfer`,
   `huggingface`, `torch`, `uv`, `vllm`), written by root because the containers ran as
