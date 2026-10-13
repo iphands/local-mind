@@ -134,7 +134,7 @@
 #   PINNED_ROUND_MB=0 ...                          # drop the pinned-allocator knob (reproduces the 128 GiB cudaHostAlloc OOM)
 #   GDN_KERNEL=cuda ...                            # VLLM_GDN_DECODE_KERNEL (default triton: REQUIRED by the FP8 GDN projections on the PR image)
 #   EXECUTOR=mp ...                                # --distributed-executor-backend (default EMPTY = vLLM's choice; mp was PR-image-only)
-#   SPEC_TOKENS=0 ./qwen3.8-flash-next/run         # MTP off (default 3)
+#   SPEC_TOKENS=0 ./qwen3.8-flash-next/run         # MTP off (default 4)
 #   BLOCK_SIZE=64 / BLOCK_SIZE= ...                # force --block-size / pass none (default auto: only when the QSA ring needs it, see below)
 #   MOE_BACKEND=marlin / MOE_BACKEND= ...          # force another backend / auto (default humming; see above)
 #   ATTN_BACKEND=flashinfer ...                    # default EMPTY = let vLLM pick
@@ -142,6 +142,15 @@
 #   KV_NVFP4=1 / KV_NVFP4=4over6 ...              # --kv-cache-dtype nvfp4 / nvfp4_4over6, overrides KV_FP8 (EXPERIMENTAL: this model's QSA rejects it, see below)
 #   KV_SKIP_MTP=0 ...                              # under KV_FP8/KV_NVFP4 the MTP layer's own KV cache stays BF16 (see below; default 1 = on)
 #   DRAFT_SAMPLE=probabilistic ...                 # MTP draft_sample_method (default EMPTY = vLLM's greedy; see below)
+#   SPEC_LIVE=1 ...                                # change the MTP draft depth on the RUNNING server: SPEC_TOKENS becomes the max and
+#                                                  # GET/POST :8700/spec_tokens sets it (EXPERIMENTAL; default 0; see "SPEC_LIVE" below)
+#   SPEC_LIVE_K=3 SPEC_LIVE_CAPTURE=3,4,5 ...      # initial depth (default SPEC_TOKENS) / K values to pre-capture CUDA graphs for, main one
+#                                                  # first (default K..1, at most MAX_NUM_SEQS values)
+#   ONLINE_FP8=1 ...                               # quantize the checkpoint's BF16 dense layers to FP8 at load (--quantization-config.linear
+#                                                  # fp8_per_channel); ONLINE_FP8=<scheme> for another vLLM scheme. EXPERIMENTAL, default 0; only for checkpoints
+#                                                  # whose dense layers are NOT already quantized (nvidia/Qwen3.8-Flash-Next-NVFP4), ignored otherwise (see "ONLINE_FP8")
+#   SM120_SKINNY=1 ...                             # give Qwen4Exp's skinny-GEMM path (BF16 projections + lm_head) a plan table on SM120 by
+#                                                  # reusing upstream's SM121 one. EXPERIMENTAL, default 0; Flash-Next only (see "SM120_SKINNY")
 #   GPU_MEM_UTIL=0.955 ...                         # the card value (default 0.95)
 #   VISION=0 ...                                   # --language-model-only (drops the ViT)
 #   MAX_NUM_SEQS=36 MAX_MODEL_LEN=32768 ...        # the card's exact measured config
@@ -229,6 +238,11 @@ KV_FP8=${KV_FP8-1}                               # 1 = --kv-cache-dtype fp8; 0 o
 KV_NVFP4=${KV_NVFP4:-}                           # 1 = --kv-cache-dtype nvfp4; 4over6 = nvfp4_4over6; overrides KV_FP8 (see the KV_NVFP4 note below)
 KV_SKIP_MTP=${KV_SKIP_MTP:-1}                    # 1 = MTP layer(s) skip fp8 KV (--kv-cache-dtype-skip-layers)
 DRAFT_SAMPLE=${DRAFT_SAMPLE:-}                   # greedy | probabilistic; EMPTY = vLLM default (greedy)
+SPEC_LIVE=${SPEC_LIVE:-0}                        # 1 = live-adjustable draft depth over HTTP (SPEC_TOKENS is then the max); see "SPEC_LIVE" below
+SPEC_LIVE_K=${SPEC_LIVE_K:-}                     # initial live depth; EMPTY = SPEC_TOKENS
+SPEC_LIVE_CAPTURE=${SPEC_LIVE_CAPTURE:-}         # K values to pre-capture CUDA graphs for, comma-separated, main one first; EMPTY = K..1
+ONLINE_FP8=${ONLINE_FP8:-0}                      # 1 = online FP8 (fp8_per_channel) for the BF16 dense layers; or a vLLM scheme name; 0 = off (see "ONLINE_FP8")
+SM120_SKINNY=${SM120_SKINNY:-0}                  # 1 = reuse the SM121 skinny-GEMM plan table on SM120 (see "SM120_SKINNY")
 VISION=${VISION:-1}                              # 0 = --language-model-only
 PLE_OFFLOAD=${PLE_OFFLOAD:-$_d_ple}              # 1 = --engram-config cpu_offload (the single-GPU path); default 1 for flashnext only
 PATCH_PLE=${PATCH_PLE:-$_d_ple}                  # mount patches/ple-ct-ignore over the image's ngram_embedding.py (see header); flashnext only
@@ -445,6 +459,149 @@ case "$DRAFT_SAMPLE" in
 esac
 [[ -n "$DRAFT_SAMPLE" && "$SPEC_TOKENS" == "0" ]] && echo "## DRAFT_SAMPLE=$DRAFT_SAMPLE ignored: MTP is off (SPEC_TOKENS=0)."
 
+# ONLINE_FP8: almost everything that is not a routed expert in nvidia/Qwen3.8-Flash-Next-NVFP4
+# is BF16 and on the checkpoint's modelopt `ignore` list: lm_head [248320x2560], the GDN
+# in_proj_qkv / in_proj_z / out_proj, the QSA projections, the shared experts, the
+# HyperConnection mixes, the router. By shape that is ~4.3B params, ~8.5 GB read per
+# forward, against ~1.3 GB for the active NVFP4 experts -- so ~85% of a token's weight bytes
+# are BF16. Pennyroyal (SGLang) halves them with online row-wise FP8 and measured +15.8% to
+# +28.3% single-stream decode (RESULTS.md / FP8.md in jpezzulli/sglang-rtxpro6000).
+# vLLM can do the same for the unquantized layers of a partially-quantized checkpoint
+# (docs/features/quantization/online.md): --quantization-config '{"linear":"fp8_per_channel"}'
+# = per-output-channel FP8 weights + dynamic per-token FP8 activations. resolve_quant_method()
+# (quantization/base_config.py) hands every LinearBase layer the checkpoint left unquantized to
+# the online method; experts keep their NVFP4 (moe is unset), and ParallelLMHead, the
+# HyperConnection mixes and the router stay BF16 (not LinearBase, or no quant_config).
+# Checked: the config parses against this checkpoint and composes onto its
+# ModelOptMixedPrecisionConfig. NOT verified: the boot on the GPU (GDN / packed QSA qkv +
+# indexer, MTP drafter, memory freed ~3.9 GiB in Pennyroyal), or the accuracy -- compare
+# outputs before adopting. Keep GDN_KERNEL=triton with it.
+#
+# It is ONLY valid where the checkpoint leaves the dense layers unquantized. On a checkpoint
+# that already quantizes them (compressed-tensors, fp8, ...) the online method has to
+# RE-quantize, which vLLM supports only for ModelOpt MXFP8 sources
+# (docs/features/quantization/online.md); for compressed-tensors it dies at model build with
+# "AttributeError: ... has no attribute 'weight'" (online/fp8.py create_weights: the source
+# creates weight_packed, then layer.weight is read). Seen 2026-10-12 on
+# unsloth/Qwen3.8-27B-NVFP4, which already has FP8 per-channel (the same recipe) on attention,
+# GDN and lm_head and NVFP4 on the MLPs; primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8 is
+# the same story for attention + GDN. So the checkpoint is probed first: allowed iff there is
+# no quantization_config, or quant_method is modelopt* and no config_groups target is a dense
+# layer (self_attn / linear_attn / lm_head / q_proj / in_proj / qkv). Otherwise the knob is
+# ignored with the reason. The vision tower sits on the checkpoint's ignore list too, so
+# without an `ignore` the online method would FP8 it as well (no decode benefit, image
+# quality risk): it is excluded with "re:.*visual.*".
+_ONLINE_FP8_SCHEME=''
+case "$ONLINE_FP8" in
+  0|'') ;;
+  1) _ONLINE_FP8_SCHEME=fp8_per_channel ;;
+  *[!a-z0-9_]*) echo "ONLINE_FP8 must be 0, 1 or a vLLM scheme name like fp8_per_channel (got '$ONLINE_FP8')"; exit 1 ;;
+  *) _ONLINE_FP8_SCHEME=$ONLINE_FP8 ;;
+esac
+if [[ -n "$_ONLINE_FP8_SCHEME" ]]; then
+  _ofp8=$(python3 - "$MODEL_ROOT/$MODEL" <<'PY'
+import json, pathlib, re, sys
+cfg = json.load(open(pathlib.Path(sys.argv[1]) / "config.json"))
+q = cfg.get("quantization_config") or (cfg.get("text_config") or {}).get("quantization_config")
+if not q:
+    print("ok no quantization_config (unquantized checkpoint)"); sys.exit(0)
+method = str(q.get("quant_method"))
+targets = [t for g in (q.get("config_groups") or {}).values() for t in g.get("targets", [])]
+dense = [t for t in targets if re.search(r"self_attn|linear_attn|lm_head|q_proj|in_proj|qkv", t)]
+if method.startswith("modelopt") and not dense:
+    print(f"ok {method}: the dense layers are not quantized")
+elif method.startswith("modelopt"):
+    print(f"no {method} already quantizes dense layers ({dense[0][:48]})")
+else:
+    print(f"no {method} already quantizes the dense layers")
+PY
+  ) || { echo "ONLINE_FP8 checkpoint probe failed"; exit 1; }
+  if [[ "${_ofp8%% *}" != ok ]]; then
+    echo "## ONLINE_FP8 ignored: ${_ofp8#* }; online FP8 would have to re-quantize them, which vLLM does not support for this method."
+    _ONLINE_FP8_SCHEME=''
+  fi
+fi
+if [[ -n "$_ONLINE_FP8_SCHEME" ]]; then
+  echo "## online-fp8: --quantization-config '{\"linear\":\"$_ONLINE_FP8_SCHEME\",\"ignore\":[\"re:.*visual.*\"]}' (${_ofp8#* }; BF16 dense layers -> FP8 at load, vision tower untouched; UNVERIFIED on the GPU for this model)"
+  [[ "$GDN_KERNEL" != triton ]] && echo "## WARNING: ONLINE_FP8 with GDN_KERNEL=$GDN_KERNEL; the GDN projections become FP8 and the launcher has only run FP8 GDN projections with the triton decode kernel."
+fi
+
+# SM120_SKINNY: Qwen4Exp swaps F.linear for a CuTe-DSL skinny GEMM on its BF16 projections and
+# the lm_head, but upstream ships plan tables only for SM103 / SM100 / SM90 / SM121
+# (qwen4_exp/nvidia/low_latency_gemm.py), so on this SM120 card all of that is plain
+# F.linear. vllm#59753 added SM121 TP=1 plans for this model's exact shapes (lm_head
+# 248320x2560, GDN 16384x2560, QSA 13952x2560, HC 10240x320, ...). The overlay in
+# container/patches/sm120-gemm-plans reuses that table for capability (12, 0). Tiles were
+# tuned on GB10 (273 GB/s), so UNVERIFIED on this card: A/B it. With ONLINE_FP8 the
+# quantized layers leave this path (it only takes unquantized linears); the lm_head,
+# HyperConnection and router shapes still use it.
+SM120_SKINNY_DIR="$HERE/../container/patches/sm120-gemm-plans"
+case "$SM120_SKINNY" in
+  0|1) ;;
+  *) echo "SM120_SKINNY must be 0 or 1 (got '$SM120_SKINNY')"; exit 1 ;;
+esac
+if [[ "$SM120_SKINNY" == 1 && "$FAMILY" != flashnext ]]; then
+  echo "## SM120_SKINNY=1 ignored: only Qwen4Exp (family flashnext) has the skinny-GEMM path."
+  SM120_SKINNY=0
+fi
+[[ "$SM120_SKINNY" == 1 ]] && echo "## sm120-skinny: SM121 skinny-GEMM plans reused for SM120 (UNVERIFIED on this card; see container/patches/sm120-gemm-plans/UPSTREAM)"
+
+# SPEC_LIVE: change the MTP draft depth without a restart (GET/POST /spec_tokens).
+# vLLM has no live setter (num_speculative_tokens feeds the scheduler, the CUDA-graph
+# capture and the QSA key ring at init), but its Dynamic SD (vllm#32374) already
+# picks K per scheduler step below the configured maximum and every allocation is
+# sized for that maximum. container/patches/spec-live replaces Dynamic SD's
+# batch-size table with ONE live K and adds the HTTP route; see its UPSTREAM.
+# Here: SPEC_TOKENS is the maximum, and a boot-time
+# "num_speculative_tokens_per_batch_size" turns Dynamic SD on and tells the workers
+# which K values get CUDA graphs (their batch-size meaning is ignored at runtime).
+# There is room for one K per batch size 1..MAX_NUM_SEQS; the main K takes the
+# widest tier ([N, MAX_NUM_SEQS]) so its full graphs cover the most request counts.
+# A K outside SPEC_LIVE_CAPTURE still works (PIECEWISE graphs instead of full ones).
+# UNVERIFIED on this model: upstream tested Dynamic SD with Eagle / Eagle-3 / DFlash,
+# not MTP on a hybrid GDN + QSA model. Enabling it also stops the scheduler padding
+# new decode requests to 1+K tokens (a full-graph optimisation).
+SPEC_SCHEDULE_JSON=''
+SPEC_LIVE_K_EFF=''
+SPEC_LIVE_DIR="$HERE/../container/patches/spec-live"
+case "$SPEC_LIVE" in
+  0|1) ;;
+  *) echo "SPEC_LIVE must be 0 or 1 (got '$SPEC_LIVE')"; exit 1 ;;
+esac
+if [[ "$SPEC_LIVE" == 1 ]]; then
+  if [[ "$SPEC_TOKENS" == "0" ]]; then
+    echo "## SPEC_LIVE=1 ignored: MTP is off (SPEC_TOKENS=0)."
+    SPEC_LIVE=0
+  else
+    _live=$(python3 - "$SPEC_TOKENS" "$MAX_NUM_SEQS" "$SPEC_LIVE_K" "$SPEC_LIVE_CAPTURE" <<'PY'
+import json, sys
+try:
+    mx, nseq = int(sys.argv[1]), int(sys.argv[2])
+    k0 = int(sys.argv[3]) if sys.argv[3] else mx
+    cap = [int(x) for x in sys.argv[4].split(",")] if sys.argv[4] else None
+except ValueError:
+    sys.exit("SPEC_LIVE_K / SPEC_LIVE_CAPTURE must be integers (CAPTURE: comma-separated)")
+if not 0 <= k0 <= mx:
+    sys.exit(f"SPEC_LIVE_K={k0} must be in 0..SPEC_TOKENS ({mx})")
+if cap is None:
+    cap = list(range(max(k0, 1), 0, -1))[:nseq]
+if not cap or len(set(cap)) != len(cap) or any(not 1 <= k <= mx for k in cap):
+    sys.exit(f"SPEC_LIVE_CAPTURE={cap} must be distinct values in 1..SPEC_TOKENS ({mx})")
+if len(cap) > nseq:
+    sys.exit(f"SPEC_LIVE_CAPTURE has {len(cap)} values but MAX_NUM_SEQS={nseq} leaves room for {nseq}"
+             " (one K per batch size 1..MAX_NUM_SEQS)")
+lows = cap[1:][::-1]
+ranges = [[i + 1, i + 1, k] for i, k in enumerate(lows)]
+ranges.append([len(lows) + 1, nseq, cap[0]])
+print(k0, json.dumps(ranges, separators=(",", ":")))
+PY
+    ) || { echo "SPEC_LIVE configuration invalid"; exit 1; }
+    read -r SPEC_LIVE_K_EFF SPEC_SCHEDULE_JSON <<< "$_live"
+    echo "## spec-live: K=$SPEC_LIVE_K_EFF of max $SPEC_TOKENS; boot schedule $SPEC_SCHEDULE_JSON (CUDA graphs per K)"
+    echo "##   GET/POST http://localhost:$PORT/spec_tokens  (UNVERIFIED on this model family; see container/patches/spec-live/UPSTREAM)"
+  fi
+fi
+
 # The table is 95.4 GB of PINNED host memory, allocated in the engine worker
 # during weight load. Warn, don't refuse: the kernel decides.
 _avail_gb=$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo)
@@ -496,6 +653,27 @@ if [[ "$DRAFT_LOAD_FILTER" != "0" ]]; then
     -v "$DRAFT_FILTER_DIR/draft_load_filter.pth:/opt/venv/lib/python3.12/site-packages/zz_draft_load_filter.pth:ro"
   )
 fi
+# SM120_SKINNY overlay: same mechanism (a new .pth, no upstream file replaced).
+if [[ "$SM120_SKINNY" == 1 ]]; then
+  [[ -f "$SM120_SKINNY_DIR/sm120_gemm_plans.py" && -f "$SM120_SKINNY_DIR/sm120_gemm_plans.pth" ]] || {
+    echo "missing $SM120_SKINNY_DIR/sm120_gemm_plans.{py,pth}"; exit 1; }
+  CONTAINER_ARGS+=(
+    -e SM120_SKINNY=1
+    -v "$SM120_SKINNY_DIR:/opt/sm120-gemm-plans:ro"
+    -v "$SM120_SKINNY_DIR/sm120_gemm_plans.pth:/opt/venv/lib/python3.12/site-packages/zz_sm120_gemm_plans.pth:ro"
+  )
+fi
+# SPEC_LIVE overlay: same mechanism (a new .pth, no upstream file replaced). The hook
+# does nothing unless SPEC_LIVE=1 is in the container's env.
+if [[ "$SPEC_LIVE" == 1 ]]; then
+  [[ -f "$SPEC_LIVE_DIR/spec_live.py" && -f "$SPEC_LIVE_DIR/spec_live.pth" ]] || {
+    echo "missing $SPEC_LIVE_DIR/spec_live.{py,pth}"; exit 1; }
+  CONTAINER_ARGS+=(
+    -e SPEC_LIVE=1 -e SPEC_LIVE_K="$SPEC_LIVE_K_EFF"
+    -v "$SPEC_LIVE_DIR:/opt/spec-live:ro"
+    -v "$SPEC_LIVE_DIR/spec_live.pth:/opt/venv/lib/python3.12/site-packages/zz_spec_live.pth:ro"
+  )
+fi
 env_extra_args
 
 vllm_core_args
@@ -521,11 +699,13 @@ VLLM_ARGS+=(
 [[ -n "$HF_OVERRIDES" ]] && VLLM_ARGS+=( --hf-overrides "$HF_OVERRIDES" )
 [[ -n "$EXECUTOR" ]] && VLLM_ARGS+=( --distributed-executor-backend "$EXECUTOR" )
 [[ -n "$KV_DTYPE" ]] && VLLM_ARGS+=( --kv-cache-dtype "$KV_DTYPE" )
+[[ -n "$_ONLINE_FP8_SCHEME" ]] && VLLM_ARGS+=( --quantization-config '{"linear":"'"$_ONLINE_FP8_SCHEME"'","ignore":["re:.*visual.*"]}' )
 (( ${#KV_SKIP_ARG[@]} )) && VLLM_ARGS+=( --kv-cache-dtype-skip-layers "${KV_SKIP_ARG[@]}" )
 [[ "$VISION" == "0" ]] && VLLM_ARGS+=( --language-model-only )
 # SPEC_TOKENS=0 disables MTP entirely (clean no-speculation baseline); else add it.
 _spec='{"method":"mtp","num_speculative_tokens":'"$SPEC_TOKENS"
 [[ -n "$DRAFT_SAMPLE" ]] && _spec+=',"draft_sample_method":"'"$DRAFT_SAMPLE"'"'
+[[ -n "$SPEC_SCHEDULE_JSON" ]] && _spec+=',"num_speculative_tokens_per_batch_size":'"$SPEC_SCHEDULE_JSON"
 _spec+='}'
 [[ "$SPEC_TOKENS" != "0" ]] && VLLM_ARGS+=( --speculative-config "$_spec" )
 [[ -n "$BLOCK_ARG" ]] && VLLM_ARGS+=( --block-size "$BLOCK_ARG" )
@@ -534,5 +714,6 @@ vllm_extra_args
 
 echo
 _ple_note=; [[ "$PLE_OFFLOAD" != "0" ]] && _ple_note=", PLE table pinned in host RAM via --engram-config"
-echo "## Running $CONTAINER  (family=$FAMILY attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS${DRAFT_SAMPLE:+/$DRAFT_SAMPLE}${KV_SKIP_ARG[*]:+ kv-bf16-layers=${KV_SKIP_ARG[*]}} block=${BLOCK_ARG:-auto} load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0$_ple_note)"
+_sm120_note=''; [[ "$SM120_SKINNY" == 1 ]] && _sm120_note=' sm120-skinny'
+echo "## Running $CONTAINER  (family=$FAMILY attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS${SPEC_LIVE_K_EFF:+ live-k=$SPEC_LIVE_K_EFF}${_ONLINE_FP8_SCHEME:+ online-fp8=$_ONLINE_FP8_SCHEME}${_sm120_note}${DRAFT_SAMPLE:+/$DRAFT_SAMPLE}${KV_SKIP_ARG[*]:+ kv-bf16-layers=${KV_SKIP_ARG[*]}} block=${BLOCK_ARG:-auto} load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0$_ple_note)"
 vllm_launch
