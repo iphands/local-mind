@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `02`.** <!-- hp:next-free -->
+**Next free plan number: `03`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-10-13):** single-stream decode throughput on one RTX PRO 6000
 > (sm_120), from a vLLM stack we build ourselves — torch, FlashInfer and vLLM all compiled from
@@ -21,8 +21,14 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
 
 ## Currently Active <!-- hp:active -->
 
+**02 — No sudo anywhere: plain `docker` is the only privilege path** (`in-progress`). Supersedes the
+privilege half of 01: same uid-1000 contract, no `sudo` in any file. The root refusal stays — root is
+reachable by `su` and `_writable` cannot see a root run.
+
 **01 — Run everything as uid/gid 1000:1000, host and container** (`pending`, T3b + T10 blocked on an
 image rebuild). Wave 1 needs no GPU and no rebuild; do T4 before asking the owner to rebuild.
+Superseded in part by 02 (`sudo` machinery removed 2026-10-13); the uid contract and its gate steps
+still stand — see `context/distilled.md`.
 
 ## Plans <!-- hp:plans -->
 
@@ -31,6 +37,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
 | 01 | Run everything as uid/gid 1000:1000, host and container | — | pending | Containers run as root today; cache mount target is unreadable to uid 1000, so identity and mount must move together. |
+| 02 | No sudo anywhere: plain `docker` is the only privilege path | 01 | in-progress | Socket is user-owned since 2026-10-13; `sudo` default fails 127. Root refusal kept — `su` still reaches root. |
 
 ## Pre-existing material <!-- hp:pre-existing -->
 
