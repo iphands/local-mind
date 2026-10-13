@@ -586,3 +586,23 @@ EXPOSE 8799
 # decoding builds its draft from that default instead of the served checkpoint —
 # breaking MTP with "Unsupported speculative method: 'mtp'".
 ENTRYPOINT ["vllm", "serve"]
+
+# Run as the base image's own unprivileged user, so nothing a serve does can leave root-owned
+# files in the host-mounted cache tree. Two facts make this metadata-only rather than a RUN layer:
+# the base (`nvidia/cuda:13.2.1-cudnn-devel-ubuntu24.04`, the ARG default at :178) already ships
+# /home/ubuntu as 0750 ubuntu:ubuntu — measured on that tag 2026-10-13, so `install -d` here would
+# be a no-op — and USER adds no filesystem bytes. Re-measure that mode/owner if BASE_IMAGE moves.
+#
+# HOME is set because docker does not derive it for a *numeric* user: without it a hand-run
+# `docker run` (no launcher flags) gets HOME=/ and every cache path resolves against the root
+# filesystem. CCACHE_DIR is overridden because :195 points it into /root, which uid 1000 cannot
+# write, while the ccache wrapper stays ahead of /usr/bin on PATH (:211) — that combination does
+# not break a compile (measured: `cc` exits 0, ccache degrades) but silently runs every serve-time
+# host compile uncached, forever. Redirected here it caches, and lands inside the mounted tree.
+#
+# KEEP THESE THE LAST INSTRUCTIONS IN THE FILE: a RUN/COPY appended after USER runs as uid 1000 and
+# half-fails. Gate step 7d (context/plans/RULES.md) is a host-side grep that only means something
+# while this ordering holds.
+ENV HOME=/home/ubuntu \
+    CCACHE_DIR=/home/ubuntu/.cache/ccache
+USER 1000:1000

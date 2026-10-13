@@ -255,11 +255,11 @@ it or the human asks. When it does:
   **not** an assertion; the jsonl provenance fields are.
 - Per Rule P1: ≥3 runs, mean and spread, and a delta inside the spread written as **within noise**.
 
-**7. Run identity (Plan 01).** Every process this project starts runs as uid/gid 1000, and the cache
-directory the container writes is *owned* by 1000 — not merely named `uid-1000`. Three assertions,
-named separately on purpose: bundled under one step number, a legitimate `SKIP` on the image check
-would hide a genuine `FAIL` on the launcher check.
-
+ **7. Run identity (Plan 01).** Every process this project starts runs as uid/gid 1000, and the cache
+ directory the container writes is *owned* by 1000 — not merely named `uid-1000`. Five assertions,
+ named separately on purpose: bundled under one step number, a legitimate `SKIP` on the image check
+ would hide a genuine `FAIL` on the launcher check.
+ 
 ```bash
 # 7a — the identity reaches the emitted command line, and a sudo'd launcher refuses. Stub docker
 #      plus a two-byte fake model: no GPU, no image, no model. About 2 s. NEVER skippable.
@@ -285,8 +285,20 @@ if [ -z "${VTAG:-}" ]; then echo 'SKIP(7b: no container/.last-build — nothing 
 else
   U=$(sudo -n docker image inspect -f '{{.Config.User}}' "$IMAGE:$VTAG" 2>/dev/null)
   if   [ -z "$U" ]; then echo 'SKIP(7b: image declares no USER — Plan 01 T3 rebuild pending)'
+                       echo 'SKIP(7b env: same rebuild — the Env defaults ship with the USER)'
   elif [ "$U" = 1000:1000 ]; then echo 'PASS(7b USER 1000:1000)'
   else echo "FAIL(7b USER=$U, want 1000:1000)"; fi
+  #    …and the two Env defaults that make the USER alone sufficient. Asked only once the USER is
+  #    there, so a stale image stays one honest SKIP rather than turning into three FAILs. The
+  #    CCACHE_DIR line is the only canary for it: if it regresses, serve-time compiles go silently
+  #    uncached and NOTHING else in the gate or at runtime ever notices.
+  if [ -n "$U" ]; then
+    E=$(sudo -n docker image inspect -f '{{json .Config.Env}}' "$IMAGE:$VTAG" 2>/dev/null)
+    grep -q '"HOME=/home\/ubuntu"'                     <<<"$E" && echo 'PASS(7b HOME env)' \
+      || echo 'FAIL(7b HOME env — docker gives a numeric user no HOME, so a hand-run serve gets HOME=/)'
+    grep -q '"CCACHE_DIR=/home/ubuntu/\.cache/ccache"' <<<"$E" && echo 'PASS(7b CCACHE_DIR)' \
+      || echo 'FAIL(7b CCACHE_DIR — points at /root: wrapper on PATH, cache dead, compiles still exit 0)'
+  fi
 
   # 7c — the image WORKS at uid 1000. Runs on today's pre-T3 image, and it is the fact the whole
   #      plan rests on, so it is never skippable while an image exists.
@@ -295,7 +307,30 @@ else
     -c 'id -u; ulimit -l; test -r /opt/venv/lib/python3.12/site-packages/vllm/__init__.py && echo readable' \
     | tr '\n' ' ' | sed 's/^/PASS(7c) /; $!s/$//; s/$/\n/'   # want: 1000 unlimited readable
 fi
+
+# 7d — USER is the LAST side-effecting instruction. Host-side text check: needs no image, so it
+#      cannot SKIP, which is the point — 7b goes SKIP exactly when the image is stale, and a RUN
+#      appended after USER is the regression that would then hide (it runs as uid 1000 and
+#      half-fails). Anchors are column-0 because continuation lines never start at column 0.
+awk '/^USER /{u=NR} /^RUN |^COPY /{r=NR} END{exit !(u && u>r)}' container/Dockerfile \
+  && echo 'PASS(7d USER last)' \
+  || echo 'FAIL(7d no USER, or a RUN/COPY follows it — it would execute as uid 1000)'
+
+# 7e — after ANY serve (step 6): nothing root-owned landed in the live tree. The product-level fact
+#      the plan exists for, and invisible to 7a-7d, which all check the flag and not the outcome.
+#      -maxdepth is MANDATORY: an unbounded find/du on this NFS tree is a ten-minute mistake
+#      (README § Caching — `du` never returned).
+C="${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}"
+if [ ! -d "$C/uid-1000" ]; then echo 'SKIP(7e: no serve has run since the per-uid split)'
+elif find "$C/uid-1000" -maxdepth 2 -user root -print -quit | grep -q .
+  then echo "FAIL(7e root-owned files under $C/uid-1000 — a root process wrote into the live tree)"
+  else echo 'PASS(7e live cache tree is root-free)'
+fi
 ```
+
+`7d` passes only once Plan 01 T3 lands; before that its `FAIL` is the correct reading, not a broken
+gate. `7e` is the assertion to re-run after a boot even when nothing relevant changed, since a
+`docker exec -u root` or a stray root container is enough to fail it.
 
 `7c` must read `1000 unlimited readable`: the uid, because vLLM imports its own package tree;
 `unlimited`, because the Qwen3.8 PLE table is a ~95 GiB `pin_memory` allocation and `--ulimit

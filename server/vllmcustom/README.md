@@ -500,8 +500,13 @@ Preflight flags it precisely because the build won't.
   `/home/ubuntu/.cache` in the container, so model loads and JIT compiles persist
   between `./qwen/run`s. The container serves as `--user 1000:1000` and the launcher
   creates that directory itself before mounting it, because dockerd would otherwise
-  auto-create a missing bind source *as root*. The `uid-1000` leaf is why two users can
-  share `$CACHE_DIR`: each gets its own writable tree instead of fighting over one.
+  auto-create a missing bind source *as root*. As of Plan 01 T3 the image declares the
+  identity too (`USER 1000:1000` plus `ENV HOME`/`CCACHE_DIR` in the runtime stage), so a
+  hand-run `docker run` with none of the launcher's flags gets the same uid and the same
+  cache paths instead of root — *live as soon as the image is rebuilt; until then the gate
+  reports `SKIP(7b)` and the running image is still root by default*. The `uid-1000` leaf
+  is why two users can share `$CACHE_DIR`: each gets its own writable tree instead of
+  fighting over one.
   The launchers refuse to run under `sudo` for the same reason — a root-run launcher
   creates the directory root-owned, and the uid-1000 serve then dies `EACCES` on its
   first cache write.
