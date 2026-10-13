@@ -43,11 +43,11 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/_model-lib.sh"
 
 # ------------------------------------------------------------ run identity
 
-# The container's uid/gid, and the name of the cache directory it may write. One
-# constant feeds both so the flag and the path can never drift apart. Never derive
-# either from `id -u`: the launcher can be started under sudo, and a root-run
-# launcher would then hand a root-owned `uid-0` directory to a container pinned to
-# 1000 — an EACCES minutes into boot naming neither cause.
+# The container's uid/gid, and the cache directory it may write. One constant feeds
+# both so the flag and the path can never drift apart. Never derive either from
+# `id -u`: the launcher can be started under sudo, and a root-run launcher would then
+# hand a root-owned cache tree to a container pinned to 1000 — an EACCES minutes into
+# boot naming neither cause.
 RUN_UID=${RUN_UID:-1000}
 
 # Only the docker CLI needs privilege on this host: the socket is root-owned and the
@@ -131,13 +131,15 @@ docker_core_args() {
   : "${NAME:?}" "${PORT:?}" "${MODEL_FOLDER:?}" "${CACHE_DIR:?}"
 
   # Created BEFORE the mount, because dockerd auto-creates a missing bind source as
-  # root — which is how the pre-split tree under $CACHE_DIR got its 243900 root-owned
-  # entries. The directory is named after RUN_UID but owned by whoever ran the script;
-  # those are different facts and the container writes as RUN_UID, so assert ownership
-  # rather than trusting the name. Owner only, never group: write access comes from the
-  # uid, and demanding gid == RUN_UID would reject a perfectly usable directory on any
-  # host where uid 1000's primary group is not 1000 — with advice you cannot follow.
-  CACHE_HOST_DIR="$CACHE_DIR/uid-$RUN_UID"
+  # root. Plan 01 T1 put a `uid-$RUN_UID` leaf here and T11 took it back out: mounting
+  # the cache root whole is what lets a serve read the cache already on disk instead of
+  # orphaning 35 GiB of warm Inductor and HF state beside a cold empty directory. The
+  # path is the operator's own $CACHE_DIR now, but it is still owned by whoever created
+  # it, and the container writes as RUN_UID — so assert ownership, never trust the name.
+  # Owner only, never group: write access comes from the uid, and demanding gid == RUN_UID
+  # would reject a perfectly usable directory on any host where uid 1000's primary group
+  # is not 1000 — with advice you cannot follow.
+  CACHE_HOST_DIR="$CACHE_DIR"
   CACHE_WAS_NEW=0
   [[ -w $CACHE_DIR ]] || {
     echo "## $CACHE_DIR is not writable by uid $EUID — it does not exist, or is not yours." >&2
@@ -160,6 +162,32 @@ docker_core_args() {
   if [[ $CACHE_UID != "$RUN_UID" ]]; then
     echo "## $CACHE_HOST_DIR is owned by uid $CACHE_UID; the container writes as uid $RUN_UID." >&2
     echo "##   fix: chown $RUN_UID $CACHE_HOST_DIR, or point CACHE_DIR= at a directory you own." >&2
+    return 1
+  fi
+  # Mounting the root means the serve writes into whatever is ALREADY in $CACHE_DIR, and
+  # the check above cannot see that: it stats the leaf, and the leaf is yours. The pre-split
+  # tree is root-owned mode 0755 — readable, never writable — so the boot prints the normal
+  # warm-start line and then dies EACCES minutes later on its first write into huggingface/
+  # or the FlashInfer JIT dir. Hence six stats on the directories a serve actually opens,
+  # not a 244k walk on the launcher's hot path, and hence a refusal rather than a warning:
+  # a warning scrolls away above the 20-60 min silence that follows, and the damage it
+  # prevents is PARTIAL — writes into new paths succeed while writes into the root-owned
+  # ones fail, leaving a half-warm tree worse than the cold one. CACHE_PROBE_DIRS= disables
+  # this; the only launcher that sets it is run-legacy, which serves as root by design.
+  local -a _probe _ro=()
+  local _d
+  read -r -a _probe <<<"${CACHE_PROBE_DIRS-huggingface flashinfer vllm torch ccache uv}"
+  for _d in "${_probe[@]}"; do
+    if [[ -e $CACHE_HOST_DIR/$_d && ! -w $CACHE_HOST_DIR/$_d ]]; then _ro+=("$_d"); fi
+  done
+  if (( ${#_ro[@]} )); then
+    echo "## REFUSED: $CACHE_HOST_DIR holds directories the serve cannot write: ${_ro[*]}" >&2
+    echo "##   That is the pre-split tree, still root-owned from the containers that ran before the uid pin." >&2
+    echo "##   Warm it once instead of re-earning it — nothing moves and nothing re-downloads:" >&2
+    echo "##     sudo chown -R $RUN_UID $CACHE_HOST_DIR" >&2
+    echo "##   This tree measured 205953 files / 35.05 GiB on 2026-10-13: minutes of NFS metadata, not bytes." >&2
+    echo "##   Let it finish before retrying. Done when this prints 0:" >&2
+    echo "##     find $CACHE_DIR -user root | wc -l" >&2
     return 1
   fi
 
@@ -302,7 +330,7 @@ vllm_launch() {
     echo "## cache: $CACHE_HOST_DIR  (NEW — cold start as uid $RUN_UID)"
     echo "##        est. 20-60 min to 'startup complete' (unmeasured): HF metadata + FlashInfer JIT."
     echo "##        kernel names scrolling past means it is alive; Ctrl-C restarts the JIT from zero."
-    echo "##        the pre-split tree is still under $CACHE_DIR, untouched — see README § Caching."
+    echo "##        first serve on this cache root — README § Caching explains what lands in it."
   else
     echo "## cache: $CACHE_HOST_DIR"
   fi

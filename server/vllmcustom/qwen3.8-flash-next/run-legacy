@@ -112,13 +112,19 @@ KV_FP8=${KV_FP8:-}                               # 1 = --kv-cache-dtype fp8 (car
 VISION=${VISION:-1}                              # 0 = --language-model-only
 PATCH_CONNECTOR=${PATCH_CONNECTOR:-1}            # mount connector_mrv2.py over the image's (see below)
 PLE_READY_TIMEOUT=${PLE_READY_TIMEOUT:-1800}     # VLLM_PLE_OFFLOAD_READY_TIMEOUT; card: 1800 RAM, 3600 NVMe
-# Its own cache root, deliberately NOT the shared one. docker_core_args mounts
-# $CACHE_DIR/uid-1000 into the container and this launcher runs that container as root
-# (see --user 0:0 below), so every file a legacy boot writes lands root-owned inside the
-# tree every other launcher mounts as uid 1000. The CACHE_UID ownership guard cannot catch
-# it — it checks the leaf directory, which stays 1000-owned — so the next ./qwen/run would
-# pass the guard and die EACCES minutes into a boot, with nothing pointing here.
+# Its own cache root, deliberately NOT the shared one. docker_core_args mounts $CACHE_DIR
+# whole and this launcher then runs that container as root (see --user 0:0 below), so every
+# file a legacy boot writes lands root-owned. The CACHE_UID ownership guard cannot catch
+# that — it checks the leaf, and the leaf stays whatever owned it first. Under Plan 01's old
+# `uid-1000` leaf the damage landed inside a tree the other launchers also mounted: they
+# passed the guard and died EACCES minutes into a boot with nothing pointing here. Since T11
+# mounts the root, that contamination would land in the live cache itself, so this separate
+# root is now the only thing keeping the two trees apart — the isolation is load-bearing.
 CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache-legacy}
+# The writability probe assumes the serve writes as RUN_UID. Here it writes as root, which
+# can write anything, so the probe would refuse this launcher on its own second boot because
+# its own first boot made those directories root-owned. Empty list = probe off.
+CACHE_PROBE_DIRS=
 
 # require_image's hint ("run ./container/build") is wrong for this launcher: the
 # image is pulled, not built.

@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 80% complete (8/10 tasks; T3b and T10 start `blocked`)
+- Status: 75% complete (9/12 tasks; T3b and T10 blocked, T9 built then dropped by owner decision — row 10)
 - Start date: 2026-10-13 (T1)
 - Plan: `context/plans/01_uid_parity.md`
 - Evidence: `context/plans/01_uid_parity.md` § Context (the 2026-10-13 probe transcripts), each
@@ -65,8 +65,9 @@
 | 7 | T6: `container/archs` honours `DOCKER` | `container/archs`, **`context/plans/RULES.md`**, `README.md` | **done** | Gate step 5 runs **bare as uid 1000** now. Kept the third copy of the guard (`_run-lib.sh` is unsourceable); added the probe on hoodie's wedge argument, against neckbeard's read |
 | 8 | T7: Gate step 7, named skip pre-rebuild | `context/plans/RULES.md` | **done** | Re-opened from `invalid`: 7a–7d did ship in T1, but **7e shipped contradicting this plan's own T7 text**, which says a `-maxdepth` "misses `hub/<repo>/<rev>`" — so the step had scope after all, and T1's Verify line was satisfied by the three sub-steps that did land. Rewriting it found a **false green in the shipped form**: `find … \| grep -q .` under `pipefail` returns 141 on a *dirty* tree (grep closes the pipe, find dies in `exit()` during its own flush), the `elif` goes false, and the step prints `PASS` — measured side by side, old says `PASS`/exit 0 and new says `FAIL`/exit 1 on one synthetic root-owned file. Now depth-unbounded behind `timeout -k 10 120`, with PASS reachable only by exit 0 **and** no match **and** empty stderr, timeout/incomplete both FAIL, and the FAIL remedy bounded so it can never print a `chown -R` over the cache root. 7a–7d untouched, so the named-skip scope stands |
 | 9 | T8: Docs + correct stale `sudo` notes + harvest | `AGENTS.md`, `README.md`, `context/*` | **done** | Four stale claims corrected in place, and the sweep found a fifth the plan did not list: `distilled.md`'s "reaches docker only through sudo" entry told agents to `sudo -n`-prefix **scripts**, which is now the thing T1/T5 make worse — so `pitfalls.md`'s matching "How to avoid" was fixed in the same commit or the repo would have shipped both instructions. `AGENTS.md` reworded imperative-first and scoped (the `DOCKER` array covers build/archs/launchers, **not** `push`/`bench/`/`scripts/*` — verified by grep, which returned 0 `DOCKER` references in those files, so `DOCKER=` is a no-op there). **Two plan instructions did not survive contact with the tree**: the `__pycache__` gitignore is already covered by `.gitignore:2` (`git check-ignore -v` proves the match, so no edit), and `PIP_USER_BASE` is not a pip variable at all — `pip install --help` offers `--user`/`--root`/`--root-user-action` and no `--user-base`, and the plan's own source row says "Consider", so it is dropped rather than documented. `run-legacy`'s `--user 0:0` recorded as the Goal's one designed exception |
-| 10 | T9: `container/cache-migrate` (opt-in) | `container/cache-migrate` | pending | No sudo needed |
+| 10 | T9: `container/cache-migrate` (opt-in) | `container/cache-migrate` | **skipped** — built, tested, then dropped | Built and fully verified (dry-run writes nothing; copy leaves **0** root-owned in DST with the source untouched; re-run adds 0; refuses uid 0 and `DST==SRC`; non-TTY without `--yes` exits 1), then **obsoleted the same day by the owner's inversion** (row 12) and deleted while still uncommitted. The *premise* was wrong, not the implementation: T9 warmed a per-uid leaf that should not have existed. Both reviewers had already argued for a documented `tar` block over a script; the reversal made that moot. Three plan instructions were refuted along the way (`rsync` is not installed, the declared directory list is wrong *depth*, "print sizes first" cannot mean `du` here). Two findings survive the deletion: the tree's real cost is **205,953 files / 35.05 GiB**, of which one Inductor cache is 33.57 GiB — counted by `find` in ~12 s where `du` never returned — and the absence of `rsync` (Deviations) |
 | 11 | T10: Runtime confirmation (gate step 6) | — | blocked: awaiting owner rebuild | |
+| 12 | T11: Mount `$CACHE_DIR` whole — drop the `uid-$RUN_UID` suffix (off-plan, owner decision) | `common/_run-lib.sh`, `context/plans/RULES.md`, `README.md`, `context/pitfalls.md`, `muse/run`, `qwen3.8-flash-next/run-legacy` | **done** | Owner challenge: *"why do they read uid-1000? Can't we just use the base path?"* — correct, and the suffix had orphaned 35 GiB for eight tasks. **neckbeard refuted a premise I handed it**: `run-legacy` never sets `RUN_UID=0` (root-ness is a `--user 0:0` append *after* `docker_core_args`), so there was no ownership-check contradiction to solve. Added a hard **writability refusal** on hoodie's Q1: with the root mounted, the leaf ownership check goes blind — the leaf is yours, the subtree is not — so a pre-chown boot prints the ordinary warm line and dies `EACCES` minutes in, the exact failure this plan exists to prevent. Six `[[ -w ]]` stats, not a 244k walk; `CACHE_PROBE_DIRS=` disables it and only `run-legacy` sets it, because it serves as root. **The inversion silently broke gate step 7a**, which stats `/tmp/gate7/cache/uid-1000` — neither reviewer caught it, the fence did; it now stats the root and asserts "left nothing root-owned" instead of "left no `uid-0` dir". 7e repointed at `$C` with a scale-aware FAIL branch, and its "twice in a row means you named the abandoned tree" hint deleted — it accused the correct configuration. Measured: full-tree sweep **11 s** (so the 120 s ceiling stands, ~10x slack), `find $CACHE_DIR \! -user 1000` → **0**, dead leaf removed by `rmdir` (which proved it empty) |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
 the last three always carry a reason in the row's Notes cell.
@@ -343,13 +344,36 @@ regression (see T10's "within noise").
   a live socket probe, i.e. sourcing it bolts on the exact probe this script was argued about. If a
   fourth caller appears the shape is a parse-only `common/_docker-parse.sh`, not `_run-lib.sh`.
 
+- **The per-uid suffix was removed eight tasks after it was added (T11).** T1 introduced
+  `$CACHE_DIR/uid-$RUN_UID` for a real reason — dockerd auto-creates a missing bind source as root —
+  and the leaf did that job. But a fresh leaf under a *populated* parent deterministically orphans
+  everything already there, and that consequence was never written down anywhere a reviewer would
+  read: every T1 Verify line ran against `/tmp/p1cache`, so the fixture proved the mechanics and hid
+  the collision with 35 GiB of real cache. The tracker's own Open Question asked whether production
+  `$CACHE_DIR` would let the launcher create `uid-1000`; it got closed by observing that it *could*,
+  which is not the question that mattered. The practice worth keeping: **any Verify line that moves a
+  user-visible path runs once against the real path, read-only, with the fate of the bytes already on
+  disk named and sized.** The stub-docker dry-run in gate 7a already exists and takes 2 s. Recorded so
+  nobody reintroduces the leaf for tidiness.
+- **`container/build` cannot run at its own defaults on this host: `rsync` is absent.** `:362` stages
+  each source tree with `rsync -a --delete --exclude=.git` under `set -euo pipefail`; the binary is
+  missing from `$PATH`, `/usr/bin`, `/usr/local/bin` and `/bin`, so the build aborts **exit 127**
+  *after* `mkdir -p` created the empty destination leaf — an empty directory that looks like progress.
+  `PREFLIGHT_ONLY=1` returns at `:344`, above the staging block, so every gate run in this plan stepped
+  over it, and gate step 5 does not cover staging either. `CTX_DIR= ./container/build` skips the block
+  and is the working path today (same cache keys, ~2 min more NFS transfer). Consequence: **`repin.md`
+  step "VLLM_REF=main ./container/build && ./container/push" is blocked as written.** Owner decision
+  2026-10-13: report only, change nothing in this plan. Written to `pitfalls.md`; fix in Plan 02, and
+  it must fail loudly rather than fall back silently — `--delete` is load-bearing, since a stale copy
+  must not survive a `checkout --force`.
+
 ## Follow-ups
 
 | Follow-up | Why | Lands in |
 |-----------|-----|----------|
 | `container/push` honours `DOCKER` | Out of scope (needs `docker login`, writes no files) but still bare `docker` | Plan 02 or a drive-by |
 | `bench/_bench-lib.sh` + `scripts/*` (`docker logs`/`ps`/`rm`) | A failed boot stops printing its crash log when run unprivileged | Plan 02 |
-| Reclaim the abandoned root-owned cache (`du -sh` + one command) | Owner chose to leave it; the disk is still theirs to reclaim | Plan 02, owner-decided |
+| `container/build`'s `rsync` dependency | Blocks `repin.md`'s build+push step at defaults; `CTX_DIR=` is the workaround, and any fallback must reproduce `--delete` | Plan 02 |
 | Persistent `pip install` in the running container | `docker exec` now lands as uid 1000 with an unmounted `~`; today's root flow let it persist in `/opt/venv`. Consider `-e PIP_USER_BASE=/home/ubuntu/.cache/pip-user` | Plan 02 |
 | `container/patches/boot-timing/__pycache__/` in `.gitignore` | Container-written bytecode inside the repo tree; regenerates as uid 1000 after T1 | T8, if not already covered |
 | `repin.md:197-199` predicts MTP 3 / util 0.96; the launcher emits MTP 4 / 0.95 | Stale expectation found during the repin run, deliberately left alone | Plan 02 |

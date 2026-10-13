@@ -281,10 +281,11 @@ OUT=$(env $R ./qwen/run Fake 2>&1)          # DOCKER=docker: `sudo` resolves ahe
 grep -qE -- '--user 1000:1000'         <<<"$OUT" && echo 'PASS(7a --user)' || echo 'FAIL(7a --user)'
 grep -qE -- 'HOME=/home/ubuntu'        <<<"$OUT" && echo 'PASS(7a HOME)'   || echo 'FAIL(7a HOME)'
 grep -qE -- ':/home/ubuntu/\.cache:rw' <<<"$OUT" && echo 'PASS(7a mount)'  || echo 'FAIL(7a mount)'
-[ "$(stat -c '%u' /tmp/gate7/cache/uid-1000)" = 1000 ] && echo 'PASS(7a owner)' || echo 'FAIL(7a owner)'
+[ "$(stat -c '%u' /tmp/gate7/cache)" = 1000 ] && echo 'PASS(7a owner)' || echo 'FAIL(7a owner)'
 SUDO_OUT=$(sudo -n env $R ./qwen/run Fake 2>&1)   # assert the TEXT, not the exit code: a sudo that
 grep -q 'run it as yourself' <<<"$SUDO_OUT" \
-  && { [ -e /tmp/gate7/cache/uid-0 ] && echo 'FAIL(7a left a uid-0 dir)' || echo 'PASS(7a refuses sudo)'; } \
+  && { [ -z "$(find /tmp/gate7/cache -user root)" ] \
+       && echo 'PASS(7a refuses sudo)' || echo 'FAIL(7a refused but left root-owned files)'; } \
   || echo 'FAIL(7a no refusal text (did `sudo -n true` work at all?))'
 rm -rf /tmp/gate7
 
@@ -330,47 +331,64 @@ awk '/^USER /{u=NR} /^RUN |^COPY /{r=NR} END{exit !(u && u>r)}' container/Docker
 #      DEPTH-UNBOUNDED ON PURPOSE — a `-maxdepth` sat here when this step was written (T3) and was
 #      taken out at T7. Both halves of that story matter, so read them before putting one back.
 #      WHY IT WAS CAPPED: an unbounded `du` on this mount once ran ten minutes without returning
-#      (README § Caching). But that walk was the ABANDONED flat tree sitting directly under
-#      $CACHE_DIR — 243,900 root-owned entries — not `uid-1000`. The census excludes it by PATH
-#      (`-path "$CACHE_DIR/uid-*" -prune`), never by depth, and says so out loud: the same search
-#      capped at six levels reads 19x low.
+#      (README § Caching). That was `du` resolving sizes across 35 GiB, and it walked the SAME tree
+#      this step now walks: since Plan 01 T11 the live mount is $CACHE_DIR whole, with no per-uid
+#      leaf to retreat to. So this sweep excludes nothing — no `-path … -prune`, no `-maxdepth` —
+#      and is bounded by `timeout` alone. The same search capped at six levels reads 19x low.
 #      WHY A CAP IS WRONG AND NOT MERELY SLOW: a serve writes huggingface/hub/<repo>/<rev>/… which
 #      is depth 6, and torchinductor / flashinfer JIT go deeper. A `-maxdepth 2` therefore prints
 #      PASS ON A TREE FULL OF ROOT-OWNED FILES — the one failure this plan exists to catch. So the
 #      cost is bounded by `timeout -k`, never by coverage. bash-only like the rest of this fence,
 #      and the only step that `exit 1`s — deliberately, and it sits last in the fence for that.
 C="${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}"
-if [ ! -d "$C/uid-1000" ]; then
-  echo "SKIP(7e: $C/uid-1000 absent — nothing has written to the per-uid tree yet)"
+if [ ! -d "$C" ]; then
+  echo "SKIP(7e: $C absent — no cache tree yet; run a launcher once)"
 else
   _t0=$SECONDS _7e=0
   _o=$(mktemp) _a=$(mktemp) _e=$(mktemp)   # root-owned matches / every entry swept / find's errors
   # `-fprint` records every visited entry in the SAME walk, so the PASS line can state how much
   # ground it covered — a 2-entry tree and a 200k-entry tree must not print the same green.
   # No `-quit`: one match says nothing about the rest, and the count is the point of the step.
-  timeout -k 10 120 find "$C/uid-1000" -fprint "$_a" -user root -print >"$_o" 2>"$_e" || _7e=$?
+  # Measured 2026-10-13 on the full 244,892-entry live tree: 11 s. The 120 s ceiling is ~10x slack,
+  # and it is also what catches a wedged mount — do not lower it because 11 s looked generous.
+  timeout -k 10 120 find "$C" -fprint "$_a" -user root -print >"$_o" 2>"$_e" || _7e=$?
   _f=$(head -n1 "$_o"); _m=$(wc -l <"$_o"); _n=$(wc -l <"$_a"); _w=$(wc -l <"$_e")
   _eh=$(sed -n '1,3p' "$_e"); rm -f "$_o" "$_a" "$_e"
   # Order is load-bearing: a match is evidence already in hand, so it outranks a timeout after it.
   if [[ -n $_f ]]; then
-    _d=$(dirname "$_f"); [[ $_d == "$C/uid-1000"/* ]] || _d=$_f   # never widen past the leaf
-    echo "FAIL(7e: $_m root-owned under $C/uid-1000 — first: $_f)"
-    echo "     one-time fix:   sudo chown -R $(id -u):$(id -g) -- $(printf '%q' "$_d")"
-    echo "     then re-count:  find $C/uid-1000 -user root | wc -l"
+    if (( _m > 1000 )); then
+      # Scale, not a stray. The single-match remedy below would chown ONE subdirectory, leave the
+      # rest, and print a second FAIL that reads like a gate stuck in a loop. This is the pre-split
+      # tree, and since T11 it is the live mount — so name the size of the job and give one command.
+      echo "FAIL(7e: $_m root-owned entries under $C — the pre-split tree, not a stray file.)"
+      echo "     not a broken gate: T11 mounts $C whole, so the live cache IS this directory."
+      echo "     one-time fix (this tree: 244,892 entries / 205,953 files / 35.05 GiB, 2026-10-13 —"
+      echo "     minutes of NFS metadata, not bytes. Run it to completion: a half-done chown just"
+      echo "     reads as a smaller FAIL, and the launcher refuses the same tree until it is done):"
+      echo "         sudo chown -R $(id -u):$(id -g) -- $C"
+      echo "     done when this prints 0:  find $C -user root | wc -l"
+      echo "     cache-legacy is a SIBLING of $C and stays root-owned on purpose — run-legacy serves"
+      echo "     as root and writes that one itself. The command above cannot reach it, and must not."
+    else
+      _d=$(dirname "$_f"); [[ $_d == "$C"/* ]] || _d=$_f   # never widen past the cache root
+      echo "FAIL(7e: $_m root-owned under $C — first: $_f)"
+      echo "     one-time fix:   sudo chown -R $(id -u):$(id -g) -- $(printf '%q' "$_d")"
+      echo "     then re-count:  find $C -user root | wc -l"
+    fi
     exit 1
   elif (( _7e == 124 )); then
-    echo "FAIL(7e: sweep of $C/uid-1000 TIMED OUT at 120 s — INCOMPLETE, not a pass."
-    echo "     Twice in a row means CACHE_DIR names the abandoned flat tree, or the mount is wedged.)"
+    echo "FAIL(7e: sweep of $C TIMED OUT at 120 s — INCOMPLETE, not a pass."
+    echo "     The whole live tree sweeps in ~11 s, so this is a wedged mount, not a big tree.)"
     exit 1
   elif (( _7e != 0 )) || (( _w != 0 )); then
     # find could not read part of the tree. A root-written directory is routinely mode 0700, so the
     # very failure this step hunts makes itself unreadable — silence here is not innocence.
-    echo "FAIL(7e: sweep of $C/uid-1000 incomplete (exit $_7e, $_w stderr lines) — not a pass:"
+    echo "FAIL(7e: sweep of $C incomplete (exit $_7e, $_w stderr lines) — not a pass:"
     if [ -n "$_eh" ]; then printf '%s\n' "$_eh"; fi
-    echo "     re-read the unreadable parts as:  sudo -n find $C/uid-1000 -user root -print"
+    echo "     re-read the unreadable parts as:  sudo -n find $C -user root -print"
     exit 1
   else
-    echo "PASS(7e: $C/uid-1000 root-free — $_n entries swept, no -maxdepth, $(( SECONDS - _t0 )) s)"
+    echo "PASS(7e: $C root-free — $_n entries swept, no -maxdepth, $(( SECONDS - _t0 )) s)"
   fi
 fi
 ```
@@ -379,10 +397,12 @@ fi
 gate. `7e` is the assertion to re-run after a boot even when nothing relevant changed, since a
 `docker exec -u root` or a stray root container is enough to fail it. It is also the only step in the
 fence that `exit 1`s, and the only one whose `FAIL` can mean "could not finish" rather than "found
-something" — read the wording, not just the token. A `TIMED OUT` or `incomplete` FAIL twice running
-means `CACHE_DIR` names the abandoned flat tree rather than the live one; fix the variable, not the
-timeout. Its `SKIP` is not a pass either, and unlike `7b` it never expires: it says the tree does not
-exist yet.
+something" — read the wording, not just the token. Since Plan 01 T11 the whole of `CACHE_DIR` *is*
+the live tree, so a `TIMED OUT` means a wedged mount and not a misconfigured variable — the full-tree
+sweep measures ~11 s against a 120 s ceiling, so it never times out for being large. A match count in
+the hundreds of thousands is the pre-split tree, not a regression: read the FAIL body before acting
+on it, because its remedy is one `chown` of the whole root and not the narrow one. Its `SKIP` is not
+a pass either, and unlike `7b` it never expires: it says the tree does not exist yet.
 
 `7c` must read `1000 unlimited readable`: the uid, because vLLM imports its own package tree;
 `unlimited`, because the Qwen3.8 PLE table is a ~95 GiB `pin_memory` allocation and `--ulimit

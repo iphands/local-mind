@@ -345,7 +345,7 @@ require_image
 if [[ "$SELFTEST" == "1" ]]; then
   # Same identity as the serve. A selftest running as root passes on a configuration the
   # server never runs in, which is the one thing a selftest must not do.
-  docker_core_args   # called only for $CACHE_HOST_DIR, which it mkdirs 0750/uid-1000 first —
+  docker_core_args   # called only for $CACHE_HOST_DIR, which it mkdirs 0750 first —
                      # that host-side create is what stops dockerd auto-creating the source root-owned
   # The cache mount is load-bearing, not cosmetic: this imports huggingface_hub, which
   # makedirs() under $HOME at import time, and $HOME/.cache is the one path uid 1000 can

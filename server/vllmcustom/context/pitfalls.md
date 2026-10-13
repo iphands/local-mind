@@ -327,11 +327,15 @@ container uid, keep launching with sudo) produces a *worse* bug than no fix at a
 
 ## How to avoid
 Never sudo a launcher. The launchers now refuse a sudo'd start and `container/build` refuses uid 0
-(`ALLOW_ROOT=1` is its only escape, and it silences the *check*, not the damage). A tree already poisoned
-is named by `find <leaf> -user root` and fixed once by `sudo chown -R 1000:1000 -- <leaf>` — bounded to
-the offending directory, never to the cache root. Gate step 7e prints exactly that. One deliberate
-exception: `run-legacy` appends `--user 0:0` and therefore uses its own `cache-legacy` root, so a root
-serve cannot leave root-owned files inside the tree the next uid-1000 serve depends on.
+(`ALLOW_ROOT=1` is its only escape, and it silences the *check*, not the damage). A poisoned tree is
+named by `find "$CACHE_DIR" -user root` and fixed once by `sudo chown -R 1000:1000 -- "$CACHE_DIR"`.
+Since Plan 01 T11 that path **is** the cache root, because the root is what gets mounted; the advice
+here used to insist the fix stay "bounded to the offending directory, never to the cache root", which
+belonged to the per-leaf mount and is withdrawn with it. Gate step 7e prints the command and its wording
+scales — a handful of strays gets the narrow `dirname` remedy, hundreds of thousands gets one whole-root
+`chown` and a note on what it will cost. One deliberate exception: `run-legacy` appends `--user 0:0` and
+therefore uses its own `cache-legacy` root, so a root serve cannot leave root-owned files inside the tree
+the other launchers depend on.
 
 ## Sources
 - vllmcustom: `common/_run-lib.sh` (root refusal, `RUN_UID`), `container/build` root guard,
@@ -359,5 +363,51 @@ in every case the forgotten fact is that the *producer's* status is the one `pip
 ## Sources
 - vllmcustom: Plan 01 T7, 2026-10-13 — old and new forms run against one synthetic `root:root` file at
   depth 6, old `PASS`/exit 0 vs new `FAIL`/exit 1; `context/plans/RULES.md` § step 7e
+
+---
+
+# `container/build` runs `rsync` unguarded and dies 127 on a host that has no rsync [OBSERVED 2026-10-13]
+
+## Problem
+`container/build` stages each source tree into `$CTX_DIR` with `rsync -a --delete --exclude=.git`
+(`container/build:362`) under `set -euo pipefail`. Where the binary is absent the build aborts with
+**exit 127** *after* `mkdir -p` created the destination leaf — so the directory exists, empty, and
+nothing was copied. `PREFLIGHT_ONLY=1` returns at `:344`, before the staging block, so the gate and every
+cheap-check path step straight over the gap: eight tasks of green gate runs never executed line 362.
+`repin.md:224` (`VLLM_REF=main ./container/build && ./container/push`) is blocked at its defaults by this.
+
+## How to avoid
+`CTX_DIR= ./container/build` skips staging entirely and passes the source trees as the contexts — same
+cache keys, ~2 min more transfer over NFS. Do not add a silent `tar`/`cp` fallback: `--delete` is
+load-bearing, because a stale copy must not survive a `checkout --force`, so any substitute has to
+reproduce it or refuse outright. Probe for the binary *before* the `mkdir`, not after. Left unfixed by
+owner decision (report only, Plan 01); fix it under Plan 02.
+
+## Sources
+- vllmcustom: `container/build:344`, `:362` — `command -v rsync` empty in `$PATH` and under `bash -lc`,
+  no shim in `/usr/bin`/`/usr/local/bin`/`/bin`; `[OBSERVED 2026-10-13]`
+
+---
+
+# `find -fprint FILE` logs every entry VISITED, not every match — counting it as matches lies [OBSERVED 2026-10-13]
+
+## Problem
+`find "$C" -fprint "$all" -user root -print` writes **every visited path** to `$all` and only the matches
+to stdout, and `wc -l <"$all"` is therefore the size of the tree rather than the number of root-owned
+entries. Both numbers are formatted identically, so the error is invisible: a sweep of a *fully chowned*
+244,892-entry tree "reports 244,892 root-owned entries". The wrong figure propagates — it reached a
+launcher's user-facing refusal message before anything noticed.
+
+## How to avoid
+Treat the `-fprint` file as a **coverage** counter, which is all gate 7e uses it for ("how much ground this
+PASS covered"), and take counts only from the matched stream. When a message must state a count, capture
+the match stream to its own file and count that. The tell is a number that contradicts a guard's own exit
+status: here the probe returned `rc=0` while the message claimed a quarter-million root-owned files, and
+the *number* was the thing to re-check, not the guard.
+
+## Sources
+- vllmcustom: Plan 01 T11, 2026-10-13 — the same command reported 244,892 while
+  `find "$CACHE_DIR" \! -user 1000 | wc -l` returned 0; `common/_run-lib.sh` refusal text corrected in
+  the same commit, `context/plans/RULES.md` § step 7e carries the coverage-only wording
 
 ---

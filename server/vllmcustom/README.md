@@ -501,7 +501,7 @@ Preflight flags it precisely because the build won't.
   installs and exports the second (~3.3 GB). The single install it replaced made every
   bump rewrite a 12.4 GB layer. `uv pip check` guards the two-step resolve.
 - **Runtime caches** (HF downloads, `torch.compile`, FlashInfer JIT) bind-mount
-  from `$CACHE_DIR/uid-1000` (default `/mnt/noir/scratch/ai/vllm/cache/uid-1000`) to
+  from `$CACHE_DIR` (default `/mnt/noir/scratch/ai/vllm/cache`) to
   `/home/ubuntu/.cache` in the container, so model loads and JIT compiles persist
   between `./qwen/run`s. The container serves as `--user 1000:1000` and the launcher
   creates that directory itself before mounting it, because dockerd would otherwise
@@ -509,11 +509,15 @@ Preflight flags it precisely because the build won't.
   identity too (`USER 1000:1000` plus `ENV HOME`/`CCACHE_DIR` in the runtime stage), so a
   hand-run `docker run` with none of the launcher's flags gets the same uid and the same
   cache paths instead of root — *live as soon as the image is rebuilt; until then the gate
-  reports `SKIP(7b)` and the running image is still root by default*. The `uid-1000` leaf
-  is why two users can share `$CACHE_DIR`: each gets its own writable tree instead of
-  fighting over one.
+  reports `SKIP(7b)` and the running image is still root by default*.
+  Plan 01 T11 mounts the cache root **whole**. For eight tasks it mounted `$CACHE_DIR/uid-1000`
+  instead (T1), which orphaned the 35 GiB already on disk behind a cold empty leaf. The suffix
+  only pays for itself where several uids share one `$CACHE_DIR`; this is a single-user box, so
+  it cost a quarter-million warm files and bought nothing. **That sharing property is gone with
+  it**: two users pointing `$CACHE_DIR` at the same directory now contend for one tree and the
+  first to boot owns it. Give each user their own `CACHE_DIR=` if that ever becomes real here.
   The launchers refuse to run under `sudo` for the same reason — a root-run launcher
-  creates the directory root-owned, and the uid-1000 serve then dies `EACCES` on its
+  creates the directory root-owned, and the serve, pinned to uid 1000, then dies `EACCES` on its
   first cache write.
   Every docker call goes through `${DOCKER[@]}` (`sudo -n docker` by default; `DOCKER=docker`
   on a host where you are in the `docker` group) — `container/build`, the launchers and, since
@@ -536,34 +540,40 @@ Preflight flags it precisely because the build won't.
   a command a human pastes), which is why the build refuses before it writes rather than
   after: a fix you cannot run is not a fix.
   `run-legacy` is the one launcher that serves as **root**, so it defaults to its own cache
-  root, `/mnt/noir/scratch/ai/vllm/cache-legacy`: a root container writing into the shared
-  `uid-1000` tree would leave root-owned files that the ownership guard cannot see (it checks
-  the leaf, which stays 1000-owned) and that break the *next* `./qwen/run` minutes into its boot.
+  root, `/mnt/noir/scratch/ai/vllm/cache-legacy`: a root container writing into the shared tree
+  would leave root-owned files that the ownership guard cannot see (it checks the leaf, which
+  stays 1000-owned) and that break the *next* `./qwen/run` minutes into its boot. Since T11 mounts
+  `$CACHE_DIR` whole, that contamination would land in the live cache itself — so the separate root
+  is now the only thing keeping the two trees apart, which makes it load-bearing rather than tidy.
   It is also the only launcher whose uid is not overridable from the environment — it is a
   `--user 0:0` append, kept so the A/B against the model card stays a comparison of images
   rather than of uids.
-- **The flat tree above it is abandoned, not deleted.** Everything the launchers mounted
-  before the per-uid split lives directly under `$CACHE_DIR` (`ccache`, `flashinfer`,
-  `huggingface`, `torch`, `uv`, `vllm`), written by root because the containers ran as
-  root then. Census taken 2026-10-13, root-owned entries only, the live per-uid tree
-  pruned out:
+- **The pre-split tree *is* the live tree now.** The six directories directly under `$CACHE_DIR`
+  (`ccache`, `flashinfer`, `huggingface`, `torch`, `uv`, `vllm`) were written by root, because the
+  containers ran as root before Plan 01. T1's `uid-1000` leaf orphaned them behind a cold empty
+  directory; T11 mounted them again and one `sudo chown -R iphands:iphands` took them back. They
+  are the warm cache, and **deleting them costs every model family a cold boot** — HF metadata
+  re-downloads and FlashInfer re-JITs, 20-60 min per family. Census re-taken 2026-10-13 after the
+  chown:
 
   ```bash
-  find "$CACHE_DIR" -path "$CACHE_DIR/uid-*" -prune -o \( -user root -print \) | wc -l
-  #   243900 entries, of which 205142 regular files, totalling 33.0 GiB:
-  find "$CACHE_DIR" -path "$CACHE_DIR/uid-*" -prune -o \( -user root -type f -printf '%s\n' \) \
-    | awk '{n++; s+=$1} END {printf "%d files, %.1f GiB\n", n, s/1073741824}'
+  find "$CACHE_DIR" \! -user 1000 | wc -l          # 0 — every entry is uid 1000
+  find "$CACHE_DIR" -type f -printf '%s\n' | awk '{n++; s+=$1} END {printf "%d files, %.2f GiB\n", n, s/1073741824}'
+  #   205,953 files / 35.05 GiB across 244,892 entries, of which `vllm/torch_compile_cache` is
+  #   242,825 files / 33.57 GiB — nearly the whole thing is one Inductor cache.
   ```
 
-  Count it **without** `-maxdepth`: the same search limited to six levels reports 13027,
-  which is 19× low. `du -sh` is worse than useless on this mount — it did not return in
-  over ten minutes, which is why the figure above comes from `find`.
-  Nothing reads that tree now. Deleting it costs one cold boot per model family — HF
-  metadata re-downloads and FlashInfer re-JITs — and nothing else, because the weights
-  come from the read-only `/models` mount and never from the cache. It is root-owned, so
-  removing it needs `sudo rm -rf`. If any of it looks worth keeping, copy it into the
-  per-uid tree first (a `./container/cache-migrate` helper for exactly this is planned as
-  of 2026-10-13 under Plan 01 T9 and does not exist yet).
+  Count it **without** `-maxdepth`: the same search capped at six levels reports 13027, which is
+  19× low. `du -sh` is worse than useless on this mount — it did not return in over ten minutes,
+  which is why every figure here comes from `find`. Gate step 7e walks this same tree, unbounded,
+  in about 11 s.
+  Two earlier versions of this paragraph are withdrawn. It used to say the tree was "abandoned…
+  removing it needs `sudo rm -rf`": after the inversion that command deletes the live cache, so the
+  sentence was a loaded foot-gun. It also pointed at `./container/cache-migrate` (T9), which copied
+  the tree into the per-uid leaf; once the leaf is gone the script would duplicate 35 GiB into a
+  directory nothing reads, and `chown` does the real job in one metadata pass with no data movement.
+  The script is deleted. Its measured cost stands as history: 205,953 files / 35.05 GiB, counted in
+  12 s by `find` where `du` never returned.
 
 To inspect/relocate the ccache on disk, export it:
 `docker buildx build ... --cache-to type=local,dest=$BUILD_DIR/ccache`.
@@ -780,7 +790,8 @@ parallelism; if it brushes the ceiling, raise it.
 - **`bench/` and `scripts/` still call bare `docker`.** `bench/_bench-lib.sh`, `bench/bench-wrapper`,
   `bench/bench-context` and the `scripts/*` that shell out (plus `container/push`) use plain `docker` for
   `logs`, `ps`, `rm`, `inspect` — and none of them reads `DOCKER`, so `DOCKER=docker` does nothing for
-  them. They write no host files, so the uid-1000 contract above does not apply; what breaks is the error
+  them. They write no host files, so the run-as-uid-1000 contract above does not apply; what breaks is
+  the error
   reporting. On an ungrouped account a failed boot prints `NOT READY` with an **empty** `crash-*.log`,
   because the denial goes to stderr and the redirect still creates the file. Until they route through
   `${DOCKER[@]}` (Plan 02), run them with `sudo -n` or a PATH stub. `container/gc-setup` is deliberately
