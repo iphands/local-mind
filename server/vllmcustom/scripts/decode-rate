@@ -1,0 +1,189 @@
+#!/usr/bin/env python3
+"""Single-stream decode rate, measured the way Pennyroyal (jpezzulli/sglang-rtxpro6000)
+documents its "C1" number, so a launcher variant can be compared with their published
+figures and with another variant of ours.
+
+    ./scripts/decode-rate baseline
+    ./scripts/decode-rate online-fp8 --runs 5
+    ./scripts/decode-rate baseline --temperature 1.0 --top-p 0.95 --top-k 20 --min-p 0
+
+What it does (their RESULTS.md methodology): ONE request at a time, ~128-token prompt,
+1,024 generated tokens (ignore_eos, so every run is the same length), tok/s counted after
+the first token (TTFT excluded). Sampling defaults to their regular set: temperature 0.8,
+top_p 0.95, top_k 40, min_p 0.05. Acceptance, and so tok/s, depends on sampling, so a
+number measured at another temperature is not comparable -- the sampling used is printed
+and stored with every result.
+
+Per run it reports the CLIENT-side rate: (completion_tokens - 1) / (total - ttft).
+Over the whole window it also reports:
+  * mean MTP acceptance length, from the delta of vllm:spec_decode_num_accepted_tokens /
+    num_drafts on /metrics (1 + accepted/drafts);
+  * with --container (default "vllm"; --container '' to skip): the server's own
+    "Avg generation throughput" log rate over the intervals where exactly one request
+    was running and no prompt was being processed -- the same signal their number comes
+    from. Needs VLLM_LOG_STATS_INTERVAL=1 (the launcher sets it) and `docker logs`.
+
+Appends one row to bench/decode-rate-results.md (git-ignored).
+"""
+import argparse
+import json
+import re
+import statistics
+import subprocess
+import sys
+import time
+import urllib.request
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT / "bench" / "lib"))
+from benchclient import stream_chat  # noqa: E402
+
+# ~125 tokens of instruction, no tool use, no need for long-context state.
+PROMPT = (
+    "You are reviewing a pull request that replaces a global lock around an in-memory cache "
+    "with a sharded design. The cache stores request-scoped objects keyed by a 64-bit id. "
+    "Explain, step by step, how you would decide the number of shards, how you would pick the "
+    "hash function, how eviction should work across shards, what invariants must still hold, "
+    "which failure modes the change could introduce under heavy contention, and how you would "
+    "test and benchmark the result before merging. Write complete sentences and use concrete "
+    "examples throughout your answer."
+)
+
+LOG_RE = re.compile(
+    r"Avg prompt throughput: ([0-9.]+) tokens/s, Avg generation throughput: ([0-9.]+) tokens/s, "
+    r"Running: (\d+) reqs")
+
+
+def prom_sum(text, name):
+    """Sum a Prometheus counter over all label sets."""
+    total, seen = 0.0, False
+    for line in text.splitlines():
+        if line.startswith(name) and (len(line) == len(name) or line[len(name)] in "{ "):
+            try:
+                total += float(line.rsplit(" ", 1)[1]); seen = True
+            except ValueError:
+                pass
+    return total if seen else None
+
+
+def spec_counters(host):
+    try:
+        with urllib.request.urlopen(f"http://{host}/metrics", timeout=10) as r:
+            text = r.read().decode()
+    except Exception:
+        return None
+    drafts = prom_sum(text, "vllm:spec_decode_num_drafts_total")
+    accepted = prom_sum(text, "vllm:spec_decode_num_accepted_tokens_total")
+    if drafts is None or accepted is None:
+        return None
+    return drafts, accepted
+
+
+def log_rates(container, since_s):
+    """Generation-throughput samples (tok/s) from intervals with one running request and
+    no prompt processing (their rule: skip the interval that crosses prefill / idle)."""
+    try:
+        out = subprocess.run(["docker", "logs", "--since", f"{int(since_s) + 2}s", container],
+                             capture_output=True, text=True, timeout=60)
+    except Exception:
+        return None
+    rates = []
+    for line in (out.stdout + out.stderr).splitlines():
+        m = LOG_RE.search(line)
+        if m and float(m.group(1)) == 0.0 and int(m.group(3)) == 1 and float(m.group(2)) > 0.0:
+            rates.append(float(m.group(2)))
+    return rates
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("label", help="variant label, e.g. baseline / online-fp8 / skinny")
+    ap.add_argument("--host", default="localhost:8700")
+    ap.add_argument("--model", default="cosmo-6000")
+    ap.add_argument("--runs", type=int, default=3)
+    ap.add_argument("--max-tokens", type=int, default=1024)
+    ap.add_argument("--temperature", type=float, default=0.8)
+    ap.add_argument("--top-p", type=float, default=0.95)
+    ap.add_argument("--top-k", type=int, default=40)
+    ap.add_argument("--min-p", type=float, default=0.05)
+    ap.add_argument("--no-think", action="store_true",
+                    help="send chat_template_kwargs enable_thinking=false (default: server's)")
+    ap.add_argument("--container", default="vllm",
+                    help="docker container whose logs give the server-side rate ('' to skip)")
+    ap.add_argument("--out", default=str(ROOT / "bench" / "decode-rate-results.md"))
+    ap.add_argument("--warmup", type=int, default=1, help="unmeasured runs first (graphs, caches)")
+    args = ap.parse_args()
+
+    extra = {"top_p": args.top_p, "top_k": args.top_k, "min_p": args.min_p}
+    if args.no_think:
+        extra["chat_template_kwargs"] = {"enable_thinking": False}
+    sampling = (f"T={args.temperature} top_p={args.top_p} top_k={args.top_k} min_p={args.min_p}"
+                + (" no-think" if args.no_think else ""))
+    msgs = [{"role": "user", "content": PROMPT}]
+
+    def one(max_tokens):
+        return stream_chat(args.host, args.model, msgs, max_tokens, temperature=args.temperature,
+                           ignore_eos=True, timeout=900, extra_body=extra)
+
+    print(f"# decode-rate {args.label} @ {args.host} ({args.model}); {sampling}; "
+          f"{args.runs} runs x {args.max_tokens} tokens\n")
+    for _ in range(args.warmup):
+        try:
+            one(min(args.max_tokens, 256))
+        except Exception as e:
+            sys.exit(f"warm-up request failed: {e}")
+
+    before = spec_counters(args.host)
+    t0 = time.monotonic()
+    rates, ttfts, ptoks = [], [], None
+    for i in range(args.runs):
+        try:
+            r = one(args.max_tokens)
+        except Exception as e:
+            print(f"  run {i + 1}: FAILED: {e}")
+            continue
+        gen = max(r["total"] - r["ttft"], 1e-6)
+        tps = (r["completion_tokens"] - 1) / gen
+        rates.append(tps); ttfts.append(r["ttft"] * 1000); ptoks = r["prompt_tokens"]
+        print(f"  run {i + 1}: {tps:7.2f} tok/s  ttft={r['ttft'] * 1000:6.0f} ms  "
+              f"({r['completion_tokens']} tok, prompt {r['prompt_tokens']})")
+    if not rates:
+        sys.exit("all runs failed")
+    elapsed = time.monotonic() - t0
+    after = spec_counters(args.host)
+
+    accept = None
+    if before and after and after[0] > before[0]:
+        accept = 1.0 + (after[1] - before[1]) / (after[0] - before[0])
+    srv = log_rates(args.container, elapsed) if args.container else None
+
+    med, mean = statistics.median(rates), statistics.fmean(rates)
+    print(f"\n  client  : median {med:.2f}  mean {mean:.2f}  min {min(rates):.2f}  max {max(rates):.2f} tok/s")
+    if accept is not None:
+        print(f"  accept  : mean acceptance length {accept:.2f}")
+    if srv:
+        print(f"  server  : log rate mean {statistics.fmean(srv):.2f}  peak {max(srv):.2f} tok/s "
+              f"over {len(srv)} one-request intervals")
+    elif args.container:
+        print("  server  : no usable log intervals (container name? VLLM_LOG_STATS_INTERVAL=1?)")
+    print("  (Pennyroyal v3.0 publishes 218.63 tok/s mean for this shape at its own sampling; "
+          "see scripts/decode-rate header)")
+
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    out = Path(args.out)
+    new = not out.exists()
+    with open(out, "a") as f:
+        if new:
+            f.write("# decode-rate results (single stream, post-first-token)\n\n"
+                    "| date (UTC) | label | sampling | runs | client median | client mean | "
+                    "server log mean | accept len | prompt tok |\n|---|---|---|---|---|---|---|---|---|\n")
+        f.write(f"| {ts} | {args.label} | {sampling} | {len(rates)} | {med:.2f} | {mean:.2f} | "
+                f"{(statistics.fmean(srv) if srv else float('nan')):.2f} | "
+                f"{(accept if accept is not None else float('nan')):.2f} | {ptoks} |\n")
+    print(f"  -> appended to {out}")
+
+
+if __name__ == "__main__":
+    main()

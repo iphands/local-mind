@@ -6,4 +6,5 @@ bench/bench-results.md
 bench/bench-results.jsonl
 bench/bench-wrapper-results.md
 bench/bench-context-results.md
+bench/decode-rate-results.md
 container/.last-build

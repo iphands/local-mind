@@ -33,7 +33,7 @@ def server_version(host, timeout=10):
 
 
 def stream_chat(host, api_model, messages, max_tokens, *, temperature=0.6,
-                ignore_eos=False, timeout=1800):
+                ignore_eos=False, timeout=1800, extra_body=None):
     """POST a streaming chat completion and time it. Returns a dict:
 
       ttft              first token of ANY kind (reasoning or answer), seconds
@@ -41,6 +41,9 @@ def stream_chat(host, api_model, messages, max_tokens, *, temperature=0.6,
       total             wall time to [DONE], seconds
       prompt_tokens / completion_tokens / cached_tokens   from usage
       content           concatenated answer text (reasoning excluded)
+
+    extra_body (dict, optional) is merged into the request body last (vLLM
+    sampling extensions such as top_k / min_p, or chat_template_kwargs).
 
     With a reasoning parser the stream carries thinking deltas (`reasoning` in
     this vLLM build; `reasoning_content` in others) until the answer starts, so
@@ -53,6 +56,8 @@ def stream_chat(host, api_model, messages, max_tokens, *, temperature=0.6,
             "stream_options": {"include_usage": True}}
     if ignore_eos:
         body["ignore_eos"] = True   # vLLM extension: always generate max_tokens
+    if extra_body:
+        body.update(extra_body)     # e.g. top_p / top_k / min_p, chat_template_kwargs
     req = urllib.request.Request(f"http://{host}/v1/chat/completions",
                                  data=json.dumps(body).encode(),
                                  headers={"Content-Type": "application/json"})
