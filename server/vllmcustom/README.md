@@ -768,3 +768,20 @@ parallelism; if it brushes the ceiling, raise it.
   `PUSH_DRY_RUN=1 ./container/push` prints the tags without publishing. Images built before
   labels existed are rejected with a message rather than pushed under a guessed
   tag.
+- **`docker exec` lands you as uid 1000, and only `~/.cache` is yours to keep.** The launchers already
+  pass `--user 1000:1000`, `-e HOME=/home/ubuntu` and `--rm`, so `docker exec -it vllm bash` is uid 1000
+  with a working `HOME` *today* — no rebuild needed, because that `HOME` comes from the launcher flag and
+  not from the image (the image gets its own `USER`/`ENV HOME` when it is next rebuilt; until then a
+  **hand-run** `docker run` still lands root). Only `/home/ubuntu/.cache` is a host bind mount, so that is
+  the one path that outlives the container: `~/.local` and `/opt/venv` are the container layer and are
+  gone when it exits, and a plain `pip install` now fails `EACCES` on `/opt/venv` where it used to write
+  root-owned files. Need a package ad hoc: `docker exec -u root …`. Need it properly: the Dockerfile.
+  `run-legacy` is the exception — it appends `--user 0:0`, so `exec` there is still root.
+- **`bench/` and `scripts/` still call bare `docker`.** `bench/_bench-lib.sh`, `bench/bench-wrapper`,
+  `bench/bench-context` and the `scripts/*` that shell out (plus `container/push`) use plain `docker` for
+  `logs`, `ps`, `rm`, `inspect` — and none of them reads `DOCKER`, so `DOCKER=docker` does nothing for
+  them. They write no host files, so the uid-1000 contract above does not apply; what breaks is the error
+  reporting. On an ungrouped account a failed boot prints `NOT READY` with an **empty** `crash-*.log`,
+  because the denial goes to stderr and the redirect still creates the file. Until they route through
+  `${DOCKER[@]}` (Plan 02), run them with `sudo -n` or a PATH stub. `container/gc-setup` is deliberately
+  excluded — it edits `/etc/docker/daemon.json` and is meant to run under `su -c`.

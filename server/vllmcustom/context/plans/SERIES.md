@@ -56,8 +56,12 @@ doesn't know it failed.)*
 
 - **`shellcheck` is not installed.** Gate step 2 reports `skip`, and a task that needs it is
   `blocked`, not `done`. It is the project's own bar already (`repin.md:181`).
-- **Docker needs `sudo -n docker`** — the account is not in the `docker` group, so `container/archs`,
-  `container/push` and `require_image` fail as plain user. Every docker gate line says `sudo -n`.
+- **Run our docker scripts bare — no `sudo -n` prefix.** The account is not in the `docker` group and
+  the scripts handle that themselves through `${DOCKER[@]}`; prefixing one with `sudo` *defeats* it,
+  because `env_reset` drops your `DOCKER` (`container/archs:16`), and `container/build` plus every
+  launcher refuse uid 0 outright. Gate lines of **raw** docker keep `sudo -n`: outside those scripts
+  `${DOCKER[@]}` is unset, so a pasted one runs nothing. `container/push`, `bench/*` and `scripts/*`
+  are the scripts still calling bare `docker`.
 - **`pytest`, `uv` and `rsync` are absent.** The four host patch tests are stdlib-only and run with
   `python3 <file>`.
 - **No model load in the per-commit gate** (owner decision 2026-10-13). The runtime tier is gate

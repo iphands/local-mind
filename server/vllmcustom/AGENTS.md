@@ -12,8 +12,10 @@ throughput. `README.md` is the detailed reference; this file is the working cont
 - `./qwen/run` · `./muse/run` · `./laguna/run` · `./qwen3.8-flash-next/run` serve on `:8700`
   (one model at a time, by design — that is why every bench finds the right server).
   `./bench/bench <label>` measures whatever is currently up.
-- **Docker needs `sudo -n`** on this host — the account is not in the `docker` group, and a bare
-  `docker` call fails as "permission denied" or, worse, as "image not found".
+- **Never `sudo` our scripts — they carry their own.** The account is not in the `docker` group, and
+  `container/build`, `container/archs` and every launcher handle that internally via `${DOCKER[@]}`
+  (`sudo -n docker`; `DOCKER=docker` where grouped). A `sudo` prefix strips your `DOCKER` and the
+  guarded ones refuse uid 0. Still bare: `container/push`, `bench/`, `scripts/*`. README § Caching.
 - **The pre-commit gate is `context/plans/RULES.md` § Project gate, steps 1–5** — all of them
   model-free. Booting a model is step 6 and happens only when a task names it.
 

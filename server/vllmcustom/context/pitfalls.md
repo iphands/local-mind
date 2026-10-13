@@ -39,9 +39,11 @@ so an access failure is reported as a **missing image** and sends you off to reb
 is sitting right there.
 
 ## How to avoid
-Prefix every docker call from an agent shell with `sudo -n`. When a script claims an image is
-missing, confirm with `sudo -n docker images` before believing it — the error text is about the
-socket, not the tag.
+Ask the socket before believing any "image not found": `sudo -n docker images`. Note this trap is now
+**closed in code**, not just documented: since Plan 01 T2 the scripts carry their own prefix via
+`${DOCKER[@]}` and probe it at source time, printing docker's own last lines before anything can
+misreport. So `sudo`-prefixing one of those scripts is no longer the fix, it is the *bug* — `env_reset`
+strips your `DOCKER` and the guarded ones refuse uid 0. Raw read-only calls still want `sudo -n` here.
 
 ## Sources
 - vllmcustom: `common/_run-lib.sh` (`require_image`), `container/archs`, `container/push`
@@ -269,5 +271,93 @@ operation instead of from its edge cases.**
   (Plan 01 T5, 2026-10-13); both defects found in review before commit and reproduced after the fix
 - vllmcustom: `context/plans/01_uid_parity_tracker.md` § Evidence, "T5 guard matrix"
 - vllmcustom: README § Caching ("a fix you cannot run is not a fix")
+
+---
+
+# Mounting the cache at `/root/.cache` made `--user` look unworkable, and it was the mount [OBSERVED 2026-10-13]
+
+## Problem
+The launchers mounted the host cache directory onto **`/root/.cache`** while the image declared no
+`USER`, so everything ran as root and the mount looked correct. Adding `--user 1000:1000` then looked
+like it *broke* the serve: uid 1000 cannot write `/root/.cache`, so the HF metadata tree, the FlashInfer
+JIT cache and vLLM's autotune cache all failed — hundreds of lines into a boot, with the flag blamed for
+a mount problem. The flag was never the issue. It was pointed at a root-owned path.
+
+## How to avoid
+When a uid change "breaks" a container, ask what its writable paths were **mounted from**, not what the
+process can do: a bind-mount target is a permission boundary the image cannot overrule. Mount at
+`/home/<user>/.cache`, and set `HOME` explicitly (`-e HOME=…` or `ENV HOME`) — with a *numeric* `--user`,
+docker does not consult `/etc/passwd`, so an unset `HOME` quietly becomes `/` and every `~/.cache` user
+is writing to the filesystem root instead.
+
+## Sources
+- vllmcustom: `common/_run-lib.sh` (the `-v …:/home/ubuntu/.cache:rw` mount, `-e HOME=/home/ubuntu`),
+  Plan 01 T1/T2/T3; `context/plans/01_uid_parity.md` § Context
+
+---
+
+# A root overwrite keeps the old owner, so "recent files" is not an ownership audit [OBSERVED 2026-10-13]
+
+## Problem
+Auditing for root-owned files by recency misses precisely the case worth catching. When a root process
+writes **over** a file that uid 1000 already owns, no `chown` happens: the bytes are root's, the owner
+field stays `1000`, and `find -newermt` / `ls -lt` present a file that looks perfectly healthy. Sort by
+mtime and you will report a clean tree over a tree a root process has been editing all week.
+
+## How to avoid
+Audit the **owner**, not the clock: `find <tree> -user root -print`. Where you need to catch change after
+a baseline, baseline the tuple `path + inode + owner`, not the timestamps — and know what each form
+proves: a *new* file shows up in a `-user root` sweep, an overwrite-in-place does not, which is exactly
+why gate step 7e asserts "no root-owned entry exists" rather than "nothing changed recently". If you must
+detect overwrites, compare content hashes; there is no ownership signal in one.
+
+## Sources
+- vllmcustom: Plan 01 T7 review, 2026-10-13; `context/plans/RULES.md` § step 7e
+
+---
+
+# `sudo ./qwen/run` poisons the cache it is about to mount, and the serve dies minutes later [OBSERVED 2026-10-13]
+
+## Problem
+Every launcher does `mkdir -p` on its cache leaf and then mounts it. Run it under `sudo` and that leaf is
+created **root-owned**, the container starts anyway (the mount itself succeeds), and the failure lands
+minutes later as `EACCES` from inside vLLM's first cache write — in a message that mentions neither sudo,
+nor ownership, nor the launcher. This is the trap the whole plan exists to close: half a fix (pin the
+container uid, keep launching with sudo) produces a *worse* bug than no fix at all.
+
+## How to avoid
+Never sudo a launcher. The launchers now refuse a sudo'd start and `container/build` refuses uid 0
+(`ALLOW_ROOT=1` is its only escape, and it silences the *check*, not the damage). A tree already poisoned
+is named by `find <leaf> -user root` and fixed once by `sudo chown -R 1000:1000 -- <leaf>` — bounded to
+the offending directory, never to the cache root. Gate step 7e prints exactly that. One deliberate
+exception: `run-legacy` appends `--user 0:0` and therefore uses its own `cache-legacy` root, so a root
+serve cannot leave root-owned files inside the tree the next uid-1000 serve depends on.
+
+## Sources
+- vllmcustom: `common/_run-lib.sh` (root refusal, `RUN_UID`), `container/build` root guard,
+  `qwen3.8-flash-next/run-legacy`; Plan 01 T1/T2/T5
+
+---
+
+# `find … | grep -q .` is not a test under `pipefail`: a dirty tree prints PASS [OBSERVED 2026-10-13]
+
+## Problem
+`if find "$D" -user root -print -quit | grep -q .` under `set -o pipefail` prints the **opposite** of the
+truth when the tree is dirty. `grep -q` exits on its first match and closes the pipe; `find` is still
+inside `exit()`, mid-flush, takes `SIGPIPE` and dies at **141**; `pipefail` takes the rightmost non-zero
+status, so the pipeline's status is 141, the `if` is false, and the step reports *clean*. The failure is
+counter-intuitive in the worst direction: it is the **match** that kills the pipeline, so the check works
+on every clean run and lies on every dirty one. This sat inside the gate's own uid assertion for four
+green gate runs before a side-by-side test caught it.
+
+## How to avoid
+Do not pipe a producer whose exit status you care about into a consumer that exits early. Capture, then
+test the capture: `_f=$(find … -print -quit)` and `[[ -n $_f ]]`, with any status you need taken as
+`cmd || rc=$?` so 124/127/141 stay distinguishable. Same family as `| head` in a `then` branch above —
+in every case the forgotten fact is that the *producer's* status is the one `pipefail` will surface.
+
+## Sources
+- vllmcustom: Plan 01 T7, 2026-10-13 — old and new forms run against one synthetic `root:root` file at
+  depth 6, old `PASS`/exit 0 vs new `FAIL`/exit 1; `context/plans/RULES.md` § step 7e
 
 ---

@@ -41,13 +41,22 @@ section**, which always stays last. Keep it dense.
 - Consequence: "add a check that the patches match upstream" is mostly a no-op here. The check that
   matters is `./container/archs` for the compiled extensions, and the launcher's own refusal.
 
-## This host reaches docker only through sudo [LIVE 2026-10-13]
+## This host reaches the docker socket through sudo, and its scripts do that themselves [LIVE 2026-10-13, amended 2026-10-13]
 
 - `docker info` as the user: `permission denied while trying to connect to the docker API at
   unix:///var/run/docker.sock`. `sudo -n docker info` → `29.7.2`. The account is in groups
   `iphands,sudo`, not `docker`.
-- Every script here calls bare `docker` (`common/_run-lib.sh:require_image`, `container/archs`,
-  `container/push`), so each needs a `sudo -n` prefix from an agent shell.
+- The scripts that touch files reach the socket themselves: `container/build`, `container/archs` and
+  every launcher define a `DOCKER` array (`sudo -n docker` by default, honoured as `DOCKER=docker`) and
+  probe `docker version` before the first call that could misreport.
+- **Amended 2026-10-13 (Plan 01 T2/T5/T6/T8).** This entry used to say every script calls bare `docker`
+  and needs a `sudo -n` prefix from an agent shell. That is now false, and the consequence **inverted**:
+  prefixing one of those scripts with `sudo` *disables* the override — `env_reset` strips `DOCKER`
+  (`container/archs:16`) — and `container/build` plus every launcher refuse uid 0 outright. Still bare,
+  and none of them reads `DOCKER`, so `DOCKER=` does nothing for them: `container/push`,
+  `container/gc-setup` (runs under `su -c` by design), `bench/_bench-lib.sh`, `bench/bench-wrapper`,
+  `bench/bench-context` and the ten `scripts/*` that shell out to docker. What *is* still true
+  unprivileged is that raw docker fails here — `sudo -n docker images` remains the way to ask.
 
 ---
 

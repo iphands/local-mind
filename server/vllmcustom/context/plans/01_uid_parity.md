@@ -4,6 +4,12 @@
 > **Created**: 2026-10-13
 > **Depends on**: N/A
 > **Goal**: Every process this project starts — container, launcher, build script — runs as uid/gid **1000:1000**, and no filesystem object it creates is owned by anyone else.
+>
+> **One exception, by design (recorded at T8)**: `./qwen3.8-flash-next/run-legacy` appends `--user 0:0`,
+> because it exists to A/B the upstream PR-branch image against ours and pinning the uid there would turn
+> an image comparison into a uid comparison. It is contained rather than exempt: it writes to its own
+> `cache-legacy` root, so a root serve cannot leave root-owned files inside the tree the next uid-1000
+> serve mounts. Gate step 7e sweeps the live tree only, so `cache-legacy` is outside its scope by design.
 > **Agent**: implementation agent
 
 ---
