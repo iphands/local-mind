@@ -153,7 +153,12 @@ cp config.yaml.default config.yaml
 
 **stats/** - Metrics collection
 - `collector.rs`: `RequestMetrics` struct, calculates tokens/sec, context usage, extended token details
-- `formatter.rs`: Formats metrics as pretty/json/compact for logging (includes reasoning tokens when present)
+- `formatter.rs`: Formats metrics as pretty/json/compact for logging (includes reasoning tokens when present).
+  The throughput cell is three-tier: a backend-reported split prints `tps=prefill/gen`;
+  otherwise `tps>=N work=M` (a wall-bounded FLOOR on decode, plus a COST rate - never
+  present either as engine speed); `tps=n/a work=M` when no output tokens were counted.
+  `cache=N` prints when the backend reported prefix-cache hits. These lines carry the
+  `llama_proxy::stats` log target.
 - Metrics collected for both streaming and non-streaming requests
 - Context usage calculated from model's KV cache via /slots endpoint
 - Extended metrics: reasoning_tokens, accepted_prediction_tokens, rejected_prediction_tokens (Opencode/Copilot)
@@ -199,7 +204,24 @@ fixes DETECT but do NOT repair on that path. Both modes run fixes on buffered re
 2. After response, extract completion tokens and timing
 3. Read context_total from the per-backend cache (probed from /props, else /v1/models — see
    `context.rs`); `context_used` comes from /slots. context_percent = context_used / context_total.
-4. Calculate metrics (tokens/sec, context percentage)
+4. Calculate metrics (tokens/sec, context percentage). Three tiers, best available
+   wins, and only tier 1 is a measurement:
+   - `prompt_tps`/`generation_tps` with `has_timing_split = true` - from the backend
+     (llama.cpp `timings`, vLLM `metrics`; vLLM needs `--enable-per-request-metrics`)
+   - `decode_tps_min` = completion/wall - always computed, ALWAYS a floor (its
+     denominator contains prefill, network and fake-mode synthesis). Never sets
+     `has_timing_split`, and the compact line prints it as `tps>=`
+   - `total_tps` = (prompt+completion)/wall - a COST rate. On a long-context agent turn
+     with a short completion it reads in the thousands while decode runs in the tens.
+     Printed as `work=`; kept on the wire because it reconciles with `sum(total_tokens)`.
+   Never print a derived number as a measurement, and never reinstate the hardcoded
+   20/80 prefill/decode split that used to live here.
+   `cached_tokens`/`cache_creation_tokens` are optional. `context_used` is KV occupancy:
+   `timings.prompt_n` / `slot.n_tokens` when available, else `prompt_tokens` - except on
+   the Anthropic shape, where `input_tokens` EXCLUDES `cache_read_input_tokens` and
+   `cache_creation_input_tokens`, so `extract_usage` sums the three (OpenAI's
+   `prompt_tokens` already subsumes them and must NOT be added to).
+   Every one of these is 0/absent = "not reported", never "measured zero".
 5. Format and log to stdout
 6. Export to remote systems asynchronously
 

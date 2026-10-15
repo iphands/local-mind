@@ -57,8 +57,9 @@ fn pretty_identity_lines(m: &RequestMetrics) -> String {
 }
 
 /// Performance rows. A prefill/decode split is only real when the backend
-/// reported one; otherwise show the throughput a single wall-clock duration
-/// can actually support rather than inventing a split.
+/// reported one. With none, name both derived numbers for what they are: a
+/// wall-bounded floor on decode and a cost rate. Neither is a speed, and
+/// neither is invented -- the invented 20/80 split this replaced is gone.
 fn pretty_performance_lines(m: &RequestMetrics) -> String {
     if m.has_timing_split {
         box_row(&format!(
@@ -69,8 +70,13 @@ fn pretty_performance_lines(m: &RequestMetrics) -> String {
             m.generation_tps, m.generation_ms
         ))
     } else {
-        box_row(&format!("   Total throughput:  {:8.2} tokens/sec", m.total_tps))
-            + &box_row("   (backend reported no prefill/decode split)")
+        box_row(&format!(
+            "   Decode (floor):    {:8.2} tokens/sec (wall-bounded)",
+            m.decode_tps_min
+        )) + &box_row(&format!(
+            "   Work rate:         {:8.2} tokens/sec (all tokens/wall)",
+            m.total_tps
+        )) + &box_row("   (no backend split: decode is a floor, work is cost)")
     }
 }
 
@@ -155,15 +161,29 @@ fn format_compact(m: &RequestMetrics) -> String {
         .map(|c| format!(" concurrent={}", c))
         .unwrap_or_default();
 
-    // Only claim a prefill/decode split when the backend actually reported one:
-    // llama.cpp's `timings`, or vLLM's `metrics` (which needs the server started
-    // with --enable-per-request-metrics; without it the field is null). Otherwise
-    // print total throughput rather than two numbers that look measured and are not.
+    // Three tiers, best available wins. Only a backend-reported split (llama.cpp
+    // `timings`, vLLM `metrics`) is a measured prefill/decode pair. With none,
+    // print the honest FLOOR on decode speed and the cost rate, and mark the
+    // floor with `>=` so it cannot be read as a measurement. Never invent a
+    // split: that was the hardcoded 20/80 estimate this replaced.
     let tps_str = if m.has_timing_split {
         format!("tps={:.2}/{:.2}", m.prompt_tps, m.generation_tps)
+    } else if m.decode_tps_min > 0.0 {
+        format!("tps>={:.2} work={:.2}", m.decode_tps_min, m.total_tps)
     } else {
-        format!("tps={:.2}tot", m.total_tps)
+        // A counted prompt with no counted output (a 0-token completion, an
+        // abort before the finish chunk): there is no floor to report, only cost.
+        format!("tps=n/a work={:.2}", m.total_tps)
     };
+
+    // Lets a reader discount `work=` for a prompt the engine never recomputed.
+    // Only ever a subset of the prompt count, so it is printed separately rather
+    // than folded into the rate.
+    let cache_str = m
+        .cached_tokens
+        .filter(|c| *c > 0)
+        .map(|c| format!(" cache={c}"))
+        .unwrap_or_default();
 
     // Queue time is the honest signal for "is concurrency hurting?" -- it is time
     // the request sat waiting to be scheduled, so it rises only under real
@@ -177,12 +197,13 @@ fn format_compact(m: &RequestMetrics) -> String {
         .unwrap_or_default();
 
     format!(
-        "model={}{} tokens={}/{} {} {} {} finish={} dur={:.1}ms{}{}",
+        "model={}{} tokens={}/{} {}{} {} {} finish={} dur={:.1}ms{}{}",
         m.model,
         group_str,
         token_cell(m.prompt_tokens),
         token_cell(m.completion_tokens),
         tps_str,
+        cache_str,
         context_str,
         if m.streaming {
             match m.stream_end {
@@ -243,6 +264,10 @@ mod tests {
         m.generation_ms = 1176.0;
         m.has_timing_split = true; // llama.cpp-style backend
         m.total_tps = 125.0;
+        // 50 completion tokens over the 1200ms wall clock. Hand-set like every
+        // other field here: these tests build a sample, they do not run the
+        // extractor.
+        m.decode_tps_min = 50.0 / 1.2;
         m.streaming = true;
         m.finish_reason = "stop".to_string();
         m.duration_ms = 1200.0;
@@ -262,7 +287,8 @@ mod tests {
     }
 
     /// A backend that reports no `timings` (vLLM) must not be shown a
-    /// prefill/decode split -- only total throughput.
+    /// prefill/decode split -- and the two derived numbers it does get must be
+    /// labelled for what they are: a wall-bounded floor and a cost rate.
     #[test]
     fn test_format_compact_without_timing_split() {
         let mut m = create_test_metrics();
@@ -270,10 +296,61 @@ mod tests {
         m.prompt_tps = 0.0;
         m.generation_tps = 0.0;
         m.total_tps = 125.0;
+        m.decode_tps_min = 50.0 / 1.2;
 
         let output = format_compact(&m);
-        assert!(output.contains("tps=125.00tot"), "got: {output}");
+        assert!(output.contains("tps>=41.67 work=125.00"), "got: {output}");
         assert!(!output.contains("/0.00"), "must not print a fabricated split: {output}");
+        // The old key read as a measured speed; it must not come back.
+        assert!(!output.contains("tot"), "retired `tot` key is back: {output}");
+    }
+
+    /// The floor branch needs a counted completion. Without one there is no
+    /// decode rate to bound at all -- print `n/a`, never a zero that reads as
+    /// "instantly slow".
+    #[test]
+    fn compact_without_counted_output_prints_no_floor() {
+        let mut m = create_test_metrics();
+        m.has_timing_split = false;
+        m.completion_tokens = None;
+        m.decode_tps_min = 0.0;
+        m.total_tps = 125.0;
+
+        let output = format_compact(&m);
+        assert!(output.contains("tps=n/a work=125.00"), "got: {output}");
+        assert!(!output.contains("tps>=0.00"), "a zero is not a floor: {output}");
+    }
+
+    /// Tier 1 wins outright: a backend-split line carries neither the floor nor
+    /// the cost rate, so the two tiers can never be confused for each other.
+    #[test]
+    fn compact_split_path_prints_neither_floor_nor_work() {
+        let m = create_test_metrics();
+        assert!(m.has_timing_split);
+
+        let output = format_compact(&m);
+        assert!(output.contains("tps=200.50/42.50"), "got: {output}");
+        assert!(!output.contains("work="), "tier 3 leaked into a tier-1 line: {output}");
+        assert!(!output.contains(">="), "tier 2 leaked into a tier-1 line: {output}");
+    }
+
+    /// The cache cell is the reader's discount on `work=`. Absent and measured
+    /// zero are both "nothing to discount" and print nothing.
+    #[test]
+    fn compact_cache_cell_appears_only_when_nonzero() {
+        let mut m = create_test_metrics();
+        m.has_timing_split = false;
+        m.cached_tokens = None;
+        assert!(!format_compact(&m).contains("cache="), "None must print nothing");
+
+        m.cached_tokens = Some(0);
+        assert!(
+            !format_compact(&m).contains("cache="),
+            "a measured zero adds nothing and buries the real ones"
+        );
+
+        m.cached_tokens = Some(4096);
+        assert!(format_compact(&m).contains("cache=4096"), "got: {}", format_compact(&m));
     }
 
     /// Regression: prompt/generation TPS were once derived from a hardcoded
@@ -291,11 +368,16 @@ mod tests {
         m.total_tokens = 39386;
         m.duration_ms = 1731.0;
         m.total_tps = (m.total_tokens as f64 / m.duration_ms) * 1000.0;
+        m.decode_tps_min = (m.completion_tokens.unwrap() as f64 / m.duration_ms) * 1000.0;
 
         let output = format_compact(&m);
         // 39240 / (0.2 * 1731ms) * 1000 == 113344.89 -- the old fabricated value
         assert!(!output.contains("113344"), "reintroduced the 20/80 estimate: {output}");
-        assert!(output.contains("tps=22753.32tot"), "got: {output}");
+        // The cost rate is still there (it reconciles with sum(total_tokens)),
+        // but under a key that cannot be read as a speed, next to the honest
+        // floor: 146 tokens over a 1731ms wall is "at least 84", not "6000".
+        assert!(output.contains("work=22753.32"), "got: {output}");
+        assert!(output.contains("tps>=84.34"), "got: {output}");
     }
 
     #[test]
@@ -630,6 +712,67 @@ mod tests {
             let cells = UnicodeWidthStr::width(line);
             assert_eq!(cells, frame, "row {line:?} spans {cells} cells");
         }
+
+        // The no-split branch has its own two value rows, and they carry longer
+        // labels than the split rows. Same frame, same rule -- with an 11-char
+        // `{:8.2}` value so the budget is proven at the wide end, not just for
+        // the 7-char values a healthy server happens to produce.
+        m.has_timing_split = false;
+        m.total_tps = 12345678.99;
+        m.decode_tps_min = 12345678.99;
+        for line in format_pretty(&m).lines() {
+            let cells = UnicodeWidthStr::width(line);
+            assert_eq!(cells, frame, "no-split row {line:?} spans {cells} cells");
+        }
+    }
+
+    /// With no backend split the box must name BOTH derived numbers for what
+    /// they are. "Total throughput" was the label that let a cost rate read as
+    /// engine speed on a wall of logs.
+    #[test]
+    fn pretty_no_split_names_both_numbers() {
+        let mut m = create_test_metrics();
+        m.has_timing_split = false;
+        m.prompt_tps = 0.0;
+        m.generation_tps = 0.0;
+        m.total_tps = 6073.63;
+        m.decode_tps_min = 146.32;
+
+        let output = format_pretty(&m);
+        assert!(output.contains("Decode (floor):"), "got: {output}");
+        assert!(output.contains("146.32"), "floor value missing: {output}");
+        assert!(output.contains("wall"), "floor must say it is wall-bounded: {output}");
+        assert!(output.contains("Work rate:"), "got: {output}");
+        assert!(output.contains("6073.63"), "cost rate missing: {output}");
+        assert!(!output.contains("Total throughput"), "retired label is back: {output}");
+        assert!(
+            !output.contains("Prompt Processing"),
+            "fabricated split row in the no-split box: {output}"
+        );
+    }
+
+    /// Serde picks up the new fields with no manual mapping. The cache counts
+    /// are `Option`, so a backend that never mentions its cache stays absent
+    /// instead of asserting "nothing was cached" -- while a measured zero still
+    /// serializes.
+    #[test]
+    fn json_format_carries_the_floor_and_omits_absent_cache_fields() {
+        let mut m = create_test_metrics();
+        let parsed: serde_json::Value = serde_json::from_str(&format_json(&m)).unwrap();
+        assert!(parsed.get("decode_tps_min").is_some(), "got: {parsed}");
+        assert!(parsed.get("cached_tokens").is_none(), "fabricated zero: {parsed}");
+        assert!(
+            parsed.get("cache_creation_tokens").is_none(),
+            "fabricated zero: {parsed}"
+        );
+
+        m.cached_tokens = Some(0);
+        let parsed: serde_json::Value = serde_json::from_str(&format_json(&m)).unwrap();
+        assert_eq!(
+            parsed.get("cached_tokens").and_then(|v| v.as_u64()),
+            Some(0),
+            "a measured zero is still a measurement"
+        );
     }
 
     /// The cut lands on display cells, not chars: a 2-cell character is kept

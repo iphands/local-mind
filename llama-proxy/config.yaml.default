@@ -146,6 +146,16 @@ backend:
 # stats:
 #   enabled: true
 #   format: "pretty"
+# The throughput cell has three tiers, and which one you see is a fact about the
+# backend, not the request: `tps=PREFILL/DECODE` is measured (llama.cpp `timings`,
+# or vLLM `metrics` with --enable-per-request-metrics). With no backend split you
+# get `tps>=N work=M`: N is a FLOOR on decode (completion tokens over the whole
+# wall clock, so it understates), and M is a COST rate - (prompt+completion) per
+# wall - which on a long-context turn with a short completion runs to thousands
+# while decode runs at tens. Never read M as engine speed. `cache=N`, when shown,
+# is prompt tokens the engine served from its prefix cache: a discount on M.
+# These lines carry the `llama_proxy::stats` target, so
+# `RUST_LOG=llama_proxy::stats=info` selects them and nothing else.
 # Note: each request's context_total is the backend's advertised window (/props n_ctx, else
 # /v1/models max_model_len), probed at most once per backend and cached — the cache expires after
 # 600s, or immediately if that backend is marked failed. The 2s probe bound and the cache lifetime

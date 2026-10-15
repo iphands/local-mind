@@ -202,7 +202,14 @@ fn build_data_point(metrics: &RequestMetrics) -> Result<Option<influxdb2::models
     let mut point = builder
         .field("total_tokens", metrics.total_tokens as f64)
         .field("prompt_tps", metrics.prompt_tps)
+        // Cost rate, NOT a speed: (prompt + completion) / wall. Every token the
+        // request moved over one duration that covers prefill and decode
+        // together. Kept for `sum()` reconciliation; graph speed with
+        // `generation_tps` (measured) or `decode_tps_min` (the floor).
         .field("total_tps", metrics.total_tps)
+        // Wall-bounded floor on decode speed, always populated when the backend
+        // counted output tokens -- so this field is never a sparse hole.
+        .field("decode_tps_min", metrics.decode_tps_min)
         .field("has_timing_split", metrics.has_timing_split)
         .field("generation_tps", metrics.generation_tps)
         .field("prompt_ms", metrics.prompt_ms)
@@ -217,6 +224,16 @@ fn build_data_point(metrics: &RequestMetrics) -> Result<Option<influxdb2::models
     }
     if let Some(completion) = metrics.completion_tokens {
         point = point.field("completion_tokens", completion as f64);
+    }
+
+    // Prefix-cache accounting. Written only when the backend reported it: a
+    // zero here would mean "nothing was cached" for a backend that never says,
+    // which is a different claim from an absent field.
+    if let Some(cached) = metrics.cached_tokens {
+        point = point.field("cached_tokens", cached as f64);
+    }
+    if let Some(wrote) = metrics.cache_creation_tokens {
+        point = point.field("cache_creation_tokens", wrote as f64);
     }
 
     // Add extended token details if present (Opencode/Copilot extensions)
@@ -350,6 +367,47 @@ mod wire_tests {
         let line = line(&m);
         assert!(line.contains("prompt_tokens=100"), "got: {line}");
         assert!(line.contains("completion_tokens=0"), "measured zero written: {line}");
+    }
+
+    /// The wall-bounded floor rides on EVERY point, including samples with no
+    /// counted output (where it is the contract's 0.0). A graph that plots
+    /// decode speed must be able to use one field for every backend instead of
+    /// stitching two together -- which is exactly how a derived number gets
+    /// mislabelled as a measured one.
+    #[test]
+    fn decode_tps_min_is_written_on_every_point() {
+        let mut m = measurable();
+        m.decode_tps_min = 84.34;
+        assert!(
+            line(&m).contains("decode_tps_min=84.34 "),
+            "got: {}",
+            line(&m)
+        );
+
+        assert!(
+            line(&measurable()).contains("decode_tps_min=0 "),
+            "no counted output is 0.0 = not reported, never a hole: {}",
+            line(&measurable())
+        );
+    }
+
+    /// Absent and zero mean different things: "this backend never says" is not
+    /// "nothing was cached". Both cache counts stay optional fields.
+    #[test]
+    fn cache_fields_are_written_only_when_the_backend_said() {
+        let line = line(&measurable());
+        assert!(!line.contains("cached_tokens"), "fabricated field: {line}");
+        assert!(
+            !line.contains("cache_creation_tokens"),
+            "fabricated field: {line}"
+        );
+
+        let mut m = measurable();
+        m.cached_tokens = Some(4096);
+        m.cache_creation_tokens = Some(500);
+        let line = line(&m);
+        assert!(line.contains("cached_tokens=4096"), "got: {line}");
+        assert!(line.contains("cache_creation_tokens=500"), "got: {line}");
     }
 
     /// big-fix F12-R4 [MAJOR 8]: `model` and `finish_reason` arrive VERBATIM

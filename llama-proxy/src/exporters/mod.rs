@@ -38,10 +38,15 @@ const DROP_WARN_INTERVAL: u64 = 100;
 pub fn log_sample_and_should_export(metrics: &RequestMetrics, format: StatsFormat) -> bool {
     if metrics.has_throughput_signal() {
         let formatted = format_metrics(metrics, format);
+        // Explicit target: this is a STATS line that happens to be emitted from
+        // the exporter module because that is where the export gate lives. Left
+        // implicit it rendered as `INFO llama_proxy::exporters:` and sent
+        // operators grepping for their per-request stats to the wrong place.
+        // `RUST_LOG=llama_proxy::stats=info` now selects these lines.
         if format == StatsFormat::Compact {
-            tracing::info!("{}", formatted);
+            tracing::info!(target: "llama_proxy::stats", "{}", formatted);
         } else {
-            tracing::info!("\n{}", formatted);
+            tracing::info!(target: "llama_proxy::stats", "\n{}", formatted);
         }
         return true;
     }
@@ -53,6 +58,7 @@ pub fn log_sample_and_should_export(metrics: &RequestMetrics, format: StatsForma
             None => "n/a".to_string(),
         };
         tracing::warn!(
+            target: "llama_proxy::stats",
             model = %metrics.model,
             stream_end = metrics.stream_end_label(),
             finish_reason = %metrics.finish_reason,
@@ -391,6 +397,75 @@ mod tests {
         }
 
         assert_eq!(EXPORTS_SKIPPED_TOTAL.load(Ordering::SeqCst) - before, 3);
+    }
+
+    /// In-file tracing capture (the `backends/node.rs` / `augment.rs` pattern):
+    /// thread-local `set_default` keeps this parallel-safe.
+    #[derive(Clone)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = Self;
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    /// The compact stats line is a STATS line that merely happens to be emitted
+    /// from this module, because this is where the export gate lives. It used to
+    /// inherit the implicit `llama_proxy::exporters` target, so
+    /// `RUST_LOG=llama_proxy::stats=info` selected nothing and an operator
+    /// hunting for per-request throughput was sent to the wrong file. Asserted
+    /// through a real formatter so the rename is proven observable, not just
+    /// written: an operator's stats-only filter must keep these lines and drop
+    /// everything else this module logs.
+    #[test]
+    fn stats_lines_belong_to_the_stats_target() {
+        crate::fixes::pin_interest_cache_for_tests();
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("off,llama_proxy::stats=info"))
+            .with_ansi(false)
+            .with_target(true)
+            .with_writer(CaptureWriter(buf.clone()))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let mut m = RequestMetrics::new();
+        m.model = "target-probe".to_string();
+        m.total_tokens = 150;
+        m.completion_tokens = Some(50);
+        m.total_tps = 125.0;
+        m.decode_tps_min = 41.67;
+
+        // Must NOT survive a stats-only filter: this module's own target is not
+        // the stats target.
+        tracing::info!("exporter-internal noise");
+        // Must survive, attributed to the stats module.
+        let keep = log_sample_and_should_export(&m, StatsFormat::Compact);
+        drop(_guard);
+
+        let text = String::from_utf8(std::mem::take(&mut *buf.lock().unwrap())).unwrap();
+        assert!(keep, "a measurable sample is still a measurable sample");
+        assert!(text.contains("target-probe"), "the stats line vanished: {text}");
+        assert!(
+            text.contains("llama_proxy::stats"),
+            "stats line is not attributable to the stats module: {text}"
+        );
+        assert!(
+            !text.contains("exporter-internal noise"),
+            "a stats-only filter leaked a non-stats event, so the target is cosmetic: {text}"
+        );
     }
 
     #[tokio::test]

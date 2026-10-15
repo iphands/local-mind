@@ -41,11 +41,33 @@ pub struct RequestMetrics {
     pub prompt_ms: f64,
     /// Generation time in ms. 0.0 when the backend did not report it.
     pub generation_ms: f64,
-    /// total_tokens / wall clock. Always computable, and the only throughput
-    /// figure available when the backend reports no split at all.
+    /// (prompt + completion) / wall clock. A COST rate: one duration covering
+    /// prefill and decode together. It is not a speed and must never be printed
+    /// under a bare `tps=` key -- the compact line shows it as `work=`. Kept
+    /// because it is the only throughput figure that spans every token the
+    /// request moved, and it reconciles with `sum(total_tokens)` in InfluxDB.
     pub total_tps: f64,
+    /// Lower bound on decode speed: completion_tokens / wall clock. Always
+    /// computable once the backend counted output tokens, and the best number
+    /// available when it reports no split at all -- but the denominator still
+    /// contains prefill, network and (in fake mode) synthesis, so it
+    /// UNDER-states the engine's decode rate and must never be printed as a
+    /// measurement. The compact line renders it as `tps>=`. Populated on
+    /// backend-split samples too, so the exporter field is never sparse.
+    pub decode_tps_min: f64,
+    /// Prompt tokens served from the engine's prefix cache. Subsumed by
+    /// `prompt_tokens` on the OpenAI/vLLM shape and by `timings.cache_n` on
+    /// llama.cpp; DISJOINT from `input_tokens` on the Anthropic shape, which is
+    /// why `context_used` is corrected in `extract_usage` and not here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cached_tokens: Option<u64>,
+    /// Prompt tokens written to the prefix cache this request. Only the
+    /// Anthropic shape reports it (`cache_creation_input_tokens`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<u64>,
     /// True when prompt_tps/generation_tps came from the backend rather than
-    /// being absent. Lets consumers tell "no split available" from "zero".
+    /// being absent. Lets consumers tell "no split available" from "zero". A
+    /// wall-bounded `decode_tps_min` is NOT a split and never sets this.
     pub has_timing_split: bool,
     /// Time the request spent queued before the engine scheduled it, in ms
     /// (vLLM only). This is the direct answer to "is concurrency making
@@ -114,6 +136,9 @@ impl RequestMetrics {
             prompt_ms: 0.0,
             generation_ms: 0.0,
             total_tps: 0.0,
+            decode_tps_min: 0.0,
+            cached_tokens: None,
+            cache_creation_tokens: None,
             has_timing_split: false,
             queue_ms: None,
             mean_itl_ms: None,
@@ -163,8 +188,31 @@ impl RequestMetrics {
         extract_timings(&mut metrics, response, duration_ms);
 
         // Always available, whether or not the backend reported a split.
+        // finite_rate is not decoration here: `u64::MAX tokens / MIN_POSITIVE ms`
+        // overflows to +inf, serde_json then emits a literal `inf`, and InfluxDB
+        // rejects the whole body (see `finite_rate`).
         if duration_ms > 0.0 && metrics.total_tokens > 0 {
-            metrics.total_tps = (metrics.total_tokens as f64 / duration_ms) * 1000.0;
+            metrics.total_tps = finite_rate(
+                (metrics.total_tokens as f64 / duration_ms) * 1000.0,
+                "total_tps",
+                &metrics.model,
+            );
+        }
+
+        // The honest floor on decode speed. The wall clock still contains
+        // prefill, network and (in fake mode) synthesis, so this UNDER-states
+        // the engine's decode rate -- but it can never over-state it, which is
+        // exactly the property `total_tps` lacked. Runs after `extract_timings`
+        // so the timings token-count fallback has already had its turn, and
+        // through `finite_rate` because a derived division is where +inf
+        // actually enters this struct.
+        let counted_output = metrics.completion_tokens.unwrap_or(0) as f64;
+        if duration_ms > 0.0 && counted_output > 0.0 {
+            metrics.decode_tps_min = finite_rate(
+                counted_output / duration_ms * 1000.0,
+                "decode_tps_min",
+                &metrics.model,
+            );
         }
 
         extract_length_fallbacks(&mut metrics, response, request);
@@ -204,6 +252,9 @@ impl RequestMetrics {
         // `total_tokens` is not redundant with `total_tps`: the latter is only
         // computed when duration_ms > 0 (see above), so a request finishing
         // inside the timer's resolution would otherwise read as "no signal".
+        // `decode_tps_min` is likewise not worth a term of its own: it is
+        // derived from `completion_tokens`, so a nonzero floor always implies
+        // `total_tokens > 0` and the disjunction below already admits it.
         self.total_tokens > 0 || self.total_tps > 0.0 || self.prompt_tps > 0.0 || self.generation_tps > 0.0
     }
 
@@ -239,12 +290,37 @@ fn extract_usage(metrics: &mut RequestMetrics, response: &Value) {
                 .get("total_tokens")
                 .and_then(|t| t.as_u64())
                 .unwrap_or_else(|| prompt.saturating_add(metrics.completion_tokens.unwrap_or(0)));
+            // Prefix-cache accounting. On this shape `prompt_tokens` ALREADY
+            // contains the cached prefix, so this is reporting only: it lets a
+            // reader discount a wall-clock rate, and it must not be added to
+            // `context_used` (see the Anthropic branch for the opposite rule).
+            metrics.cached_tokens = usage
+                .get("prompt_tokens_details")
+                .and_then(|d| d.get("cached_tokens"))
+                .and_then(|t| t.as_u64());
         }
         // Try Anthropic format
         else if let Some(input) = usage.get("input_tokens").and_then(|t| t.as_u64()) {
             metrics.prompt_tokens = Some(input);
             metrics.completion_tokens = usage.get("output_tokens").and_then(|t| t.as_u64());
             metrics.total_tokens = input.saturating_add(metrics.completion_tokens.unwrap_or(0));
+            metrics.cached_tokens = usage
+                .get("cache_read_input_tokens")
+                .and_then(|t| t.as_u64());
+            metrics.cache_creation_tokens = usage
+                .get("cache_creation_input_tokens")
+                .and_then(|t| t.as_u64());
+            // Anthropic's `input_tokens` counts only the tokens it did NOT read
+            // from or write to the cache, so it is disjoint from the two fields
+            // above -- unlike OpenAI's `prompt_tokens`, which subsumes them.
+            // The engine's KV occupancy is therefore the SUM, and this is the
+            // one place allowed to add them. `extract_timings` defers to a
+            // `context_used` that is already set for exactly this reason.
+            metrics.context_used = Some(
+                input
+                    .saturating_add(metrics.cached_tokens.unwrap_or(0))
+                    .saturating_add(metrics.cache_creation_tokens.unwrap_or(0)),
+            );
         }
 
         // Extract extended usage details (Opencode/Copilot extensions)
@@ -309,6 +385,13 @@ fn extract_timings(metrics: &mut RequestMetrics, response: &Value, duration_ms: 
             metrics.context_used = Some(prompt_n);
         }
 
+        // llama.cpp spells the prefix-cache count `cache_n`, and like OpenAI's
+        // `cached_tokens` it is SUBSUMED by prompt_n, so context_used above
+        // stays correct untouched. extract_timings runs after extract_usage, so
+        // where a body somehow carries both spellings this one wins: llama.cpp
+        // is authoritative for its own extension, and vLLM never sends timings.
+        metrics.cached_tokens = timings.get("cache_n").and_then(|t| t.as_u64());
+
         // Fallback to timings for token counts when usage is missing (e.g., timeout
         // scenarios). Absent and zero are one trigger class here, matching the
         // pre-Option baseline where absence was stored as 0.
@@ -330,10 +413,15 @@ fn extract_timings(metrics: &mut RequestMetrics, response: &Value, duration_ms: 
         tracing::debug!("No timings field found in response");
 
         // If no timings, use prompt_tokens as context_used fallback
-        // (Anthropic format responses have usage.input_tokens but no timings)
-        if let Some(prompt_tokens) = metrics.prompt_tokens.filter(|p| *p > 0) {
-            metrics.context_used = Some(prompt_tokens);
-            tracing::debug!("Using prompt_tokens as context_used: {}", prompt_tokens);
+        // (Anthropic format responses have usage.input_tokens but no timings).
+        // Skipped when the shape-specific code already set it: on the Anthropic
+        // shape prompt_tokens alone omits the cached prefix entirely, and
+        // extract_usage wrote the correct sum.
+        if metrics.context_used.is_none() {
+            if let Some(prompt_tokens) = metrics.prompt_tokens.filter(|p| *p > 0) {
+                metrics.context_used = Some(prompt_tokens);
+                tracing::debug!("Using prompt_tokens as context_used: {}", prompt_tokens);
+            }
         }
 
         extract_vllm_usage(metrics, response, duration_ms);
@@ -868,6 +956,16 @@ mod tests {
         assert!(json.unwrap().contains("request_id"));
     }
 
+    /// The wire contract for the new fields: the floor is always present (it is
+    /// not optional), the cache counts are not (they are Option).
+    #[test]
+    fn serialized_sample_always_carries_the_floor_and_only_reports_cache_counts() {
+        let json = serde_json::to_value(RequestMetrics::new()).unwrap();
+        assert!(json.get("decode_tps_min").is_some(), "got: {json}");
+        assert!(json.get("cached_tokens").is_none(), "got: {json}");
+        assert!(json.get("cache_creation_tokens").is_none(), "got: {json}");
+    }
+
     #[test]
     fn test_context_info_from_slots_response() {
         let response = serde_json::json!([
@@ -1084,7 +1182,8 @@ mod tests {
         assert_eq!(m.prompt_tokens, Some(10));
         assert_eq!(m.completion_tokens, None);
         assert_eq!(m.total_tokens, 10);
-        assert_eq!(m.context_used, Some(10), "the context_used fallback still fires");
+        assert_eq!(m.context_used, Some(10), "Anthropic KV occupancy with no cache tokens");
+        assert_eq!(m.cached_tokens, None, "the shape has no cache fields here");
     }
 
     #[test]
@@ -1184,7 +1283,8 @@ mod tests {
 
     /// vLLM responses carry `usage` but no llama.cpp `timings`. That path used to
     /// fabricate a prefill/decode split from a hardcoded 20%/80% division of the
-    /// wall clock. Assert it reports total throughput and leaves the split empty.
+    /// wall clock. Assert it leaves the split empty and reports only what one
+    /// duration can support: a cost rate and a floor on decode.
     #[test]
     fn test_no_timings_reports_total_only() {
         let response = serde_json::json!({
@@ -1200,6 +1300,20 @@ mod tests {
         assert_eq!(m.generation_tps, 0.0, "must not invent a decode rate");
         // the old code produced 113344.89 here, on a server measured at ~14.5k tok/s
         assert!((m.total_tps - 22753.32).abs() < 0.1, "total_tps was {}", m.total_tps);
+        // ... and this is what the same request ACTUALLY did: 146 tokens over a
+        // 1731ms wall, i.e. at least 84 tok/s of decode. Two orders of magnitude
+        // under the cost rate, which is the whole reason both are printed.
+        assert!(
+            (m.decode_tps_min - 84.34).abs() < 0.01,
+            "decode_tps_min was {}",
+            m.decode_tps_min
+        );
+        assert!(
+            m.decode_tps_min < m.total_tps,
+            "the floor can never exceed the cost rate: {} vs {}",
+            m.decode_tps_min,
+            m.total_tps
+        );
     }
 
     /// A backend that does report timings keeps the real split.
@@ -1219,6 +1333,187 @@ mod tests {
         assert_eq!(m.prompt_tps, 200.5);
         assert_eq!(m.generation_tps, 42.5);
         assert!(m.total_tps > 0.0, "total_tps should still be populated");
+        // The floor is populated on tier-1 samples too, so the InfluxDB field is
+        // never a sparse hole. It is simply not what the line prints when a real
+        // measurement exists.
+        assert!(m.decode_tps_min > 0.0, "decode_tps_min must still be filled in");
+    }
+
+    /// The number that replaces the old `tps=<n>tot` on a backend with no split:
+    /// completion tokens over the wall clock. Measured, always available, and a
+    /// FLOOR -- the denominator still contains prefill, so it understates.
+    #[test]
+    fn decode_tps_min_is_a_wall_bounded_floor() {
+        let response = serde_json::json!({
+            "model": "cosmo-6000",
+            "usage": {"input_tokens": 6360, "output_tokens": 157},
+            "stop_reason": "tool_use"
+        });
+        // The first line of the operator log that prompted this: the old code
+        // printed tps=6073.63tot for a request that decoded 157 tokens.
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), false, 1073.0);
+
+        assert!((m.decode_tps_min - 146.32).abs() < 0.01, "got {}", m.decode_tps_min);
+        assert!((m.total_tps - 6073.63).abs() < 0.1, "got {}", m.total_tps);
+        assert!(!m.has_timing_split, "a derived floor is not a backend split");
+        assert_eq!(m.prompt_tps, 0.0);
+    }
+
+    /// No counted output means no floor. A 0 here would read as "instantly slow"
+    /// on an aborted or prompt-only request.
+    #[test]
+    fn decode_tps_min_absent_without_completion_tokens() {
+        let response = serde_json::json!({
+            "model": "m",
+            "usage": {"prompt_tokens": 500, "completion_tokens": null, "total_tokens": 500}
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), true, 500.0);
+
+        assert_eq!(m.completion_tokens, None);
+        assert_eq!(m.decode_tps_min, 0.0, "absent output is not a zero rate");
+    }
+
+    /// The floor is computed after `extract_timings`, so a backend that reports
+    /// counts only under `timings` (the timeout path) still gets one.
+    #[test]
+    fn decode_tps_min_survives_the_timings_token_fallback() {
+        let response = serde_json::json!({
+            "model": "m",
+            "timings": {"prompt_n": 1000, "predicted_n": 400, "predicted_ms": 2000.0},
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), false, 2000.0);
+
+        assert_eq!(m.completion_tokens, Some(400));
+        assert!(
+            (m.decode_tps_min - 200.0).abs() < 0.01,
+            "decode_tps_min was {}",
+            m.decode_tps_min
+        );
+    }
+
+    /// A request that finishes inside the timer's resolution has no denominator.
+    #[test]
+    fn decode_tps_min_zero_duration_stays_zero() {
+        let response = serde_json::json!({
+            "model": "m",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 100, "total_tokens": 110}
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), false, 0.0);
+
+        assert_eq!(m.decode_tps_min, 0.0);
+        assert_eq!(m.total_tps, 0.0);
+    }
+
+    /// Hostile-body class, same vector as every other derived rate in this file:
+    /// a huge count over `f64::MIN_POSITIVE` ms overflows the division to +inf,
+    /// which serde_json emits as a literal `inf` and InfluxDB 400s wholesale.
+    /// Both derived rates map to the contract's 0.0 = "not reported".
+    #[test]
+    fn decode_tps_min_clamps_hostile_division() {
+        let huge = u64::MAX;
+        let response = serde_json::json!({
+            "model": "m",
+            "usage": {"prompt_tokens": huge, "completion_tokens": huge, "total_tokens": huge},
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        });
+        let m = RequestMetrics::from_response(
+            &response,
+            &serde_json::json!({"messages": []}),
+            false,
+            f64::MIN_POSITIVE,
+        );
+
+        assert!(m.total_tokens > 0, "the counts are real; only the rate is junk");
+        assert!(
+            !m.decode_tps_min.is_infinite() && m.decode_tps_min == 0.0,
+            "decode_tps_min = {}",
+            m.decode_tps_min
+        );
+        assert!(
+            !m.total_tps.is_infinite() && m.total_tps == 0.0,
+            "total_tps = {}",
+            m.total_tps
+        );
+    }
+
+    /// Anthropic's `input_tokens` EXCLUDES cached and cache-written tokens, so
+    /// KV occupancy is the sum. This is the only shape that needs the addition.
+    #[test]
+    fn anthropic_cache_fields_are_extracted() {
+        let response = serde_json::json!({
+            "model": "m",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "hi"}],
+            "stop_reason": "end_turn",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 30000,
+                "cache_creation_input_tokens": 500
+            }
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), false, 100.0);
+
+        assert_eq!(m.prompt_tokens, Some(100), "input_tokens keeps its own meaning");
+        assert_eq!(m.total_tokens, 120, "the cost total stays input+output");
+        assert_eq!(m.cached_tokens, Some(30000));
+        assert_eq!(m.cache_creation_tokens, Some(500));
+        assert_eq!(m.context_used, Some(30620), "the engine held all of it in KV");
+    }
+
+    /// The opposite rule for the opposite shape: OpenAI/vLLM `prompt_tokens`
+    /// ALREADY contains the cached prefix. Reading the count must not add it to
+    /// context_used a second time.
+    #[test]
+    fn openai_cached_tokens_do_not_inflate_context_used() {
+        let response = serde_json::json!({
+            "model": "m",
+            "usage": {
+                "prompt_tokens": 5000,
+                "completion_tokens": 10,
+                "total_tokens": 5010,
+                "prompt_tokens_details": {"cached_tokens": 4096}
+            },
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), false, 100.0);
+
+        assert_eq!(m.cached_tokens, Some(4096));
+        assert_eq!(m.cache_creation_tokens, None, "this shape never reports it");
+        assert_eq!(m.context_used, Some(5000), "subsumed, so NOT 9096");
+    }
+
+    /// llama.cpp spells the same idea `timings.cache_n`, subsumed by `prompt_n`.
+    #[test]
+    fn llama_cache_n_populates_cached_tokens() {
+        let response = serde_json::json!({
+            "model": "m",
+            "usage": {"prompt_tokens": 2000, "completion_tokens": 5, "total_tokens": 2005},
+            "timings": {"prompt_n": 2000, "predicted_n": 5, "cache_n": 1500,
+                        "prompt_ms": 100.0, "predicted_ms": 50.0},
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), false, 200.0);
+
+        assert_eq!(m.cached_tokens, Some(1500));
+        assert_eq!(m.context_used, Some(2000), "prompt_n, cache included already");
+    }
+
+    /// A backend that never mentions its cache must not be reported as having
+    /// missed one: absent, not zero.
+    #[test]
+    fn cache_fields_stay_absent_when_the_backend_stays_silent() {
+        let response = serde_json::json!({
+            "model": "m",
+            "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), false, 50.0);
+
+        assert_eq!(m.cached_tokens, None);
+        assert_eq!(m.cache_creation_tokens, None);
     }
 
     /// vLLM with --enable-per-request-metrics returns a `metrics` object. It must

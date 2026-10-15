@@ -253,6 +253,17 @@ llama-proxy run --config config.yaml --dump ./debug-dumps   # dump request/respo
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+With no backend split (vLLM without `--enable-per-request-metrics`, or any
+Anthropic `/v1/messages` response) the Performance block names both derived
+numbers instead of pretending to have a measurement:
+
+```
+Performance
+  Decode (floor):        32.57 tokens/sec (wall-bounded)
+  Work rate:             50.40 tokens/sec (all tokens/wall)
+  (no backend split: decode is a floor, work is cost)
+```
+
 ### JSON Format
 ```json
 {
@@ -264,6 +275,7 @@ llama-proxy run --config config.yaml --dump ./debug-dumps   # dump request/respo
   "total_tokens": 1521,
   "prompt_tps": 1698.07,
   "generation_tps": 33.13,
+  "decode_tps_min": 32.57,
   "context_total": 4096,
   "context_used": 538,
   "context_percent": 13.1,
@@ -273,10 +285,38 @@ llama-proxy run --config config.yaml --dump ./debug-dumps   # dump request/respo
 }
 ```
 
+`decode_tps_min` is always present (the wall-bounded floor is computable whenever
+the backend counted output tokens). `cached_tokens` and
+`cache_creation_tokens` appear only when the backend reported them — absent is
+not "zero cached".
+
 ### Compact Format
 ```
 model=cosmo-6000 tokens=57/8 tps=536.42/115.68 ctx=57/262144 sync finish=length dur=184.0ms concurrent=1
 ```
+
+The `tps=` cell has three tiers, and which one you see is a fact about the
+backend, not about the request:
+
+| Rendered | Meaning | Source |
+|---|---|---|
+| `tps=536.42/115.68` | prefill / decode, **measured** | backend split: llama.cpp `timings`, or vLLM `metrics` (`--enable-per-request-metrics`) |
+| `tps>=146.32 work=6073.63` | decode is **at least** 146 tok/s; the request moved 6073.63 tok/s of work | completion / wall, and (prompt+completion) / wall |
+| `tps=n/a work=6073.63` | no decode to measure (0 counted output tokens) | — |
+
+`tps>=` is a floor, never a measurement: the wall clock still contains prefill,
+network and (in `fake` mode) the proxy's own synthesis, so it understates. It is
+the best available number when the backend reports no split — which is the
+normal case for the Anthropic `/v1/messages` path, where the proxy has to buffer
+the response to repair it and the backend's per-request timing block is not part
+of the payload at all. `work=` is a **cost** rate: on a long-context agent turn
+with a short completion it runs to thousands while decode runs at tens.
+
+`cache=N`, when present, is how many prompt tokens the engine served from its
+prefix cache — a discount on `work=`, since the engine did not recompute them.
+
+A request whose first token the proxy had to re-ask for prints `reprompt=N/2`
+before the `finish=` cell.
 
 ---
 
