@@ -1,0 +1,21 @@
+{
+  "$schema": "https://pi.dev/schemas/models.schema.json",
+  "providers": {
+    "cosmo": {
+      "baseUrl": "http://cosmo.lan:8799/v1",
+      "api": "openai-completions",
+      "apiKey": "deadbeef",
+      "models": [
+        { "id": "cosmo-proxy" }
+      ]
+    },
+    "ollama": {
+      "baseUrl": "http://host.containers.internal:8701/v1",
+      "api": "openai-completions",
+      "apiKey": "ollama",
+      "models": [
+        { "id": "qwen2.5-coder:7b" }
+      ]
+    }
+  }
+}
