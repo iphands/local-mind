@@ -351,6 +351,13 @@ WORKDIR /src/pytorch
 # they were part of every layer key, so retuning MAX_JOBS forced a full
 # torch+flashinfer+vllm recompile. Please don't "simplify" this back into ENV.
 # The -f guard and := defaults keep a bare `docker build` (no --secret) working.
+# torch >= 2.14 builds through scikit-build-core: setup.py is a shim that fails every subcommand
+# but install/develop, so `setup.py bdist_wheel` is gone and 2.16 removes the shim outright.
+# --no-isolation is required -- cmake/ninja/CUDA and requirements.txt live in THIS venv -- and
+# `build` then checks [build-system] requires and aborts loudly rather than proceeding. --outdir
+# skips dist/ deliberately: `build` does not clean it, and ./build rsyncs this tree with --delete
+# --exclude=.git, so a stale dist/ would ride in and a `dist/*.whl` glob would hand layer 1 two
+# torch wheels to resolve. -v records the resolved backend instead of a bare "backend exited".
 RUN --mount=type=cache,target=/root/.cache/ccache \
     --mount=type=cache,target=/root/.cache/uv \
     --mount=type=secret,id=buildjobs \
@@ -358,9 +365,10 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
     : "${MAX_JOBS:=8}" "${NVCC_THREADS:=1}" ; \
     export MAX_JOBS NVCC_THREADS CMAKE_BUILD_PARALLEL_LEVEL="$MAX_JOBS" ; \
     uv pip install -r requirements.txt && \
-    python setup.py bdist_wheel && \
-    mkdir -p /wheels && cp dist/*.whl /wheels/ && \
-    uv pip install dist/*.whl && \
+    mkdir -p /wheels && \
+    python -m build -v --no-isolation --wheel --outdir /wheels . && \
+    ls -l /wheels/torch-${TORCH_VERSION}-*.whl && \
+    uv pip install /wheels/torch-*.whl && \
     ccache -s
 
 ###############################################################################
