@@ -4,7 +4,8 @@ A runbook for Claude. To run it, say: **"follow ./repin.md"** (newest `main`) or
 **"follow ./repin.md to <sha>"**. It moves `VLLM_MAIN_SHA` in `container/versions.env`, re-checks
 everything the image and `./qwen3.8-flash-next/run` depend on, dispositions every customization
 (4b), makes **one commit**, and reports.
-It never builds and never pushes. The owner runs the build. (This is the hands-on, local
+It never builds and never pushes — neither `git push` nor `./container/push`; both are the owner's.
+The owner runs the build. (This is the hands-on, local
 counterpart of `qwen3.8-flash-next/upstream-watch-prompt.md`, which is a remote read-only watcher.)
 
 **Scope: the main snapshot.** The other launchers are bound to images this runbook never moves —
@@ -19,7 +20,8 @@ build-side moved, but the Qwen4Exp config did).
 
 ## Rules
 
-- Start from a clean tree on `dev`. Commit only this repin. Do not push. Do not run
+- Start from a clean tree on `dev`. Commit only this repin. **Never `git push`** — the owner does
+  (RULES.md Rule B1 #7); report the hash, never a push claim. Do not run
   `./container/build` without `PREFLIGHT_ONLY=1`. Do not touch the running `vllm` container.
   Every docker call below is a throwaway `--rm` with no GPU.
 - Scratch files go in the session scratchpad, not the repo.
@@ -286,11 +288,14 @@ One commit, `container: pin main snapshot at <sha7>`. Body as in the templates: 
 why (with PR numbers), what the dry-run resolved, the launcher and overlay findings, the completed
 4b disposition table, a `Checked:` line, `Not verified:` (runtime on the GPU, plus every
 **pending-build** row), and `Not built yet: VLLM_REF=main ./container/build.`
-No co-author trailer. Don't push.
+No co-author trailer. Never `git push` — the owner does; report the hash and stop.
 
 ## 9. Report (short)
 
 - `<old7> -> <new7>` (date, N commits), commit hash.
+- Say the words **"I did not run `git push`"** and stop there. Make no claim about the remote in either
+  direction — not "not pushed", not "already pushed", not "in sync" — you cannot see it from here
+  (`context/pitfalls.md`). This says nothing about the owner's `./container/push` step below.
 - A table of what moved (package / was / now / on the Flash-Next path?), and which build stages
   will rebuild.
 - Anything that needed a decision or a code change, and anything not verified.

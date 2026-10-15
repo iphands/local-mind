@@ -60,7 +60,7 @@ resolved before doing anything slow:
 | `./bench/bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
 | `./bench/bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |
 | `./bench/make-test-convo`| build the static ~100k-token "summarize Quake II source" turn from `vendor/yquake2` into `bench/data/test-convo.json` |
-| `./container/push` | `docker push` to `docker.io/iphands/vllm-blackwell` — by default whatever `./container/build` last built (`container/.last-build`) |
+| `./container/push` | `docker push` to `docker.io/iphands/vllm-blackwell` — by default whatever `./container/build` last built (`container/.last-build`). **Owner-only** (RULES.md Rule B1 #7) |
 | `bench/lib/`   | the shared measurement client (`benchclient.py`) + the Python drivers the bench scripts invoke (`measure.py`, `ctxbench.py`) |
 
 ## Quick start
@@ -181,7 +181,8 @@ because `main` no longer borrows the release set's torch:
    full procedure; `./container/preflight` refuses any of the three that disagrees with the commit.
 2. `PREFLIGHT_ONLY=1 VLLM_REF=main ./container/build` — seconds; refuses a mismatched pin.
    Read the output for *which* stages will rebuild: if torch moved, it is all of them.
-3. `VLLM_REF=main ./container/build && ./container/push`
+3. `VLLM_REF=main ./container/build` — then `./container/push`, which is the **owner's step**, never
+   the agent's (RULES.md Rule B1 #7).
 4. `./qwen3.8-flash-next/run` — picks the new image up by label, and needs nothing: no launcher
    overlay replaces an upstream file any more. The `ngram_embedding.py` overlay it used to mount was
    superseded by vllm#59431 (main `c32513b`, 2026-09-30) and deleted at this pin; the launcher's

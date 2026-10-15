@@ -495,7 +495,12 @@ finished.
    produced — lands with the work. Stage explicit paths: `git add <paths>`, never `git add -A`.
 5. The full project gate (Rule A) passes before every commit.
 6. A change in observable behavior updates `README.md` in the same commit.
-7. **Never push** — the human pushes after review. **No co-author trailers** unless asked.
+7. **Never push, and never offer to** — the human pushes after review; `git push` in any form,
+   `--dry-run` included, is theirs alone, and `./container/push` publishes the *image* and is never
+   a licence for it. **Report the commit, never the remote:** say "I did not run `git push`" and
+   stop — that is something you observed, while "not pushed" is a claim about a remote you cannot
+   see. Incident: `context/pitfalls.md` § *Push state is invisible from an agent shell*.
+   **No co-author trailers** unless asked.
 8. Every task in a plan carries its `**Commit**:` line, so the reminder is baked in.
 
 ### Rule B2 — Git history is append-only <!-- hp:append-only -->

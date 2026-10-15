@@ -37,14 +37,19 @@ throughput. `README.md` is the detailed reference; this file is the working cont
 - **Working a plan:** follow the tracker's Resume Instructions → pass the project gate (Rule A) →
   commit `[P<n>][T<n>][<topic>] <summary>` with the tracker row in the same commit. One task per
   commit.
-- **Git:** never push; no co-author trailers; history is append-only — fix a bad commit with a new
-  one, and chain `edit && git commit`. The same rule covers `$BUILD_DIR/src/*`: those four trees are
-  hand-editable by design, and a `checkout --force` in one of them is not recoverable.
+- **Git:** **NEVER push. `git push` is the owner's — every form, every reason** — not `--dry-run`,
+  not "just to check", never merely offered, and `./container/push` (the *image*) is theirs too.
+  Commit, explain what it contains, end the turn. No co-author trailers; history is append-only — fix
+  a bad commit with a new one, and chain `edit && git commit`. The same rule covers
+  `$BUILD_DIR/src/*`: those four trees are hand-editable by design, and a `checkout --force` in one of
+  them is not recoverable. Authoritative wording: RULES.md Rule B1 #7.
 - **Knowledge:** read `context/AGENTS.md` for what lives where; record findings as you go, and
   harvest them before a plan moves to `completed/`.
 - **Current state lives in `SERIES.md`**, not in this file.
 - **Honesty:** never claim something is done, verified or recorded unless it is — on disk, in the
-  command output.
+  command output. The remote is the same rule: report the hash and that you did not run `git push`,
+  and nothing beyond it — not "not pushed", not "already pushed", not where `origin/*` sits. You
+  cannot see it, and a remote-tracking ref is not evidence.
 
 This is a sub-project of `local-mind` (git root `../..`). The monorepo root has no agent file of its
 own and its `context/` is empty, so nothing above this file constrains you.

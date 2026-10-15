@@ -522,3 +522,38 @@ extracted by line range, including the step-7 sub-fence.
   for the T5/T6 gate runs, which reported 9 PASS / 3 named SKIP / 0 FAIL
 
 ---
+
+# Push state is invisible from an agent shell — report the commit, never the remote [OBSERVED 2026-10-15]
+
+## Problem
+An agent obeyed "never push" to the letter and then reported **"Not pushed."** as a fact about the
+remote. The rule was followed and the report was still false by construction: nothing in that shell can
+observe GitHub, and the remote may move without you either way — you cannot see it in either
+direction. The inverse claim is
+worse — "already pushed", "origin/dev has it" — because that is the belief that licenses `--amend` or a
+force-push, which Rule B2 exists to prevent. Both directions are the same error: asserting a state you
+cannot see.
+
+## How to avoid
+Report only what your own commands produced: the commit hash, and the words "I did not run
+`git push`". Nothing else about the remote — not "not pushed", not "already pushed", not where
+`origin/*` sits, and never an offer to push. A remote-tracking ref is not evidence of remote state: it
+records what this working tree last believed, and a stale-looking one is exactly the condition Rule B2.2
+names ("this holds even when the commit looks unpushed"). Do not reach for `git ls-remote` as a
+workaround — if it ever does answer, that means credentials appeared, not that pushing became allowed.
+
+## Evidence, and how to read it
+`refs/remotes/origin/dev`'s reflog carries `update by push` twice on 2026-10-15: `a7e41f3 → 0e51c58` at
+18:19:49Z, then `0e51c58 → 8363331` (= HEAD) at 20:12:04Z, ~1h52m apart. The neighbouring entry reads
+`pull: fast-forward`, so fetch writes a *different* message and these two are genuinely push-shaped.
+Read it precisely: **git writes `update by push` into the local tracking ref itself, on a successful
+push.** It proves `git push` ran **in this working tree** — most likely the owner, per the very rule
+being written here, though host automation, an IDE or a hook are not excluded — not that some external
+mechanism pushes on your behalf, and not what GitHub actually holds. Contingent, and *not the reason*:
+that shell had no `~/.ssh` and `git ls-remote origin` failed host-key verification. The prohibition is
+the owner's instruction, not the missing credential; it holds intact the day a credential appears.
+
+## Sources
+- `.git/logs/refs/remotes/origin/dev` — reflog entries above, read directly
+- `context/plans/RULES.md` Rule B1 #7 (the rule), Rule B2.2 (the same trap for `--amend`)
+- vllmcustom: repin `8363331`, 2026-10-15 — the report that triggered this entry

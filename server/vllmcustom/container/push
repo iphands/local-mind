@@ -1,5 +1,8 @@
 #!/bin/bash
 # Push the built image to Docker Hub. Run `docker login` first.
+# OWNER-ONLY: the owner publishes the image (RULES.md Rule B1 #7) — an agent running a build or a
+# repin must not invoke this script in any mode. `PUSH_DRY_RUN=1` prints tags instead of publishing
+# and is still the owner's command; the line below documents it, it is not an offer to run it.
 #
 #   ./container/push                  # pushes what ./container/build last built (container/.last-build)
 #   TAG=cu1303-sm120 ./container/push # push a specific variant tag
@@ -15,7 +18,8 @@
 # Which image: $TAG if given, else the TAG ./container/build recorded in
 # container/.last-build on its last successful run, else the CUDA variant of
 # :latest (the old default, for images built before .last-build existed). So
-# `VLLM_REF=main ./container/build && ./container/push` pushes the snapshot.
+# `VLLM_REF=main ./container/build` builds the snapshot; `./container/push` — owner-only, see the
+# header above — publishes it.
 #
 # A snapshot build (VLLM_REF=main) lives under its own tag family. Its version
 # label is <next>.dev<date>+g<sha7>; the '+' is not legal in a docker tag and

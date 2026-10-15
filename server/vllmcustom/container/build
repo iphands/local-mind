@@ -520,8 +520,8 @@ else
 fi
 
 # What ./container/push publishes by default: the image this run just built, so
-# `VLLM_REF=main ./container/build && ./container/push` pushes the snapshot
-# rather than whatever :latest happens to be. Written only on success (set -e);
-# gitignored, machine-local state.
+# the owner's `./container/push` after a `VLLM_REF=main ./container/build` publishes
+# the snapshot rather than whatever :latest happens to be. Written only on success
+# (set -e); gitignored, machine-local state.
 printf 'IMAGE=%s\nTAG=%s\nVTAG=%s\nVLLM_REF=%s\n' "$IMAGE" "$TAG" "$VTAG" "$VLLM_REF" > "$here/.last-build"
 echo "## recorded in container/.last-build -- ./container/push will publish $IMAGE:$TAG"
