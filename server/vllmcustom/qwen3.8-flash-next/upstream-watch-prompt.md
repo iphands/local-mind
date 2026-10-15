@@ -112,8 +112,8 @@ The owner's build fails or degrades if these move; check them from the raw files
    - **Upstream, RESOLVED:** `Qwen4ExpPLEEmbeddingMethod.from_quant_config` in
      https://github.com/vllm-project/vllm/blob/main/vllm/models/qwen4_exp/common/ngram_embedding.py
      handles a compressed-tensors `ignore` match on the PLE prefix since vllm#59431 (main
-     `c32513b`, 2026-09-30; pinned from `47de9d4`). The launcher now skips the owner's overlay
-     (`server/vllmcustom/qwen3.8-flash-next/patches/ple-ct-ignore/`) on such images. Only report
+     `c32513b`, 2026-09-30; pinned from `47de9d4`). The owner's overlay of that file is **deleted**
+     (2026-10-15 repin) — the launcher no longer mounts it on any image. Only report
      a regression: that branch disappearing from `from_quant_config` again.
    - **The checkpoint:** its `config.json` declares `text_config.ple_embedding_dtype =
      "float8_e4m3fn"` while its `ple-bf16-*.safetensors` shards are BF16, which makes main pick

@@ -18,18 +18,30 @@
 # Version notes (checked 2026-09-11; see README "Default version set"):
 #   - vLLM v0.29.0 (tagged 2026-09-08) pins torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0 / flashinfer 0.6.18 -- only flashinfer moved from
-#     v0.28.0. main still pins torch 2.13.0 (flashinfer 0.6.18.post1), so torch
-#     2.14.0 (released 2026-08-26) is not yet usable with any vLLM.
-#   - CUDA 13.2.1 is the newest toolkit torch 2.13.0 officially builds against
-#     (its binary matrix is 12.6/12.9/13.0/13.2). 13.3.x exists and the host
-#     driver supports it, but no torch/flashinfer/vLLM release has CI on it.
+#     v0.28.0. That is still true of the RELEASE set. It stopped being true of
+#     main on 2026-10-14: vllm#52183 moved main to torch 2.14.0 / torchvision
+#     0.29.0, so the snapshot now carries its own torch pins (VLLM_MAIN_TORCH_REF
+#     / VLLM_MAIN_TORCHVISION_VERSION) rather than this set's. No tagged vLLM
+#     release pins 2.14.0 yet, so the release build is unaffected.
+#   - CUDA 13.2.1: the constraint that actually binds the minor is the cu132
+#     torchvision index, which must agree with the CUDA our source-built torch
+#     reports (both torchvision and torchaudio raise at import on a major.minor
+#     mismatch). It happens to also be the newest toolkit in torch 2.13's binary
+#     matrix (12.6/12.9/13.0/13.2), but do not infer it from that matrix -- see
+#     the note in versions.env on what torch 2.14's PyPI metadata pulls. 13.3.x
+#     exists and the host driver supports it, but no torch/flashinfer/vLLM
+#     release has CI on it.
 #   - FlashInfer 0.6.18 (both the v0.29.0 pin and main's 0.6.18.post1) added a
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at 698e79f, 2026-10-13;
-#     was df6c7ad, 2026-10-13, 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#   - main snapshot (VLLM_REF=main in ./build, pinned at 4d9a8d6, 2026-10-15;
+#     was 698e79f, 2026-10-13, df6c7ad, 2026-10-13, 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
 #     and 1ee4be4, 2026-09-12):
+#     READ THIS BEFORE QUOTING A PIN: the "same torch 2.13.0 / torchvision 0.28.0" below
+#     describes that 1ee4be4..698e79f line, NOT the current one. 4d9a8d6 moved to
+#     torch 2.14.0 / torchvision 0.29.0 and flashinfer 0.7.1 -- see the
+#     "698e79f -> 4d9a8d6" paragraph further down, which is the current state.
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
 #     flashinfer.ai/whl), same requirements/build/cuda.txt, same
@@ -193,6 +205,66 @@
 #     cudnn-frontend is on the Flash-Next path; nvidia-cutlass-dsl stays 4.8.0
 #     (still PyPI's latest) and transformers stays 5.19.0, under which both
 #     checkpoints load with their 12 QSA layers relabelled indexed_attention.
+#     698e79f -> 4d9a8d6 (2026-10-15, 165 commits): THE FIRST REPIN TO MOVE
+#     TORCH. vllm#52183 takes torch 2.13.0 -> 2.14.0 and torchvision 0.28.0 ->
+#     0.29.0; the release set stays on 2.13.0/0.28.0, so main now pins its own
+#     via VLLM_MAIN_TORCH_REF / VLLM_MAIN_TORCHVISION_VERSION and ./build
+#     resolves them inside the VLLM_REF=main branch. Consequence, stated loudly
+#     because it is the number that matters: torch-build is dead, and the stages
+#     are a chain, so this is a FULL rebuild (torch hours -> torchaudio ->
+#     flashinfer -> vllm -> openai), not the incremental vllm-only rebuild a
+#     165-commit range would otherwise have been. ccache barely helps across a
+#     torch minor bump. Budget hours, not minutes.
+#     Two things ride along with the torch move:
+#       - torchaudio stays 2.11.0 because main still pairs it that way (upstream's
+#         own combination, so the pin did NOT move and ./preflight passes), but
+#         torchaudio-build is FROM torch-build, so v2.11.0 sources now compile
+#         against 2.14 headers with BUILD_RNNT/BUILD_ALIGN/BUILD_CUDA_CTC_DECODER
+#         on. The CUDA-major.minor import guard is unaffected (both sides 13.2);
+#         the open question is C++/ATen drift. It fails FAST in that stage --
+#         after the torch hours, before flashinfer -- so it costs time, never a
+#         broken runtime. NOT VERIFIED until the build runs.
+#       - DeepGEMM 1e1842a..a981d8e -> 6ce1c5e and TORCH_STABLE_LIBRARY ->
+#         TORCH_LIBRARY, i.e. back OFF the stable ABI. Attributed by line blame,
+#         not by subject lines: the whole net change is #61510's revert; #61491
+#         bumped the tag to 90a20e2 and its own revert #61703 cancelled it
+#         exactly. So DeepGEMM's _C lands on torch's UNSTABLE C++ ABI at the same
+#         repin that moves torch 2.13 -> 2.14, and it compiles for 12.0 here.
+#         That is the one item in this bump that can fail in vllm-build or at
+#         first boot -- watch that step personally.
+#     Build-side, everything else: vllm_flash_attn.cmake is byte-for-byte
+#     unchanged (GIT_TAG still b273a02, GIT_PROGRESS TRUE still exactly once), so
+#     the sm120 patch below still applies and the FA row is pending-build -- only
+#     ./container/archs proves the emitted archs. requirements/build/cuda.txt and
+#     pyproject.toml's build-requires also say 2.14.0 now; both are inert here,
+#     because use_existing_torch.py strips the torch pin before the build-stage
+#     install and the build runs --no-build-isolation.
+#     Runtime resolve (dry-run in the g698e79f image, in-place and
+#     --upgrade-package per changed line, plus a whole-graph --upgrade): no
+#     conflicts. flashinfer-python 0.7.0.post1 -> 0.7.1 (#60948) so
+#     flashinfer-build recompiles (~35 min AOT; cubin 0.7.1 confirmed published at
+#     flashinfer.ai/whl). humming-kernels[cu13] 0.1.16 -> 0.1.17 (#61556) -- ON
+#     the Flash-Next path, this launcher's default --moe-backend. tokenspeed-mla
+#     0.2.15 -> 2.0.2 (#61125, a MAJOR jump; MLA-only, off this path).
+#     instanttensor's floor rises 0.1.9 -> 0.2.2 but the image already carries
+#     0.2.2. Whole-graph re-resolve additionally ages anthropic, cuda-bindings,
+#     cuda-pathfinder, cuda-python, filelock, markupsafe, numpy,
+#     nvidia-cudnn-frontend, openai and pydantic-settings to newer allowed
+#     versions -- that is the index moving, as ever. nvidia-cutlass-dsl stays
+#     4.8.0 and transformers 5.19.0 (requirements/common.txt unchanged), under
+#     which both checkpoints still load with their 12 QSA layers relabelled from
+#     the raw config.json's full_attention to indexed_attention.
+#     One resolve side effect worth knowing, not worth acting on: PyPI's torch
+#     2.14.0 wheel metadata adds cuda-toolkit==13.0.3.0 and pulls
+#     nvidia-cuda-runtime / nvidia-cuda-nvrtc DOWN 13.4.92 -> 13.0.96 / 13.0.88.
+#     Do NOT conclude those wheels are in vllm-openai: layer 1 installs
+#     /wheels-base/*.whl WITH deps, so what lands depends on the metadata of OUR
+#     source-built torch wheel, which is unmeasured (that dry-run resolved PyPI's
+#     wheel, not ours). We compile against the system CUDA 13.2 and nothing known
+#     on this path loads a pip nvrtc. Treat this purely as a diagnostic: if a boot
+#     ever dies inside a CUDA/nvrtc call, run
+#     `python -c "import importlib.metadata as m;print(m.requires('torch'))"` in
+#     the image BEFORE blaming the model. NOT VERIFIED either way.
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,

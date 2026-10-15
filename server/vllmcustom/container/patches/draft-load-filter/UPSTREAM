@@ -1,6 +1,6 @@
 # draft-load-filter notes. NO BASE_SHA256 here, deliberately: like
-# container/patches/boot-timing (and unlike qwen3.8-flash-next/patches/
-# ple-ct-ignore) this NEVER replaces an upstream file. draft_load_filter.pth is
+# container/patches/boot-timing this NEVER replaces an upstream file.
+# draft_load_filter.pth is
 # a new file mounted into site-packages; it installs a sys.meta_path hook that
 # wraps upstream functions post-import, looked up by name. If upstream renames
 # or removes a target the hook no-ops and prints "[draft-load-filter] NOT
@@ -32,7 +32,22 @@
 # at :473) and orig_to_new_substr={"mtp.": None} (model.py:925, :1128) are still
 # defined and appear on no +/- line, so the mapper is untouched) and at 698e79f
 # (2026-10-13; none of the four hooked files changed since df6c7ad -- weight_utils,
-# default_loader, mtp.py and model.py are all byte-identical over the window):
+# default_loader, mtp.py and model.py are all byte-identical over the window) and at
+# 4d9a8d6 (2026-10-15, 165 commits): mtp.py and model.py are STILL untouched, but
+# weight_utils.py is +52/-1 and default_loader.py +1, and should_skip_weight goes
+# from 4 to 6 call sites. Read the blame before worrying: the def at
+# weight_utils.py:68 is on no +/- line, the ep_weight_filter re-import is unchanged,
+# and the 3 sites inside the safetensors / multi-thread iterators (1179, 1196, 1214)
+# are the same 3, only shifted -- so the seam this patch rides is intact. The 2 NEW
+# sites (1391, 1396) are both inside instanttensor_weights_iterator, which is
+# reached only under --load-format instanttensor; this launcher passes no
+# --load-format, so the default safetensors_weights_iterator path (which does get
+# local_expert_ids, default_loader.py:337) is what runs and the new code is
+# unreachable here. IF instanttensor is ever enabled, re-derive first: line 1391
+# probes any(should_skip_weight(name, set())) to decide "is this an EP-split
+# checkpoint", and our wrapper answers True for draft weights, so that probe would
+# read a draft checkpoint as EP-split and switch the loader to an exact-match
+# tensor_filter allowlist. test_draft_load_filter.py passes.
 #   vllm.model_executor.model_loader.weight_utils
 #       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
 #                               safetensors_weights_iterator resolves it as a

@@ -11,8 +11,8 @@
 # low_latency_gemm.py finds no plan table (QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY has only
 # (10, 3), (10, 0), (9, 0), (12, 1)), so enable_qwen4_exp_low_latency_gemm() returns at
 # `not plans` and the BF16 projections and the lm_head run as plain F.linear. The overlay sets
-# QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY[(12, 0)] = QWEN4_EXP_SM121_GEMM_PLANS (16 shapes, added for
-# TP=1 in vllm#59753, including this model's lm_head 248320x2560, GDN 16384x2560, QSA
+# QWEN4_EXP_GEMM_PLANS_BY_CAPABILITY[(12, 0)] = QWEN4_EXP_SM121_GEMM_PLANS (16 shapes at
+# 698e79f, 17 at 4d9a8d6; added for TP=1 in vllm#59753, including this model's lm_head 248320x2560, GDN 16384x2560, QSA
 # 13952x2560, HC 10240x320, shared expert and router shapes).
 #
 # Re-grepped at df6c7ad (2026-10-13): low_latency_gemm.py is unchanged since 187a0eb
@@ -20,6 +20,15 @@
 # (12, 1) -- upstream still ships no (12, 0) table, so the overlay is still required.
 # test_sm120_gemm_plans.py passes. The in-container check below has NOT been repeated
 # at df6c7ad: that image is not built yet.
+# Re-grepped at 4d9a8d6 (2026-10-15, 165 commits): low_latency_gemm.py is +9/-1 since
+# 698e79f and the capability dict STILL keys exactly (10, 3) (10, 0) (9, 0) (12, 1) at
+# :302-308 -- no (12, 0), so the overlay is still required. The +9 is a new
+# (7296, 2560) QSA-indexer entry inside QWEN4_EXP_SM121_GEMM_PLANS, i.e. upstream
+# tuned one more TP=2 shape on the source table this overlay copies; because the hook
+# aliases that table object rather than a snapshot of it (SOURCE_CAPABILITY = (12, 1),
+# and the log prints len(source)), the 17th shape is inherited for free and the patch
+# needed no change. test_sm120_gemm_plans.py passes. Still NOT repeated in-container
+# (this repin does not build the image); the GPU A/B below is still outstanding too.
 # Verified at vLLM 187a0eb (2026-10-10) and in a throwaway container of the b6d8e8a image
 # (no GPU): the capability key type is a tuple subclass (DeviceCapability(12, 0) == (12, 0),
 # equal hash), the existing keys are exactly (10, 0) (10, 3) (12, 1) (9, 0), the hook applies

@@ -7,9 +7,14 @@
 #   VLLM_REF=v0.28.0 FLASHINFER_REF=v0.6.16.post3 ./container/build
 #                                           # the previous set (same torch / torchaudio / torchvision)
 #   VLLM_REF=main ./container/build         # SNAPSHOT: the main commit pinned in versions.env VLLM_MAIN_SHA, with its own
-#                                           # flashinfer pin; tagged cu1321-sm120-main, never touches :latest
+#                                           # flashinfer / torch / torchvision pins; tagged cu1321-sm120-main, never touches :latest
+#                                           #   COST: if that snapshot's torch differs from the last one built, this is a FULL
+#                                           #   multi-hour rebuild (torch -> torchaudio -> flashinfer -> vllm -> openai), not
+#                                           #   an incremental one. The current pin (4d9a8d6) moved 2.13 -> 2.14, so it is.
 #   VLLM_REF=<sha> FLASHINFER_REF=v0.6.x ./container/build
-#                                           # any other untagged commit; pin flashinfer to ITS requirements/cuda.txt
+#                                           # any other untagged commit; pin flashinfer AND torch to ITS requirements/cuda.txt
+#                                           #   (since vllm#52183 main wants torch 2.14, so a bare VLLM_REF=<recent-sha>
+#                                           #    gets the release torch 2.13 and preflight refuses it — pass TORCH_REF= too)
 #   BUILD_MEM_GB=64 ./container/build       # tighter memory budget (lowers the derived MAX_JOBS)
 #   CTX_DIR= ./container/build              # build contexts straight from $BUILD_DIR/src (ships .git, see below)
 #
@@ -79,8 +84,9 @@ NVCC_THREADS=${NVCC_THREADS:-1}
 #
 # Snapshot builds (an untagged vLLM commit). `VLLM_REF=main` means the commit
 # pinned in VLLM_MAIN_SHA (versions.env), NOT the moving branch tip, with that
-# commit's flashinfer pin. Any other non-tag ref (a full sha, origin/main, a
-# branch) is taken as given, and then FLASHINFER_REF must be whatever that
+# commit's flashinfer / torch / torchvision pins (the VLLM_MAIN_* overrides). Any
+# other non-tag ref (a full sha, origin/main, a branch) is taken as given, and
+# then FLASHINFER_REF *and* TORCH_REF / TORCHVISION_VERSION must be whatever that
 # commit's requirements/cuda.txt pins (preflight refuses otherwise). Snapshots
 # get their own tag family (see TAG below) and never move :latest, so ./qwen/run
 # and friends keep the release build while ./qwen3.8-flash-next/run finds the
@@ -89,6 +95,11 @@ VLLM_REF=${VLLM_REF:-$DEFAULT_VLLM_REF}
 if [[ $VLLM_REF == main ]]; then
   VLLM_REF=$VLLM_MAIN_SHA
   FLASHINFER_REF=${FLASHINFER_REF:-$VLLM_MAIN_FLASHINFER_REF}
+  # main diverged from the release set at vllm#52183 (torch 2.14.0). Inside the
+  # branch and ahead of the DEFAULT_* fallbacks below, so an explicit
+  # TORCH_REF=... on the command line still wins and the release path is untouched.
+  TORCH_REF=${TORCH_REF:-$VLLM_MAIN_TORCH_REF}
+  TORCHVISION_VERSION=${TORCHVISION_VERSION:-$VLLM_MAIN_TORCHVISION_VERSION}
 fi
 # A release is vX.Y.Z; anything else is a snapshot.
 if [[ $VLLM_REF =~ ^v[0-9] ]]; then VLLM_SNAPSHOT=0; else VLLM_SNAPSHOT=1; fi

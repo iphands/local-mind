@@ -1,11 +1,12 @@
-# boot-timing overlay notes. NO BASE_SHA256 here, deliberately: unlike
-# patches/ple-ct-ignore (a whole-file overlay, valid only over one exact
-# upstream file), this patch NEVER replaces an upstream file. It injects
-# sitecustomize.py via PYTHONPATH and wraps upstream functions post-import,
-# looked up by name at import time. If upstream renames/removes a target the
-# hook no-ops and the report prints "hooks NOT applied: <list>" -- the boot
-# itself is untouched either way. So nothing to re-derive on snapshot bumps;
-# only a shrinking report would ever signal drift.
+# boot-timing overlay notes. NO BASE_SHA256 here, deliberately: this patch NEVER
+# replaces an upstream file. It injects sitecustomize.py via PYTHONPATH and wraps
+# upstream functions post-import, looked up by name at import time. If upstream
+# renames/removes a target the hook no-ops and the report prints "hooks NOT
+# applied: <list>" -- the boot itself is untouched either way. So nothing to
+# re-derive on snapshot bumps; only a shrinking report would ever signal drift.
+# (Since 2026-10-15 this is also the general rule rather than a contrast: the one
+# overlay that DID copy an upstream file, qwen3.8-flash-next/patches/ple-ct-ignore,
+# was removed once vllm#59431 landed upstream, so no patch here carries a hash.)
 #
 # Verified against: image iphands/vllm-blackwell:cu1321-sm120-main-vllm0.31.0.
 #   dev20260924-g36f94d5 (VLLM_MAIN_SHA 36f94d5, V2 Model Runner), 2026-09-25,
@@ -38,6 +39,15 @@
 #   renderers/base.py changed since df6c7ad, and warmup_mm still greps to 1 at both
 #   shas; every other hooked file is byte-identical over the window.
 #   test_boot_timing.py passes.
+#   Re-grepped present at 4d9a8d6 (2026-10-15, 165 commits): of the hooked files
+#   gpu_worker.py, gpu/model_runner.py and core_client.py changed since 698e79f;
+#   every hooked attr greps to exactly the same count as at 698e79f (entry 4,
+#   app_state 1, warmup_mm 1, make_client 1, run_engine_core 1, the five gpu_worker
+#   methods 5, capture_model 1, kernel_warmup+flashinfer_autotune 2) -- so nothing
+#   was renamed or removed, only bodies moved. Still needed: `git grep -inE
+#   'startup_timing|boot_timing|profile_report'` over the whole tree at 4d9a8d6
+#   returns nothing, so upstream has shipped no startup waterfall to make this
+#   redundant. test_boot_timing.py passes.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client

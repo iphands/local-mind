@@ -1,6 +1,6 @@
 # spec-live overlay notes. NO BASE_SHA256 here, deliberately: like
-# container/patches/boot-timing and draft-load-filter (and unlike
-# qwen3.8-flash-next/patches/ple-ct-ignore) this NEVER replaces an upstream file.
+# container/patches/boot-timing and draft-load-filter this NEVER replaces an
+# upstream file.
 # spec_live.pth is a new file mounted into site-packages; it installs a
 # sys.meta_path hook that wraps/extends upstream objects post-import, looked up by
 # name. If upstream renames or removes a target the hook no-ops and prints
@@ -23,6 +23,18 @@
 # call_utility_async (core_client.py:1259) and register_api_routers (routers.py:12).
 # test_spec_live.py passes. The in-container import check below has NOT been repeated
 # at df6c7ad: that image is not built yet.
+# Re-grepped present at 4d9a8d6 (2026-10-15, 165 commits): scheduler.py is +78/-0 and
+# core_client.py +21/-4 since 698e79f; core.py and routers.py are byte-identical over
+# the window. Every seam survives -- dynamic_sd_lookup still declared at
+# scheduler.py:307 and built at :310, the V2 worker's
+# num_spec_tokens_to_schedule still comes from dynamic_sd_lookup[batch] (moved
+# :1486-1488 -> :1564-1566, additive: the +78 is elsewhere in the file),
+# EngineCoreProc._convert_msgspec_args still called at core.py:1695 (def :1755),
+# call_utility_async still at core_client.py:1259, register_api_routers still 5
+# occurrences. Purely additive diff is what an in-place wrap needs: nothing the hook
+# replaces moved shape, only position. test_spec_live.py passes. Still NOT repeated
+# in-container: this repin does not build the image (repin.md forbids it), so the
+# import-time check belongs to the first boot after ./container/build.
 # Verified at vLLM 187a0eb (2026-10-10), by reading the source, by the host test
 # (test_spec_live.py: fakes shaped like these seams), and by importing the three
 # targets with the hook in a throwaway container of the b6d8e8a image (no GPU):

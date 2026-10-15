@@ -4,7 +4,7 @@
 # ./qwen3.8-flash-next/run-legacy is the upstream PR-branch image it replaced.
 # Also serves the base Qwen3.8 checkpoints (Qwen3_5: 27B and friends) from the same image:
 # the model family is read from config.json and the Flash-Next-only pieces (PLE/engram
-# offload, the PLE overlay and dtype probe, the pinned-RAM warning) are skipped for them.
+# offload, the PLE dtype probe, the pinned-RAM warning) are skipped for them.
 #
 #   VLLM_REF=main ./container/build                # build the snapshot first (the VLLM_MAIN_SHA pinned in container/versions.env)
 #   ./qwen3.8-flash-next/run                       # nvidia/Qwen3.8-Flash-Next-NVFP4 (default; MTP 4, humming MoE, fp8 KV, util 0.95)
@@ -31,10 +31,10 @@
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Last verified against main @ 698e79f (2026-10-13, VLLM_MAIN_SHA in
+# Last verified against main @ 4d9a8d6 (2026-10-15, VLLM_MAIN_SHA in
 # container/versions.env at the time; first verified at 1ee4be4, 2026-09-12, re-checked at
 # 468663a, 826e300, 36f94d5, a44d7b5, 2b9b55c, 47de9d4, 84bcbc6, bdd31c3, b6d8e8a, 187a0eb,
-# df6c7ad and on each bump): vllm/config/engram.py with
+# df6c7ad, 698e79f and on each bump): vllm/config/engram.py with
 # cpu_offload, Qwen4ExpPLEPinnedHostEmbedding (in qwen4_exp/common/ since
 # vllm#57497) selected when it is set, Qwen4ExpForConditionalGeneration +
 # Qwen4ExpMTP in the registry, VLLM_GDN_DECODE_KERNEL still an env, the qwen3
@@ -80,19 +80,17 @@
 #      (Nested dicts are merged into the sub-config, not replaced: vLLM's
 #      ModelConfig._apply_dict_overrides -> _update_nested.)
 #   2. With the field corrected, from_quant_config() sees a compressed-tensors
-#      quant config and upstream only knows Fp8Config / ModelOpt there: it would
-#      raise NotImplementedError. patches/ple-ct-ignore/ngram_embedding.py is
-#      the upstream file plus one branch -- a compressed-tensors `ignore` match
-#      on the PLE prefix (this checkpoint: 're:.*\.ple\..*') means unquantized.
-#      Mounted over the image's copy (PATCH_PLE=0 to drop it). The overlay is
-#      only valid over the exact upstream file it came from, so the launcher
-#      hashes the image's copy against BASE_SHA256 in
-#      patches/ple-ct-ignore/UPSTREAM before mounting it.
-#      Verified in the image: from_quant_config(<this checkpoint's CT config>,
-#      <ple prefix>) -> Qwen4ExpPLEUnquantizedEmbeddingMethod.
-#      Fixed upstream by vllm#59431 (main c32513b, 2026-09-30): from 47de9d4 on
-#      the image's own file has the compressed-tensors branch, the launcher
-#      sees it and skips the overlay; it is only mounted on older snapshots.
+#      quant config, and upstream at the time only knew Fp8Config / ModelOpt there,
+#      so it raised NotImplementedError. This launcher used to carry the fix as an
+#      overlay of the upstream ngram_embedding.py (plus one branch: a
+#      compressed-tensors `ignore` match on the PLE prefix — this checkpoint:
+#      're:.*\.ple\..*' — means unquantized). It does not any more: vllm#59431
+#      (main c32513b, 2026-09-30) landed the same branch upstream, so from
+#      47de9d4 on the image's own file already handles it. Verified again at
+#      4d9a8d6: the CompressedTensors branch is still there, and the overlay is
+#      gone from this launcher (see "PLE compressed-tensors overlay ... GONE"
+#      below the image check). The nvidia checkpoint never hit this path anyway —
+#      all four projections are BF16 in the MTP layer too.
 # SECOND BOOT (2026-09-13): past the PLE method, the pinned-host table itself
 # failed to allocate, 3 s into layer construction:
 #   ngram_embedding.py allocate_embedding_weight -> torch.empty(..., device="cpu",
@@ -133,8 +131,7 @@
 #
 # Knobs (same names as ./qwen3.8-flash-next/run-legacy where the meaning is the same):
 #   PLE_OFFLOAD=0 ...                              # do NOT offload: table on GPU (TP2+ only; will not fit one card). Default 1 for family flashnext, 0 for qwen
-#                                                  # (PATCH_PLE, PLE_DTYPE, MOE_BACKEND, NVFP4_BACKEND likewise default per family; see "Model family" below)
-#   PATCH_PLE=0 ...                                # do NOT mount patches/ple-ct-ignore (reproduces the NotImplementedError)
+#                                                  # (PLE_DTYPE, MOE_BACKEND, NVFP4_BACKEND likewise default per family; see "Model family" below)
 #   BOOT_TIMING=0 ...                              # do NOT mount container/patches/boot-timing (startup waterfall report)
 #   DRAFT_LOAD_FILTER=0 ...                        # read every checkpoint tensor again: the MTP drafter all 123.5 GiB, the target its 2.5 GiB of mtp.*
 #   PLE_DTYPE=float8_e4m3fn / PLE_DTYPE= ...       # force / skip the ple_embedding_dtype override (default: auto from the shard)
@@ -252,7 +249,6 @@ ONLINE_FP8=${ONLINE_FP8:-0}                      # 1 = online FP8 (fp8_per_chann
 SM120_SKINNY=${SM120_SKINNY:-0}                  # 1 = reuse the SM121 skinny-GEMM plan table on SM120 (see "SM120_SKINNY")
 VISION=${VISION:-1}                              # 0 = --language-model-only
 PLE_OFFLOAD=${PLE_OFFLOAD:-$_d_ple}              # 1 = --engram-config cpu_offload (the single-GPU path); default 1 for flashnext only
-PATCH_PLE=${PATCH_PLE:-$_d_ple}                  # mount patches/ple-ct-ignore over the image's ngram_embedding.py (see header); flashnext only
 PLE_DTYPE=${PLE_DTYPE-$_d_ple_dtype}             # auto = read the shard; a dtype name = force; EMPTY = trust config.json / skip (the qwen family)
 PINNED_ROUND_MB=${PINNED_ROUND_MB:-1024}         # pinned requests above this are not rounded to a power of 2; 0 = torch default (see header)
 BOOT_TIMING=${BOOT_TIMING:-1}                    # mount container/patches/boot-timing on PYTHONPATH: per-section boot report at "Application startup complete"
@@ -267,59 +263,17 @@ CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
   echo "Image $CONTAINER not found. Build the main snapshot first:"
   echo "  VLLM_REF=main ./container/build"; exit 1; }
 
-# PLE patch: an overlay of one upstream file, valid only over the exact upstream
-# file it was derived from. Checked by CONTENT: the image's copy must hash to
-# BASE_SHA256 in patches/ple-ct-ignore/UPSTREAM. (It used to be checked by vLLM
-# commit, which forced an edit on every bump even though the file was
-# byte-identical from 468663a to 36f94d5.) Costs one short-lived container, ~1 s.
-PATCH_ROOT="$HERE/patches/ple-ct-ignore"
-PATCH_SRC="$PATCH_ROOT/ngram_embedding.py"
-if [[ "$PATCH_PLE" != "0" ]]; then
-  [[ -f "$PATCH_SRC" && -f "$PATCH_ROOT/UPSTREAM" ]] || { echo "missing $PATCH_SRC or $PATCH_ROOT/UPSTREAM"; exit 1; }
-  # shellcheck source-path=SCRIPTDIR source=patches/ple-ct-ignore/UPSTREAM
-  source "$PATCH_ROOT/UPSTREAM"
-  # Where upstream keeps the file moves between commits (nvidia/ -> common/ at
-  # vLLM 267eee5), so the mount target comes from UPSTREAM too.
-  PATCH_DST=/opt/venv/lib/python3.12/site-packages/$UPSTREAM_PATH
-  # Captured rather than discarded. The reachability probe and the image check above have
-  # already ruled out "no socket" and "no image", so a failure here means upstream's file is
-  # not at $PATCH_DST (its path does move — nvidia/ -> common/ at vLLM 267eee5) or the
-  # inspection container could not start. Neither of those is "the hash differs", which is
-  # the only thing the message below is allowed to claim.
-  _img_sum=''
-  # Matched, not split: the capture is stdout+stderr merged, so the first token is the hash
-  # only if nothing else printed. `${_img_out%% *}` would put an `ld.so: warning:` into the
-  # mismatch message as `sha256 ld.so: warning:` — the exact misattribution this block exists
-  # to prevent. No digest found (even on exit 0) leaves it empty, which is the no-hash case.
-  if _img_out=$("${DOCKER[@]}" run --rm --entrypoint sha256sum "$CONTAINER" "$PATCH_DST" 2>&1) &&
-     [[ "$_img_out" =~ (^|[^0-9a-fA-F])([0-9a-f]{64})[[:space:]] ]]; then
-    _img_sum=${BASH_REMATCH[2]}
-  fi
-  _img_err=${_img_out%%$'\n'*}
-  # vllm#59431 (main c32513b, 2026-09-30) made the overlay redundant: upstream's
-  # from_quant_config now returns the unquantized method when
-  # CompressedTensorsConfig.get_scheme_dict() is None, which it is for an
-  # `ignore` match -- the same should_ignore_layer() call the overlay makes.
-  # Detected by content, like the hash, so older snapshots still get the overlay.
-  if [[ -n "$_img_sum" ]] && [[ "$_img_sum" != "$BASE_SHA256" ]] &&
-     "${DOCKER[@]}" run --rm --entrypoint grep "$CONTAINER" -qF \
-       'isinstance(quant_config, CompressedTensorsConfig)' "$PATCH_DST" 2>/dev/null; then
-    echo "## PLE overlay: not mounted, the image's ngram_embedding.py already handles a compressed-tensors ignore (vllm#59431)"
-    PATCH_PLE=0
-  elif [[ -z "$_img_sum" ]]; then
-    echo "$CONTAINER gave no hash for $PATCH_DST — the inspection container said:"
-    echo "  ${_img_err:-<no output at all>}"
-    echo "So the upstream file moved, or no container can be started from this image. The"
-    echo "overlay can be neither checked nor mounted: correct the path in"
-    echo "$PATCH_ROOT/UPSTREAM, or set PATCH_PLE=0 to boot without it."; exit 1
-  elif [[ "$_img_sum" != "$BASE_SHA256" ]]; then
-    _img_ref=$("${DOCKER[@]}" image inspect -f '{{index .Config.Labels "ai.vllmcustom.vllm.ref"}}' "$CONTAINER")
-    echo "$CONTAINER (vLLM ${_img_ref:-<no ai.vllmcustom.vllm.ref label>}) ships a different"
-    echo "$PATCH_DST than the overlay was derived from (sha256 $_img_sum, overlay expects"
-    echo "$BASE_SHA256 from $BASE_REF). Re-derive the patch (see $PATCH_ROOT/UPSTREAM),"
-    echo "or PATCH_PLE=0 to boot without it."; exit 1
-  fi
-fi
+# The PLE compressed-tensors overlay that used to live here is GONE (2026-10-15), and
+# so is the PATCH_PLE knob that toggled it: if you set PATCH_PLE=0 out of habit it is
+# now simply unread by this script, not an unsupported error. Nothing else changed.
+# vllm#59431 (main c32513b, 2026-09-30) taught upstream's from_quant_config to
+# return the unquantized method when CompressedTensorsConfig.get_scheme_dict() is
+# None — the same should_ignore_layer() call the overlay made — so the overlay has
+# been inert on every snapshot since 47de9d4, and at this pin (4d9a8d6) upstream's
+# own ngram_embedding.py carries the branch. The launcher used to detect that by
+# grepping the image's copy and skip the mount; now there is nothing to skip. The
+# dtype probe below is still required and unchanged: it fixes the *checkpoint's*
+# wrong ple_embedding_dtype, which is a different bug.
 
 # ple_embedding_dtype: config.json vs. what the shards actually hold. The value
 # that matters is the tensor dtype; when config.json disagrees, override it.
@@ -650,7 +604,6 @@ CONTAINER_ARGS+=(
 # If you need other allocator settings, put them in the same variable via
 # ENV_EXTRA (last -e wins) and keep this key in it.
 [[ "$PINNED_ROUND_MB" != "0" ]] && CONTAINER_ARGS+=( -e PYTORCH_CUDA_ALLOC_CONF="pinned_max_round_threshold_mb:$PINNED_ROUND_MB" )
-[[ "$PATCH_PLE" != "0" ]] && CONTAINER_ARGS+=( -v "$PATCH_SRC:$PATCH_DST:ro" )
 # Startup timing: a PYTHONPATH dir with sitecustomize.py + boot_timing.py. No
 # upstream file is replaced, so there is nothing to sha-check (see its UPSTREAM).
 # The image ships no PYTHONPATH; sitecustomize chains Debian's own regardless.

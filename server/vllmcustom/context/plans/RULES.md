@@ -133,7 +133,10 @@ false-fails and false-passes. Extension second: 16 of the 20 tracked `.py` files
 with no shebang at all, and the three sourced libs (`common/_run-lib.sh`, `common/_model-lib.sh`,
 `bench/_bench-lib.sh`) open with `# shellcheck shell=bash` instead of one. A shebang-only classifier
 syntax-checks none of those nineteen and still prints a green run — it reported `24 b / 8 p` here on
-2026-10-13 while the true set was `27 b / 24 p`. Pass: no `FAIL` line, counts `27 b` / `24 p`, `env ok`.
+2026-10-13 while the true set was `27 b / 24 p`. Pass: no `FAIL` line, counts `27 b` / **`23 p`**,
+`env ok`. (Python was 24 until the `4d9a8d6` repin deleted `qwen3.8-flash-next/patches/ple-ct-ignore/`,
+whose `ngram_embedding.py` was a tracked no-shebang `.py` and so counted here. Removal on purpose, so
+the number moves — a count that drops with no such story is still the failure this step exists for.)
 
 ```bash
 # 1a — syntax, over tracked files only (in-memory compile: no __pycache__ written)
@@ -193,13 +196,21 @@ or say in the tracker that it did not.
 
 **4. Pin preflight, read-only form.** Pass: `## preflight OK`, exit 0, for **both** sets.
 
+The two sets no longer share a torch: main took 2.14.0 in vllm#52183 while the release set
+stays on 2.13.0. So the snapshot's pins must be prefixed **per command**, not exported — one
+exported `TORCH_VERSION` for both lines reads green only while the two sets agree, and after
+vllm#52183 it is a false failure on a healthy tree.
+
 ```bash
 set -a; . container/versions.env; set +a
 export SRC_DIR=${SRC_DIR:-/mnt/noir/scratch/ai/vllm/build/src} TORCHVISION_INDEX=cu132 \
-  TORCH_VERSION=${DEFAULT_TORCH_REF#v} TORCHAUDIO_VERSION=${DEFAULT_TORCHAUDIO_REF#v} \
-  TORCHVISION_VERSION=$DEFAULT_TORCHVISION_VERSION
-VLLM_REF=$DEFAULT_VLLM_REF  FLASHINFER_VERSION=${DEFAULT_FLASHINFER_REF#v}    ./container/preflight
-VLLM_REF=$VLLM_MAIN_SHA     FLASHINFER_VERSION=${VLLM_MAIN_FLASHINFER_REF#v}  ./container/preflight
+  TORCHAUDIO_VERSION=${DEFAULT_TORCHAUDIO_REF#v}      # not diverged: one value serves both sets
+VLLM_REF=$DEFAULT_VLLM_REF  FLASHINFER_VERSION=${DEFAULT_FLASHINFER_REF#v}    \
+TORCH_VERSION=${DEFAULT_TORCH_REF#v}      TORCHVISION_VERSION=$DEFAULT_TORCHVISION_VERSION \
+  ./container/preflight
+VLLM_REF=$VLLM_MAIN_SHA     FLASHINFER_VERSION=${VLLM_MAIN_FLASHINFER_REF#v}  \
+TORCH_VERSION=${VLLM_MAIN_TORCH_REF#v}    TORCHVISION_VERSION=$VLLM_MAIN_TORCHVISION_VERSION \
+  ./container/preflight
 ```
 
 Use **this** form as the routine check. The documented `PREFLIGHT_ONLY=1 ./container/build` is the

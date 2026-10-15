@@ -29,17 +29,27 @@ section**, which always stays last. Keep it dense.
   `assert isinstance(model_output, tuple)` crash) and `muse/patches/muse-dflash/` have **no test at
   all**. Anything touching them is verified at runtime or not at all — say which.
 
-## Only overlays that copy an upstream file carry a content hash [REPO]
+## No vLLM patch replaces an upstream file, so nothing carries a content hash [REPO, amended 2026-10-15]
 
-- `container/patches/{boot-timing,draft-load-filter,sm120-gemm-plans,spec-live}/UPSTREAM` state
-  that no `BASE_SHA256` is present **deliberately**: they are post-import hooks, so there is no
-  upstream file to hash — a renamed target just no-ops and the boot report says
-  `hooks NOT applied`.
-- `qwen3.8-flash-next/patches/ple-ct-ignore/UPSTREAM` does carry a hash, and the **launcher**
-  checks it against the copy inside the image, not against the host tree. A host-side hash check
-  would compare the wrong artifact, so gate step 5 does not do one.
-- Consequence: "add a check that the patches match upstream" is mostly a no-op here. The check that
-  matters is `./container/archs` for the compiled extensions, and the launcher's own refusal.
+- All four patches under `container/patches/` (`boot-timing`, `draft-load-filter`,
+  `sm120-gemm-plans`, `spec-live`) are post-import hooks: a `sitecustomize`/`.pth` mount that wraps
+  upstream objects looked up by name at import time. Their `UPSTREAM` files state that no
+  `BASE_SHA256` is present **deliberately** — there is no upstream file to hash, and a renamed target
+  just no-ops, with the boot report printing `hooks NOT applied`.
+- The exception, so do not over-read the heading above: `container/patches/vllm-flash-attn-arch.py`
+  is not a hook. It is a `FetchContent` `PATCH_COMMAND` that edits the fetched vllm-flash-attention
+  `CMakeLists.txt`, and it asserts each edit lands exactly once. It guards itself by anchor rather
+  than by sha, so it still carries no `BASE_SHA256` — but it does modify upstream content, and it is
+  the row `./container/archs` exists to prove.
+- There **used to be** one whole-file overlay: `qwen3.8-flash-next/patches/ple-ct-ignore/`, which
+  copied `ngram_embedding.py` and carried a `BASE_SHA256` that the **launcher** compared against the
+  copy inside the image, never the host tree (a host-side check would compare the wrong artifact, so
+  gate step 5 does not do one). vllm#59431 landed the same branch upstream on 2026-09-30, the overlay
+  was inert from `47de9d4` on, and it was **deleted at the `4d9a8d6` repin**. Its base file had moved
+  +221/−17 in that last range, so it was unrecoverable as an overlay regardless.
+- Consequence: "add a check that the patches match upstream" is a no-op here — there is no base file
+  to match. The checks that matter are `./container/archs` for the compiled extensions, the host-side
+  `container/patches/*/test_*.py` (gate step 3), and the hooks' own runtime `NOT applied` lines.
 
 ## This project reaches the docker socket directly — it uses no privilege helper [LIVE 2026-10-13, amended 2026-10-13 (Plan 02)]
 

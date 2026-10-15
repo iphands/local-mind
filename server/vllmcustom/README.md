@@ -55,7 +55,7 @@ resolved before doing anything slow:
 | `./muse/run`  | serve Muse Glimmer — same image, plus the shims in `muse/patches/` (see below). Default `RedHatAI/Muse-Glimmer-30B-NVFP4` |
 | `./laguna/run`| serve Laguna-S with its DFlash drafter. Default `Laguna-S-2.1-NVFP4` |
 | `./qwen3.8-flash-next/run-legacy`| serve Qwen3.8-Flash-Next (180B-A6B) single-GPU via the `vllm/vllm-openai:qwen38-flash-next` PR-branch image — the only *published* build with a PLE CPU-offload path (vllm#53899); NOT the local build. The launcher the model card's numbers correspond to; kept for A/B. Default `primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8` |
-| `./qwen3.8-flash-next/run`| **the default since 2026-09-13** (also takes base Qwen3.8 checkpoints such as `unsloth/Qwen3.8-27B-NVFP4`: the family is read from `config.json`, and the PLE/engram offload is only used for Flash-Next; `FAMILY=` overrides): the same model from the local **main snapshot** image (the `cu1321-sm120-main-vllm…` image built from `VLLM_MAIN_SHA` in `container/versions.env`, found by its `ai.vllmcustom.vllm.ref` label; built with `VLLM_REF=main ./container/build`), using main's merged single-GPU path (vllm#54371, `--engram-config '{"cpu_offload": true}'`) instead of the PR branch's offload worker. Carries three fixes the first boots needed (see its header): an `--hf-overrides` correcting the checkpoint's wrong `ple_embedding_dtype`, auto-detected from the shard; a one-branch overlay of `ngram_embedding.py` (`qwen3.8-flash-next/patches/ple-ct-ignore/`) so a compressed-tensors `ignore` match on the PLE means unquantized; and `PYTORCH_CUDA_ALLOC_CONF=pinned_max_round_threshold_mb:1024`, because the 95.4 GiB table is one pinned allocation and torch's pinned allocator otherwise rounds it up to 128 GiB (measured: fails in 0.2 s without, pins in 35 s with) — plus the boot-timing `sitecustomize` mount (`container/patches/boot-timing/`) that prints a phase + GPU/host-memory + `gpu_memory_utilization` headroom report at serve-ready |
+| `./qwen3.8-flash-next/run`| **the default since 2026-09-13** (also takes base Qwen3.8 checkpoints such as `unsloth/Qwen3.8-27B-NVFP4`: the family is read from `config.json`, and the PLE/engram offload is only used for Flash-Next; `FAMILY=` overrides): the same model from the local **main snapshot** image (the `cu1321-sm120-main-vllm…` image built from `VLLM_MAIN_SHA` in `container/versions.env`, found by its `ai.vllmcustom.vllm.ref` label; built with `VLLM_REF=main ./container/build`), using main's merged single-GPU path (vllm#54371, `--engram-config '{"cpu_offload": true}'`) instead of the PR branch's offload worker. Carries two fixes the first boots needed (see its header): an `--hf-overrides` correcting the checkpoint's wrong `ple_embedding_dtype`, auto-detected from the shard; and `PYTORCH_CUDA_ALLOC_CONF=pinned_max_round_threshold_mb:1024`, because the 95.4 GiB table is one pinned allocation and torch's pinned allocator otherwise rounds it up to 128 GiB (measured: fails in 0.2 s without, pins in 35 s with) — plus the boot-timing `sitecustomize` mount (`container/patches/boot-timing/`) that prints a phase + GPU/host-memory + `gpu_memory_utilization` headroom report at serve-ready. It used to mount a third fix, a one-branch overlay of `ngram_embedding.py`; vllm#59431 landed it upstream and the overlay is deleted |
 | `./bench/bench`| client-side TTFT + decode tok/s against `:8700`, logs `bench/bench-results.md` |
 | `./bench/bench-wrapper`| sweep NVFP4-backend × MTP configs: start/stop vLLM per config, warmup, measure, print table |
 | `./bench/bench-context`| large-context decode test: per backend, 3-turn convo + padded probes (8k–128k), TG-vs-depth |
@@ -100,7 +100,12 @@ pins live in [`container/versions.env`](container/versions.env)** (with the reas
 | torchaudio | v2.11.0 (**from source**, small) | `TORCH_CUDA_ARCH_LIST=12.0` |
 | torchvision | 0.28.0 (`+cu132` wheel, `--no-deps`) | not perf-critical |
 
-torchaudio 2.11.0 alongside torch 2.13.0 is not a typo — that is upstream's own pairing.
+torchaudio 2.11.0 alongside torch 2.13.0 is not a typo — that is upstream's own pairing, and it is
+still 2.11.0 next to the snapshot's torch 2.14.0 for the same reason: `main` pairs them that way, so
+the pin did not move even though torch did. What that does change is what it compiles against —
+`torchaudio-build` is `FROM torch-build`, so 2.11.0's sources now build against 2.14 headers. The
+CUDA major.minor import guard below is unaffected (both sides 13.2); whether the C++ lines up is
+unproven until that stage actually runs.
 torchaudio is built from source because no `+cu132` wheel exists and a `+cu130` one does
 **not** work: torchaudio and torchvision both compare their compiled CUDA major.minor with
 `torch.version.cuda` at import and raise (`PyTorch has CUDA version 13.2 whereas TorchAudio
@@ -150,9 +155,9 @@ re-check its `requirements/cuda.txt` when you do. What differs from the release 
 
 | component | release (v0.29.0) | main snapshot (`VLLM_MAIN_SHA`) |
 |---|---|---|
-| FlashInfer | v0.6.18 | **v0.7.0** (`VLLM_MAIN_FLASHINFER_REF`; vllm#58069, was 0.6.18.post1 through `826e300`; cubin wheel is published). 0.7.0 split the AOT jit-cache into a shim plus per-arch provider wheels (flashinfer#4514): flashinfer-build builds `flashinfer-jit-cache-sm120f` + the shim, and vllm-openai asserts the shim finds an sm120 provider |
-| torch / torchaudio / torchvision | 2.13.0 / 2.11.0 / 0.28.0 | unchanged |
-| runtime deps (from PyPI) | — | + `instanttensor`, cutlass-dsl 4.7.1, quack 0.6.5, transformers ≥ 5.10.4, `xgrammar==0.2.7` (was a range), `humming-kernels[cu13]==0.1.16` (0.1.12 at `468663a`, 0.1.15 at `826e300`), and via flashinfer 0.7.0 `nccl-extensions` / `nccl4py>=0.4.1`; the full `36f94d5` `requirements/cuda.txt` resolves against torch 2.13.0 (`uv pip install --dry-run` in the g468663a image, 2026-09-24; torch stays 2.13.0) |
+| FlashInfer | v0.6.18 | **v0.7.1** (`VLLM_MAIN_FLASHINFER_REF`; vllm#60948, was 0.6.18.post1 through `826e300`, 0.7.0 from `36f94d5`, 0.7.0.post1 from `47de9d4`; cubin wheel is published). 0.7.0 split the AOT jit-cache into a shim plus per-arch provider wheels (flashinfer#4514): flashinfer-build builds `flashinfer-jit-cache-sm120f` + the shim, and vllm-openai asserts the shim finds an sm120 provider |
+| torch / torchaudio / torchvision | 2.13.0 / 2.11.0 / 0.28.0 | **2.14.0 / 2.11.0 / 0.29.0** (`VLLM_MAIN_TORCH_REF` / `VLLM_MAIN_TORCHVISION_VERSION`; vllm#52183 from `4d9a8d6`). The **first repin to move torch**, so the snapshot no longer shares the release set's torch — torchaudio stays 2.11.0 because that is still main's own pairing. Consequence: `torch-build` is dead, the stages are a chain, so a snapshot bump that moves torch is a full multi-hour rebuild, not an incremental one |
+| runtime deps (from PyPI) | — | + `instanttensor` (floor now `>=0.2.2`; the image already carried 0.2.2), cutlass-dsl 4.8.0, quack 0.6.5, transformers ≥ 5.16.1, `humming-kernels[cu13]==0.1.17` (0.1.12 at `468663a`, 0.1.15 at `826e300`, 0.1.16 at `36f94d5`) — **on this launcher's default `--moe-backend`, so it is on the Flash-Next path** — `tokenspeed-mla==2.0.2` (was 0.2.15; a major jump, MLA-only and off this path), and via flashinfer `nccl-extensions` / `nccl4py>=0.4.1`. The full `4d9a8d6` `requirements/cuda.txt` re-resolves clean with **no conflicts** (whole-graph `uv pip install --dry-run --upgrade` in the `g698e79f` image, 2026-10-15); torch moves to 2.14.0 as intended, and torch's own metadata additionally pulls `cuda-toolkit==13.0.3.0` and takes `nvidia-cuda-runtime` / `nvidia-cuda-nvrtc` **down** to 13.0.96 / 13.0.88 |
 | system packages | — | **`libdw-dev`** in vllm-build, **`libdw1`** in vllm-openai: vllm#56876 repinned DeepGEMM (built for sm120) to the `vllm-project` fork, whose `deep_jit` submodule includes `<elfutils/libdwfl.h>` and `dlopen`s `libdw.so.1` for stack traces. Deliberately not in `base`, so torch/flashinfer layers stay cached |
 | new CUDA extensions | — | `_deepselect_C` (10.0f only → empty target on sm120, nothing compiled); FlashMLA repinned, still 9.0/10.x only |
 | vllm-flash-attention commit | `06bdd47` | `b273a02` (was `9cd61de`, before that `506341a`) — `CMakeLists.txt` byte-identical across the move, the sm120 patch applies (re-run against the new tag, 2026-10-13) |
@@ -166,21 +171,28 @@ from in the `ai.vllmcustom.vllm.ref` label (full sha for a snapshot, tag for a r
 the tag typed in. `./container/push` pushes whatever the last successful build produced
 (`container/.last-build`), and pushes `:latest` only when `:latest` *is* the image being pushed.
 
-**Bumping the snapshot** is one edit:
+**Bumping the snapshot** used to be one edit. Since vllm#52183 it is the sha plus its three slots,
+because `main` no longer borrows the release set's torch:
 
-1. `container/versions.env`: set `VLLM_MAIN_SHA`, and `VLLM_MAIN_FLASHINFER_REF` to that commit's
-   `requirements/cuda.txt` flashinfer pin.
+1. `container/versions.env`: set `VLLM_MAIN_SHA`, `VLLM_MAIN_FLASHINFER_REF` to that commit's
+   `requirements/cuda.txt` flashinfer pin, and `VLLM_MAIN_TORCH_REF` + `VLLM_MAIN_TORCHVISION_VERSION`
+   to *its* torch pins. Check `requirements/cuda.txt` for a `torchaudio==` line too — if it moved,
+   that is a source-build of a second ABI partner and worth stopping over. `./repin.md` is the
+   full procedure; `./container/preflight` refuses any of the three that disagrees with the commit.
 2. `PREFLIGHT_ONLY=1 VLLM_REF=main ./container/build` — seconds; refuses a mismatched pin.
+   Read the output for *which* stages will rebuild: if torch moved, it is all of them.
 3. `VLLM_REF=main ./container/build && ./container/push`
-4. `./qwen3.8-flash-next/run` — picks the new image up by label. The PLE overlay is checked by the
-   upstream file's content hash (`qwen3.8-flash-next/patches/ple-ct-ignore/UPSTREAM`), so it needs
-   attention only if that upstream file changed; the launcher says so if it did. From vLLM
-   `c32513b` on (vllm#59431) upstream handles the compressed-tensors `ignore` itself, and the
-   launcher skips the overlay rather than refusing.
+4. `./qwen3.8-flash-next/run` — picks the new image up by label, and needs nothing: no launcher
+   overlay replaces an upstream file any more. The `ngram_embedding.py` overlay it used to mount was
+   superseded by vllm#59431 (main `c32513b`, 2026-09-30) and deleted at this pin; the launcher's
+   `--hf-overrides` dtype probe and the pinned-RAM setting are both still required and unchanged.
 
-Any other untagged ref works the same way but has to bring its own
-flashinfer pin: `VLLM_REF=<sha> FLASHINFER_REF=<its requirements/cuda.txt pin> ./container/build`;
-preflight refuses a mismatch as usual.
+Any other untagged ref works the same way but has to bring its own pins:
+`VLLM_REF=<sha> FLASHINFER_REF=<its requirements/cuda.txt pin> ./container/build`, and — since
+vllm#52183 — also `TORCH_REF=<its torch pin> TORCHVISION_VERSION=<its torchvision pin>` whenever that
+commit wants something other than the release set's 2.13.0, because the `VLLM_MAIN_*` overrides apply
+to `VLLM_REF=main` only. A bare `VLLM_REF=<recent sha>` therefore gets the release torch and is
+refused by preflight rather than built quietly.
 
 ### Boot timing report (`container/patches/boot-timing/`)
 
@@ -196,12 +208,12 @@ arithmetic on measured bytes, not estimates. `BOOT_TIMING=0` disables everything
 `/tmp/vllm-boot-timing/marks.log`, and `container/patches/boot-timing/test_boot_timing.py`
 covers the renderer on any host without vLLM.
 
-### Why not newer (as of 2026-09-11)
+### Why not newer (as of 2026-10-15)
 
 | candidate | status | blocker |
 |---|---|---|
-| torch 2.14.0 (2026-08-26) | released | no vLLM release pins it — v0.29.0 and `main` still pin 2.13.0 |
-| FlashInfer 0.6.18.post1 (2026-09-04), 0.7.0 (2026-09-21) | released | vLLM's wheel hard-pins `flashinfer-python==X`; v0.29.0 wants 0.6.18 (`main` is on 0.7.0 since 2026-09-24, and the snapshot follows it) |
+| torch 2.14.0 (2026-08-26) | released, **and the main snapshot now runs it** | still not a blocker-free choice for the *release* build: no tagged vLLM pins it (v0.29.0 wants 2.13.0), so `VLLM_REF=v0.29.0` keeps 2.13.0 and only `VLLM_REF=main` moves. `main` took it in vllm#52183 on 2026-10-14, which is why the snapshot carries its own torch pins at all |
+| FlashInfer 0.6.18.post1 (2026-09-04), 0.7.0 (2026-09-21), 0.7.1 (2026-10-12) | released | vLLM's wheel hard-pins `flashinfer-python==X`; v0.29.0 wants 0.6.18 (`main` is on 0.7.1 since vllm#60948, and the snapshot follows it) |
 | CUDA 13.3.1 | image published; driver 610.43.03 ≥ its 610.43.02 floor | not in torch's binary matrix (12.6/12.9/13.0/13.2), no FlashInfer/vLLM CI; 13.3+ nvcc changed its dry-run output (broke sccache upstream) |
 | vLLM v0.30.0 | not tagged (2026-09-18: `v0.30.0rc2` is out, on a release branch) | when it is: `VLLM_REF=v0.30.0 FLASHINFER_REF=<its requirements/cuda.txt pin> PREFLIGHT_ONLY=1 ./container/build` first |
 

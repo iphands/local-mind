@@ -24,9 +24,13 @@ build-side moved, but the Qwen4Exp config did).
   Every docker call below is a throwaway `--rm` with no GPU.
 - Scratch files go in the session scratchpad, not the repo.
 - **Stop and ask** before editing if any of these happen: `torch==` / `torchaudio==` /
-  `torchvision==` change in `requirements/cuda.txt` (torch source rebuild plus a re-pin of the
-  release set too), a launcher workaround breaks with no obvious fix, the dry-run resolve
-  moves torch / torchaudio / flashinfer when it shouldn't, or a **4b** row cannot be answered
+  `torchvision==` change in `requirements/cuda.txt` — still a stop, but since the `4d9a8d6` repin the
+  usual answer is no longer "re-pin the release set too": main's torch now has its own slots
+  (`VLLM_MAIN_TORCH_REF` / `VLLM_MAIN_TORCHVISION_VERSION`), so the question is *take the tip with its
+  own torch, or hold the snapshot back*, and that is the owner's call, not yours. `torchaudio==`
+  moving is a harder stop: it is a second source-built ABI partner. Also stop if a launcher
+  workaround breaks with no obvious fix, if the dry-run resolve
+  moves torch / torchaudio / flashinfer when it shouldn't, or if a **4b** row cannot be answered
   with evidence — an unanswered row is a disposition you do not have, and step 6 runs on dispositions.
 - When a check passes, say what it covered. When something can't be checked here (anything at
   runtime on the GPU), say "not verified".
@@ -101,7 +105,7 @@ Re-verify every assumption in the `qwen3.8-flash-next/run` header at `$NEW` (`gi
 |---|---|
 | `cpu_offload` in EngramConfig | `vllm/config/engram.py` |
 | `class Qwen4ExpPLEPinnedHostEmbedding`, chosen when cpu_offload | `vllm/models/qwen4_exp/common/ngram_embedding.py`, `nvidia/ngram_embedding.py` |
-| `isinstance(quant_config, CompressedTensorsConfig)` branch (PLE overlay stays skipped; its absence = regression) | `common/ngram_embedding.py` |
+| `isinstance(quant_config, CompressedTensorsConfig)` branch (regression check only — the overlay that needed it was deleted at `4d9a8d6`; its absence = upstream regressed, and the launcher no longer covers it) | `common/ngram_embedding.py` |
 | `getattr(config, "ple_embedding_dtype", ...)` is what picks the PLE method | `nvidia/ngram_embedding.py` |
 | `Qwen4ExpForConditionalGeneration`, `Qwen4ExpMTP` registered | `vllm/model_executor/models/registry.py` |
 | `VLLM_GDN_DECODE_KERNEL` env | `vllm/envs.py` |
@@ -113,7 +117,11 @@ Re-verify every assumption in the `qwen3.8-flash-next/run` header at `$NEW` (`gi
 If `requirements/common.txt`'s `transformers` line changed, or anything touched the Qwen4Exp
 config / layer types, load **both** checkpoints' configs with the transformers version the dry-run
 picked (vLLM uses transformers' own `Qwen4ExpConfig` since vllm#57387). The checkpoints still label
-their QSA layers `full_attention`, and the model code only accepts `qwen_sparse_attention`.
+their QSA layers `full_attention` in the raw `config.json`; transformers relabels them, so what
+`AutoConfig` hands back says `indexed_attention`, and vLLM's `_QSA_LAYER_TYPES` accepts both spellings
+(`("qwen_sparse_attention", "indexed_attention")` at `4d9a8d6` as at `698e79f`). So a cfgcheck that
+prints `full_attention` **after** `AutoConfig` is the regression, and so is one that prints
+`indexed_attention` while `_QSA_LAYER_TYPES` no longer lists it.
 
 ```bash
 cat > <scratchpad>/cfgcheck.py <<'PY'
@@ -121,7 +129,7 @@ import collections, transformers
 from transformers import AutoConfig
 c = AutoConfig.from_pretrained("/model"); t = c.get_text_config()
 print("transformers", transformers.__version__, type(t).__module__, type(t).__name__)
-print("layer_types", collections.Counter(t.layer_types))   # want qwen_sparse_attention, not full_attention
+print("layer_types", collections.Counter(t.layer_types))   # post-AutoConfig: want indexed_attention x12 (raw config.json says full_attention; see above)
 for k in ["ple_embedding_dtype", "indexer_compress_ratio", "indexer_n_heads", "mtp_num_hidden_layers"]:
     print(f"  {k} = {getattr(t, k, '<MISSING>')!r}")
 setattr(c.text_config, "ple_embedding_dtype", "float8_e4m3fn")   # what the launcher's --hf-overrides does
@@ -175,7 +183,7 @@ before step 6 and report the table as far as it goes.
 | `container/patches/draft-load-filter` | did a loader-side MTP-head skip ship that covers `Qwen4ExpMTP`? | `git -C $V log --format='%h %s' $OLD..$NEW -- vllm/model_executor/model_loader/ vllm/models/qwen4_exp/`; `git -C $V grep -n is_unused_checkpoint_weight $NEW -- vllm/models/qwen4_exp/`. vllm#60152's shard-level hook is the candidate and it is model-declared: the row is **merged** only when `Qwen4ExpMTP` declares it |
 | `container/patches/spec-live` (opt path) | did Dynamic SD gain a live-K API that subsumes the utility call? | `git -C $V log --format='%h %s' $OLD..$NEW -- vllm/v1/core/sched vllm/v1/engine/ vllm/config/speculative.py vllm/entrypoints/launchers/api_server` — a live-K knob would surface beside `num_speculative_tokens_per_batch_size` in `speculative.py` |
 | `container/patches/sm120-gemm-plans` (opt path) | does upstream ship a `(12,0)` GEMM table? | step 4's check. Yes ⇒ **merged → remove in this commit** |
-| `qwen3.8-flash-next/patches/ple-ct-ignore` | retired upstream at `c32513b` (vllm#59431), an ancestor of `$OLD`, and step 0 proves a repin only moves forward — this overlay can never fire again | `git -C $V grep -n 'isinstance(quant_config, CompressedTensorsConfig)' $NEW -- vllm/models/qwen4_exp/common/ngram_embedding.py`. Step 7's stub cannot check the mount (see there). ⇒ **merged → remove in this commit** unless the owner says keep — that outcome is **retired-kept** |
+| ~~`qwen3.8-flash-next/patches/ple-ct-ignore`~~ | **DELETED at the `4d9a8d6` repin** — this row is history, not a task; the dir no longer exists, so do not go looking for it. It was retired upstream at `c32513b` (vllm#59431), an ancestor of every pin since, and a repin only moves forward, so it could never fire again | Keep the regression check, without the overlay: `git -C $V grep -n 'isinstance(quant_config, CompressedTensorsConfig)' $NEW -- vllm/models/qwen4_exp/common/ngram_embedding.py`. If that branch ever disappears, upstream regressed and there is no longer a local workaround — that is a stop-and-ask, not a re-derive |
 | launcher: `--hf-overrides` dtype fix | retires with a corrected checkpoint, not with a sha | step 3's cfgcheck shows whether the checkpoint still mislabels ⇒ **checkpoint-driven** |
 | launcher: `BLOCK_SIZE=auto`, `PINNED_ROUND_MB` | upstream's own fix retires them | the last two rows of step 3's table give the exact drop condition |
 | `muse/patches/*`, `run-legacy`, the other launchers | out of scope — bound to images this repin never moves (see Scope) | — |
@@ -209,10 +217,15 @@ minor and update that comment (pattern: the 0.31.0 -> 0.32.0 move in `6a9bac4`).
   assumption broke.
 - Any 4b row answered **merged → remove in this commit**: enumerate the artifact's touchpoints with
   `git grep -l <name>` and remove every one in this commit — a half-removal is worse than no
-  removal. For `ple-ct-ignore` that is: the dir, the `PATCH_PLE` knob with its header doc and its
-  gate block in `qwen3.8-flash-next/run`, `container/versions.env`, both `README.md` mentions,
+  removal. Worked example, the `ple-ct-ignore` removal at `4d9a8d6`: the dir, the `PATCH_PLE` knob
+  with its header doc, its gate block and its `-v` mount line in `qwen3.8-flash-next/run`,
+  `container/versions.env`, both `README.md` mentions,
   `qwen3.8-flash-next/upstream-watch-prompt.md`, `context/distilled.md`, the comparison line in the
   three sibling `container/patches/*/UPSTREAM`, and this file's own step 3 row and step 7 expect.
+  All of those are clean now, so `git grep -l ple-ct-ignore` should return nothing but intentional
+  history notes: this file, `context/distilled.md`, the step-1 count note in
+  `context/plans/RULES.md`, and the comparison line in `container/patches/boot-timing/UPSTREAM`.
+  A hit anywhere else is a leftover.
   `container/patches/*` overlays are mounted by the launcher, not the Dockerfile — the Dockerfile
   holds only the vllm-flash-attn-arch hook. This is the "an assumption broke" of the bullet above,
   broken upstream and evidenced by the table, not an exception to it.
@@ -240,25 +253,32 @@ for a in "$@"; do [[ $a == serve ]] && { echo "STUB: launch suppressed"; exit 0;
 exit 0
 EOF
 chmod +x <scratchpad>/stub/docker
-DOCKER=docker PATH=<scratchpad>/stub:$PATH IMAGE_TAG=${OLD_IMG#*:} PATCH_PLE=0 ./qwen3.8-flash-next/run 2>&1 \
+DOCKER=docker PATH=<scratchpad>/stub:$PATH IMAGE_TAG=${OLD_IMG#*:} ./qwen3.8-flash-next/run 2>&1 \
   | grep -E '^## |^docker '
 ```
 
-`PATCH_PLE=0` is not optional here: the launcher's PLE gate hashes the image's own
-`ngram_embedding.py` through `docker run`, so under the stub it gets no hash and exits 1 ("gave no
-hash") before ever reaching the launch. The vllm#59431 skip line needs a real image; at repin time
-the overlay decision is the 4b row's `git grep` at `$NEW`.
+There is no `PATCH_PLE=0` here any more, and there must not be one added back: that knob and the PLE
+gate behind it were deleted at `4d9a8d6`, so the stubbed run goes straight from `require_image` to the
+launch line. Before that removal the gate hashed the image's own `ngram_embedding.py` through
+`docker run`, the stub gave it no hash, and the launcher exited 1 ("gave no hash") before reaching the
+launch — which is why this command used to need the knob. Nothing else in the launcher shells out to
+docker before `serve`, so if the run ever dies before printing the `docker ` line again, the cause is
+a new pre-launch container call, not this.
 
 The anchor is `^docker ` exactly: Plan 02 removed the optional privilege prefix it used to tolerate.
 `vllm_launch` echoes whatever `$DOCKER` expands to, so if the default ever changes this filter silently
 matches nothing — a grep that passes having verified nothing. Keep `DOCKER=docker` explicit above, and
 if the default moves, move this anchor with it.
 
-Expect: no PLE overlay mount (with `PATCH_PLE=0` the `docker ` line must carry no
-`ngram_embedding.py` `-v`; the vllm#59431 skip itself is what step 3's grep proved, not this),
-PLE dtype override `float8_e4m3fn`, no `--block-size` at MTP 3, and `--kv-cache-dtype fp8
---speculative-config ...3 --moe-backend humming --gpu-memory-utilization 0.96` on
-`/models/nvidia/Qwen3.8-Flash-Next-NVFP4`.
+Expect: no `ngram_embedding.py` `-v` on the `docker ` line (there is no overlay to mount any more, so
+this is a check that the removal stayed removed, not that a skip fired), PLE dtype override
+`float8_e4m3fn`, no `--block-size` (the QSA ring capacity divides every 16-aligned size, so
+`BLOCK_SIZE=auto` drops it), and `--kv-cache-dtype fp8 --kv-cache-dtype-skip-layers 48
+--speculative-config {"method":"mtp","num_speculative_tokens":4} --moe-backend humming
+--gpu-memory-utilization 0.95` on `/models/nvidia/Qwen3.8-Flash-Next-NVFP4`. Those three numbers are
+the launcher's own defaults (`SPEC_TOKENS:-4`, `GPU_MEM_UTIL:-0.95`), not constants of this
+procedure — this line said "MTP 3" and "0.96" from 2026-09-13 until the `4d9a8d6` repin ran the stub
+and caught it, so read them off `qwen3.8-flash-next/run` rather than trusting this file.
 
 ## 8. Commit
 
