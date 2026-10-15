@@ -2,9 +2,17 @@
 
 A runbook for Claude. To run it, say: **"follow ./repin.md"** (newest `main`) or
 **"follow ./repin.md to <sha>"**. It moves `VLLM_MAIN_SHA` in `container/versions.env`, re-checks
-everything the image and `./qwen3.8-flash-next/run` depend on, makes **one commit**, and reports.
+everything the image and `./qwen3.8-flash-next/run` depend on, dispositions every customization
+(4b), makes **one commit**, and reports.
 It never builds and never pushes. The owner runs the build. (This is the hands-on, local
 counterpart of `qwen3.8-flash-next/upstream-watch-prompt.md`, which is a remote read-only watcher.)
+
+**Scope: the main snapshot.** The other launchers are bound to images this runbook never moves —
+`muse/patches/` (and `qwen`/`laguna`) to the release build, `run-legacy` to the upstream PR-branch
+image. Reviewing their shims belongs to a release bump; no runbook for that yet, and this is not
+it. That boundary is a default, not a guard: `muse/run` mounts `muse/patches/` unconditionally and
+`IMAGE_TAG` overrides the image with no compatibility check, so `IMAGE_TAG=<main tag> ./muse/run`
+runs those shims over a snapshot and only the boot finds out.
 
 Templates for the result: `git show 6a9bac4` (flashinfer moved) and `git show ddc82f5` (nothing
 build-side moved, but the Qwen4Exp config did).
@@ -17,8 +25,9 @@ build-side moved, but the Qwen4Exp config did).
 - Scratch files go in the session scratchpad, not the repo.
 - **Stop and ask** before editing if any of these happen: `torch==` / `torchaudio==` /
   `torchvision==` change in `requirements/cuda.txt` (torch source rebuild plus a re-pin of the
-  release set too), a launcher workaround breaks with no obvious fix, or the dry-run resolve
-  moves torch / torchaudio / flashinfer when it shouldn't.
+  release set too), a launcher workaround breaks with no obvious fix, the dry-run resolve
+  moves torch / torchaudio / flashinfer when it shouldn't, or a **4b** row cannot be answered
+  with evidence — an unanswered row is a disposition you do not have, and step 6 runs on dispositions.
 - When a check passes, say what it covered. When something can't be checked here (anything at
   runtime on the GPU), say "not verified".
 
@@ -148,6 +157,31 @@ python3 container/patches/spec-live/test_spec_live.py
 python3 container/patches/sm120-gemm-plans/test_sm120_gemm_plans.py
 ```
 
+## 4b. Dispositions (every artifact, at $NEW)
+
+A hook that still lands is not a disposition. One row per artifact, answered at `$NEW`, pasted into
+the commit body. Allowed answers: **still needed**, **merged → remove in this commit**,
+**retired-kept** (cannot fire anymore, stays on disk with a reason in the body). Two rows carry a
+row-scoped state instead: **pending-build** (FA row only) and **checkpoint-driven** (dtype row only).
+Evidence by kind — *merged* names the upstream commit or PR; *still needed* names the command you
+ran and what it returned (empty log, no such symbol); no PR number exists for an absence, so never
+cite one you did not see. No cell empty, no cell hedged: a row without evidence is **STOP** — halt
+before step 6 and report the table as far as it goes.
+
+| artifact | the question at `$NEW` | how to answer |
+|---|---|---|
+| `container/patches/vllm-flash-attn-arch.py` | does FA still force sm_80 PTX for FA2 / build FA3 on an empty arch list? | step 1's diff is the whole answer when the FA `GIT_TAG` is unmoved: unchanged tree ⇒ **still needed (FA <tag> unchanged)**. If it moved, read the fetched `CMakeLists.txt`; the patch asserts its own anchors at build time. Only `./container/archs` proves the emitted archs, so until a build has happened this row is **pending-build** |
+| `container/patches/boot-timing` | out-of-tree reporting, can never merge; has upstream shipped a startup waterfall that would make it noise? | `git -C $V log --format='%h %s' $OLD..$NEW -- vllm/entrypoints vllm/renderers vllm/v1/engine vllm/v1/worker vllm/model_executor/warmup`, then `git -C $V grep -inE 'startup_timing\|boot_timing\|profile_report' $NEW`. A hit is a talk, not a merge — `vllm/config/profiler.py` is on-demand profiling, not a report |
+| `container/patches/draft-load-filter` | did a loader-side MTP-head skip ship that covers `Qwen4ExpMTP`? | `git -C $V log --format='%h %s' $OLD..$NEW -- vllm/model_executor/model_loader/ vllm/models/qwen4_exp/`; `git -C $V grep -n is_unused_checkpoint_weight $NEW -- vllm/models/qwen4_exp/`. vllm#60152's shard-level hook is the candidate and it is model-declared: the row is **merged** only when `Qwen4ExpMTP` declares it |
+| `container/patches/spec-live` (opt path) | did Dynamic SD gain a live-K API that subsumes the utility call? | `git -C $V log --format='%h %s' $OLD..$NEW -- vllm/v1/core/sched vllm/v1/engine/ vllm/config/speculative.py vllm/entrypoints/launchers/api_server` — a live-K knob would surface beside `num_speculative_tokens_per_batch_size` in `speculative.py` |
+| `container/patches/sm120-gemm-plans` (opt path) | does upstream ship a `(12,0)` GEMM table? | step 4's check. Yes ⇒ **merged → remove in this commit** |
+| `qwen3.8-flash-next/patches/ple-ct-ignore` | retired upstream at `c32513b` (vllm#59431), an ancestor of `$OLD`, and step 0 proves a repin only moves forward — this overlay can never fire again | `git -C $V grep -n 'isinstance(quant_config, CompressedTensorsConfig)' $NEW -- vllm/models/qwen4_exp/common/ngram_embedding.py`. Step 7's stub cannot check the mount (see there). ⇒ **merged → remove in this commit** unless the owner says keep — that outcome is **retired-kept** |
+| launcher: `--hf-overrides` dtype fix | retires with a corrected checkpoint, not with a sha | step 3's cfgcheck shows whether the checkpoint still mislabels ⇒ **checkpoint-driven** |
+| launcher: `BLOCK_SIZE=auto`, `PINNED_ROUND_MB` | upstream's own fix retires them | the last two rows of step 3's table give the exact drop condition |
+| `muse/patches/*`, `run-legacy`, the other launchers | out of scope — bound to images this repin never moves (see Scope) | — |
+
+A **merged** row makes this commit bigger — see step 6's last bullet — and it is still one commit.
+
 ## 5. Version prefix
 
 `DEFAULT_VLLM_NEXT_VERSION` must be the release *after* the newest release branch whose cut point
@@ -168,10 +202,20 @@ minor and update that comment (pattern: the 0.31.0 -> 0.32.0 move in `6a9bac4`).
 - `container/Dockerfile` header: the `pinned at <sha7>, <date>; was ...` line, plus a
   `<old7> -> <new7> (<date>, N commits): ...` paragraph above "Otherwise nothing in this file is
   snapshot-specific". It covers which layers rebuild, the runtime resolve and CMake.
-- `container/patches/{boot-timing,draft-load-filter}/UPSTREAM`: a "re-grepped at <sha7>" note.
+- `container/patches/{boot-timing,draft-load-filter,spec-live,sm120-gemm-plans}/UPSTREAM`: a
+  "re-grepped at <sha7>" note carrying the row's 4b answer.
 - `qwen3.8-flash-next/run` header: `Last verified against main @ <sha7>`, append the old sha to the
   re-checked list, and update any workaround note that step 3 changed. Edit code only if an
   assumption broke.
+- Any 4b row answered **merged → remove in this commit**: enumerate the artifact's touchpoints with
+  `git grep -l <name>` and remove every one in this commit — a half-removal is worse than no
+  removal. For `ple-ct-ignore` that is: the dir, the `PATCH_PLE` knob with its header doc and its
+  gate block in `qwen3.8-flash-next/run`, `container/versions.env`, both `README.md` mentions,
+  `qwen3.8-flash-next/upstream-watch-prompt.md`, `context/distilled.md`, the comparison line in the
+  three sibling `container/patches/*/UPSTREAM`, and this file's own step 3 row and step 7 expect.
+  `container/patches/*` overlays are mounted by the launcher, not the Dockerfile — the Dockerfile
+  holds only the vllm-flash-attn-arch hook. This is the "an assumption broke" of the bullet above,
+  broken upstream and evidenced by the table, not an exception to it.
 - `qwen3.8-flash-next/upstream-watch-prompt.md` / `README.md`: only if a fact they state changed.
 
 ## 7. Verify
@@ -196,24 +240,32 @@ for a in "$@"; do [[ $a == serve ]] && { echo "STUB: launch suppressed"; exit 0;
 exit 0
 EOF
 chmod +x <scratchpad>/stub/docker
-DOCKER=docker PATH=<scratchpad>/stub:$PATH IMAGE_TAG=${OLD_IMG#*:} ./qwen3.8-flash-next/run 2>&1 \
+DOCKER=docker PATH=<scratchpad>/stub:$PATH IMAGE_TAG=${OLD_IMG#*:} PATCH_PLE=0 ./qwen3.8-flash-next/run 2>&1 \
   | grep -E '^## |^docker '
 ```
+
+`PATCH_PLE=0` is not optional here: the launcher's PLE gate hashes the image's own
+`ngram_embedding.py` through `docker run`, so under the stub it gets no hash and exits 1 ("gave no
+hash") before ever reaching the launch. The vllm#59431 skip line needs a real image; at repin time
+the overlay decision is the 4b row's `git grep` at `$NEW`.
 
 The anchor is `^docker ` exactly: Plan 02 removed the optional privilege prefix it used to tolerate.
 `vllm_launch` echoes whatever `$DOCKER` expands to, so if the default ever changes this filter silently
 matches nothing — a grep that passes having verified nothing. Keep `DOCKER=docker` explicit above, and
 if the default moves, move this anchor with it.
 
-Expect: PLE overlay not mounted (vllm#59431), PLE dtype override `float8_e4m3fn`, no `--block-size`
-at MTP 3, and `--kv-cache-dtype fp8 --speculative-config ...3 --moe-backend humming
---gpu-memory-utilization 0.96` on `/models/nvidia/Qwen3.8-Flash-Next-NVFP4`.
+Expect: no PLE overlay mount (with `PATCH_PLE=0` the `docker ` line must carry no
+`ngram_embedding.py` `-v`; the vllm#59431 skip itself is what step 3's grep proved, not this),
+PLE dtype override `float8_e4m3fn`, no `--block-size` at MTP 3, and `--kv-cache-dtype fp8
+--speculative-config ...3 --moe-backend humming --gpu-memory-utilization 0.96` on
+`/models/nvidia/Qwen3.8-Flash-Next-NVFP4`.
 
 ## 8. Commit
 
 One commit, `container: pin main snapshot at <sha7>`. Body as in the templates: what moved and
-why (with PR numbers), what the dry-run resolved, the launcher and overlay findings, a `Checked:`
-line, `Not verified:` (runtime on the GPU), and `Not built yet: VLLM_REF=main ./container/build.`
+why (with PR numbers), what the dry-run resolved, the launcher and overlay findings, the completed
+4b disposition table, a `Checked:` line, `Not verified:` (runtime on the GPU, plus every
+**pending-build** row), and `Not built yet: VLLM_REF=main ./container/build.`
 No co-author trailer. Don't push.
 
 ## 9. Report (short)
@@ -222,9 +274,12 @@ No co-author trailer. Don't push.
 - A table of what moved (package / was / now / on the Flash-Next path?), and which build stages
   will rebuild.
 - Anything that needed a decision or a code change, and anything not verified.
-- Next steps for the owner:
-  1. `VLLM_REF=main ./container/build && ./container/push`
-  2. `./qwen3.8-flash-next/run` (a bare launch is the daily driver).
+  - Next steps for the owner:
+    1. `VLLM_REF=main ./container/build`, then `IMAGE_TAG=cu1321-sm120-main ./container/archs`
+       (bare, archs inspects `:latest` — the *release* image, a check that passes having checked
+       nothing), then `./container/push`. The `_vllm_fa2_C` line out of archs is the evidence the
+       4b FA row could not get pre-build; paste it back and the next repin cites it.
+    2. `./qwen3.8-flash-next/run` (a bare launch is the daily driver).
 
   Until the new image exists, the launcher refuses, because it looks the image up by
   `VLLM_MAIN_SHA`. To run the previous image meanwhile, use `IMAGE_TAG=<old tag> ./qwen3.8-flash-next/run`.
