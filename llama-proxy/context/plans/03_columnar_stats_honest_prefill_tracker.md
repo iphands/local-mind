@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 14% complete (1/7 tasks)
+- Status: 29% complete (2/7 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/03_columnar_stats_honest_prefill.md`
 - Evidence: `captures/vllm_metrics_2026-10-16_*.json` (gitignored, RULES P2) for the backend payload;
@@ -59,15 +59,29 @@
    Numerator-independent corroboration: those 3200 tokens moved from compute to cache between the cold
    and warm runs and ttft fell 216.72 ms, so the engine's own rate is 3200/0.21672 = **14,765 tok/s**
    — 8% from the corrected number, 46% from the raw one.
-2. **The one-sided-absent shape of `tok=`** (`tok=186417/   n/a` vs a different filler). Decide in T6,
-   record the choice and the test that pins it.
+ 2. **The one-sided-absent shape of `tok=`** (`tok=186417/   n/a` vs a different filler). Decide in T6,
+    record the choice and the test that pins it.
+ 3. **Do `ctx`/`tok` stay `{:>6}`, or widen to `{:>7}`?** **Raised by T2, needs the human — deliberately
+    not decided in code.** A 1M-token vLLM window (`1048576`) and a prompt of similar size are 7 digits
+    and do not fit the plan's pinned `{:>6}`, so the head cannot stay aligned for them. Widening both
+    symmetrically costs 2 cells of head (129 → 133) against Open Question 7's width concern; leaving them
+    means a 1M-context deployment gets a ragged head. T2 took the conservative route: the contract keeps
+    the plan's 6-cell fields, s2 uses the widest **in-band** values (`999999/999999`), and
+    `an_over_wide_context_is_never_clamped` (non-ignored) pins the one property that must hold either way
+    — an out-of-band number shifts the columns rather than being clamped, rounded or dropped. The contract
+    test must not be "fixed" by editing `CELL_CTX`/`CELL_TOK` until this is answered.
+ 4. **`stream=sync`: confirmed a documentation change, not just a formatter change.** `README.md`'s
+    "Is it really streaming?" currently instructs operators to read bare `sync` for `fake` mode, so T6's
+    `stream=sync` must land with that sentence, or the docs misdescribe the log line. README also still
+    lists `cache` *inside* the head and a `reprompt=N/2` cell `format_compact` does not emit — both are
+    T7's job to regenerate from rendered output.
 
 ## Progress
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 1 | T1: Establish what vLLM's `metrics` object actually contains | `captures/` | done | 6 payloads captured; **no** `prefill_time_ms` ⇒ ttft confirmed as T4's denominator; `queue_time_ms` ≈0.01 ms ⇒ not subtracted; corrected pp mean 12,858 (n=4) |
-| 2 | T2: Write the columnar contract as a red test | `src/stats/formatter.rs` | pending | lands `#[ignore]`d; red output is T6's evidence |
+| 2 | T2: Write the columnar contract as a red test | `src/stats/formatter.rs` | done | lands `#[ignore]`d; **34 cells red**, all genuine and all clearable by T6; golden positive control added (ASCII + CJK) and it caught a wrong *expectation* |
 | 3 | T3: Make an unmeasured rate absent, not zero | `src/stats/collector.rs`, `src/exporters/influxdb.rs`, `src/stats/formatter.rs` | pending | `prompt_tps`/`generation_tps` → `Option<f64>`; `total_tps`/`decode_tps_min` stay `f64` |
 | 4 | T4: Correct the vLLM prefill rate for prefix-cache hits | `src/stats/collector.rs` | pending | five Context rows are the test data; none may exceed 15k |
 | 5 | T5: Add the prefill plausibility canary | `src/exporters/mod.rs`, `src/proxy/handler.rs`, `src/config/mod.rs` | pending | first-WARN-then-1-in-100; counter exact |
@@ -89,6 +103,9 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-10-16 | same request on a first-touch prompt (cold prefix cache) | `cached=0`, `ttft=666.28ms`, raw ≡ corrected = 13,619 | **1** | cold is **not repeatable**: vLLM exposes no prefix-cache flush, so this is a single run, never a mean (RULES P1) |
 | 2026-10-16 | `queue_time_ms` read off every capture | 0.0077 / 0.0086 / 0.0089 / 0.0096 / 0.0098 / 0.0118 ms | 6 | ≈ 0 ⇒ **not** subtracted. Whether ttft contains it is unmeasurable at this load, and if it does the rate is *understated*, not inflated — see Follow-ups |
 | 2026-10-16 | derived marginal rate: 3200 cached tokens ÷ Δttft (666.28 − 449.55 ms) | engine compute rate **14,765 tok/s** | 1 cold/warm pair | the only check that does **not** depend on the numerator choice: 8% from the corrected figure, 46% from the raw one |
+| 2026-10-16 | T2 gate: `RUSTFLAGS='-D warnings'` + check/clippy/fmt/`test --workspace --lib` | exit 0; **919 passed / 0 failed / 1 ignored** (baseline 915; +4 = discrimination, head-constants, golden control, over-wide witness) | 1 | not a measurement |
+| 2026-10-16 | `cargo test --lib stats::formatter -- --ignored` (the red contract) | 1 failed, **34 cell(s) wrong** | 1 | decomposition, each row independently attributable: **19** label offsets moved (`dur`×5, `ctx`×5, `finish`×5, `stream`×4) + **5** `tok=` ABSENT + **1** `stream=` ABSENT (s1 non-streaming prints bare `sync`) + **5** rate-group width (9/67/34/20/4 vs 23) + **3** trailing whitespace (s1, s3, s4 — s2/s5 end on `concurrent=` so have none) + **1** control char (`\n`, s5's forged `finish=stop\nforged 2`). Reconciles with the first red run: 19+1 = 20 label failures, and the +4 is exactly the whole-line assertions added in review |
+| 2026-10-16 | golden positive control `the_head_offsets_describe_a_buildable_line` vs a **hand-typed** expectation | first hand-typed golden measured **127 cells, not 129** (a dropped space after the model field and after `stream=ok`); regenerated from a display-width script, both literals now assert 129 at offsets 0/47/61/79/97/112 | 1 | **[OBSERVED]** the positive control earned its keep: a 34/34 red cannot distinguish "formatter is ragged" from "expected offsets are wrong", and here it caught a wrong *expectation*. Both reviewers had asked for this test sight unseen |
 | | | | | |
 
 *(T1 adds the captured payload rows here; T4 adds the post-fix rates from a real run, with the build
@@ -138,10 +155,43 @@ places. Each was accepted and is implemented as below, not as the plan's body te
   meant to bite. `raw_pp` is included in the WARN fields so a WARN line identifies itself as the old
   bug or a new one.
 
+**Deviation / T2 review record** — round 3 (both reviewers, on the contract test itself). One real bug
+in the test was found and fixed, and four things were pinned that T6 must not rediscover:
+
+- **[OBSERVED] The first version of the rate-width assertion was unsatisfiable by design.** It computed
+  `occupied = dur - (CELL_MODEL + SEP)` = `47 - 23` = **24** and compared it to `CELL_RATE` = **23**, so
+  a *perfectly columnar* line failed it and T6 could never have gone green. The rate cell is bracketed
+  by **two** separators (after the model cell, before `dur=`), so the derivation is
+  `dur - (CELL_MODEL + 2*SEP)`. It is now `rate_group_cells()`, one definition shared by the contract
+  test **and** the golden control — the reason it survived a fully-red run is that nothing green ever
+  executed it. **Do not "simplify" `2 * SEP` back to `SEP`.**
+- The rate-width check is **derived from** the `dur=` offset, so it is not independent evidence: the 5
+  rate-width rows restate the 5 `dur=` rows. Read the 34 as ~29 distinct facts, not 34.
+- **`cache=` and `reprompt=` are in the TAIL, not the head.** `HEAD` has seven cells and neither is one.
+  This is load-bearing, not tidiness: `cache=` renders between `ctx` and the token counts today, and
+  while it does, the `tok=`/`stream=`/`finish=` offsets on s2 and s4 **cannot reach their targets** —
+  cache is variable-width and unpadded. If a cell ever moves into the head, `HEAD_CELLS` changes in the
+  same commit and the plan's table is updated with it.
+- **`stream=sync` is an operator-visible output change, decided here rather than at T6.** Today
+  `format_compact` renders bare `sync` when `streaming == false`, which is why the contract reports
+  `stream=` ABSENT for s1. T6 renders `stream=sync` padded into the 7-cell badge field **and** updates
+  README's "Is it really streaming?" grep guidance (`sync` vs `stream=ok`) in the same commit, or the
+  docs start lying about the log line.
+- `s1.streaming = false` is **load-bearing** — the only fixture row exercising the non-streaming shape,
+  and the cheapest line in the file to flip in order to silence one red. Commented in place.
+- The python display-width script used to draft the goldens is a **drafting aid; the Rust assertion is
+  the oracle**. They agree on CJK but `unicodedata`/`wcwidth` and `unicode-width` diverge on
+  ambiguous-width and emoji classes, so wide-glyph fixtures stay **CJK-only, no emoji**, or the two
+  oracles drift and the next bug is a width-library disagreement.
+
 ## Follow-ups
 
 | Follow-up | Why | Lands in |
 |-----------|-----|----------|
+| **Prerequisite, T6's first commit:** rate *magnitudes* in `the_contract_fixture_discriminates` (digit counts of `pp`/`tg`/`work`) | ~3 lines. Without it, softening s2's `prompt_tps = 88_000.0` to `53.64` leaves every assertion green and silently removes `CELL_RATE = 23`'s only justification — Plan 01's bug one level up, in the exact column this plan exists to defend | T6 |
+| **Prerequisite, T6:** whole-line width sum (`width(line) == HEAD_CELLS + present tail cells`) plus a ~24-cell cap on `finish` | the only assertion bounding the deliberately-untruncated finish value and catching a hole right of `finish=`; `content_filter` must still overflow visibly, but a 4 KB `stop_reason` must not become a paragraph in every journal entry | T6 |
+| Optionals as a **bit tuple** rather than a popcount, and badge `distinct == 5` | hardens coverage already claimed rather than closing a contract hole; popcount erases *which* optional varied | T6 |
+| Field-count / `split(' ')` check on the rendered line | **deliberately not added**, and both reviewers concurred: it is blind to interior holes, the head is covered by absolute offsets, and the tail is free-form so `cut -d' '` is unsafe regardless. Recorded so it is not re-proposed | — |
 | Extra compact cells: `reason=` (reasoning tokens are in pretty/json but not compact), `node=<host:port>` for per-node attribution, a `req_id` tail cell, a startup column legend | raised in review; each is a real operator gap, none is this plan's deliverable, and each widens the head | Plan 03 Open Question 6 → a later stats plan |
 | Exercise the llama.cpp `timings` prefill branch against a real llama.cpp backend, or delete it | it is unexecuted on this box and still cites Plan 1's unresolved Open Unknown 1 (`collector.rs:372-380`) | Plan 03 Open Question 4; needs a llama.cpp backend |
 | Flip `stats.max_plausible_prefill_tps` to a `const` if it is never tuned | both reviewers: a config field is a permanent surface for a constant operators will not touch | Plan 03 Open Question 2 |

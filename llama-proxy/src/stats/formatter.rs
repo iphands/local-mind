@@ -796,4 +796,523 @@ mod tests {
             );
         }
     }
+
+    // ---- P03/T2: the columnar contract Plan 01 never had a test for --------------
+    //
+    // Plan 01 declared the compact line columnar and shipped `contains` assertions,
+    // which cannot fail for a ragged line. The property that actually matters is
+    // stated here in TERMINAL DISPLAY CELLS (never bytes or `chars()`: the CJK
+    // sample below has more bytes than cells, which is the same trap `{:<N}` sprang
+    // on the pretty box), and it is stated as ABSOLUTE offsets rather than
+    // sample-to-sample agreement -- a layout that is uniformly wrong agrees with
+    // itself, so invariance alone is satisfiable and proves nothing.
+    //
+    // The widths are spelled out from the plan's T6 table instead of being read
+    // back off `format_compact`: an expectation derived from the code under test can
+    // only ever agree with it. The same table is recorded in
+    // `context/plans/03_columnar_stats_honest_prefill_tracker.md`, so a T6 that
+    // disagrees with these numbers has to change one of them on purpose, in the
+    // open -- not quietly edit the test until it goes green.
+
+    /// "model=" + `{:<16}`, truncated display-cell-wise via `truncate_to_width`.
+    const CELL_MODEL: usize = 6 + 16;
+    /// ONE width for all three rate tiers. Which tier you see is a fact about the
+    /// backend, not about the request, so the line must not betray which it was.
+    const CELL_RATE: usize = 23;
+    /// "dur=" + `{:>7.0}` + "ms". Seven, not six: a reprompt loop against
+    /// `timeout_seconds: 300` overflows six digits and re-breaks everything right.
+    const CELL_DUR: usize = 4 + 7 + 2;
+    /// "ctx=" + `{:>6}` + "/" + `{:>6}`; an absent side renders `n/a` in 6 cells.
+    const CELL_CTX: usize = 4 + 6 + 1 + 6;
+    /// "tok=" + `{:>6}` + "/" + `{:>6}`.
+    const CELL_TOK: usize = 4 + 6 + 1 + 6;
+    /// "stream=" + `{:<7}` -- `stalled` is the widest badge at 7.
+    const CELL_STREAM: usize = 7 + 7;
+    /// "finish=" + `{:<10}`; `tool_calls` fills it exactly. `content_filter` (14)
+    /// overflows BY DESIGN -- a diagnostic field is never silently clamped -- which
+    /// is exactly why the invariant pinned below is the START of `finish=`, never
+    /// its end.
+    const CELL_FINISH: usize = 7 + 10;
+    /// Head cells are joined by exactly one space.
+    const SEP: usize = 1;
+
+    /// The head, in order, as (label to probe, display width). The rate cell is
+    /// probed by POSITION, not by label: tier 1 renders `pp=`/`tg`, tier 2 `tps>=`
+    /// and `work=`, tier 3 `n/a`, so it has no stable label -- and keeping a 2-char
+    /// needle out of a line whose leading field is free-form backend text removes a
+    /// whole class of probe false-positives.
+    const HEAD: [(&str, usize); 7] = [
+        ("model=", CELL_MODEL),
+        ("", CELL_RATE),
+        ("dur=", CELL_DUR),
+        ("ctx=", CELL_CTX),
+        ("tok=", CELL_TOK),
+        ("stream=", CELL_STREAM),
+        ("finish=", CELL_FINISH),
+    ];
+
+    /// Total head width, DERIVED from the cells above so the total can never
+    /// silently disagree with its own parts.
+    const HEAD_CELLS: usize = {
+        let mut total = 0;
+        let mut i = 0;
+        while i < HEAD.len() {
+            total += HEAD[i].1;
+            if i + 1 < HEAD.len() {
+                total += SEP;
+            }
+            i += 1;
+        }
+        total
+    };
+
+    /// Where each head label must begin, derived from the cell widths.
+    fn head_offsets() -> Vec<(&'static str, usize)> {
+        let mut out = Vec::new();
+        let mut cell = 0usize;
+        for (i, (label, width)) in HEAD.iter().enumerate() {
+            if !label.is_empty() {
+                out.push((*label, cell));
+            }
+            cell += width;
+            if i + 1 < HEAD.len() {
+                cell += SEP;
+            }
+        }
+        out
+    }
+
+    /// Where a head label was found. Absence and ambiguity are VALUES, not panics:
+    /// the contract test collects every mismatch before failing, so a panic here
+    /// would destroy the report that makes it useful.
+    #[derive(Debug)]
+    enum Probe {
+        At(usize),
+        Absent,
+        Ambiguous(usize),
+    }
+
+    /// Display-cell offset of `needle`. Bytes would lie: the CJK sample carries more
+    /// bytes than cells, the same trap `{:<N}` sprang on the pretty box. A duplicate
+    /// needle is `Ambiguous` rather than its first hit, because the free-form
+    /// `model=` field can contain any needle and would masquerade as a formatter bug.
+    fn probe(line: &str, needle: &str) -> Probe {
+        let mut hits = line.match_indices(needle);
+        let Some(first) = hits.next() else {
+            return Probe::Absent;
+        };
+        if hits.next().is_some() {
+            let n = line.match_indices(needle).count();
+            return Probe::Ambiguous(n);
+        }
+        Probe::At(UnicodeWidthStr::width(&line[..first.0]))
+    }
+
+    /// Cells the rate group occupies, derived from where `dur=` actually landed.
+    ///
+    /// The rate cell is bracketed by TWO separators -- one after the model cell, one
+    /// before `dur=` -- so both must come off: `47 - (22 + 2*1) == CELL_RATE`. Shared
+    /// by the contract test and the golden control, so this derivation cannot rot on
+    /// its own the way a copy in one place did (a single-separator version demanded
+    /// `dur=` at 46 while the offsets table demands 47, which no formatter can satisfy).
+    fn rate_group_cells(dur_at: usize) -> usize {
+        dur_at.saturating_sub(CELL_MODEL + 2 * SEP)
+    }
+
+    fn fixture(model: &str, finish_reason: &str) -> RequestMetrics {
+        let mut m = RequestMetrics::new();
+        m.model = model.to_string();
+        m.finish_reason = finish_reason.to_string();
+        m
+    }
+
+    /// The five rows the contract is checked against. Each carries SEVERAL
+    /// adversarial attributes at once, because the property is invariance -- one
+    /// line can stress four columns -- and every column has both a narrowest and a
+    /// widest representative somewhere in the set (`the_contract_fixture_discriminates`
+    /// fails loudly if that ever stops being true).
+    ///
+    /// `finish_reason` is deliberately hostile in two rows: it is verbatim,
+    /// unsanitized backend text (`collector.rs:528`, and Anthropic's `stop_reason`
+    /// at `:546`), so a newline in it does not shift a column, it splits the log
+    /// line in two. The InfluxDB exporter already sanitizes `"stop\nforged 2"`; the
+    /// compact line must not be the last place that learns.
+    fn contract_fixtures() -> Vec<(&'static str, RequestMetrics)> {
+        let mut rows: Vec<(&'static str, RequestMetrics)> = Vec::new();
+
+        // S1 -- narrowest everything: short ASCII model, no context, no token
+        // counts, no optional cells, non-streaming. This is the row the head must
+        // not collapse on.
+        let mut s1 = fixture("qwen3-7b", "stop");
+        s1.has_timing_split = true;
+        s1.prompt_tps = 53.64;
+        s1.generation_tps = 42.5;
+        s1.duration_ms = 184.0;
+        // LOAD-BEARING: the only row exercising the non-streaming shape. Today that
+        // renders bare `sync` with no `stream=` label, which is why the contract test
+        // reports `stream=` ABSENT for s1 -- a real gap, not a ragged column. T6 must
+        // close it by rendering `stream=sync` padded into the badge cell (and updating
+        // README's "Is it really streaming?" grep guidance in the same commit). Do NOT
+        // flip this to `true` to silence that one red: it is the cheapest edit in the
+        // file and would leave CELL_STREAM justified by `stalled` alone.
+        s1.streaming = false;
+        rows.push(("s1-ascii-min", s1));
+
+        // S2 -- widest IN-BAND everything: a 40-cell model name (forces truncation),
+        // 6-digit rates, a 7-digit wall, 6-digit counts (the ceiling of the pinned
+        // `{:>6}` fields -- a 1M-token window is out of band and gets its own witness
+        // test below), every optional cell present, the longest badge, and an
+        // overflowing finish value.
+        let mut s2 = fixture("Qwen3-14B-128K-Q3_K_S.gguf-batch-instruct-realigned", "content_filter");
+        s2.has_timing_split = true;
+        s2.prompt_tps = 88_000.0;
+        s2.generation_tps = 9_999.99;
+        s2.duration_ms = 1_234_567.0;
+        s2.context_used = Some(999_999);
+        s2.context_total = Some(999_999);
+        s2.prompt_tokens = Some(999_999);
+        s2.completion_tokens = Some(999_999);
+        s2.group_name = Some("heavy".to_string());
+        s2.cached_tokens = Some(182_400);
+        s2.queue_ms = Some(1_234.0);
+        s2.concurrent_requests = Some(7);
+        s2.streaming = true;
+        s2.stream_end = Some("stalled");
+        rows.push(("s2-everything-max", s2));
+
+        // S3 -- wide glyphs in BOTH the model and the finish reason, plus the
+        // narrowest numbers: padding must be counted in display cells, not chars,
+        // in every cell that can carry text.
+        let mut s3 = fixture("本地大模型-Qwen3-14B-量化版", "停止done");
+        s3.decode_tps_min = 146.32;
+        s3.total_tps = 125.0;
+        s3.duration_ms = 9.99;
+        s3.context_used = Some(1);
+        s3.context_total = Some(2_048);
+        s3.prompt_tokens = Some(0);
+        s3.completion_tokens = Some(0);
+        s3.streaming = true;
+        s3.stream_end = Some("truncated");
+        rows.push(("s3-cjk-tiny", s3));
+
+        // S4 -- the long-context agent turn: a cost rate in the six digits while
+        // decode crawls. `cache=` present with `queue=` absent, because an
+        // optional cell must never move a head column.
+        let mut s4 = fixture("cosmo-6000", "length");
+        s4.decode_tps_min = 0.07;
+        s4.total_tps = 125_000.0;
+        s4.duration_ms = 45_000.0;
+        s4.context_used = Some(100_000);
+        s4.context_total = Some(262_144);
+        s4.prompt_tokens = Some(123_456);
+        s4.completion_tokens = Some(7);
+        s4.cached_tokens = Some(51_200);
+        s4.streaming = true;
+        s4.stream_end = Some("ok");
+        rows.push(("s4-long-context-cost", s4));
+
+        // S5 -- no counted output at all, one-char model, an absent completion
+        // count beside a present prompt count, and a finish value carrying a
+        // newline and a space.
+        let mut s5 = fixture("a", "stop\nforged 2");
+        s5.total_tps = 125.0;
+        s5.duration_ms = 0.0;
+        s5.prompt_tokens = Some(4_096);
+        s5.completion_tokens = None;
+        s5.concurrent_requests = Some(1);
+        s5.streaming = true;
+        s5.stream_end = Some("client_gone");
+        rows.push(("s5-no-output-hostile", s5));
+
+        rows
+    }
+
+    /// The head columns must be occupied by values that actually differ in width,
+    /// or the contract test below is a no-op wearing a costume: a fixture where all
+    /// five rows land in the same digit bucket tests nothing, which is Plan 01's
+    /// `contains` bug one level up. Runs today, on purpose -- it is what stops a
+    /// later edit of `123456` down to `123` from silently deleting the test's power.
+    ///
+    /// It inspects the INPUT fields, never rendered strings, so it cannot be
+    /// satisfied by adjusting an expected value.
+    #[test]
+    fn the_contract_fixture_discriminates() {
+        let rows = contract_fixtures();
+        assert!(rows.len() >= 4, "the contract needs >=4 samples");
+
+        let distinct = |vals: Vec<usize>| {
+            let mut v = vals;
+            v.sort_unstable();
+            v.dedup();
+            v.len()
+        };
+        let digits = |v: Option<u64>| v.map_or(0, |n| n.to_string().len());
+        let wall_digits = |m: &RequestMetrics| m.duration_ms.max(0.0) as u64;
+
+        let models: Vec<usize> = rows.iter().map(|(_, m)| UnicodeWidthStr::width(m.model.as_str())).collect();
+        let walls: Vec<usize> = rows.iter().map(|(_, m)| digits(Some(wall_digits(m)))).collect();
+        let ctx_used: Vec<usize> = rows.iter().map(|(_, m)| digits(m.context_used)).collect();
+        let ctx_total: Vec<usize> = rows.iter().map(|(_, m)| digits(m.context_total)).collect();
+        let prompt: Vec<usize> = rows.iter().map(|(_, m)| digits(m.prompt_tokens)).collect();
+        let completion: Vec<usize> = rows.iter().map(|(_, m)| digits(m.completion_tokens)).collect();
+        let tiers: Vec<usize> = rows
+            .iter()
+            .map(|(_, m)| {
+                if m.has_timing_split {
+                    1
+                } else if m.decode_tps_min > 0.0 {
+                    2
+                } else {
+                    3
+                }
+            })
+            .collect();
+        let optionals: Vec<usize> = rows
+            .iter()
+            .map(|(_, m)| {
+                usize::from(m.group_name.is_some())
+                    + usize::from(m.cached_tokens.is_some())
+                    + usize::from(m.queue_ms.is_some())
+                    + usize::from(m.concurrent_requests.is_some())
+            })
+            .collect();
+
+        for (column, widths) in [
+            ("model", &models),
+            ("dur", &walls),
+            ("ctx used", &ctx_used),
+            ("ctx total", &ctx_total),
+            ("tok prompt", &prompt),
+            ("tok completion", &completion),
+            ("tier", &tiers),
+            ("optional-cell presence", &optionals),
+        ] {
+            assert!(
+                distinct(widths.clone()) >= 2,
+                "column `{column}` never varies across the fixture ({widths:?}): the contract \
+                 test would pass without exercising it"
+            );
+        }
+
+        // The three tiers must all be represented: which tier renders is a fact
+        // about the backend, and the head must look identical whichever it was.
+        assert_eq!(distinct(tiers), 3, "all three rate tiers must appear in the fixture");
+
+        // No two rows may be twins, or one row is carrying another's coverage.
+        let vectors: Vec<(Vec<usize>, Vec<usize>)> = rows
+            .iter()
+            .map(|(_, m)| {
+                (
+                    vec![UnicodeWidthStr::width(m.model.as_str())],
+                    vec![
+                        digits(Some(wall_digits(m))),
+                        digits(m.context_used),
+                        digits(m.context_total),
+                        digits(m.prompt_tokens),
+                        digits(m.completion_tokens),
+                    ],
+                )
+            })
+            .collect();
+        for i in 0..vectors.len() {
+            for j in (i + 1)..vectors.len() {
+                assert_ne!(
+                    vectors[i], vectors[j],
+                    "samples {} and {} are width-twins and add no coverage",
+                    rows[i].0, rows[j].0
+                );
+            }
+        }
+    }
+
+    /// The constants must describe one coherent head, not seven hand-typed numbers
+    /// that drifted apart.
+    #[test]
+    fn head_constants_are_self_consistent() {
+        let offsets = head_offsets();
+        assert_eq!(
+            offsets.first().map(|(_, o)| *o),
+            Some(0),
+            "the head starts with the model cell"
+        );
+        assert_eq!(
+            offsets.last().map(|(_, o)| *o + CELL_FINISH),
+            Some(HEAD_CELLS),
+            "`finish=` is the last head cell, so its end is the head width"
+        );
+        assert_eq!(
+            HEAD_CELLS, 129,
+            "the head is 122 cells of content plus 6 separators; if this moves, \
+             update the table in the plan and the tracker together, never here alone"
+        );
+    }
+
+    /// Positive control for the table above, and the reason the contract's red means
+    /// anything: with every single assertion red, "the formatter is ragged" and "the
+    /// expected offsets are simply wrong" look identical, and a permanently-red
+    /// contract test gets reconciled by editing its constants. These two literals are
+    /// typed out by hand and asserted against `head_offsets()` exactly as the
+    /// formatter will be -- if the table is wrong, THIS fails today.
+    ///
+    /// `GOLDEN_CJK` is why the head must be padded in DISPLAY CELLS: its model field
+    /// is 8 chars but 16 cells, so `{:<16}` char padding puts every column after it
+    /// eight cells out.
+    const GOLDEN_ASCII: &str = "model=qwen3-7b         pp=   88.000k tg=9999.9 dur=    184ms ctx=999999/262144 tok=186417/   498 stream=ok      finish=stop      ";
+
+    const GOLDEN_CJK: &str = "model=本地大模型量化版 pp=   88.000k tg=9999.9 dur=    184ms ctx=999999/262144 tok=186417/   498 stream=ok      finish=stop      ";
+
+    #[test]
+    fn the_head_offsets_describe_a_buildable_line() {
+        for (tag, golden) in [("ascii", GOLDEN_ASCII), ("cjk", GOLDEN_CJK)] {
+            assert_eq!(
+                UnicodeWidthStr::width(golden),
+                HEAD_CELLS,
+                "{tag} golden is not the pinned head width"
+            );
+            for (label, want) in head_offsets() {
+                match probe(golden, label) {
+                    Probe::At(got) => assert_eq!(got, want, "{tag} golden violates `{label}`"),
+                    other => panic!("{tag} golden: `{label}` not uniquely found: {other:?}"),
+                }
+            }
+
+            // A derivation only the ragged contract test runs is an unexercised
+            // assertion -- that is how a one-cell error here survived a fully-red run.
+            let found = probe(golden, "dur=");
+            let Probe::At(dur_at) = found else {
+                panic!("{tag} golden: `dur=` not uniquely found: {found:?}")
+            };
+            assert_eq!(
+                rate_group_cells(dur_at),
+                CELL_RATE,
+                "{tag} golden: rate-group derivation disagrees with CELL_RATE"
+            );
+        }
+    }
+
+    /// A 1M-token vLLM window (`1048576`) and a prompt of similar size do not fit the
+    /// `{:>6}` fields the plan pins, so the head cannot stay aligned for them. That
+    /// widening (2 cells of head, against OQ7's width concern) is a human decision, not
+    /// this test's. What IS pinned here, and stays pinned however the width question is
+    /// answered: an out-of-band number shifts the columns rather than being clamped,
+    /// rounded or dropped.
+    #[test]
+    fn an_over_wide_context_is_never_clamped() {
+        let mut m = fixture("cosmo-6000", "stop");
+        m.has_timing_split = true;
+        m.prompt_tps = 13_619.0;
+        m.generation_tps = 146.2;
+        m.duration_ms = 3_144.0;
+        m.context_used = Some(1_048_576);
+        m.context_total = Some(1_048_576);
+        m.prompt_tokens = Some(1_000_000);
+        m.completion_tokens = Some(4_096);
+        m.streaming = true;
+        m.stream_end = Some("ok");
+
+        let line = format_compact(&m);
+        for value in ["1048576", "1000000"] {
+            assert!(
+                line.contains(value),
+                "`{value}` must reach the log verbatim rather than be clamped to its field: {line:?}"
+            );
+        }
+    }
+
+    /// The contract Plan 01 shipped without. Red until T6 rewrites `format_compact`
+    /// against these widths.
+    ///
+    /// Every assertion is absolute (measured against `HEAD`), never "row i agrees
+    /// with row j", and every mismatch is collected before failing so one run names
+    /// EVERY moved cell instead of the first one.
+    #[ignore = "P03/T6: columnar compact rewrite -- see context/plans/03_columnar_stats_honest_prefill.md"]
+    #[test]
+    fn compact_head_columns_are_position_invariant() {
+        let rows = contract_fixtures();
+        let offsets = head_offsets();
+        let mut bad: Vec<String> = Vec::new();
+
+        let mut tails: Vec<String> = Vec::new();
+
+        for (name, m) in &rows {
+            let line = format_compact(m);
+
+            match probe(&line, "model=") {
+                Probe::At(0) => {}
+                Probe::At(off) => bad.push(format!("{name}: `model=` must start the line at cell 0, found {off}")),
+                Probe::Absent => bad.push(format!("{name}: `model=` absent from {line:?}")),
+                Probe::Ambiguous(n) => bad.push(format!(
+                    "{name}: `model=` occurs {n} times, so no column can be attributed to it  ({line:?})"
+                )),
+            }
+
+            for (label, want) in &offsets {
+                match probe(&line, label) {
+                    Probe::At(got) if got == *want => {}
+                    Probe::At(got) => bad.push(format!("{name}: `{label}` starts at cell {got}, expected {want}  ({line:?})")),
+                    Probe::Absent => bad.push(format!(
+                        "{name}: `{label}` ABSENT -- the head cell is missing, not merely misaligned  ({line:?})"
+                    )),
+                    Probe::Ambiguous(n) => bad.push(format!(
+                        "{name}: `{label}` occurs {n} times; the probe cannot attribute it to a column  ({line:?})"
+                    )),
+                }
+            }
+
+            // The rate group is probed by position, since no label is common to all
+            // three tiers. Until the model cell is padded this also absorbs the
+            // model's shortfall: it restates the `dur=` assertion above rather than
+            // measuring the rate cell independently.
+            if let Probe::At(dur) = probe(&line, "dur=") {
+                let occupied = rate_group_cells(dur);
+                if occupied != CELL_RATE {
+                    bad.push(format!(
+                        "{name}: the rate group occupies {occupied} cells, expected {CELL_RATE}  ({line:?})"
+                    ));
+                }
+            }
+
+            // Absolute head offsets are blind to everything after `finish=`, so the
+            // whole-line properties an operator actually consumes are asserted here:
+            // a newline in a backend-supplied field splits one log record into two, a
+            // tab expands to a tab stop no width computation can predict, and
+            // trailing padding is invisible to every offset above.
+            if let Some(ch) = line.chars().find(|c| c.is_control() || matches!(c, '\u{2028}' | '\u{2029}')) {
+                bad.push(format!(
+                    "{name}: control character {ch:?} inside a single-line log record  ({line:?})"
+                ));
+            }
+            if line.ends_with(' ') {
+                bad.push(format!(
+                    "{name}: trailing whitespace, which breaks awk/column consumption  ({line:?})"
+                ));
+            }
+
+            // Non-degeneracy: the head is padded identical by design after T6, so the
+            // samples prove they differ through the FREE-FORM tail.
+            let tail = match line.find("finish=") {
+                Some(at) => line[at + "finish=".len()..].to_string(),
+                None => line.clone(),
+            };
+            tails.push(tail);
+        }
+
+        let mut unique_tails = tails.clone();
+        unique_tails.sort();
+        unique_tails.dedup();
+        assert!(
+            unique_tails.len() == rows.len(),
+            "only {} of {} samples rendered a distinct tail -- the fixture is uniform and \
+             the contract proves nothing: {tails:?}",
+            unique_tails.len(),
+            rows.len()
+        );
+
+        assert!(
+            bad.is_empty(),
+            "the compact head is not columnar ({} cell(s) wrong):\n{}",
+            bad.len(),
+            bad.join("\n")
+        );
+    }
 }
