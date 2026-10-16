@@ -22,7 +22,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-None in progress — next up: Plan 02 (`/hands-plan resume 02`).
+- **Plan 02** — vllm-first docs + read-only vendor discovery: in progress, 1/6 tasks done; next T2 (context KB vendor rows).
 
 ## Plans <!-- hp:plans -->
 
@@ -31,7 +31,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | Plan | Title | Depends on | Status | Notes |
 |---|---|---|---|---|
 | 01 | stats columnar + prefill fix | N/A | done | columnar compact stats + corrected prefill TPS |
-| 02 | vllm-first docs + read-only vendor discovery | N/A | pending | re-frame docs vLLM-first; gitignore + rules for ./vendor/* |
+| 02 | vllm-first docs + read-only vendor discovery | N/A | in-progress | re-frame docs vLLM-first; gitignore + rules for ./vendor/* |
 
 ## Abandoned / Superseded <!-- hp:abandoned -->
 

@@ -259,6 +259,28 @@ gets cited.
 4. **Restore the system after a session** — sysctls, env vars, swapped drivers/binaries, debug
    flags. The next session's baseline depends on a known state.
 
+### P3 — Vendor sources are read-only discovery space
+
+`vendor/vllm` and `vendor/llama.cpp` (paths **relative to the `llama-proxy/` project root** — not
+the `../vendor/…` that root `CLAUDE.md` still references, which does not exist) are upstream
+checkouts dropped in to learn how the backends actually behave. They are **read-only**: never edit,
+never `git add`, never commit.
+
+**State, verified 2026-10-16:** they are untracked and, from the repo root (`../..`, a single repo),
+**not yet ignored** — the root `.gitignore` `/vendor` is anchored to the workspace root and misses
+`llama-proxy/vendor/`. **Plan 02 T3 adds `/vendor/` to `llama-proxy/.gitignore`.** So today the real
+hazard is not a vanished edit but a `git add -A` staging a whole upstream checkout into a commit —
+stage explicit paths (Rule B4), always; once T3 lands they become invisible to git and ripgrep.
+
+1. **Cite them like any source**: `vendor/vllm/<path>:<line>`.
+2. **A zero-hit search is not evidence of absence.** Search explicitly and widen past ripgrep's
+   defaults: `rg --no-ignore --hidden -n '<symbol>' vendor/vllm/ -g '!**/build/**'`. `--no-ignore`
+   covers ignore files (once T3 ignores the tree), `--hidden` covers `.cache/`, `.github/` and
+   other dot-paths, and the `-g` keeps a stale local build from faking a hit upstream never shipped.
+   Re-run widened before concluding anything is absent — and distrust a lone *hit* for the same reason.
+3. A backend-behavior fact learned here goes in `context/distilled.md` tagged `[REPO]` with its
+   `path:line` (see `context/AGENTS.md`, "Where Findings Go").
+
 ---
 
 ## Series-Scoped Rules <!-- hp:series-rules -->

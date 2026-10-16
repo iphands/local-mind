@@ -2,8 +2,8 @@
 
 ## Overview
 
-- Status: 0% complete (0/6 tasks)
-- Start date: — (set when T1 starts)
+- Status: 17% complete (1/6 tasks)
+- Start date: 2026-10-16
 - Plan: `context/plans/02_vllm_first_docs.md`
 - Evidence: doc-framing plan — evidence is the grep output each Verify prints (the claim flipping
   vLLM-first) plus the `git check-ignore` / `rg` blindness pair in T3. No live perf numbers, so
@@ -38,7 +38,7 @@
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
-| 1 | T1: P3 read-only vendor rule + `rg --no-ignore` | `context/plans/RULES.md` | pending | write before T3 |
+| 1 | T1: P3 read-only vendor rule + `rg --no-ignore` | `context/plans/RULES.md` | done | added at :262; wording corrected to reality (see Notes) |
 | 2 | T2: register vendor in context KB map | `context/CLAUDE.md` | pending | symlink to AGENTS.md |
 | 3 | T3: gitignore `/vendor/`, observe ignore took | `.gitignore` | pending | record rg blindness pair |
 | 4 | T4: root CLAUDE.md vLLM-first | `CLAUDE.md` | pending | keep hands-plan block + Preservation List |
@@ -55,6 +55,8 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-10-16 | `hp-scan --brief .` | `NEXT computed=02` | 1 | plan number source |
 | 2026-10-16 | `ls -l AGENTS.md context/AGENTS.md` | both → `CLAUDE.md` symlinks | 1 | edits go to CLAUDE.md |
 | 2026-10-16 | `rg --files target` | listed gitignored `target/` files | 1 | env rg shows ignored tree when passed explicitly |
+| 2026-10-16 | `git check-ignore -v vendor/vllm/README.md` | **exit 1 — not ignored**; `git status` → `?? llama-proxy/vendor/` | 1 | invalidated P3's drafted "gitignored, edit silently lost" premise → corrected |
+| 2026-10-16 | `RUSTFLAGS='-D warnings' cargo check/clippy …` + `cargo fmt --check` + `cargo test --workspace --lib` | check/clippy/fmt exit 0; 915 passed | 1 | T1 gate. `just gate` (`-- -D warnings`) errors in this cargo — see Follow-ups |
 
 _(T3 adds the `rg --files vendor`=0 vs `rg --no-ignore --files vendor`>0 pair on the day it runs.)_
 
@@ -64,6 +66,21 @@ _(T3 adds the `rg --files vendor`=0 vs `rg --no-ignore --files vendor`>0 pair on
 
 - (pre-exec) fixrate.md was found to already name the vLLM split path (`:47`, `:387`, `:411`), so
   T5's fixrate change was narrowed from "add the path" to "add a cross-reference + vendor pointer."
+- **(T1) The plan's drafted P3 was invalid as written.** It asserted the vendor tree "is gitignored
+  (Plan 02), so an edit there is silently lost." Reality (verified 2026-10-16): `git check-ignore
+  vendor/vllm/README.md` → exit 1, `git status` → `?? llama-proxy/vendor/` — **not ignored** (T3 has
+  not run; the root `.gitignore` `/vendor` is workspace-root-anchored and misses `llama-proxy/vendor/`),
+  and "silently lost" is the **wrong hazard** — gitignoring keeps files on disk; the real danger is a
+  `git add -A` staging the checkout. P3 was rewritten (Rule E) to state the verified current state,
+  attribute the ignore to T3, name the `git add -A` hazard, widen the ripgrep recipe
+  (`--no-ignore --hidden -g '!**/build/**'`), disambiguate `vendor/` vs the dead `../vendor/`, and
+  route findings to `context/distilled.md`. Plan item "T1" marked **done with correction**; the
+  drafted wording is superseded, not executed.
+- **(T1) The project gate command is broken in this toolchain.** `RULES.md:122/124` and `justfile:16`
+  run `cargo check/clippy … -- -D warnings`, which this cargo rejects
+  (`unexpected argument '-D' found`); `just gate` cannot pass as written. Ran the equivalent
+  `RUSTFLAGS='-D warnings' cargo check/clippy` + `cargo fmt --check` + `cargo test --workspace --lib`
+  (all exit 0, 915 tests pass). Not silently rewritten (gate is authoritative) → Follow-up below.
 
 ## Follow-ups
 
@@ -72,3 +89,5 @@ _(T3 adds the `rg --files vendor`=0 vs `rg --no-ignore --files vendor`>0 pair on
 | Update CLI `about`/`long_about` strings (`src/main.rs:47`) + `main.rs:1`/`lib.rs:1` doc comments to vLLM-first | Observable `--help` behavior; code change, out of a docs plan's scope | a later code plan |
 | Delete `PLAN.md` after human review (currently OBSOLETE-stamped) | Deletion is a human call; append-only until then | next resync / human |
 | Consider a "which backend gives me what" table (`/props`, `/slots`, `timings`, `metrics`, `vllm:cache_config_info`, `max_model_len`) in README | Single table answers most vLLM-first positioning questions | optional README follow-up |
+| **Fix the gate**: `justfile:16` + `RULES.md:122/124` use `cargo … -- -D warnings`, rejected by this cargo (`unexpected argument '-D' found`); `just gate` cannot pass as written | Reproducibility: every task's gate claim rests on this command; workaround is `RUSTFLAGS='-D warnings' cargo …` | separate bookkeeping commit (authoritative file — human sign-off first) |
+| Fix root `CLAUDE.md` "Reference Implementation" `../vendor/claude-code`, `../vendor/opencode`, `../vendor/llama.cpp` — resolve to a **nonexistent** `local-mind/vendor/`; real checkouts are `llama-proxy/vendor/{vllm,llama.cpp}` | Dead pointers misroute discovery work; P3 now warns against them | ride T4 (same file) or a later docs pass |
