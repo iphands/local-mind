@@ -1,6 +1,6 @@
 # Plan 01 — stats columnar + prefill fix
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-10-16
 > **Depends on**: N/A
 > **Goal**: Make the compact stats line columnar (reordered, right-aligned fixed widths) and fix the inflated prefill TPS caused by prefix-cache hits.

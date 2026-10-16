@@ -208,11 +208,7 @@ impl RequestMetrics {
         // actually enters this struct.
         let counted_output = metrics.completion_tokens.unwrap_or(0) as f64;
         if duration_ms > 0.0 && counted_output > 0.0 {
-            metrics.decode_tps_min = finite_rate(
-                counted_output / duration_ms * 1000.0,
-                "decode_tps_min",
-                &metrics.model,
-            );
+            metrics.decode_tps_min = finite_rate(counted_output / duration_ms * 1000.0, "decode_tps_min", &metrics.model);
         }
 
         extract_length_fallbacks(&mut metrics, response, request);
@@ -304,12 +300,8 @@ fn extract_usage(metrics: &mut RequestMetrics, response: &Value) {
             metrics.prompt_tokens = Some(input);
             metrics.completion_tokens = usage.get("output_tokens").and_then(|t| t.as_u64());
             metrics.total_tokens = input.saturating_add(metrics.completion_tokens.unwrap_or(0));
-            metrics.cached_tokens = usage
-                .get("cache_read_input_tokens")
-                .and_then(|t| t.as_u64());
-            metrics.cache_creation_tokens = usage
-                .get("cache_creation_input_tokens")
-                .and_then(|t| t.as_u64());
+            metrics.cached_tokens = usage.get("cache_read_input_tokens").and_then(|t| t.as_u64());
+            metrics.cache_creation_tokens = usage.get("cache_creation_input_tokens").and_then(|t| t.as_u64());
             // Anthropic's `input_tokens` counts only the tokens it did NOT read
             // from or write to the cache, so it is disjoint from the two fields
             // above -- unlike OpenAI's `prompt_tokens`, which subsumes them.
@@ -1417,12 +1409,7 @@ mod tests {
             "usage": {"prompt_tokens": huge, "completion_tokens": huge, "total_tokens": huge},
             "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
         });
-        let m = RequestMetrics::from_response(
-            &response,
-            &serde_json::json!({"messages": []}),
-            false,
-            f64::MIN_POSITIVE,
-        );
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), false, f64::MIN_POSITIVE);
 
         assert!(m.total_tokens > 0, "the counts are real; only the rate is junk");
         assert!(
@@ -1460,7 +1447,10 @@ mod tests {
         assert_eq!(m.total_tokens, 120, "the cost total stays input+output");
         assert_eq!(m.cached_tokens, Some(30000));
         assert_eq!(m.cache_creation_tokens, Some(500));
-        assert_eq!(m.context_used, Some(30620), "the engine held all of it in KV");
+        // KV occupancy = input_tokens + cache_read + cache_creation
+        // (Anthropic's input_tokens excludes both cache fields; output_tokens
+        // are not part of KV occupancy). 100 + 30000 + 500 = 30600.
+        assert_eq!(m.context_used, Some(30600), "the engine held all of it in KV");
     }
 
     /// The opposite rule for the opposite shape: OpenAI/vLLM `prompt_tokens`

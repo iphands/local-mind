@@ -22,14 +22,14 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-None in progress — next up: Plan 01 (`/hands-plan resume 01`).
+- **Plan 01** — stats columnar + prefill fix: in progress, 1/5 tasks done; next T2 (fix prefill rate).
 
 ## Plans <!-- hp:plans -->
 
 Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 
 | Plan | Title | Depends on | Status | Notes |
-| 01 | stats columnar + prefill fix | N/A | pending | columnar compact stats + corrected prefill TPS |
+| 01 | stats columnar + prefill fix | N/A | in-progress | columnar compact stats + corrected prefill TPS |
 
 ## Abandoned / Superseded <!-- hp:abandoned -->
 

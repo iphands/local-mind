@@ -761,10 +761,7 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&format_json(&m)).unwrap();
         assert!(parsed.get("decode_tps_min").is_some(), "got: {parsed}");
         assert!(parsed.get("cached_tokens").is_none(), "fabricated zero: {parsed}");
-        assert!(
-            parsed.get("cache_creation_tokens").is_none(),
-            "fabricated zero: {parsed}"
-        );
+        assert!(parsed.get("cache_creation_tokens").is_none(), "fabricated zero: {parsed}");
 
         m.cached_tokens = Some(0);
         let parsed: serde_json::Value = serde_json::from_str(&format_json(&m)).unwrap();

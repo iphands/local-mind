@@ -74,6 +74,7 @@ pub fn log_sample_and_should_export(metrics: &RequestMetrics, format: StatsForma
 }
 
 /// Trait for metrics exporters
+#[allow(clippy::double_must_use)]
 #[async_trait]
 pub trait MetricsExporter: Send + Sync {
     /// Export metrics to the destination

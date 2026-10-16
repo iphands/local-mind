@@ -2,8 +2,8 @@
 
 ## Overview
 
-- Status: 0% complete (0/5 tasks)
-- Start date: — (set when T1 starts)
+- Status: 20% complete (1/5 tasks)
+- Start date: 2026-10-16
 - Plan: `context/plans/01_stats_columnar_prefill.md`
 - Evidence: unit test outputs in `src/stats/collector.rs` and `src/stats/formatter.rs`
 
@@ -22,7 +22,7 @@
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
-| 1 | T1: Make the project gate green at init | `src/stats/formatter.rs` | pending | pre-existing clippy/fmt/test failures at init |
+| 1 | T1: Make the project gate green at init | `src/stats/formatter.rs` | done | gate green: check/clippy/fmt/test all exit 0 |
 | 2 | T2: Fix inflated prefill TPS from prefix-cache hits | `src/stats/collector.rs` | pending | depends on T1 (gate must be green) |
 | 3 | T3: Reorder and pad compact stats columns + update affected tests | `src/stats/formatter.rs` | pending | depends on T2; gate must stay green |
 | 4 | T4: Remaining stats tests (full suite) | `src/stats/formatter.rs`, `src/stats/collector.rs` | pending | depends on T3 |

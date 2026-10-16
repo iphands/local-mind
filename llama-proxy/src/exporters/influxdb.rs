@@ -378,11 +378,7 @@ mod wire_tests {
     fn decode_tps_min_is_written_on_every_point() {
         let mut m = measurable();
         m.decode_tps_min = 84.34;
-        assert!(
-            line(&m).contains("decode_tps_min=84.34 "),
-            "got: {}",
-            line(&m)
-        );
+        assert!(line(&m).contains("decode_tps_min=84.34 "), "got: {}", line(&m));
 
         assert!(
             line(&measurable()).contains("decode_tps_min=0 "),
@@ -395,19 +391,19 @@ mod wire_tests {
     /// "nothing was cached". Both cache counts stay optional fields.
     #[test]
     fn cache_fields_are_written_only_when_the_backend_said() {
-        let line = line(&measurable());
-        assert!(!line.contains("cached_tokens"), "fabricated field: {line}");
+        let first_line = line(&measurable());
+        assert!(!first_line.contains("cached_tokens"), "fabricated field: {first_line}");
         assert!(
-            !line.contains("cache_creation_tokens"),
-            "fabricated field: {line}"
+            !first_line.contains("cache_creation_tokens"),
+            "fabricated field: {first_line}"
         );
 
         let mut m = measurable();
         m.cached_tokens = Some(4096);
         m.cache_creation_tokens = Some(500);
-        let line = line(&m);
-        assert!(line.contains("cached_tokens=4096"), "got: {line}");
-        assert!(line.contains("cache_creation_tokens=500"), "got: {line}");
+        let second_line = line(&m);
+        assert!(second_line.contains("cached_tokens=4096"), "got: {second_line}");
+        assert!(second_line.contains("cache_creation_tokens=500"), "got: {second_line}");
     }
 
     /// big-fix F12-R4 [MAJOR 8]: `model` and `finish_reason` arrive VERBATIM
