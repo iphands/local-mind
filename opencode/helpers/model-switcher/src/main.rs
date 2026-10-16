@@ -37,7 +37,7 @@ fn print_usage() {
     );
     eprintln!("  all                    Change all agents (system default + agents) to same model");
     eprintln!("  restore-omo-defaults  Restore oh-my-opencode.json from backup");
-    eprintln!("  ctx <SIZE> <PRESET>   Set limit.input for all models (safe/balanced/aggressive)");
+            eprintln!("  ctx <SIZE> <PRESET>   Set limit.context and limit.input for all models (safe/balanced/aggressive)");
     eprintln!("  ctx off               Remove limit.input from all models");
     eprintln!("  image [on]            Add image input modality to all models in opencode.jsonc (default: on)");
     eprintln!("  image off             Remove image input modality from all models");
@@ -1302,20 +1302,32 @@ fn run_ctx_mode(ctx_size: u64, preset: CtxPreset) -> Result<()> {
         preset.name(),
         (preset.fraction() * 100.0) as u64
     );
-    println!("  limit.input  : {}", format_tokens(input_limit));
+    println!("  limit.context: {}", format_tokens(ctx_size));
+    println!(
+        "  limit.input  : {}  ({}% of context)",
+        format_tokens(input_limit),
+        (preset.fraction() * 100.0) as u64
+    );
     println!();
 
-    let changes = update_input_limits(OPENCODE_CONFIG_PATH, Some(input_limit))?;
-    println!("  Updated {} model(s) in {}", changes, OPENCODE_CONFIG_PATH);
+    let context_changes = update_context_limits(OPENCODE_CONFIG_PATH, Some(ctx_size))?;
+    let input_changes = update_input_limits(OPENCODE_CONFIG_PATH, Some(input_limit))?;
+    println!(
+        "  Updated {} model(s) in {}",
+        context_changes.max(input_changes),
+        OPENCODE_CONFIG_PATH
+    );
 
     Ok(())
 }
 
 fn run_ctx_off_mode() -> Result<()> {
-    let changes = update_input_limits(OPENCODE_CONFIG_PATH, None)?;
+    let context_changes = update_context_limits(OPENCODE_CONFIG_PATH, None)?;
+    let input_changes = update_input_limits(OPENCODE_CONFIG_PATH, None)?;
     println!(
-        "  Removed limit.input from {} model(s) in {}",
-        changes, OPENCODE_CONFIG_PATH
+        "  Removed limit.context and limit.input from {} model(s) in {}",
+        context_changes.max(input_changes),
+        OPENCODE_CONFIG_PATH
     );
     Ok(())
 }
@@ -1448,6 +1460,132 @@ fn remove_input_from_limit(line: &str) -> String {
     }
 
     // Fall back to removing the following comma: "input": NNN, ...
+    let after = &line[after_num..];
+    let ws_after = after.bytes().take_while(|&b| b == b' ').count();
+    if after[ws_after..].starts_with(',') {
+        let comma_end = after_num + ws_after + 1;
+        return format!("{}{}", &line[..key_pos], &line[comma_end..]);
+    }
+
+    format!("{}{}", &line[..key_pos], &line[after_num..])
+}
+
+pub fn update_context_limits(path: &str, context_limit: Option<u64>) -> Result<usize> {
+    let content =
+        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path))?;
+    let mut changes = 0usize;
+
+    let new_content: String = content
+        .lines()
+        .map(|line| {
+            if !line.contains("\"limit\":") {
+                return line.to_string();
+            }
+            let new_line = update_line_context_limit(line, context_limit);
+            if new_line != line {
+                changes += 1;
+            }
+            new_line
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    let new_content = if content.ends_with('\n') {
+        new_content + "\n"
+    } else {
+        new_content
+    };
+
+    fs::write(path, &new_content)
+        .with_context(|| format!("Failed to write {}", path))?;
+    Ok(changes)
+}
+
+pub fn update_line_context_limit(line: &str, context_limit: Option<u64>) -> String {
+    if !line.contains("\"limit\":") {
+        return line.to_string();
+    }
+
+    let has_context = line.contains("\"context\":");
+
+    match context_limit {
+        Some(val) => {
+            if has_context {
+                replace_context_value(line, val)
+            } else {
+                add_context_to_limit(line, val)
+            }
+        }
+        None => {
+            if has_context {
+                remove_context_from_limit(line)
+            } else {
+                line.to_string()
+            }
+        }
+    }
+}
+
+fn replace_context_value(line: &str, val: u64) -> String {
+    let key = "\"context\":";
+    let Some(key_pos) = line.find(key) else {
+        return line.to_string();
+    };
+    let after_key = key_pos + key.len();
+    let ws_count = line[after_key..].bytes().take_while(|&b| b == b' ').count();
+    let digit_start = after_key + ws_count;
+    let digit_len = line[digit_start..]
+        .bytes()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    format!("{}{}{}", &line[..digit_start], val, &line[digit_start + digit_len..])
+}
+
+fn add_context_to_limit(line: &str, val: u64) -> String {
+    let limit_key = "\"limit\":";
+    let Some(limit_pos) = line.find(limit_key) else {
+        return line.to_string();
+    };
+    let after_limit = limit_pos + limit_key.len();
+    let Some(brace_offset) = line[after_limit..].find('{') else {
+        return line.to_string();
+    };
+    let content_start = after_limit + brace_offset + 1;
+    let Some(close_offset) = line[content_start..].find('}') else {
+        return line.to_string();
+    };
+    let close_pos = content_start + close_offset;
+    format!(
+        "{}, \"context\": {}{}",
+        &line[..close_pos],
+        val,
+        &line[close_pos..]
+    )
+}
+
+fn remove_context_from_limit(line: &str) -> String {
+    let key = "\"context\":";
+    let Some(key_pos) = line.find(key) else {
+        return line.to_string();
+    };
+    let after_key = key_pos + key.len();
+    let ws_count = line[after_key..].bytes().take_while(|&b| b == b' ').count();
+    let digit_start = after_key + ws_count;
+    let digit_len = line[digit_start..]
+        .bytes()
+        .take_while(|b| b.is_ascii_digit())
+        .count();
+    let after_num = digit_start + digit_len;
+
+    // Prefer removing the preceding comma: ..., "context": NNN
+    if let Some(comma_pos) = line[..key_pos].rfind(',') {
+        let between = &line[comma_pos + 1..key_pos];
+        if between.chars().all(|c| c == ' ') {
+            return format!("{}{}", &line[..comma_pos], &line[after_num..]);
+        }
+    }
+
+    // Fall back to removing the following comma: "context": NNN, ...
     let after = &line[after_num..];
     let ws_after = after.bytes().take_while(|&b| b == b' ').count();
     if after[ws_after..].starts_with(',') {
