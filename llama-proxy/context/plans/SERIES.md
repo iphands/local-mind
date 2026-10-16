@@ -22,7 +22,8 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-None in progress — next up: Plan 03 (`/hands-plan resume 03`).
+- **Plan 03** — columnar compact stats + honest vLLM prefill: in progress, 1/7 tasks done; next T2
+  (write the columnar contract as a red test).
 
 ## Plans <!-- hp:plans -->
 
@@ -32,7 +33,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 |---|---|---|---|---|
 | 01 | stats columnar + prefill fix | N/A | done | columnar compact stats + corrected prefill TPS |
 | 02 | vllm-first docs + read-only vendor discovery | N/A | done | vLLM-first docs landed; `/vendor` read-only discovery + P3 rule; stale `PLAN.md` OBSOLETE-stamped |
-| 03 | columnar compact stats + honest vLLM prefill | Plan 1 | pending | Plan 01's columnar claim and prefill fix are both false on the live vLLM backend |
+| 03 | columnar compact stats + honest vLLM prefill | Plan 1 | in-progress | Plan 01's columnar claim and prefill fix are both false on the live vLLM backend |
 
 ## Abandoned / Superseded <!-- hp:abandoned -->
 

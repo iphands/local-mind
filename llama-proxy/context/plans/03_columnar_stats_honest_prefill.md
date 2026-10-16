@@ -1,6 +1,6 @@
 # Plan 03 — columnar compact stats + honest vLLM prefill
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-10-16
 > **Depends on**: Plan 1
 > **Goal**: Make the compact stats line genuinely columnar (every head cell a fixed display width, conditional cells moved to a tail) and fix the vLLM-path prefill rate that divides cached tokens by a window that excludes them.
