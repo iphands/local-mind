@@ -137,7 +137,7 @@ Expected: tests cover decode vs an independent encoder, exception override, inte
 
 - [x] T1: `python3 container/patches/csf-scale-decode/test_csf_scale_decode.py` → `ALL TESTS PASS`
 - [x] T2: real-shard seam run prints the expected dtype/shape for every decoded tensor and no `csf` name; numbers in the tracker
-- [ ] T3: `bash -n` clean; gate steps 1, 3 report the new counts
+- [x] T3: `bash -n` clean; gate steps 1, 3 report the new counts
 - [ ] T4: owner boot log shows the decode line and a coherent completion — or the tracker says it did not run
 - [ ] All: the project gate passes on the final commit, skips named
 - [ ] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read

@@ -17,9 +17,9 @@ section**, which always stays last. Keep it dense.
 - What it means for this project.
 -->
 
-## The host-runnable test surface is exactly four files, and two patches have none [LIVE 2026-10-13]
+## The host-runnable test surface is exactly five files, and two patches have none [LIVE 2026-10-13, amended 2026-10-15 (Plan 04)]
 
-- `container/patches/{boot-timing,draft-load-filter,sm120-gemm-plans,spec-live}/test_*.py` run on
+- `container/patches/{boot-timing,csf-scale-decode,draft-load-filter,sm120-gemm-plans,spec-live}/test_*.py` run on
   the host with plain `python3 <file>` (stdlib only, no vLLM, no pytest — pytest is not installed).
   Each prints `ALL TESTS PASS` and exits 0.
 - `muse/patches/atem-parsers/selftest.py` looks host-runnable from its docstring but is not: it
@@ -89,6 +89,13 @@ section**, which always stays last. Keep it dense.
 - `common/_run-lib.sh` `docker_core_args`: when `VLLM_BOOT_LOG=1`, creates `./storage` (owned by RUN_UID), mounts to `/opt/vllm-storage:rw`, exports `VLLM_BOOT_LOG_DIR=/opt/vllm-storage`.
 - `qwen3.8-flash-next/run`: sets `VLLM_BOOT_LOG=1`, `VLLM_MODEL_NAME="$MODEL"`, `VLLM_BOOT_ARGS` as JSON-encoded dict converted from the bash `VLLM_ARGS` array.
 - Opt-in per launcher: other launchers stay silent by not setting `VLLM_BOOT_LOG`.
+
+## NVFP4-CSF checkpoints (Plan 04) [SOURCE][LIVE 2026-10-15]
+
+- Format: routed-expert E4M3 block scales stored as `<X>.weight_scale.nvfp4_csf_fixed` (U8 `[rows/16, 16*(1+cols/2)]`: per 16-row slab, 16 row-base bytes then packed nibbles, low nibble = even column) + `…_exceptions` (U32: `row*cols+col | value<<24`, sorted). Scale = `base[row] + nibble`, exception words overwrite. cols = K/16. Codec string `byte-window4-fixed-stream-u24-exceptions/1`. [SOURCE: b12x `tests/quantization/test_nvfp4_csf.py::_fixture` codec 0, `local-inference-lab/b12x` master; vLLM fork `…/utils/nvfp4_csf_utils.py:_slice_scale_plane`, 2026-10-15]
+- Only main-decoder routed experts are compressed; MTP, vision, PLE, shared experts, global scales stay plain. [DOC: HF card of `local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD`]
+- The community readers are bound to b12x kernels (and PP1/DP1, no EP); there is no upstream-vLLM reader. `container/patches/csf-scale-decode/` decodes in the weight stream instead. Real shard 1: 913 planes decoded in 0.3–0.4 s, torch backend == pure-Python reference on 6/6 planes. [LIVE 2026-10-15]
+- A decode of real data looks sane (bases 89–104, no NaN codes, 0.2–1 % exceptions, scales finite 14–448) but ground truth is only the b12x fixture; boot coherence is the test (Plan 04 T4).
 
 ---
 

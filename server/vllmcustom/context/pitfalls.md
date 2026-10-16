@@ -572,3 +572,44 @@ tz=timezone.utc).isoformat()` and replace `+00:00` with `Z`.
 
 ## Sources
 - vllmcustom: `container/patches/boot-timing/boot_timing.py` `write_jsonl()` — fixed on second attempt
+
+---
+
+# A checkpoint with its shards under `tensors/` fails two different ways
+
+## Problem
+`nvidia/Qwen3.8-Flash-Next-FP4-Local` keeps its 21 shards in `tensors/` and its
+`model.safetensors.index.json` says `tensors/model-0000N-….safetensors`. vLLM's loader globs
+`*.safetensors` at the **top level** of the model dir, so the first boot died with `Cannot find any
+model weights`. Symlinking the shards to the top level alone then died with `Weight files referenced
+in index but missing: …/tensors/model-…`: `filter_duplicate_safetensors_files` requires every path
+in the index to be among the globbed files, and the index paths and the bare symlink names disagree.
+[OBSERVED 2026-10-15]
+
+## How to avoid
+Top-level relative symlinks to every shard **and** an index whose `weight_map` values are the bare
+filenames (keep the original as `model.safetensors.index.json.orig`). Both are needed. The shards stay
+where they are. Do it before booting; the failure arrives after the 14 s model init.
+
+## Sources
+- vLLM `model_loader/default_loader.py:259` (`Cannot find any model weights`), `weight_utils.py:610`
+  (`Weight files referenced in index but missing`), image `…g4d9a8d6`.
+
+---
+
+# A model card's "use our container" can mean a missing loader, not a missing flag
+
+## Problem
+After the layout fix the same checkpoint failed with `AttributeError: Layer …experts has no parameter
+'w2_weight_scale.nvfp4_csf_exceptions'`. No flag or env var fixes this: the string `csf_exceptions`
+appears nowhere in our vLLM. The model card said so on line 20 ("upstream vLLM support for this format
+has not yet landed. You must use one of the containers"). [OBSERVED 2026-10-15]
+
+## How to avoid
+`grep -rl <odd tensor suffix>` the image's `vllm/` before debugging flags, and read the card's first
+IMPORTANT line. Then decide: patch the weight stream (Plan 04, `container/patches/csf-scale-decode/`)
+or use their container.
+
+## Sources
+- `models/vllm/nvidia/Qwen3.8-Flash-Next-FP4-Local/README.md:20`; `docker run … grep -rIl csf_exceptions`
+  over `/opt/venv/lib/python3.12/site-packages/vllm` printed nothing.

@@ -209,6 +209,20 @@ arithmetic on measured bytes, not estimates. `BOOT_TIMING=0` disables everything
 `/tmp/vllm-boot-timing/marks.log`, and `container/patches/boot-timing/test_boot_timing.py`
 covers the renderer on any host without vLLM.
 
+### NVFP4-CSF scale decode (`container/patches/csf-scale-decode/`)
+
+`nvidia/Qwen3.8-Flash-Next-FP4-Local` stores every routed-expert NVFP4 block-scale matrix as a
+lossless compressed pair, `<X>.weight_scale.nvfp4_csf_fixed` (uint8) + `…_exceptions` (uint32); its
+model card says upstream vLLM has no reader and points at community containers whose reader needs
+b12x kernels. Without help our image dies at the first MoE layer with `has no parameter
+'w2_weight_scale.nvfp4_csf_exceptions'`. The patch wraps `DefaultModelLoader.get_all_weights` and
+yields the ordinary `float8_e4m3fn` `<X>.weight_scale` in place of each pair (decoded on the CPU,
+~0.4 s per 5 GB shard), so HUMMING/Marlin see a normal NVFP4 checkpoint and the resident weights are
+the same size as any other. Like the other patches it overlays no upstream file: a renamed target
+prints `[csf-scale-decode] NOT applied`. `./qwen3.8-flash-next/run-fp4local` mounts it by default;
+`CSF_SCALE_DECODE=0` turns it off. Codec, sources and what is and is not verified:
+`container/patches/csf-scale-decode/UPSTREAM`, `context/plans/04_csf_scale_decode.md`.
+
 ### Why not newer (as of 2026-10-15)
 
 | candidate | status | blocker |
