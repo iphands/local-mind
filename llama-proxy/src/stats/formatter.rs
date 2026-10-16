@@ -242,101 +242,186 @@ fn format_json(m: &RequestMetrics) -> String {
     serde_json::to_string(m).unwrap_or_else(|_| "{}".to_string())
 }
 
-/// Compact single-line format
+/// A free-form field is text the proxy did not author: the model name and
+/// `finish_reason` arrive verbatim from the backend, `group_name` from config. Two
+/// things must be true before one may enter a single-line record, and neither is
+/// style:
+///   * no control character may survive. A `\n` in a backend `stop_reason` splits one
+///     log record into two, which is the forgery class the InfluxDB line protocol
+///     already sanitizes against; U+2028/2029 are line separators that `char::is_control`
+///     does NOT report, so they are named explicitly.
+///   * no `=` may survive. The head is located by probing for `ctx=`, `tok=`,
+///     `stream=`, `finish=` — a free-form value carrying one of those needles makes the
+///     probe ambiguous, so a backend string can forge a column. Control-char stripping
+///     alone does not close this.
+///   * the BYTE count is capped, not just the cell count. `truncate_to_width` bounds
+///     cells, and a cell bound does not bound bytes: U+200B, ZWJ/ZWNJ and combining
+///     marks are zero cells, so a backend echoing `"\u{200b}" * 10_000_000` as the model
+///     name is under the cell limit, sails through truncation untouched, and writes
+///     tens of megabytes into one log record. The model is remotely writable through
+///     the model the backend echoes, so the cap is on chars as well.
+const MAX_FREE_FORM_CHARS: usize = 64;
+
+/// Cap on the `finish=` value in DISPLAY CELLS. See `format_compact`: it exists to
+/// bound a log write, not to align a column — `finish=` is the last head cell, so its
+/// width cannot move the head, and every legitimate finish reason fits well inside it.
+const MAX_FINISH_CELLS: usize = 24;
+
+fn free_form(value: &str) -> String {
+    value
+        .chars()
+        .take(MAX_FREE_FORM_CHARS)
+        .map(|c| {
+            if c.is_control() || matches!(c, '\u{2028}' | '\u{2029}') || c == '=' {
+                ' '
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
+/// Pad to `cells` TERMINAL CELLS on the right. Never `{:<N}` on text: a format count
+/// is in chars, so the 8-char CJK model that is 16 cells wide would gain 8 spaces and
+/// shove every column after it — the bug `box_row` already fixed for `pretty`.
+fn pad_cells(s: &str, cells: usize) -> String {
+    match cells.checked_sub(UnicodeWidthStr::width(s)) {
+        Some(shortfall) => format!("{}{}", s, " ".repeat(shortfall)),
+        None => s.to_string(),
+    }
+}
+
+/// Render one `n/a`-able count for a `{:>6}`-shaped slot. `None` is the absence of a
+/// measurement and prints `n/a`; a measured zero prints `0`.
+fn count_cell(count: Option<u64>) -> String {
+    count.map_or_else(|| "n/a".to_string(), |n| n.to_string())
+}
+
+/// The rate group: ONE width for all three tiers, so the line cannot betray which
+/// tier it rendered. Which tier you see is a fact about the backend, not the request.
+///
+/// Built as two fixed-width fields rather than three hand-spaced literals. A
+/// hand-spaced tier string is 22, 23 or 24 cells depending on how many spaces someone
+/// typed (`tg>=` is inherently one wider than `tg=`, and `pp=…k` is one wider than
+/// `pp=…n/a`), and only the first of those is the contract's 23. Fixing the widths
+/// makes every tier land on 23 by construction AND pins the decode number's right edge,
+/// so `tg=  195.5` and `tg>= 146.3` stack in a wall of mixed-tier lines.
+///
+/// `pp` gets 12 cells and `tg` 10 because the two fields span very different ranges:
+/// prefill legitimately runs 50 → 580,000 tok/s (a full prefix-cache hit is left
+/// un-discounted by design), and the kilo suffix is what keeps that four-order spread
+/// inside a fixed cell without clamping. `tg` must hold `10000.0`, which is what
+/// 9999.99 rounds to at one decimal — so it needs 7, not 6.
+fn rate_group(m: &RequestMetrics) -> String {
+    // `pp` prints ONLY on tier 1. A half split (backend-reported prefill, no usable
+    // decode rate) is tier 2, and printing its cache-inflated prefill there put a huge
+    // figure in the column the eye lands on while the column that matters stayed empty
+    // — the exact failure `tps_tier` exists to prevent. Absent, not zero.
+    match tps_tier(m) {
+        1 => format!(
+            "pp={:>8.3}k tg={:>7.1}",
+            m.prompt_tps.unwrap_or(0.0) / 1000.0,
+            m.generation_tps.unwrap_or(0.0)
+        ),
+        // The absent `pp` side gives up one cell (11, not tier 1's 12) so the floor
+        // number gets the SAME 7 cells tier 1 gives a measured decode: `{:>6.1}` renders
+        // 10000.0 -- which 9999.95 rounds up to -- as 7 chars, making the group 24 and
+        // moving `dur=` off its pinned cell. The `n/a` sits in whitespace either way.
+        2 => format!("pp=     n/a tg>={:>7.1}", m.decode_tps_min),
+        3 => "pp=     n/a tg=     n/a".to_string(),
+        _ => unreachable!("tps_tier returns 1..=3"),
+    }
+}
+
+/// Compact single-line format: a pinned-width head followed by a free-form tail.
+/// A cell is columnar only if its width is constant, so no conditional cell may sit
+/// inside the head — `group=`, `work=`, `queue=`, `concurrent=` and `cache=` are all
+/// present-or-absent and therefore live in the tail, `cache=` last because a cell that
+/// appears only on cache hits must sit after everything that has to line up.
+///
+/// The widths are the contract's (`HEAD`/`head_offsets` in the test module); changing
+/// one means changing the plan's table and the tracker in the same commit, never here.
 fn format_compact(m: &RequestMetrics) -> String {
-    let context_str = match (m.context_used, m.context_total) {
-        (Some(used), Some(total)) => format!("ctx={}/{}", used, total),
-        _ => "ctx=null".to_string(),
+    // Truncated THEN padded, both in display cells: a 50-cell GGUF name is what shifts
+    // every column today, and padding a 46-cell value to 16 is a no-op.
+    let model = pad_cells(&truncate_to_width(&free_form(&m.model), 16), 16);
+
+    // `dur` is the one cell that saturates. It is the proxy's own wall clock, not a
+    // backend-reported quantity, and 7 digits is ~2.8h — past that a request is stuck,
+    // and a column that shifts for a stuck request teaches nothing. `ctx`/`tok` and the
+    // rates are backend-reported and NEVER clamped: an out-of-band figure must widen the
+    // line rather than be silently rounded into a number the engine never reported.
+    // `f64::min` returns the OTHER operand when one is NaN, so a NaN wall clock would
+    // otherwise print as the 9999999 sentinel — a plausible 2.8h request where nothing is
+    // known. Non-finite renders as `NaN`/`inf` (still 7 cells) rather than a lie.
+    let dur_value = if m.duration_ms.is_finite() {
+        m.duration_ms.min(9_999_999.0)
+    } else {
+        f64::NAN
     };
+    let dur = format!("dur={:>7.0}ms", dur_value);
+    let ctx = format!("ctx={:>6}/{:>6}", count_cell(m.context_used), count_cell(m.context_total));
+    let tok = format!(
+        "tok={:>6}/{:>6}",
+        count_cell(m.prompt_tokens),
+        count_cell(m.completion_tokens)
+    );
 
-    let group_str = m.group_name.as_ref().map(|g| format!(" group={}", g)).unwrap_or_default();
-
-    let concurrent_str = m
-        .concurrent_requests
-        .map(|c| format!(" concurrent={}", c))
-        .unwrap_or_default();
-
-    // Three tiers, best available wins. Only a backend-reported split is a measured
-    // prefill/decode pair. With none, print the honest FLOOR on decode speed and the
-    // cost rate, and mark the floor with `>=` so it cannot be read as a measurement.
-    // Never invent a split: that was the hardcoded 20/80 estimate this replaced.
-    //
-    // Tier 1 is gated on the DECODE side specifically, not on `has_timing_split`
-    // (see [`tps_tier`]). Decode tok/s is the number an operator actually scans this
-    // line for, and half a split is not a split: with decode unreported,
-    // `pp=<impressive number> tg=n/a` puts a big figure where the eye lands and
-    // leaves the column that matters empty, so a wall of such lines reads "fast".
-    // The floor tier instead bounds exactly the missing quantity. What is dropped
-    // from THIS line is the prefill measurement of a half split -- it is not lost,
-    // it stays on the wire: `json` and InfluxDB still carry `prompt_tps`, and this
-    // line is a scan surface, not the record of truth.
-    //
-    // `has_timing_split` stays the broader `||` PROVENANCE fact on the wire. Display and
-    // provenance are different questions, and conflating them is exactly what produced
-    // the fabricated `tps= 0.00/ 0.00`.
-    let tps_str = match tps_tier(m) {
-        1 => format!("tps={}/{}", tps_side(m.prompt_tps), tps_side(m.generation_tps)),
-        2 => format!("tps>={:>6.2} work={:>6.2}", m.decode_tps_min, m.total_tps),
-        // No backend decode rate and no counted output (a 0-token completion, an
-        // abort before the finish chunk): there is no floor to report, only cost.
-        _ => format!("tps=n/a work={:>6.2}", m.total_tps),
-    };
-
-    // Lets a reader discount `work=` for a prompt the engine never recomputed.
-    // Only ever a subset of the prompt count, so it is printed separately rather
-    // than folded into the rate.
-    let cache_str = m
-        .cached_tokens
-        .filter(|c| *c > 0)
-        .map(|c| format!(" cache={c}"))
-        .unwrap_or_default();
-
-    // Queue time is the honest signal for "is concurrency hurting?" -- it is time
-    // the request sat waiting to be scheduled, so it rises only under real
-    // saturation, whereas a falling per-stream decode rate does not by itself
-    // mean the server is overloaded. Shown only when the backend reports it and
-    // it is not trivially zero.
-    let queue_str = m
-        .queue_ms
-        .filter(|q| *q >= 1.0)
-        .map(|q| format!(" queue={:.0}ms", q))
-        .unwrap_or_default();
-
-    // Stream end badge, extracted so the line can list columns in the desired
-    // order without nesting a match inside format!.
-    let stream_str = if m.streaming {
+    // Always labelled now, including non-streaming: bare `sync` was a column with no
+    // key, and `stream=sync` keeps every existing `grep sync` working.
+    let badge = if m.streaming {
         match m.stream_end {
-            Some("truncated") => "stream=trunc",
-            Some("stalled") => "stream=stalled",
-            Some("client_gone") => "stream=gone",
-            Some("ok") => "stream=ok",
-            // Requests whose stream end was never observed (legacy/other
-            // paths) keep the historical bare marker.
-            _ if m.stream_incomplete => "stream=trunc",
-            _ => "stream=ok",
+            Some("truncated") => "trunc",
+            Some("stalled") => "stalled",
+            Some("client_gone") => "gone",
+            Some("ok") => "ok",
+            _ if m.stream_incomplete => "trunc",
+            _ => "ok",
         }
     } else {
         "sync"
     };
+    let stream = format!("stream={}", pad_cells(badge, 7));
 
-    // Column order: model, tps, dur, ctx, cache, tokens, stream, finish,
-    // then queue and concurrent. Right-aligned fixed widths (never leading
-    // zeros) keep the line columnar without faking precision.
-    format!(
-        "model={}{} {} dur={:>6.1}ms {} {} {} {} {} finish={} {} {}",
-        m.model,
-        group_str,
-        tps_str,
-        m.duration_ms,
-        context_str,
-        cache_str,
-        token_cell(m.prompt_tokens),
-        token_cell(m.completion_tokens),
-        stream_str,
-        m.finish_reason,
-        queue_str,
-        concurrent_str
-    )
+    // `n/a`, never a blank cell: an empty `finish=` reads as a missing column.
+    // `tool_calls` fills the 10 cells exactly and `content_filter` (14) overflows BY
+    // DESIGN — a rare diagnostic value is never clamped into invisibility. The cap is
+    // purely a log-flood bound: this is verbatim backend text and the widest value any
+    // backend emits is 14 cells, so 24 cuts junk and nothing legitimate.
+    let finish_value = free_form(&m.finish_reason);
+    let finish_value = match finish_value.trim() {
+        "" => "n/a".to_string(),
+        "unknown" => "n/a".to_string(),
+        _ => truncate_to_width(&finish_value, MAX_FINISH_CELLS),
+    };
+    let finish = format!("finish={}", pad_cells(&finish_value, 10));
+
+    let head = [format!("model={model}"), rate_group(m), dur, ctx, tok, stream, finish].join(" ");
+
+    let mut tail: Vec<String> = Vec::new();
+    if let Some(g) = &m.group_name {
+        tail.push(format!("group={}", free_form(g)));
+    }
+    // `work=` is the cost rate: (prompt+completion)/wall. On a long-context agent turn
+    // with a short completion it reads in the thousands while decode crawls in the
+    // tens, so it is the least trustworthy number on the line and sits furthest out.
+    // Only tiers 2 and 3 have one; tier 1's figures are the measured split.
+    if tps_tier(m) != 1 && m.total_tps > 0.0 {
+        tail.push(format!("work={:.2}", m.total_tps));
+    }
+    if let Some(q) = m.queue_ms.filter(|q| *q >= 1.0) {
+        tail.push(format!("queue={q:.0}ms"));
+    }
+    if let Some(c) = m.concurrent_requests {
+        tail.push(format!("concurrent={c}"));
+    }
+    if let Some(c) = m.cached_tokens.filter(|c| *c > 0) {
+        tail.push(format!("cache={c}"));
+    }
+
+    // The head pads its last cell; the line must not end in it, or awk/column
+    // consumption breaks on every request whose tail is thin.
+    format!("{head} {}", tail.join(" ")).trim_end().to_string()
 }
 
 /// Truncate a string to `max_cells` terminal display cells with an ellipsis.
@@ -393,10 +478,10 @@ mod tests {
 
         let output = format_compact(&m);
         assert!(output.contains("test-model"));
-        // New column order: model, tps, dur, ctx, cache, tokens, stream, finish.
-        assert!(output.contains("tps=200.50/ 42.50"));
-        assert!(output.contains("dur=1200.0ms"));
-        assert!(output.contains(" 100 50 "));
+        // Pinned head order: model, rate group, dur, ctx, tok, stream, finish.
+        assert!(output.contains("pp=   0.201k tg=   42.5"), "got: {output}");
+        assert!(output.contains("dur=   1200ms"), "got: {output}");
+        assert!(output.contains("tok=   100/    50"), "got: {output}");
         assert!(output.contains("stream=ok"));
         assert!(output.contains("finish=stop"));
     }
@@ -414,7 +499,8 @@ mod tests {
         m.decode_tps_min = 50.0 / 1.2;
 
         let output = format_compact(&m);
-        assert!(output.contains("tps>= 41.67 work=125.00"), "got: {output}");
+        assert!(output.contains("tg>=   41.7"), "got: {output}");
+        assert!(output.contains("work=125.00"), "got: {output}");
         assert!(!output.contains("/0.00"), "must not print a fabricated split: {output}");
         // The old key read as a measured speed; it must not come back.
         assert!(!output.contains("tot"), "retired `tot` key is back: {output}");
@@ -444,8 +530,9 @@ mod tests {
         );
 
         let output = format_compact(&m);
-        assert!(output.contains("tps=n/a work=125.00"), "got: {output}");
-        assert!(!output.contains("tps>=0.00"), "a zero is not a floor: {output}");
+        assert!(output.contains("tg=     n/a"), "got: {output}");
+        assert!(output.contains("work=125.00"), "got: {output}");
+        assert!(!output.contains("tg>="), "a zero is not a floor: {output}");
     }
 
     /// The case the decode-side gate exists for, and the one the old
@@ -463,10 +550,10 @@ mod tests {
         m.generation_tps = None; // the column the operator scans is empty
 
         let out = format_compact(&m);
-        assert!(out.contains("tps>="), "must bound the missing quantity: {out}");
-        assert!(out.contains("41.67"), "floor value missing: {out}");
+        assert!(out.contains("tg>="), "must bound the missing quantity: {out}");
+        assert!(out.contains("41.7"), "floor value missing: {out}");
         assert!(
-            !out.contains("88000") && !out.contains("88,000"),
+            !out.contains("88000") && !out.contains("88,000") && !out.contains("88.000"),
             "prefill printed where decode belongs: {out}"
         );
     }
@@ -484,7 +571,7 @@ mod tests {
         m.decode_tps_min = 0.0; // so no floor exists either
 
         let out = format_compact(&m);
-        assert!(out.contains("tps=200.50/ 42.50"), "got: {out}");
+        assert!(out.contains("pp=   0.201k tg=   42.5"), "got: {out}");
         assert!(!out.contains(">="), "a bound replaced a measurement: {out}");
         assert!(!out.contains("work="), "tier 3 leaked into tier 1: {out}");
     }
@@ -497,7 +584,7 @@ mod tests {
         assert!(m.has_timing_split);
 
         let output = format_compact(&m);
-        assert!(output.contains("tps=200.50/ 42.50"), "got: {output}");
+        assert!(output.contains("pp=   0.201k tg=   42.5"), "got: {output}");
         assert!(!output.contains("work="), "tier 3 leaked into a tier-1 line: {output}");
         assert!(!output.contains(">="), "tier 2 leaked into a tier-1 line: {output}");
     }
@@ -550,7 +637,7 @@ mod tests {
         // but under a key that cannot be read as a speed, next to the honest
         // floor: 146 tokens over a 1731ms wall is "at least 84", not "6000".
         assert!(output.contains("work=22753.32"), "got: {output}");
-        assert!(output.contains("tps>= 84.34"), "got: {output}");
+        assert!(output.contains("tg>=   84.3"), "got: {output}");
     }
 
     #[test]
@@ -600,7 +687,7 @@ mod tests {
         m.context_total = Some(4096);
 
         let output = format_compact(&m);
-        assert!(output.contains("ctx=100/4096"));
+        assert!(output.contains("ctx=   100/  4096"), "got: {output}");
     }
 
     #[test]
@@ -608,7 +695,7 @@ mod tests {
         let m = create_test_metrics();
 
         let output = format_compact(&m);
-        assert!(output.contains("ctx=null"));
+        assert!(output.contains("ctx=   n/a/   n/a"), "got: {output}");
     }
 
     /// An absent token count must read `n/a`, never a fabricated 0.
@@ -619,7 +706,7 @@ mod tests {
         m.completion_tokens = None;
 
         let compact = format_compact(&m);
-        assert!(compact.contains("n/a n/a"), "got: {compact}");
+        assert!(compact.contains("tok=   n/a/   n/a"), "got: {compact}");
 
         let pretty = format_pretty(&m);
         assert!(pretty.contains("Input:    n/a"), "got: {pretty}");
@@ -634,8 +721,8 @@ mod tests {
         m.completion_tokens = Some(0);
 
         let compact = format_compact(&m);
-        assert!(compact.contains(" 0 0 "), "got: {compact}");
-        assert!(!compact.contains("n/a"), "got: {compact}");
+        assert!(compact.contains("tok=     0/     0"), "got: {compact}");
+        assert!(!compact.contains("tok=   n/a"), "got: {compact}");
     }
 
     #[test]
@@ -853,9 +940,10 @@ mod tests {
         m.duration_ms = 600.0;
 
         let output = format_compact(&m);
-        // Format: tps={:.2}/{:.2} -> prompt_tps/generation_tps
-        assert!(output.contains("123.45"));
-        assert!(output.contains("150.00"));
+        // pref/decode are k tok/s and raw tok/s respectively, so the raw figures
+        // appear only through those two cells.
+        assert!(output.contains("pp=   0.123k"), "got: {output}");
+        assert!(output.contains("tg=  150.0"), "got: {output}");
         assert!(output.contains("length"));
         assert!(output.contains("600"));
     }
@@ -1049,10 +1137,11 @@ mod tests {
     const SEP: usize = 1;
 
     /// The head, in order, as (label to probe, display width). The rate cell is
-    /// probed by POSITION, not by label: tier 1 renders `pp=`/`tg`, tier 2 `tps>=`
-    /// and `work=`, tier 3 `n/a`, so it has no stable label -- and keeping a 2-char
-    /// needle out of a line whose leading field is free-form backend text removes a
-    /// whole class of probe false-positives.
+    /// probed by POSITION, not by label: tier 1 renders `pp=`/`tg=`, tier 2 `tg>=`
+    /// (`work=` is a tail cell, not part of the group), tier 3 `n/a` for both, so the
+    /// group has no stable label -- and keeping a 2-char needle out of a line whose
+    /// leading field is free-form backend text removes a whole class of probe
+    /// false-positives.
     const HEAD: [(&str, usize); 7] = [
         ("model=", CELL_MODEL),
         ("", CELL_RATE),
@@ -1131,6 +1220,112 @@ mod tests {
         dur_at.saturating_sub(CELL_MODEL + 2 * SEP)
     }
 
+    /// The offsets are pinned over a MAGNITUDE sweep, not only the fixture rows. The
+    /// bug class this exists for is a field that fits every healthy value and then grows
+    /// one cell at a boundary, moving `dur=`..`finish=` with it -- a wall-bounded floor
+    /// of 10000.0 rendered `tg>= 10000.0`, a 24-cell rate group with `dur=` at 48. The
+    /// sweep runs to the documented ceilings: prefill 580,000 tok/s on a full
+    /// prefix-cache hit, and a decode floor below 100k, past which no engine decodes.
+    #[test]
+    fn head_offsets_survive_every_rate_magnitude() {
+        let mut rows: Vec<(String, RequestMetrics)> = Vec::new();
+
+        for floor in [0.07, 41.67, 999.9, 9_999.9, 9_999.95, 10_000.0, 99_999.9] {
+            let mut m = fixture("qwen3", "stop");
+            m.completion_tokens = Some(10);
+            m.decode_tps_min = floor;
+            rows.push((format!("tier2 floor {floor}"), m));
+        }
+        for prefill in [1.0, 200.5, 14_765.0, 580_000.0, 1_000_000.0, 9_999_999.0] {
+            let mut m = fixture("qwen3", "stop");
+            m.has_timing_split = true;
+            m.prompt_tps = Some(prefill);
+            m.generation_tps = Some(42.5);
+            rows.push((format!("tier1 prefill {prefill}"), m));
+        }
+        let mut quiet = fixture("qwen3", "stop");
+        quiet.completion_tokens = None;
+        quiet.decode_tps_min = 0.0;
+        rows.push(("tier3 no counted output".to_string(), quiet));
+
+        for (label, m) in &rows {
+            let line = format_compact(m);
+            for (needle, want) in head_offsets() {
+                match probe(&line, needle) {
+                    Probe::At(at) => assert_eq!(at, want, "{label}: `{needle}` at {at}: {line}"),
+                    other => panic!("{label}: `{needle}` {other:?} -- {line}"),
+                }
+            }
+        }
+    }
+
+    /// `dur` is the one cell that saturates, and the one value that must NOT saturate: a
+    /// NaN wall clock is the absence of a measurement, not a 2.8h request. Both branches
+    /// must land in 7 cells or `dur=` shifts during the exact incident an operator is
+    /// reading the line for -- a wedged backend is the only way to reach this branch.
+    #[test]
+    fn a_non_finite_or_saturated_wall_keeps_the_dur_cell_at_seven_cells() {
+        for (label, wall) in [
+            ("finite", 3_144.0),
+            ("saturated", 9.9e12),
+            ("nan", f64::NAN),
+            ("inf", f64::INFINITY),
+        ] {
+            let mut m = fixture("qwen3", "stop");
+            m.duration_ms = wall;
+            let line = format_compact(&m);
+            for (needle, want) in head_offsets() {
+                match probe(&line, needle) {
+                    Probe::At(at) => {
+                        assert_eq!(at, want, "{label} wall {wall}: `{needle}` at {at}: {line}")
+                    }
+                    other => panic!("{label} wall {wall}: `{needle}` {other:?} -- {line}"),
+                }
+            }
+        }
+
+        let mut m = fixture("qwen3", "stop");
+        m.duration_ms = f64::NAN;
+        assert!(
+            !format_compact(&m).contains("9999999"),
+            "NaN printed as the saturation sentinel"
+        );
+    }
+
+    /// Backend text is bounded in BYTES, not only in display cells. A zero-width run is
+    /// zero cells, so a cell bound alone lets `"\u{200b}" * 100_000` as the echoed model
+    /// name -- or a megabyte of `finish_reason` -- through into a single log record.
+    #[test]
+    fn backend_text_cannot_flood_the_line() {
+        let flood = "\u{200b}".repeat(100_000);
+
+        let mut m = fixture("qwen3", "stop");
+        m.model = flood.clone();
+        let line = format_compact(&m);
+        assert!(
+            line.chars().count() < 400,
+            "model flood leaked {} chars",
+            line.chars().count()
+        );
+
+        let m = fixture("qwen3", &flood);
+        let line = format_compact(&m);
+        assert!(
+            line.chars().count() < 400,
+            "finish flood leaked {} chars",
+            line.chars().count()
+        );
+
+        let m = fixture("qwen3", &"a".repeat(100_000));
+        let line = format_compact(&m);
+        for (needle, want) in head_offsets() {
+            match probe(&line, needle) {
+                Probe::At(at) => assert_eq!(at, want, "long finish: {line}"),
+                other => panic!("long finish: `{needle}` {other:?} -- {line}"),
+            }
+        }
+    }
+
     fn fixture(model: &str, finish_reason: &str) -> RequestMetrics {
         let mut m = RequestMetrics::new();
         m.model = model.to_string();
@@ -1160,13 +1355,10 @@ mod tests {
         s1.prompt_tps = Some(53.64);
         s1.generation_tps = Some(42.5);
         s1.duration_ms = 184.0;
-        // LOAD-BEARING: the only row exercising the non-streaming shape. Today that
-        // renders bare `sync` with no `stream=` label, which is why the contract test
-        // reports `stream=` ABSENT for s1 -- a real gap, not a ragged column. T6 must
-        // close it by rendering `stream=sync` padded into the badge cell (and updating
-        // README's "Is it really streaming?" grep guidance in the same commit). Do NOT
-        // flip this to `true` to silence that one red: it is the cheapest edit in the
-        // file and would leave CELL_STREAM justified by `stalled` alone.
+        // LOAD-BEARING: the only row exercising the non-streaming shape, which renders
+        // `stream=sync` padded into the 7-cell badge field. Do NOT flip this to `true`
+        // to silence a red: it is the cheapest edit in the file and would leave
+        // CELL_STREAM justified by `stalled` alone.
         s1.streaming = false;
         rows.push(("s1-ascii-min", s1));
 
@@ -1349,7 +1541,7 @@ mod tests {
         );
         assert_eq!(
             HEAD_CELLS, 129,
-            "the head is 122 cells of content plus 6 separators; if this moves, \
+            "the head is 123 cells of content plus 6 separators; if this moves, \
              update the table in the plan and the tracker together, never here alone"
         );
     }
@@ -1358,8 +1550,13 @@ mod tests {
     /// anything: with every single assertion red, "the formatter is ragged" and "the
     /// expected offsets are simply wrong" look identical, and a permanently-red
     /// contract test gets reconciled by editing its constants. These two literals are
-    /// typed out by hand and asserted against `head_offsets()` exactly as the
-    /// formatter will be -- if the table is wrong, THIS fails today.
+    /// typed out by hand and asserted against `head_offsets()` -- if the table is wrong,
+    /// THIS fails today.
+    ///
+    /// It is a control on the OFFSETS TABLE, not a sample of the output: the rate group
+    /// here is the plan table's shape (`{:>9.3}k` / `{:>6.1}`) while the formatter emits
+    /// `{:>8.3}k` / `{:>7.1}`. Both total `CELL_RATE` and only the total is asserted, so
+    /// do not paste this line into a ticket as an example of what the proxy prints.
     ///
     /// `GOLDEN_CJK` is why the head must be padded in DISPLAY CELLS: its model field
     /// is 8 chars but 16 cells, so `{:<16}` char padding puts every column after it
@@ -1426,13 +1623,8 @@ mod tests {
         }
     }
 
-    /// The contract Plan 01 shipped without. Red until T6 rewrites `format_compact`
-    /// against these widths.
-    ///
-    /// Every assertion is absolute (measured against `HEAD`), never "row i agrees
-    /// with row j", and every mismatch is collected before failing so one run names
-    /// EVERY moved cell instead of the first one.
-    #[ignore = "P03/T6: columnar compact rewrite -- see context/plans/03_columnar_stats_honest_prefill.md"]
+    /// The contract Plan 01 shipped without. Its 34 red cells went to zero when
+    /// `format_compact` grew the pinned head; it runs in the normal suite now.
     #[test]
     fn compact_head_columns_are_position_invariant() {
         let rows = contract_fixtures();

@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 71% complete (5/7 tasks)
+- Status: 86% complete (6/7 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/03_columnar_stats_honest_prefill.md`
 - Evidence: `captures/vllm_metrics_2026-10-16_*.json` (gitignored, RULES P2) for the backend payload;
@@ -85,7 +85,7 @@
 | 3 | T3: Make an unmeasured rate absent, not zero | `src/stats/collector.rs`, `src/exporters/influxdb.rs`, `src/stats/formatter.rs` | done | `prompt_tps`/`generation_tps` → `Option<f64>`; `total_tps`/`decode_tps_min` stay `f64`. **Beyond plan:** compact tier-1 gate moved onto decode-presence, `pretty` follows it, one `tps_tier()` predicate, 4 lying fixtures fixed, gate gained the feature-on test line |
 | 4 | T4: Correct the vLLM prefill rate for prefix-cache hits | `src/stats/collector.rs` | done | five Context rows reproduce 6,421 / 12,797 / 13,021 / 11,748 / 12,491 tok/s within ±1% (worst drift 0.008%), none above 15k; control row verified as the smallest shrink **off measured rates**, not the expected literals; discount gated to the OpenAI usage shape, with the Anthropic disjoint-cache case counter-tested; confirmed on live traffic (warm prints 14,257 corrected vs 22,025 raw) |
 | 5 | T5: Add the prefill plausibility canary | `src/exporters/mod.rs`, `src/proxy/handler.rs`, `src/config/mod.rs` | done | counter exact, WARN first-then-1-in-100 off a shared `warns_at`; default **raised to 50,000** (human decision, plan said 15,000 — within 2% of the measured engine rate); non-finite threshold rejected at load; `/proxy/metrics` HELP pinned to `StatsConfig::default()`; two derived WARN fields **removed during review**, see Notes |
-| 6 | T6: Rewrite `format_compact` against the contract | `src/stats/formatter.rs` | pending | pinned head, free tail, `cache=` last |
+| 6 | T6: Rewrite `format_compact` against the contract | `src/stats/formatter.rs` | done | pinned head, free tail, `cache=` last; contract un-ignored and green |
 | 7 | T7: Regenerate the docs from the rendered line and harvest the lesson | `README.md`, `CLAUDE.md`, `context/pitfalls.md` | pending | delete `README.md:334`; pin the README example with a test |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
@@ -126,6 +126,12 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-10-16 | **mutation:** drop `occurrence == 1` from `warns_at` | `sampled_warnings_fire_first_then_every_interval` FAILS | 1 | **[OBSERVED]** the first occurrence always logs, so a single-trip anomaly is never invisible; only the tail is sampled |
 | 2026-10-16 | **mutation:** WARN identity field `model = ?…` → `%…` | `a_newline_in_the_model_name_cannot_forge_a_second_line_in_the_canary_warn` FAILS | 1 | **[OBSERVED]** `model` is client-supplied; Display writes a newline raw and the request forges its own log line — the F12-R4 line-protocol class |
 | 2026-10-16 | **mutation:** delete `\|\| prompt_tps.is_some_and(\|v\| v > 0.0)` from `has_throughput_signal` | **3** FAIL — `an_implausible_prefill_rate_is_counted_and_never_skipped`, `test_has_throughput_signal_needs_a_token_count_or_a_rate`, `timings_rate_without_counts_keeps_none_counts_and_real_signal` | 1 | **[OBSERVED, CORRECTED]** the disjunct is load-bearing on both sides of the seam at once. My **first** claim for this mutation was "fails only the new coupling test" — wrong, and neckbeard's challenge is what caught it: the two collector tests are the pre-existing pins. Reverted, `git diff` clean |
+| 2026-10-16 | T6 first red: `pad_cells(&free_form(model), 16)` with **no** truncation | contract **34 → 12 cells wrong**, confined to s2/s3; s1/s4/s5 already clean | 1 | **[OBSERVED]** `pad_cells` on a 46-cell model is a **silent no-op** — padding cannot shrink a value. Truncate-then-pad closed both rows in one edit |
+| 2026-10-16 | `cargo test --lib stats::formatter` after the rewrite (contract **un-ignored**) | 50 passed / 0 failed / **0 ignored**; `#[ignore]` deleted | 1 | the 34 cells T2 shipped red are closed; offsets land at 0/47/61/79/97/112 |
+| 2026-10-16 | **mutation:** restore the original tier-2 literals `pp=      n/a tg>={:>6.1}` | `head_offsets_survive_every_rate_magnitude` FAILS at `tier2 floor 9999.95: dur= at 48` (renders `tg>=10000.0`), plus 2 key-name tests — while **`compact_head_columns_are_position_invariant` stays GREEN** | 1 | **[OBSERVED]** neckbeard's finding. The five contract fixtures have a **tier-2 blind spot**: no fixture floor sits near 10k, so the contract alone would have shipped a 24-cell rate group that moves `dur=`. Tier 2 now borrows one cell from the absent-`pp` side (11, not tier 1's 12) so the floor gets the same 7 cells tier 1 gives a measured decode — the file's own comment demanded 7 and only got it on tier 1 |
+| 2026-10-16 | **mutation:** drop `.take(MAX_FREE_FORM_CHARS)` from `free_form` | `backend_text_cannot_flood_the_line` FAILS — **`model flood leaked 100123 chars`** | 1 | **[OBSERVED]** a cell bound was never a byte bound: `truncate_to_width` early-returns at ≤16 **cells**, so `"\u{200b}" × 100_000` as the echoed model name passed through untouched — ~100 KB per log record, remotely writable through the model the backend echoes. `finish_reason` (verbatim backend text, `collector.rs:687`) is now separately capped at 24 display cells |
+| 2026-10-16 | `dur` non-finite branch (hoodie's blocker: new branch, zero coverage) | `a_non_finite_or_saturated_wall_keeps_the_dur_cell_at_seven_cells` passes; NaN / inf / saturated each hold 7 cells | 1 | `f64::min` returns the **other** operand when one is NaN, so the original one-liner rendered an unknown wall clock as a plausible 2.8h request — a lie in exactly the wedged-backend incident the operator opens the log for |
+| 2026-10-16 | T6 gate: `RUSTFLAGS='-D warnings'` + check / clippy `--all-targets --features influxdb` / fmt / **test twice** | exit 0; **953 passed / 0 failed / 0 ignored** feature-off and **975 / 0 / 0** feature-on | 1 | baseline 949 / 971; **+4** (magnitude sweep, byte-flood witness, non-finite `dur`, and the de-ignored contract). **`0 ignored` for the first time in this plan** |
 | | | | | |
 
 *(T1 adds the captured payload rows here; T4 adds the post-fix rates from a real run, with the build
@@ -289,6 +295,39 @@ reviewers removing things I had added, which is the only kind of review worth re
 - **My own evidence was wrong once and a reviewer caught it.** The `has_throughput_signal` mutation
   was reported as killing one test; the re-run kills three. The claim had been made from the new
   test's name rather than from the run output. Recorded in Evidence with `[OBSERVED, CORRECTED]`.
+
+**T6 review record** — both reviewers, on the rewritten head. Two defects survived `cargo test` and
+neither was findable from the suite as written:
+
+- **The contract's fixtures do not cover tier 2.** Restoring the shipped tier-2 literals broke the
+  magnitude sweep at `9999.95` while `compact_head_columns_are_position_invariant` stayed **green** —
+  no fixture floor sits near 10k, so the 34-cell contract could never see a 24-cell rate group. A red
+  contract test is not the same statement as a covered contract test. The sweep, not the fixtures, is
+  the guard now.
+- **A cell bound is not a byte bound.** `truncate_to_width` bounds *cells*, so a zero-width run is
+  invisible to it and `free_form` let 100 KB of backend text into one log record; `finish_reason` was
+  uncapped outright. Both fields are verbatim backend text (`collector.rs:687` takes `stop_reason`
+  as-is), i.e. remotely writable through the model the backend echoes.
+- **README scope, an unresolved conflict inside this tracker.** Prerequisites (line 195) say T6 must
+  update README's "Is it really streaming?" guidance *in the same commit* as `stream=sync`; the
+  ordering rules (line 34) say **"T6 does not touch `README.md` at all"** and T7's row owns it. The
+  ordering rule won: T6 ships `src/stats/formatter.rs` only. Harm today is nil — the badge still reads
+  `sync`, so `grep sync` matches `stream=sync` unchanged (hoodie verified). **T7 owes that sentence as
+  its first obligation**, along with the rest of the compact section.
+- **Declined as human decisions, not oversights** (each changes the pinned contract or the plan table):
+  `CELL_RATE` 23→24 (would make `tg=`/`tg>=` provenance unmistakable), model pad 16→12 (pulls the rates
+  left out of the 22-cell gutter), `{:>8.3}k`→`{:>8.1}k`, badge renames `sync`→`buf` / `gone`→`hangup`,
+  and reordering the tail to lead with `queue=`/`concurrent=`. neckbeard actively **endorsed** keeping
+  3 decimals: 1-decimal k renders a prefill under ~100 tok/s as `0.1k`, destroying the cold-cache
+  signal on small models — T7 must not "simplify" it.
+- **T7's list, from the reviews** (docs-only, all of it verified against the code): README's compact
+  section is now wrong in nearly every token (`tps=A/B`, unlabelled token pair, `cache=` between `ctx`
+  and tokens, and cell-order *prose* that disagrees with the shipped order); `finish=n/a` is a grep
+  trap because README tells operators to expect `finish_reason=unknown` for a backend error body;
+  `pp=     n/a` on a half split contradicts the pretty box, which still prints the prefill figure —
+  same request, two formats, contradictory answers, so say why; `dur=    NaNms` is new output nobody
+  has been told about; and the head is columnar only **up to the start of `finish=`**, so `awk '{print
+  $8}'` grabs the wrong field on `content_filter` and truncated-finish lines.
 
 ## Follow-ups
 

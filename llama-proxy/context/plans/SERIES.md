@@ -22,7 +22,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 03** — columnar compact stats + honest vLLM prefill: in progress, 5/7 tasks done; next T6
+- **Plan 03** — columnar compact stats + honest vLLM prefill: in progress, 6/7 tasks done; next T7
   (rewrite `format_compact` against the red contract, then un-`#[ignore]` it).
 
 ## Plans <!-- hp:plans -->
