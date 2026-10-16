@@ -1,6 +1,6 @@
 # Plan 03 — vLLM boot stats JSONL log
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-10-16
 > **Depends on**: N/A
 > **Goal**: Persist the vLLM post-startup stats report as one JSONL line per boot in `./storage`, with the model name and VLLM serve args as top-level fields, append-only for historical reference.

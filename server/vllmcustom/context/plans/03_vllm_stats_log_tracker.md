@@ -2,8 +2,8 @@
 
 ## Overview
 
-- Status: 0% complete (0/6 tasks)
-- Start date: — (set when T1 starts)
+- Status: 17% complete (1/6 tasks)
+- Start date: 2026-10-16
 - Plan: `context/plans/03_vllm_stats_log.md`
 - Evidence: `./storage/vllm_boot_stats.jsonl` (one JSONL line per boot, append-only). Test environment: image tag from `container/.last-build`, `VLLM_REF` from `container/versions.env`, model from `qwen3.8-flash-next/run` `$MODEL`.
 
@@ -23,7 +23,7 @@
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
-| 1 | T1: Grounding & key facts | `container/patches/boot-timing/boot_timing.py`, `common/_run-lib.sh`, `qwen3.8-flash-next/run` | pending | |
+| 1 | T1: Grounding & key facts | `container/patches/boot-timing/boot_timing.py`, `common/_run-lib.sh`, `qwen3.8-flash-next/run` | done | All Key Facts line numbers verified against source: format_report=585, _record=719, vllm_launch=370, BOOT_TIMING_DIR=610, BOOT_TIMING=254. |
 | 2 | T2: Design JSONL schema & storage layout | `context/plans/03_vllm_stats_log.md` | pending | |
 | 3 | T3: Add JSONL writer to boot_timing.py | `container/patches/boot-timing/boot_timing.py` | pending | gated by `VLLM_BOOT_LOG_DIR` env |
 | 4 | T4: Wire launcher to mount storage + pass model/args | `common/_run-lib.sh`, `qwen3.8-flash-next/run` | pending | mirrors cache-dir ownership pattern |
