@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `05`.** <!-- hp:next-free -->
+**Next free plan number: `06`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-10-13):** single-stream decode throughput on one RTX PRO 6000
 > (sm_120), from a vLLM stack we build ourselves — torch, FlashInfer and vLLM all compiled from
@@ -41,6 +41,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 02 | No sudo anywhere: plain `docker` is the only privilege path | 01 | done | Closed 2026-10-13, gate rc 0. Root refusal kept — `su` still reaches root; `ALLOW_ROOT` deleted, no escape hatch. |
 | 03 | Persist vLLM post-startup stats as JSONL in ./storage, with model name and VLLM args | — | done | All six tasks complete. JSONL writer in boot_timing.py; launcher mounts ./storage, passes VLLM_MODEL_NAME and JSON-encoded VLLM_BOOT_ARGS; gate green. |
 | 04 | Decode NVFP4-CSF expert scales at load time | — | in-progress | Runtime patch so nvidia/Qwen3.8-Flash-Next-FP4-Local boots without b12x: wrap the loader's weight stream, decode CSF to plain E4M3. |
+| 05 | Trim the source build to what sm_120 serving uses | — | pending | Torch/torchaudio flags, Marlin int8-act, FlashInfer AOT trims; tiered keep-list for Muse/Nemotron/Qwen/gpt-oss; baseline + smoke gate first. Needs one owner full rebuild. |
 
 ## Pre-existing material <!-- hp:pre-existing -->
 
