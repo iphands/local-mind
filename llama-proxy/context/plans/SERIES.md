@@ -22,7 +22,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 01** — stats columnar + prefill fix: done, 5/5 tasks (closed 2026-10-16).
+None in progress — next up: Plan 02 (`/hands-plan resume 02`).
 
 ## Plans <!-- hp:plans -->
 
