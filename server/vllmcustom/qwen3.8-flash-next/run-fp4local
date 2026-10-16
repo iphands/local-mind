@@ -1,0 +1,654 @@
+#!/bin/bash
+# Serve Qwen3.8-Flash-Next-FP4-Local (180B MoE, 6B active, hybrid GDN + sparse full
+# attention, Qwen4ExpForConditionalGeneration) on the ONE RTX PRO 6000 from OUR
+# sm120 image built from a vLLM main snapshot.
+#
+#   VLLM_REF=main ./container/build                # build the snapshot first (the VLLM_MAIN_SHA pinned in container/versions.env)
+#   ./qwen3.8-flash-next/run-fp4local              # nvidia/Qwen3.8-Flash-Next-FP4-Local (MTP 3, qwen3_xml parser, fp8 KV, util 0.975)
+#   ./qwen3.8-flash-next/run-fp4local <path>       # another Flash-Next checkpoint under models/vllm
+#   FAMILY=flashnext|qwen ...                      # override the config.json family detection
+#
+# This is ./qwen3.8-flash-next/run retuned for nvidia/Qwen3.8-Flash-Next-FP4-Local
+# (community RTX PRO 6000 settings for this exact model). The differences from
+# ./run are the ENV var defaults we deliberately do NOT inherit:
+#
+#   * PLE_DTYPE is empty here (skip the ple_embedding_dtype probe). The probe reads
+#     the shard header, sees U8 (packed NVFP4), disagrees with config.json's
+#     ple_embedding_dtype="nvfp4", and would wrongly emit --hf-overrides setting it
+#     to "U8". For this model config.json is correct: nvfp4 tells vLLM how to read
+#     the U8-packed table shards. Trust config.json instead.
+#   * --tool-call-parser qwen3_xml (run hardcodes qwen3_coder, which is for
+#     Qwen3-Coder; this model's chat template is qwen3 XML-style tool calls).
+#   * SPEC_TOKENS=3 (run: 4), DRAFT_SAMPLE=probabilistic (run: greedy).
+#   * GPU_MEM_UTIL=0.975 (run: 0.95) — the card's measured value for this model;
+#     verify "Available KV cache memory" at boot so the pinned PLE table + KV cache
+#     fit on one card.
+#   * MAX_NUM_SEQS=16 (run: 4), MAX_BATCHED_TOKENS=6019 (run: 4096),
+#     BLOCK_SIZE=64 (run: auto), CUDAGRAPH_MODE=FULL_AND_PIECEWISE (run: empty).
+#   * override-generation-config temperature 1.0 (run: 0.95), matching the
+#     checkpoint's generation_config.json.
+#
+# Everything else (pinned image lookup by ai.vllmcustom.vllm.ref label,
+# --engram-config cpu_offload, HF_HUB_OFFLINE=1, --user 1000:1000, --gpus device=0,
+# the call order with env_extra_args/vllm_extra_args LAST) is identical to ./run.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=../common/_run-lib.sh
+source "$HERE/../common/_run-lib.sh"
+
+# shellcheck disable=SC2034  # read by docker_core_args in common/_run-lib.sh
+NAME=vllm
+# Our own build, but the SNAPSHOT tag family (VLLM_REF=main ./container/build),
+# never :latest -- :latest stays the release build every other launcher uses.
+# Pinned to the exact vLLM commit rather than the moving cu<cuda>-sm120-main
+# tag, so a later snapshot build cannot change what this launcher runs
+# unnoticed: the image is looked up by its ai.vllmcustom.vllm.ref label (stamped
+# by container/Dockerfile) against VLLM_MAIN_SHA in container/versions.env --
+# the same pin ./container/build builds -- so a bump there is picked up here
+# with no edit. The build date in the tag no longer needs to be known. Newest
+# match wins (docker lists newest first), restricted to the default CUDA
+# variant. IMAGE_TAG=... still overrides.
+# shellcheck source-path=SCRIPTDIR source=../container/versions.env
+source "$HERE/../container/versions.env"
+IMAGE=${IMAGE:-iphands/vllm-blackwell}
+if [[ -z ${IMAGE_TAG:-} ]]; then
+  IMAGE_TAG=$("${DOCKER[@]}" images "$IMAGE" --filter "label=ai.vllmcustom.vllm.ref=$VLLM_MAIN_SHA" \
+                --format '{{.Tag}}' | grep -m1 "^cu${DEFAULT_CUDA_VERSION//./}-sm120-main-vllm" || true)
+  if [[ -z $IMAGE_TAG ]]; then
+    echo "No $IMAGE image built from vLLM $VLLM_MAIN_SHA (VLLM_MAIN_SHA in container/versions.env)."
+    echo "Build the main snapshot first:"
+    echo "  VLLM_REF=main ./container/build"; exit 1
+  fi
+fi
+vllm_image
+
+# shellcheck disable=SC2034  # read by resolve_model in common/_model-lib.sh
+DEFAULT_MODEL=nvidia/Qwen3.8-Flash-Next-FP4-Local   # relative to MODEL_ROOT (./models/vllm)
+resolve_model "${1:-}"
+
+# Model family. "flashnext" = Qwen4Exp (this launcher's original target): it needs the whole
+# PLE/engram path. "qwen" = the base Qwen3.8 checkpoints (Qwen3_5, dense or MoE), which must
+# NOT get it: --engram-config on them dies in config validation with "EngramConfig requires
+# a model with supported Engram embeddings and non-empty n-gram layer ids". Detected from
+# config.json architectures; FAMILY= overrides. HAS_MOE / HAS_NVFP4 pick the MoE and
+# linear backend defaults below.
+_fam=$(python3 - "$MODEL_ROOT/$MODEL" "${FAMILY:-}" <<'PY'
+import json, pathlib, sys
+cfg = json.load(open(pathlib.Path(sys.argv[1]) / "config.json"))
+t = cfg.get("text_config") or cfg
+fam = sys.argv[2] or ("flashnext" if any("Qwen4Exp" in a for a in cfg.get("architectures", [])) else "qwen")
+moe = int((t.get("num_experts") or 0) > 0)
+quant = json.dumps(cfg.get("quantization_config") or {}).lower()
+print(fam, moe, int("fp4" in quant))
+PY
+) || { echo "model family check failed"; exit 1; }
+read -r FAMILY HAS_MOE HAS_NVFP4 <<< "$_fam"
+case "$FAMILY" in
+  flashnext|qwen) ;;
+  *) echo "FAMILY must be flashnext or qwen (got '$FAMILY')"; exit 1 ;;
+esac
+echo "## family  $FAMILY (moe=$HAS_MOE nvfp4=$HAS_NVFP4)"
+# Per-family defaults for the knobs below; an env var of the same name still wins.
+_d_ple=0 _d_nvfp4_backend='' _d_moe=''
+[[ "$FAMILY" == flashnext ]] && { _d_ple=1; }
+[[ "$FAMILY" != flashnext && "$HAS_NVFP4" == 1 ]] && _d_nvfp4_backend=cutlass   # qwen/run: bench-fastest NVFP4 GEMM on sm120f
+[[ "$HAS_MOE" == 1 ]] && _d_moe=humming
+# For FP4-Local config.json's ple_embedding_dtype="nvfp4" is correct: it tells
+# vLLM how to read the U8-packed NVFP4 table shards. The shard-header probe
+# would read "U8", disagree with config, and wrongly override to "U8", so the
+# default is empty (trust config.json / skip the probe). ${PLE_DTYPE-} keeps an
+# exported PLE_DTYPE=... from the environment; unset falls back to empty.
+PLE_DTYPE=${PLE_DTYPE-}
+
+PORT=${PORT:-8700}
+ATTN_BACKEND=${ATTN_BACKEND-}                    # EMPTY = vLLM auto-select
+MOE_BACKEND=${MOE_BACKEND-$_d_moe}               # humming on MoE checkpoints, none on dense; EMPTY = auto (may already be marlin on main; see header)
+NVFP4_BACKEND=${NVFP4_BACKEND-$_d_nvfp4_backend} # --linear-backend; Flash-Next's linear layers are FP8 (leave it); cutlass on NVFP4 base checkpoints; EMPTY = vLLM's choice
+SPEC_TOKENS=${SPEC_TOKENS:-3}                    # MTP speculative tokens; 3 = card optimum for this model; 0 = off
+BLOCK_SIZE=${BLOCK_SIZE-64}                      # 64 = card value for this model; a number = forced; EMPTY = none
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.975}              # the card's measured value for this model; verify "Available KV cache memory" at boot
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}           # native; the PR image needed <=135168 beside the MTP draft head
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-16}                 # card value for this model
+MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-6019}   # card value for this model
+CUDAGRAPH_MODE=${CUDAGRAPH_MODE-FULL_AND_PIECEWISE} # card value for this model
+FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-}     # 1 = FlashInfer autotuning during warmup (A/B)
+KV_FP8=${KV_FP8-1}                               # 1 = --kv-cache-dtype fp8; 0 or EMPTY = BF16
+KV_NVFP4=${KV_NVFP4:-}                           # 1 = --kv-cache-dtype nvfp4; 4over6 = nvfp4_4over6; overrides KV_FP8 (see the KV_NVFP4 note below)
+KV_SKIP_MTP=${KV_SKIP_MTP:-1}                    # 1 = MTP layer(s) skip fp8 KV (--kv-cache-dtype-skip-layers)
+DRAFT_SAMPLE=${DRAFT_SAMPLE-probabilistic}       # greedy | probabilistic; EMPTY = vLLM default (greedy)
+SPEC_LIVE=${SPEC_LIVE:-0}                        # 1 = live-adjustable draft depth over HTTP (SPEC_TOKENS is then the max); see "SPEC_LIVE" below
+SPEC_LIVE_K=${SPEC_LIVE_K:-}                     # initial live depth; EMPTY = SPEC_TOKENS
+SPEC_LIVE_CAPTURE=${SPEC_LIVE_CAPTURE:-}         # K values to pre-capture CUDA graphs for, comma-separated, main one first; EMPTY = K..1
+ONLINE_FP8=${ONLINE_FP8:-0}                      # 1 = online FP8 (fp8_per_channel) for the BF16 dense layers; or a vLLM scheme name; 0 = off (see "ONLINE_FP8")
+SM120_SKINNY=${SM120_SKINNY:-0}                  # 1 = reuse the SM121 skinny-GEMM plan table on SM120 (see "SM120_SKINNY")
+VISION=${VISION:-1}                              # 0 = --language-model-only
+PLE_OFFLOAD=${PLE_OFFLOAD:-$_d_ple}              # 1 = --engram-config cpu_offload (the single-GPU path); default 1 for flashnext only
+PINNED_ROUND_MB=${PINNED_ROUND_MB:-1024}         # pinned requests above this are not rounded to a power of 2; 0 = torch default (see header)
+BOOT_TIMING=${BOOT_TIMING:-1}                    # mount container/patches/boot-timing on PYTHONPATH: per-section boot report at "Application startup complete"
+VLLM_BOOT_LOG=${VLLM_BOOT_LOG:-1}                # 1 = append boot stats JSONL to ./storage (mounted by docker_core_args when set)
+DRAFT_LOAD_FILTER=${DRAFT_LOAD_FILTER:-1}        # skip checkpoint tensors a model drops, before reading them (see below)
+CSF_SCALE_DECODE=${CSF_SCALE_DECODE:-1}        # decode this checkpoint's NVFP4-CSF expert scales to plain E4M3 as they load (see below); 0 = vLLM fails on the *.nvfp4_csf_* tensors
+GDN_KERNEL=${GDN_KERNEL:-triton}                 # VLLM_GDN_DECODE_KERNEL
+EXECUTOR=${EXECUTOR:-}                           # --distributed-executor-backend; empty = default
+CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
+
+# require_image's hint names a plain ./container/build, which would produce the
+# release image, not this tag.
+"${DOCKER[@]}" image inspect "$CONTAINER" >/dev/null 2>&1 || {
+  echo "Image $CONTAINER not found. Build the main snapshot first:"
+  echo "  VLLM_REF=main ./container/build"; exit 1; }
+
+# The PLE compressed-tensors overlay that used to live here is GONE (2026-10-15), and
+# so is the PATCH_PLE knob that toggled it: if you set PATCH_PLE=0 out of habit it is
+# now simply unread by this script, not an unsupported error. Nothing else changed.
+# vllm#59431 (main c32513b, 2026-09-30) taught upstream's from_quant_config to
+# return the unquantized method when CompressedTensorsConfig.get_scheme_dict() is
+# None — the same should_ignore_layer() call the overlay made — so the overlay has
+# been inert on every snapshot since 47de9d4, and at this pin (4d9a8d6) upstream's
+# own ngram_embedding.py carries the branch. The launcher used to detect that by
+# grepping the image's copy and skip the mount; now there is nothing to skip. The
+# dtype probe below is still required and unchanged: it fixes the *checkpoint's*
+# wrong ple_embedding_dtype, which is a different bug.
+
+# ple_embedding_dtype: config.json vs. what the shards actually hold. The value
+# that matters is the tensor dtype; when config.json disagrees, override it.
+# Read from the safetensors header (8-byte length + JSON), no torch needed.
+HF_OVERRIDES=
+if [[ -n "$PLE_DTYPE" ]]; then
+  _ple=$(python3 - "$MODEL_ROOT/$MODEL" "$PLE_DTYPE" <<'PY'
+import json, pathlib, struct, sys
+m, want = pathlib.Path(sys.argv[1]), sys.argv[2]
+cfg = json.load(open(m / "config.json"))
+declared = (cfg.get("text_config") or cfg).get("ple_embedding_dtype")
+if want == "auto":
+    idx = json.load(open(m / "model.safetensors.index.json"))["weight_map"]
+    name = next((k for k in sorted(idx) if k.endswith(".ngram_embedding.shard_0.weight")), None)
+    if name is None:
+        print(f"skip no ngram_embedding.shard_0.weight in the index; declared={declared}"); sys.exit(0)
+    with open(m / idx[name], "rb") as f:
+        hdr = json.loads(f.read(struct.unpack("<Q", f.read(8))[0]))
+    st = hdr[name]["dtype"]
+    want = {"BF16": "bfloat16", "F16": "float16", "F32": "float32",
+            "F8_E4M3": "float8_e4m3fn"}.get(st, st)
+    src = f"{idx[name]} says {st}"
+else:
+    src = "PLE_DTYPE forced"
+if want == declared:
+    print(f"ok config.json ple_embedding_dtype={declared} matches ({src})")
+else:
+    print(f"override {want} config.json says {declared!r}, {src}")
+PY
+  ) || { echo "PLE dtype check failed"; exit 1; }
+  echo "## PLE dtype: ${_ple#* }"
+  case "$_ple" in
+    override\ *) _dt=${_ple#override }; _dt=${_dt%% *}
+                 HF_OVERRIDES='{"text_config": {"ple_embedding_dtype": "'"$_dt"'"}}' ;;
+  esac
+fi
+
+# --block-size for the QSA key ring (upstream gap, vLLM 47de9d4; qsa_cache.py and
+# platforms/interface.py still do not fold it in at df6c7ad -- neither file changed
+# between 187a0eb and df6c7ad -- so still needed). With MTP,
+# qwen4_exp/common/qsa_cache.py sizes each QSA layer's key ring as
+# capacity = cr * ceil((cr + k) / cr)   (cr = indexer_compress_ratio, k = SPEC_TOKENS)
+# and asserts block_size % capacity == 0 -- its comment says the ring joins
+# the LCM that sets the block size, but platforms/interface.py
+# _align_hybrid_block_size never adds it: it picks the smallest multiple of
+# max(16, --block-size) that holds the mamba page (1616 = 16 x 101 here).
+# With cr=4 the ring is 8 for k=1-4 and 16 for k=9-12 (fine), but 12 for
+# k=5-8: "QSA ring capacity 12 must divide the attention block size 1616",
+# after the full ~8 min weight load (2026-09-26, SPEC_TOKENS=5). Passing
+# --block-size lcm(16, capacity) (48) makes that same code pick a multiple of
+# 48 instead (1632 = 12 x 136, ~1% bigger pages); a user block size only skips
+# the backend-preference pass, the hybrid mamba alignment still runs. Drop
+# this once upstream folds the ring capacity into the LCM.
+BLOCK_ARG=
+if [[ "$BLOCK_SIZE" == auto ]]; then
+  if [[ "$SPEC_TOKENS" != "0" ]]; then
+    _blk=$(python3 - "$MODEL_ROOT/$MODEL" "$SPEC_TOKENS" <<'PY'
+import json, math, pathlib, sys
+m, k = pathlib.Path(sys.argv[1]), int(sys.argv[2])
+cfg = json.load(open(m / "config.json"))
+cr = (cfg.get("text_config") or cfg).get("indexer_compress_ratio")
+if not cr:
+    print("none no indexer_compress_ratio in config.json (no QSA ring)"); sys.exit(0)
+cap = cr * -(-(cr + k) // cr)
+align = math.lcm(16, cap)
+if align == 16:
+    print(f"none QSA ring capacity {cap} (cr={cr}, k={k}) divides every 16-aligned block size")
+else:
+    print(f"{align} QSA ring capacity {cap} (cr={cr}, k={k}) does not divide 16-aligned block sizes"
+          f" -> --block-size {align} (vLLM rounds it up to fit the mamba page)")
+PY
+    ) || { echo "QSA block-size check failed"; exit 1; }
+    echo "## block size: ${_blk#* }"
+    [[ "${_blk%% *}" != none ]] && BLOCK_ARG=${_blk%% *}
+  fi
+elif [[ -n "$BLOCK_SIZE" ]]; then
+  BLOCK_ARG=$BLOCK_SIZE
+fi
+# Validate a forced --block-size against the QSA key-ring capacity. With MTP,
+# qwen4_exp/common/qsa_cache.py sizes the ring as cr*ceil((cr+k)/cr) and asserts
+# block_size % capacity == 0. The `auto` path above picks lcm(16, capacity); a
+# forced size that isn't a multiple of the capacity fails *after* an ~8-minute
+# weight load (QSA ring capacity 12 must divide the block size for k=5-8, so the
+# default BLOCK_SIZE=64 is fine for k=1-4 and 9-12 but not 5-8).
+if [[ -n "$BLOCK_ARG" ]]; then
+  _blk_cap=$(python3 - "$MODEL_ROOT/$MODEL" "$SPEC_TOKENS" "$BLOCK_ARG" <<'PY'
+import json, pathlib, sys
+m, k, bs = pathlib.Path(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3])
+cfg = json.load(open(m / "config.json"))
+cr = (cfg.get("text_config") or cfg).get("indexer_compress_ratio")
+if not cr:
+    print("ok no QSA ring"); sys.exit(0)
+cap = cr * -(-(cr + k) // cr)
+if bs % cap != 0:
+    print(f"fail QSA ring capacity {cap} (cr={cr}, k={k}) does not divide --block-size {bs}"
+          f" -> pick a multiple of {cap} or use BLOCK_SIZE=auto")
+else:
+    print(f"ok block size {bs} divisible by QSA ring capacity {cap}")
+PY
+  ) || { echo "QSA block-size validation failed"; exit 1; }
+  echo "## block size: ${_blk_cap#* }"
+  [[ "${_blk_cap%% *}" == fail ]] && exit 1
+fi
+
+# Observed on the PR-branch image, unverified on main: warn, don't refuse.
+if [[ "$MOE_BACKEND" == marlin && "$SPEC_TOKENS" != "0" ]]; then
+  echo "## WARNING: MOE_BACKEND=marlin with MTP failed at draft load on the PR-branch image (vllm#54788: draft experts are BF16)."
+  echo "##          If the engine dies with \"moe_backend='marlin' is not supported for unquantized MoE\", set SPEC_TOKENS=0."
+fi
+if [[ "$SPEC_TOKENS" == "1" ]]; then
+  echo "## WARNING: SPEC_TOKENS=1 hung the PR-branch image at boot (engine blocked in shm_broadcast). Watch for a silent stall."
+fi
+
+# Draft-acceptance knobs (KV_SKIP_MTP defaults on, DRAFT_SAMPLE off; A/B them).
+# KV_SKIP_MTP: --kv-cache-dtype fp8 also quantizes the MTP layer's own QSA KV.
+# vllm#60023 (4ff028d, 2026-10-05) made QSA honor --kv-cache-dtype-skip-layers
+# and measured the drafter's fp8 KV costing acceptance at depth (GB10, NVFP4,
+# K=6, greedy: accept length 3.215 all fp8, 3.473 with only the MTP layer BF16,
+# 3.504 all BF16; ~7% of the KV pool).
+# The index to skip is the MTP attention layer's number as vLLM names it, and the
+# two families name it differently, so it is read from config.json, not hard-coded:
+#   flashnext: Qwen4ExpMTP names its layer layers.{num_hidden_layers + i} (48 here).
+#   qwen:      Qwen3_5MTP names it mtp.layers.{i} with NO offset (qwen3_5_mtp.py:
+#              mtp_start_layer_idx is defined but unused), so attention.py's
+#              extract_layer_index() sees 0 and "num_hidden_layers" (64) would match
+#              nothing: a silent no-op. 0 is safe only while target layer 0 is not a
+#              full-attention layer (it is GDN on the Qwen3.8 hybrids), else it would
+#              also skip the target's layer 0 -- then the knob is ignored with a note.
+#              From reading the code; confirm with the KV cache size at boot.
+#
+# KV_NVFP4: picks --kv-cache-dtype nvfp4 (or nvfp4_4over6) and wins over KV_FP8.
+# EXPERIMENTAL, and expected to FAIL at engine init on this model: the QSA
+# attention backend only accepts auto/bfloat16/fp8/fp8_e4m3
+# (models/qwen4_exp/nvidia/qsa.py: supported_kv_cache_dtypes, and the impl
+# constructor raises "Qwen4Exp QSA requires a BF16 or FP8-e4m3 main KV cache").
+# vllm#60452 (NVFP4 KV + XQA on SM12x) only touches the FlashInfer backend, which
+# the QSA layers do not use. The knob is here so the flag reaches vLLM unchanged
+# once QSA grows NVFP4 support. Warn, don't refuse: the engine decides.
+KV_DTYPE=""
+case "$KV_NVFP4" in
+  "")      [[ -n "$KV_FP8" && "$KV_FP8" != "0" ]] && KV_DTYPE=fp8 ;;
+  1)       KV_DTYPE=nvfp4 ;;
+  4over6)  KV_DTYPE=nvfp4_4over6 ;;
+  0)       [[ -n "$KV_FP8" && "$KV_FP8" != "0" ]] && KV_DTYPE=fp8 ;;
+  *) echo "KV_NVFP4 must be 1, 4over6 or empty (got '$KV_NVFP4')"; exit 1 ;;
+esac
+if [[ "$KV_DTYPE" == nvfp4* ]]; then
+  [[ -n "$KV_FP8" && "$KV_FP8" != "0" ]] && echo "## KV_NVFP4=$KV_NVFP4 overrides KV_FP8 (using --kv-cache-dtype $KV_DTYPE)."
+  echo "## WARNING: --kv-cache-dtype $KV_DTYPE: this model's QSA backend only supports BF16/FP8 KV; expect NotImplementedError at engine init."
+fi
+KV_SKIP_ARG=()
+if [[ "$KV_SKIP_MTP" == "1" ]]; then
+  if [[ -z "$KV_DTYPE" ]]; then
+    echo "## KV_SKIP_MTP=1 ignored: the KV cache is already BF16 (KV_FP8 off)."
+  elif [[ "$SPEC_TOKENS" == "0" ]]; then
+    echo "## KV_SKIP_MTP=1 ignored: MTP is off (SPEC_TOKENS=0)."
+  else
+    _mtp_layers=$(python3 - "$MODEL_ROOT/$MODEL" "$FAMILY" <<'PY'
+import json, pathlib, sys
+cfg = json.load(open(pathlib.Path(sys.argv[1]) / "config.json"))
+t = cfg.get("text_config") or cfg
+n = t.get("mtp_num_hidden_layers", 1)
+if sys.argv[2] == "flashnext":
+    start = t["num_hidden_layers"]
+else:
+    layer_types = t.get("layer_types")
+    if not layer_types or layer_types[0] == "full_attention":
+        print("none"); sys.exit(0)
+    start = 0
+print(" ".join(str(i) for i in range(start, start + n)))
+PY
+    ) || { echo "MTP layer index lookup failed"; exit 1; }
+    if [[ "$_mtp_layers" == none ]]; then
+      echo "## KV_SKIP_MTP=1 ignored: layer 0 of this model is (or may be) a full-attention layer, so index 0 would also skip the target's layer 0."
+    else
+      read -ra KV_SKIP_ARG <<< "$_mtp_layers"
+      echo "## KV skip: MTP layer(s) $_mtp_layers keep a BF16 KV cache (--kv-cache-dtype-skip-layers)"
+    fi
+  fi
+fi
+# DRAFT_SAMPLE: vLLM drafts greedily by default (draft_sample_method "greedy":
+# argmax, one-hot draft probs in rejection sampling), so at temperature 1.0 a
+# draft is accepted with ~the target's probability of that argmax token.
+# "probabilistic" samples drafts at the request temperature and uses the full
+# draft logits in the ratio test (more GPU memory). Until vllm#56724 lands the
+# drafts ignore the request's top_k/top_p, so draws outside top_k=20 get rejected.
+case "$DRAFT_SAMPLE" in
+  ""|greedy|probabilistic) ;;
+  *) echo "DRAFT_SAMPLE must be greedy or probabilistic (got '$DRAFT_SAMPLE')"; exit 1 ;;
+esac
+[[ -n "$DRAFT_SAMPLE" && "$SPEC_TOKENS" == "0" ]] && echo "## DRAFT_SAMPLE=$DRAFT_SAMPLE ignored: MTP is off (SPEC_TOKENS=0)."
+
+# ONLINE_FP8: almost everything that is not a routed expert in nvidia/Qwen3.8-Flash-Next-FP4-Local
+# is BF16 and on the checkpoint's modelopt `ignore` list: lm_head [248320x2560], the GDN
+# in_proj_qkv / in_proj_z / out_proj, the QSA projections, the shared experts, the
+# HyperConnection mixes, the router. By shape that is ~4.3B params, ~8.5 GB read per
+# forward, against ~1.3 GB for the active NVFP4 experts -- so ~85% of a token's weight bytes
+# are BF16. Pennyroyal (SGLang) halves them with online row-wise FP8 and measured +15.8% to
+# +28.3% single-stream decode (RESULTS.md / FP8.md in jpezzulli/sglang-rtxpro6000).
+# vLLM can do the same for the unquantized layers of a partially-quantized checkpoint
+# (docs/features/quantization/online.md): --quantization-config '{"linear":"fp8_per_channel"}'
+# = per-output-channel FP8 weights + dynamic per-token FP8 activations. resolve_quant_method()
+# (quantization/base_config.py) hands every LinearBase layer the checkpoint left unquantized to
+# the online method; experts keep their NVFP4 (moe is unset), and ParallelLMHead, the
+# HyperConnection mixes and the router stay BF16 (not LinearBase, or no quant_config).
+# Checked: the config parses against this checkpoint and composes onto its
+# ModelOptMixedPrecisionConfig. NOT verified: the boot on the GPU (GDN / packed QSA qkv +
+# indexer, MTP drafter, memory freed ~3.9 GiB in Pennyroyal), or the accuracy -- compare
+# outputs before adopting. Keep GDN_KERNEL=triton with it.
+#
+# It is ONLY valid where the checkpoint leaves the dense layers unquantized. On a checkpoint
+# that already quantizes them (compressed-tensors, fp8, ...) the online method has to
+# RE-quantize, which vLLM supports only for ModelOpt MXFP8 sources
+# (docs/features/quantization/online.md); for compressed-tensors it dies at model build with
+# "AttributeError: ... has no attribute 'weight'" (online/fp8.py create_weights: the source
+# creates weight_packed, then layer.weight is read). Seen 2026-10-12 on
+# unsloth/Qwen3.8-27B-NVFP4, which already has FP8 per-channel (the same recipe) on attention,
+# GDN and lm_head and NVFP4 on the MLPs; primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8 is
+# the same story for attention + GDN. So the checkpoint is probed first: allowed iff there is
+# no quantization_config, or quant_method is modelopt* and no config_groups target is a dense
+# layer (self_attn / linear_attn / lm_head / q_proj / in_proj / qkv). Otherwise the knob is
+# ignored with the reason. The vision tower sits on the checkpoint's ignore list too, so
+# without an `ignore` the online method would FP8 it as well (no decode benefit, image
+# quality risk): it is excluded with "re:.*visual.*".
+_ONLINE_FP8_SCHEME=''
+case "$ONLINE_FP8" in
+  0|'') ;;
+  1) _ONLINE_FP8_SCHEME=fp8_per_channel ;;
+  *[!a-z0-9_]*) echo "ONLINE_FP8 must be 0, 1 or a vLLM scheme name like fp8_per_channel (got '$ONLINE_FP8')"; exit 1 ;;
+  *) _ONLINE_FP8_SCHEME=$ONLINE_FP8 ;;
+esac
+if [[ -n "$_ONLINE_FP8_SCHEME" ]]; then
+  _ofp8=$(python3 - "$MODEL_ROOT/$MODEL" <<'PY'
+import json, pathlib, re, sys
+cfg = json.load(open(pathlib.Path(sys.argv[1]) / "config.json"))
+q = cfg.get("quantization_config") or (cfg.get("text_config") or {}).get("quantization_config")
+if not q:
+    print("ok no quantization_config (unquantized checkpoint)"); sys.exit(0)
+method = str(q.get("quant_method"))
+targets = [t for g in (q.get("config_groups") or {}).values() for t in g.get("targets", [])]
+dense = [t for t in targets if re.search(r"self_attn|linear_attn|lm_head|q_proj|in_proj|qkv", t)]
+if method.startswith("modelopt") and not dense:
+    print(f"ok {method}: the dense layers are not quantized")
+elif method.startswith("modelopt"):
+    print(f"no {method} already quantizes dense layers ({dense[0][:48]})")
+else:
+    print(f"no {method} already quantizes the dense layers")
+PY
+  ) || { echo "ONLINE_FP8 checkpoint probe failed"; exit 1; }
+  if [[ "${_ofp8%% *}" != ok ]]; then
+    echo "## ONLINE_FP8 ignored: ${_ofp8#* }; online FP8 would have to re-quantize them, which vLLM does not support for this method."
+    _ONLINE_FP8_SCHEME=''
+  fi
+fi
+if [[ -n "$_ONLINE_FP8_SCHEME" ]]; then
+  echo "## online-fp8: --quantization-config '{\"linear\":\"$_ONLINE_FP8_SCHEME\",\"ignore\":[\"re:.*visual.*\"]}' (${_ofp8#* }; BF16 dense layers -> FP8 at load, vision tower untouched; UNVERIFIED on the GPU for this model)"
+  [[ "$GDN_KERNEL" != triton ]] && echo "## WARNING: ONLINE_FP8 with GDN_KERNEL=$GDN_KERNEL; the GDN projections become FP8 and the launcher has only run FP8 GDN projections with the triton decode kernel."
+fi
+
+# SM120_SKINNY: Qwen4Exp swaps F.linear for a CuTe-DSL skinny GEMM on its BF16 projections and
+# the lm_head, but upstream ships plan tables only for SM103 / SM100 / SM90 / SM121
+# (qwen4_exp/nvidia/low_latency_gemm.py), so on this SM120 card all of that is plain
+# F.linear. vllm#59753 added SM121 TP=1 plans for this model's exact shapes (lm_head
+# 248320x2560, GDN 16384x2560, QSA 13952x2560, HC 10240x320, ...). The overlay in
+# container/patches/sm120-gemm-plans reuses that table for capability (12, 0). Tiles were
+# tuned on GB10 (273 GB/s), so UNVERIFIED on this card: A/B it. With ONLINE_FP8 the
+# quantized layers leave this path (it only takes unquantized linears); the lm_head,
+# HyperConnection and router shapes still use it.
+SM120_SKINNY_DIR="$HERE/../container/patches/sm120-gemm-plans"
+case "$SM120_SKINNY" in
+  0|1) ;;
+  *) echo "SM120_SKINNY must be 0 or 1 (got '$SM120_SKINNY')"; exit 1 ;;
+esac
+if [[ "$SM120_SKINNY" == 1 && "$FAMILY" != flashnext ]]; then
+  echo "## SM120_SKINNY=1 ignored: only Qwen4Exp (family flashnext) has the skinny-GEMM path."
+  SM120_SKINNY=0
+fi
+[[ "$SM120_SKINNY" == 1 ]] && echo "## sm120-skinny: SM121 skinny-GEMM plans reused for SM120 (UNVERIFIED on this card; see container/patches/sm120-gemm-plans/UPSTREAM)"
+
+# SPEC_LIVE: change the MTP draft depth without a restart (GET/POST /spec_tokens).
+# vLLM has no live setter (num_speculative_tokens feeds the scheduler, the CUDA-graph
+# capture and the QSA key ring at init), but its Dynamic SD (vllm#32374) already
+# picks K per scheduler step below the configured maximum and every allocation is
+# sized for that maximum. container/patches/spec-live replaces Dynamic SD's
+# batch-size table with ONE live K and adds the HTTP route; see its UPSTREAM.
+# Here: SPEC_TOKENS is the maximum, and a boot-time
+# "num_speculative_tokens_per_batch_size" turns Dynamic SD on and tells the workers
+# which K values get CUDA graphs (their batch-size meaning is ignored at runtime).
+# There is room for one K per batch size 1..MAX_NUM_SEQS; the main K takes the
+# widest tier ([N, MAX_NUM_SEQS]) so its full graphs cover the most request counts.
+# A K outside SPEC_LIVE_CAPTURE still works (PIECEWISE graphs instead of full ones).
+# UNVERIFIED on this model: upstream tested Dynamic SD with Eagle / Eagle-3 / DFlash,
+# not MTP on a hybrid GDN + QSA model. Enabling it also stops the scheduler padding
+# new decode requests to 1+K tokens (a full-graph optimisation).
+SPEC_SCHEDULE_JSON=''
+SPEC_LIVE_K_EFF=''
+SPEC_LIVE_DIR="$HERE/../container/patches/spec-live"
+case "$SPEC_LIVE" in
+  0|1) ;;
+  *) echo "SPEC_LIVE must be 0 or 1 (got '$SPEC_LIVE')"; exit 1 ;;
+esac
+if [[ "$SPEC_LIVE" == 1 ]]; then
+  if [[ "$SPEC_TOKENS" == "0" ]]; then
+    echo "## SPEC_LIVE=1 ignored: MTP is off (SPEC_TOKENS=0)."
+    SPEC_LIVE=0
+  else
+    _live=$(python3 - "$SPEC_TOKENS" "$MAX_NUM_SEQS" "$SPEC_LIVE_K" "$SPEC_LIVE_CAPTURE" <<'PY'
+import json, sys
+try:
+    mx, nseq = int(sys.argv[1]), int(sys.argv[2])
+    k0 = int(sys.argv[3]) if sys.argv[3] else mx
+    cap = [int(x) for x in sys.argv[4].split(",")] if sys.argv[4] else None
+except ValueError:
+    sys.exit("SPEC_LIVE_K / SPEC_LIVE_CAPTURE must be integers (CAPTURE: comma-separated)")
+if not 0 <= k0 <= mx:
+    sys.exit(f"SPEC_LIVE_K={k0} must be in 0..SPEC_TOKENS ({mx})")
+if cap is None:
+    cap = list(range(max(k0, 1), 0, -1))[:nseq]
+if not cap or len(set(cap)) != len(cap) or any(not 1 <= k <= mx for k in cap):
+    sys.exit(f"SPEC_LIVE_CAPTURE={cap} must be distinct values in 1..SPEC_TOKENS ({mx})")
+if len(cap) > nseq:
+    sys.exit(f"SPEC_LIVE_CAPTURE has {len(cap)} values but MAX_NUM_SEQS={nseq} leaves room for {nseq}"
+             " (one K per batch size 1..MAX_NUM_SEQS)")
+lows = cap[1:][::-1]
+ranges = [[i + 1, i + 1, k] for i, k in enumerate(lows)]
+ranges.append([len(lows) + 1, nseq, cap[0]])
+print(k0, json.dumps(ranges, separators=(",", ":")))
+PY
+    ) || { echo "SPEC_LIVE configuration invalid"; exit 1; }
+    read -r SPEC_LIVE_K_EFF SPEC_SCHEDULE_JSON <<< "$_live"
+    echo "## spec-live: K=$SPEC_LIVE_K_EFF of max $SPEC_TOKENS; boot schedule $SPEC_SCHEDULE_JSON (CUDA graphs per K)"
+    echo "##   GET/POST http://localhost:$PORT/spec_tokens  (UNVERIFIED on this model family; see container/patches/spec-live/UPSTREAM)"
+  fi
+fi
+
+# The table is 95.4 GB of PINNED host memory, allocated in the engine worker
+# during weight load. Warn, don't refuse: the kernel decides.
+_avail_gb=$(awk '/MemAvailable/ {printf "%d", $2/1048576}' /proc/meminfo)
+if [[ "$PLE_OFFLOAD" != "0" ]] && (( _avail_gb < 100 )); then
+  echo "## WARNING: ${_avail_gb} GB host RAM available; the BF16 n-gram table needs ~100 GB free (pinned, not swappable)."
+  echo "##          Stop whatever else is running (docker ps) or expect the host allocation to fail at weight load."
+fi
+# GPU_MEM_UTIL=0.975 is above the 0.95/0.955 this stack measured for this model.
+# The PLE table is pinned host RAM (not GPU), so this only scales the KV cache.
+# vLLM prints "Available KV cache memory" and the boot-timing patch prints a
+# gpu_memory_utilization headroom block at "Application startup complete"; watch
+# those and drop GPU_MEM_UTIL=0.955 if you see OOM.
+_gu_warn=$(awk -v u="$GPU_MEM_UTIL" 'BEGIN{print (u+0 > 0.95 ? 1 : 0)}')
+if [[ "$_gu_warn" == 1 ]]; then
+  echo "## GPU_MEM_UTIL=$GPU_MEM_UTIL is above the 0.95 floor this stack measured for this model."
+  echo "##          Watch \"Available KV cache memory\" at boot; drop GPU_MEM_UTIL=0.955 on OOM."
+fi
+
+docker_core_args
+CONTAINER_ARGS+=(
+  -e VLLM_GDN_DECODE_KERNEL="$GDN_KERNEL"                  # triton REQUIRED for the FP8 GDN projections (card)
+  -e VLLM_SLEEP_WHEN_IDLE=1                                # release SMs when no requests pending (idle power)
+  # The model is a directory under the read-only /models mount, loaded in place;
+  # this makes any Hub access an error rather than a 184 GB surprise.
+  -e HF_HUB_OFFLINE=1
+)
+# The 95.4 GiB table is one pinned allocation; stop torch rounding it to 128 GiB.
+# If you need other allocator settings, put them in the same variable via
+# ENV_EXTRA (last -e wins) and keep this key in it.
+[[ "$PINNED_ROUND_MB" != "0" ]] && CONTAINER_ARGS+=( -e PYTORCH_CUDA_ALLOC_CONF="pinned_max_round_threshold_mb:$PINNED_ROUND_MB" )
+# Startup timing: a PYTHONPATH dir with sitecustomize.py + boot_timing.py. No
+# upstream file is replaced, so there is nothing to sha-check (see its UPSTREAM).
+# The image ships no PYTHONPATH; sitecustomize chains Debian's own regardless.
+BOOT_TIMING_DIR="$HERE/../container/patches/boot-timing"
+if [[ "$BOOT_TIMING" != "0" ]]; then
+  [[ -f "$BOOT_TIMING_DIR/sitecustomize.py" && -f "$BOOT_TIMING_DIR/boot_timing.py" ]] || {
+    echo "missing $BOOT_TIMING_DIR/{sitecustomize,boot_timing}.py"; exit 1; }
+  CONTAINER_ARGS+=( -v "$BOOT_TIMING_DIR:/opt/boot-timing:ro" -e PYTHONPATH=/opt/boot-timing )
+fi
+# Checkpoint load filter. The MTP drafter (Qwen4ExpMTP) is a second model that
+# vLLM loads from the SAME checkpoint, and the default safetensors iterator
+# reads every tensor before the drafter's load_weights discards 96% of them:
+# 171 s of NFS re-reading on the 2026-09-26 boot (the pinned PLE table leaves
+# too little RAM for the page cache to help). draft_load_filter skips, before
+# the read, every tensor the drafter's own name-remap would drop -- through
+# the same should_skip_weight seam upstream uses for EP expert filtering. The
+# target gets the mirror image: the 2.5 GiB of mtp.* its load_weights drops
+# (~4.7 s with MTP off; ~a wash with MTP on, where that read had been warming
+# the page cache for the drafter). Like boot-timing it replaces no upstream
+# file (hooks by name, no-ops on drift; see its UPSTREAM). Loaded by a NEW
+# .pth in site-packages, so it is independent of PYTHONPATH/sitecustomize.
+DRAFT_FILTER_DIR="$HERE/../container/patches/draft-load-filter"
+if [[ "$DRAFT_LOAD_FILTER" != "0" ]]; then
+  [[ -f "$DRAFT_FILTER_DIR/draft_load_filter.py" && -f "$DRAFT_FILTER_DIR/draft_load_filter.pth" ]] || {
+    echo "missing $DRAFT_FILTER_DIR/draft_load_filter.{py,pth}"; exit 1; }
+  CONTAINER_ARGS+=(
+    -v "$DRAFT_FILTER_DIR:/opt/draft-load-filter:ro"
+    -v "$DRAFT_FILTER_DIR/draft_load_filter.pth:/opt/venv/lib/python3.12/site-packages/zz_draft_load_filter.pth:ro"
+  )
+fi
+# NVFP4-CSF scale decode. This checkpoint stores every routed-expert block-scale
+# matrix losslessly compressed (<X>.weight_scale.nvfp4_csf_fixed + _exceptions);
+# upstream vLLM has no reader (the model card says so) and the community readers
+# need b12x kernels. csf_scale_decode wraps DefaultModelLoader.get_all_weights and
+# yields the ordinary float8_e4m3fn <X>.weight_scale instead, so HUMMING/Marlin
+# see a normal NVFP4 checkpoint. Same mechanism as the load filter above: a NEW
+# .pth, no upstream file replaced, "NOT applied" on drift (see its UPSTREAM).
+CSF_DECODE_DIR="$HERE/../container/patches/csf-scale-decode"
+if [[ "$CSF_SCALE_DECODE" != "0" ]]; then
+  [[ -f "$CSF_DECODE_DIR/csf_scale_decode.py" && -f "$CSF_DECODE_DIR/csf_scale_decode.pth" ]] || {
+    echo "missing $CSF_DECODE_DIR/csf_scale_decode.{py,pth}"; exit 1; }
+  CONTAINER_ARGS+=(
+    -v "$CSF_DECODE_DIR:/opt/csf-scale-decode:ro"
+    -v "$CSF_DECODE_DIR/csf_scale_decode.pth:/opt/venv/lib/python3.12/site-packages/zz_csf_scale_decode.pth:ro"
+  )
+fi
+# SM120_SKINNY overlay: same mechanism (a new .pth, no upstream file replaced).
+if [[ "$SM120_SKINNY" == 1 ]]; then
+  [[ -f "$SM120_SKINNY_DIR/sm120_gemm_plans.py" && -f "$SM120_SKINNY_DIR/sm120_gemm_plans.pth" ]] || {
+    echo "missing $SM120_SKINNY_DIR/sm120_gemm_plans.{py,pth}"; exit 1; }
+  CONTAINER_ARGS+=(
+    -e SM120_SKINNY=1
+    -v "$SM120_SKINNY_DIR:/opt/sm120-gemm-plans:ro"
+    -v "$SM120_SKINNY_DIR/sm120_gemm_plans.pth:/opt/venv/lib/python3.12/site-packages/zz_sm120_gemm_plans.pth:ro"
+  )
+fi
+# SPEC_LIVE overlay: same mechanism (a new .pth, no upstream file replaced). The hook
+# does nothing unless SPEC_LIVE=1 is in the container's env.
+if [[ "$SPEC_LIVE" == 1 ]]; then
+  [[ -f "$SPEC_LIVE_DIR/spec_live.py" && -f "$SPEC_LIVE_DIR/spec_live.pth" ]] || {
+    echo "missing $SPEC_LIVE_DIR/spec_live.{py,pth}"; exit 1; }
+  CONTAINER_ARGS+=(
+    -e SPEC_LIVE=1 -e SPEC_LIVE_K="$SPEC_LIVE_K_EFF"
+    -v "$SPEC_LIVE_DIR:/opt/spec-live:ro"
+    -v "$SPEC_LIVE_DIR/spec_live.pth:/opt/venv/lib/python3.12/site-packages/zz_spec_live.pth:ro"
+  )
+fi
+env_extra_args
+
+vllm_core_args
+VLLM_ARGS+=(
+  --enable-auto-tool-choice
+  --reasoning-parser qwen3
+  --tool-call-parser qwen3_xml                 # this model's chat template is qwen3 XML-style tool calls
+
+  # Qwen3.8-Flash-Next README, thinking mode (== the checkpoint's generation_config.json).
+  # Also used for the base Qwen3.8 family: thinking is forced on below for both.
+  # Instruct / non-thinking set, if ever served with enable_thinking false:
+  #   {"temperature": 0.7, "top_p": 0.80, "top_k": 20, "min_p": 0.0, "presence_penalty": 1.5, "repetition_penalty": 1.0}
+  --override-generation-config '{ "temperature": 1.0, "top_p": 0.95, "top_k": 20, "min_p": 0.0, "presence_penalty": 0.0, "repetition_penalty": 1.0 }'
+
+  --default-chat-template-kwargs '{"enable_thinking": true, "preserve_thinking": true}'
+)
+
+# The single-GPU path: table in pinned host RAM, looked up over UVA (vllm#54371).
+# Explicit flag even though cpu_offload defaults to true since vllm#57937 (which
+# also removed the legacy VLLM_PLE_CPU_OFFLOAD env): the launcher should not
+# depend on an upstream default for a 95 GiB placement decision.
+[[ "$PLE_OFFLOAD" != "0" ]] && VLLM_ARGS+=( --engram-config '{"cpu_offload": true}' )
+[[ -n "$HF_OVERRIDES" ]] && VLLM_ARGS+=( --hf-overrides "$HF_OVERRIDES" )
+[[ -n "$EXECUTOR" ]] && VLLM_ARGS+=( --distributed-executor-backend "$EXECUTOR" )
+[[ -n "$KV_DTYPE" ]] && VLLM_ARGS+=( --kv-cache-dtype "$KV_DTYPE" )
+[[ -n "$_ONLINE_FP8_SCHEME" ]] && VLLM_ARGS+=( --quantization-config '{"linear":"'"$_ONLINE_FP8_SCHEME"'","ignore":["re:.*visual.*"]}' )
+(( ${#KV_SKIP_ARG[@]} )) && VLLM_ARGS+=( --kv-cache-dtype-skip-layers "${KV_SKIP_ARG[@]}" )
+[[ "$VISION" == "0" ]] && VLLM_ARGS+=( --language-model-only )
+# SPEC_TOKENS=0 disables MTP entirely (clean no-speculation baseline); else add it.
+_spec='{"method":"mtp","num_speculative_tokens":'"$SPEC_TOKENS"
+[[ -n "$DRAFT_SAMPLE" ]] && _spec+=',"draft_sample_method":"'"$DRAFT_SAMPLE"'"'
+[[ -n "$SPEC_SCHEDULE_JSON" ]] && _spec+=',"num_speculative_tokens_per_batch_size":'"$SPEC_SCHEDULE_JSON"
+_spec+='}'
+[[ "$SPEC_TOKENS" != "0" ]] && VLLM_ARGS+=( --speculative-config "$_spec" )
+[[ -n "$BLOCK_ARG" ]] && VLLM_ARGS+=( --block-size "$BLOCK_ARG" )
+nvfp4_backend_args
+vllm_extra_args
+
+# Boot-stats JSONL: pass the model name and the resolved serve args into the
+# container so boot_timing.py's write_jsonl can make them top-level fields.
+# VLLM_ARGS is a bash array like (--flag value --bare-flag ...); convert to a
+# JSON key->value dict (bare flags -> true) so the log is easy to query later.
+CONTAINER_ARGS+=( -e VLLM_MODEL_NAME="$MODEL" )
+VLLM_BOOT_ARGS="$(python3 -c '
+import json, sys
+args = sys.argv[1:]
+d = {}
+i = 0
+while i < len(args):
+    a = args[i]
+    if a.startswith("--"):
+        k = a[2:]
+        if "=" in k:
+            k, v = k.split("=", 1)
+            d[k] = v
+        elif i + 1 < len(args) and not args[i + 1].startswith("--"):
+            d[k] = args[i + 1]
+            i += 1
+        else:
+            d[k] = True
+    i += 1
+print(json.dumps(d))
+' "${VLLM_ARGS[@]}")"
+CONTAINER_ARGS+=( -e VLLM_BOOT_ARGS="$VLLM_BOOT_ARGS" )
+
+echo
+_ple_note=; [[ "$PLE_OFFLOAD" != "0" ]] && _ple_note=", PLE table pinned in host RAM via --engram-config"
+_sm120_note=''; [[ "$SM120_SKINNY" == 1 ]] && _sm120_note=' sm120-skinny'
+echo "## Running $CONTAINER  (model=$MODEL family=$FAMILY attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS${SPEC_LIVE_K_EFF:+ live-k=$SPEC_LIVE_K_EFF}${_ONLINE_FP8_SCHEME:+ online-fp8=$_ONLINE_FP8_SCHEME}${_sm120_note}${DRAFT_SAMPLE:+/$DRAFT_SAMPLE}${KV_SKIP_ARG[*]:+ kv-bf16-layers=${KV_SKIP_ARG[*]}} block=${BLOCK_ARG:-64} load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) csf-decode=$([[ "$CSF_SCALE_DECODE" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0$_ple_note)"
+vllm_launch
