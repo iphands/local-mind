@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 17% complete (1/6 tasks)
+- Status: 33% complete (2/6 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/03_vllm_stats_log.md`
 - Evidence: `./storage/vllm_boot_stats.jsonl` (one JSONL line per boot, append-only). Test environment: image tag from `container/.last-build`, `VLLM_REF` from `container/versions.env`, model from `qwen3.8-flash-next/run` `$MODEL`.
@@ -17,14 +17,14 @@
 
 ## Open Unknowns
 
-- Whether `VLLM_BOOT_ARGS` should be space-joined or JSON-encoded (risk: args with embedded spaces/JSON). Decide in T3/T4.
+- Whether `VLLM_BOOT_ARGS` should be space-joined or JSON-encoded (risk: args with embedded spaces/JSON). Decide in T3/T4. ~~strike~~ RESOLVED (T2): JSON-encoded key→value dict, bare flags map to `true`.
 
 ## Progress
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 1 | T1: Grounding & key facts | `container/patches/boot-timing/boot_timing.py`, `common/_run-lib.sh`, `qwen3.8-flash-next/run` | done | All Key Facts line numbers verified against source: format_report=585, _record=719, vllm_launch=370, BOOT_TIMING_DIR=610, BOOT_TIMING=254. |
-| 2 | T2: Design JSONL schema & storage layout | `context/plans/03_vllm_stats_log.md` | pending | |
+| 2 | T2: Design JSONL schema & storage layout | `context/plans/03_vllm_stats_log.md` | done | Schema defined in plan with validated example JSONL object; vllm_args is a key→value dict (not array); storage at ./storage/vllm_boot_stats.jsonl, mounted to /opt/vllm-storage, gated by VLLM_BOOT_LOG_DIR env. |
 | 3 | T3: Add JSONL writer to boot_timing.py | `container/patches/boot-timing/boot_timing.py` | pending | gated by `VLLM_BOOT_LOG_DIR` env |
 | 4 | T4: Wire launcher to mount storage + pass model/args | `common/_run-lib.sh`, `qwen3.8-flash-next/run` | pending | mirrors cache-dir ownership pattern |
 | 5 | T5: Verify with project gate | all touched files | pending | gate step 2 = skip (shellcheck absent) |
