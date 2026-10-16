@@ -10,6 +10,10 @@
   vLLM-first) plus the `git check-ignore` / `rg` blindness pair in T3. No live perf numbers, so
   the Evidence table records commands + observed output, not measurements.
 
+> **Commit-tag provenance (2026-10-16)**: the commit tags here use the project's `[proxy]` scope
+> tag; the commits themselves landed as `[llama-proxy][P…]` and history was not rewritten
+> (Rule B2). `git log` is the authority on what was committed.
+
 ## Resume Instructions
 
 1. Read the project's root `AGENTS.md`/`CLAUDE.md`, `context/plans/RULES.md` (in full), then
@@ -24,9 +28,9 @@
    escape hatch is in place before grep goes blind), then T4, T5, T6 (independent). T4 must not
    touch the `hands-plan:begin` block; T5 must not rename the "Is it really streaming?" heading.
 4. These three artifacts (plan + tracker + SERIES row) land first, before any task, as
-   `[llama-proxy][P2][plan] add vllm-first docs + read-only vendor discovery` (RULES.md Rule B
+   `[proxy][P2][plan] add vllm-first docs + read-only vendor discovery` (RULES.md Rule B
    bookkeeping tag — do NOT fold them into T1's commit). Then commit per task as
-   `[llama-proxy][P2][T<n>][<topic>] <summary>` (plan number **not** zero-padded), with **this
+   `[proxy][P2][T<n>][<topic>] <summary>` (plan number **not** zero-padded), with **this
    tracker's row in the same commit**. When T1 starts, flip plan `Status` → `in-progress`, this row
    → `in-progress` under SERIES *Currently Active*, and set `Start date` — all in T1's commit.
 

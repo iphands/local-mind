@@ -9,6 +9,10 @@
 > **Before writing any code, re-read `context/plans/RULES.md` in full.**
 > For historical context, completed plans live in `context/plans/completed/`.
 
+> **Commit-tag provenance (2026-10-16)**: the `**Commit**:` messages here use the project's
+> `[proxy]` scope tag; the commits themselves landed as `[llama-proxy][P…]` and history was not
+> rewritten (Rule B2). `git log` is the authority on what was committed.
+
 ---
 
 ## TL;DR
@@ -137,7 +141,7 @@ cargo check --workspace --features influxdb -- -D warnings && cargo clippy --all
 ```
 Expected: the two greps hit (the rule + the escape hatch both landed); gate exits 0.
 
-**Commit**: `[llama-proxy][P2][T1][vendor-rules] add P3 read-only vendor discovery rule` — *tracker row in the same commit (Rule B).*
+**Commit**: `[proxy][P2][T1][vendor-rules] add P3 read-only vendor discovery rule` — *tracker row in the same commit (Rule B).*
 
 ### T2: Register vendor in the `context/` KB map
 
@@ -162,7 +166,7 @@ cargo check --workspace --features influxdb -- -D warnings && cargo clippy --all
 ```
 Expected: vendor row present, still-symlink confirmed, gate exits 0.
 
-**Commit**: `[llama-proxy][P2][T2][docs] register vendor discovery in context KB map` — *tracker row in the same commit.*
+**Commit**: `[proxy][P2][T2][docs] register vendor discovery in context KB map` — *tracker row in the same commit.*
 
 ### T3: Gitignore `/vendor/` (and observe the ignore took)
 
@@ -205,7 +209,7 @@ Expected: `git check-ignore` matches and `git status --porcelain vendor/` is emp
 - **Refutes if**: `git status --porcelain vendor/` still lists `?? vendor/` (the ignore did not apply — check the anchor / a trailing-space typo), **or** `git check-ignore -v` prints no `/vendor/` rule even though `git status` is empty (ignored via `.git/info/exclude` or a global `core.excludesFile`, not by the file we just edited — a false pass).
 - **Within noise if**: `rg --files vendor` (explicit path) lists files — expected, an explicit arg bypasses the parent ignore; only the **root** `rg --files` skipping `vendor/` is the blindness signal.
 
-**Commit**: `[llama-proxy][P2][T3][gitignore] ignore read-only /vendor tree` — *tracker row in the same commit.*
+**Commit**: `[proxy][P2][T3][gitignore] ignore read-only /vendor tree` — *tracker row in the same commit.*
 
 ### T4: Re-frame root `CLAUDE.md` (=`AGENTS.md`) vLLM-first
 
@@ -240,7 +244,7 @@ cargo check --workspace --features influxdb -- -D warnings && cargo clippy --all
 ```
 Expected: the new vLLM-first sentences are present and the first `vllm` grep hits in the Overview (not just the pre-existing :52-53 mentions), the old exact llama.cpp-only line is gone, both hands-plan markers survive, `AGENTS.md` is still a symlink, gate exits 0.
 
-**Commit**: `[llama-proxy][P2][T4][docs] make root CLAUDE.md vLLM-first` — *tracker row in the same commit.*
+**Commit**: `[proxy][P2][T4][docs] make root CLAUDE.md vLLM-first` — *tracker row in the same commit.*
 
 ### T5: Re-frame `README.md` vLLM-first + narrow `fixrate.md`
 
@@ -275,7 +279,7 @@ cargo check --workspace --features influxdb -- -D warnings && cargo clippy --all
 ```
 Expected: README intro + diagram lead vLLM, old `[llama.cpp]` intro gone, cited heading preserved, flag named at both sites, the new vLLM API-Compatibility bullet present, **all three Preservation greps hit**, gate exits 0.
 
-**Commit**: `[llama-proxy][P2][T5][docs] make README/fixrate vLLM-first` — *tracker row in the same commit.*
+**Commit**: `[proxy][P2][T5][docs] make README/fixrate vLLM-first` — *tracker row in the same commit.*
 
 ### T6: Triage tracked docs + stamp stale `PLAN.md` obsolete
 
@@ -316,7 +320,7 @@ cargo check --workspace --features influxdb -- -D warnings && cargo clippy --all
 ```
 Expected: PLAN.md stamped; no tracked doc still claims llama.cpp is *the* target backend except documented Follow-ups; gate exits 0.
 
-**Commit**: `[llama-proxy][P2][T6][docs] triage docs; stamp stale PLAN.md obsolete` — *tracker row in the same commit.*
+**Commit**: `[proxy][P2][T6][docs] triage docs; stamp stale PLAN.md obsolete` — *tracker row in the same commit.*
 
 ---
 
