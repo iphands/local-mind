@@ -281,6 +281,27 @@ The proxy requires `config.yaml` (copy from `config.yaml.default`). Key settings
 - `stats.format`: pretty | json | compact
 - `exporters.influxdb.enabled`: Enable InfluxDB export
 
+<!-- hands-plan:begin v1 -->
+## Plans & Context
+
+`context/` is this project's living memory and `context/plans/` its plan system.
+**`context/plans/RULES.md` is authoritative** — where this file and RULES.md disagree, RULES.md wins.
+
+- **Before non-trivial work:** read `context/plans/RULES.md` in full (its first table says what
+  needs a plan), then `context/plans/SERIES.md` (active plans, next free number, north star).
+  New plan = copy `NN_example.md` + `NN_example_tracker.md`, register it in SERIES.
+- **Working a plan:** follow the tracker's Resume Instructions → pass the project gate
+  (Rule A) → commit `[llama-proxy][P<n>][T<n>][<topic>] <summary>` with the tracker row in the
+  same commit. One task per commit.
+- **Git:** never push; no co-author trailers; history is append-only — fix a bad commit with a
+  new one, and chain `edit && git commit`.
+- **Knowledge:** read `context/AGENTS.md` for what lives where; record findings as you go, and
+  harvest them before a plan moves to `completed/`.
+- **Current state lives in `SERIES.md`**, not in this file.
+- **Honesty:** never claim something is done, verified or recorded unless it is — on disk, in the
+  command output.
+<!-- hands-plan:end -->
+
 ## Adding New Features
 
 **New Fix Module**:
