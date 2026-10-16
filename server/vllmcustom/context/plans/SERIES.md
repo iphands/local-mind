@@ -29,8 +29,6 @@ still stand — see `context/distilled.md`.
 **02 — No sudo anywhere** is **done** (2026-10-13, `completed/`). Nothing left active: the next move is
 Plan 01's T4, or a new plan against the north star.
 
-**Plan 03 — vLLM boot stats JSONL log**: done (6/6 tasks), committed as [P3].
-
 ## Plans <!-- hp:plans -->
 
 Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
