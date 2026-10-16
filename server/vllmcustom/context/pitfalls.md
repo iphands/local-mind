@@ -557,3 +557,18 @@ the owner's instruction, not the missing credential; it holds intact the day a c
 - `.git/logs/refs/remotes/origin/dev` — reflog entries above, read directly
 - `context/plans/RULES.md` Rule B1 #7 (the rule), Rule B2.2 (the same trap for `--amend`)
 - vllmcustom: repin `8363331`, 2026-10-15 — the report that triggered this entry
+
+# `time.strftime` does not expand `%f` (microseconds) [OBSERVED 2026-10-16]
+
+## Problem
+`time.strftime("%Y-%m-%dT%H:%M:%S.%fZ", time.gmtime(now))` prints the literal `%f` instead of
+microseconds — `time.strftime` has no `%f` directive (that's `datetime`). The JSONL `ts` field came
+out as `2026-10-16T00:35:44.%fZ`, which is not valid ISO-8601 and breaks downstream parsing.
+
+## How to avoid
+Use `time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now))` plus a manually formatted microsecond
+suffix: `f".{int((now % 1) * 1_000_000):06d}Z"`. Or use `datetime.datetime.fromtimestamp(now,
+tz=timezone.utc).isoformat()` and replace `+00:00` with `Z`.
+
+## Sources
+- vllmcustom: `container/patches/boot-timing/boot_timing.py` `write_jsonl()` — fixed on second attempt

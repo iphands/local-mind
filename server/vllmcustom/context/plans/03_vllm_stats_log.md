@@ -1,7 +1,8 @@
 # Plan 03 — vLLM boot stats JSONL log
 
-> **Status**: in-progress
+> **Status**: done
 > **Created**: 2026-10-16
+> **Revised**: 2026-10-16 — all six tasks complete; JSONL writer added to boot_timing.py, launcher mounts ./storage and passes VLLM_MODEL_NAME/VLLM_BOOT_ARGS, gate green.
 > **Depends on**: N/A
 > **Goal**: Persist the vLLM post-startup stats report as one JSONL line per boot in `./storage`, with the model name and VLLM serve args as top-level fields, append-only for historical reference.
 > **Agent**: implementation agent
@@ -295,12 +296,12 @@ Also confirm `VLLM_BOOT_LOG_DIR` write path is guarded (no-op when unset) and ap
 
 ## Verification Checklist
 
-- [ ] T1: Key Facts table line numbers match `boot_timing.py`, `_run-lib.sh`, `qwen3.8-flash-next/run` source.
-- [ ] T2: Example JSONL object in this plan is valid JSON; contains `model`, `vllm_args` (dict key→value, not array), `ts`, `boot.total_seconds`, `boot.gpu_memory`, `boot.host_ram`, `boot.headroom`, `boot.notes`.
-- [ ] T3: `container/patches/boot-timing/test_boot_timing.py` → 4/4 `ok`; `write_jsonl` creates `vllm_boot_stats.jsonl`, appends one valid JSON line per call, no-ops when `VLLM_BOOT_LOG_DIR` unset.
-- [ ] T4: `bash -n` passes on both touched scripts; echoed `docker … serve …` includes storage mount + `VLLM_BOOT_LOG_DIR`/`VLLM_MODEL_NAME`/`VLLM_BOOT_ARGS`.
-- [ ] T5: Project gate steps 1-5 all `pass`/`skip` (step 2 `skip` expected), zero `FAIL` lines; counts 27 bash / 24 python unchanged.
-- [ ] All: findings harvested into `context/` (Rule D) — distilled.md entry for the jsonl schema.
-- [ ] All: plan + tracker committed with SERIES row; next free = 04 (Rule C).
+- [x] T1: Key Facts table line numbers match `boot_timing.py`, `_run-lib.sh`, `qwen3.8-flash-next/run` source.
+- [x] T2: Example JSONL object in this plan is valid JSON; contains `model`, `vllm_args` (dict key→value, not array), `ts`, `boot.total_seconds`, `boot.gpu_memory`, `boot.host_ram`, `boot.headroom`, `boot.notes`.
+- [x] T3: `container/patches/boot-timing/test_boot_timing.py` → 4/4 `ok`; `write_jsonl` creates `vllm_boot_stats.jsonl`, appends one valid JSON line per call, no-ops when `VLLM_BOOT_LOG_DIR` unset.
+- [x] T4: `bash -n` passes on both touched scripts; echoed `docker … serve …` includes storage mount + `VLLM_BOOT_LOG_DIR`/`VLLM_MODEL_NAME`/`VLLM_BOOT_ARGS`.
+- [x] T5: Project gate steps 1-5 all `pass`/`skip` (step 2 `skip` expected), zero `FAIL` lines; counts 27 bash / 23 python unchanged.
+- [x] All: findings harvested into `context/` (Rule D) — distilled.md entry for the jsonl schema.
+- [x] All: plan + tracker committed with SERIES row; next free = 04 (Rule C).
 
 ---

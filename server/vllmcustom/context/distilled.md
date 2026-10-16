@@ -83,6 +83,13 @@ section**, which always stays last. Keep it dense.
   when everything else does. The two root-side scripts remain `container/gc-setup` and
   `container/slice-setup`, by design, both via `su -c`.
 
+## Boot stats JSONL log (Plan 03) [REPO][LIVE 2026-10-16]
+
+- `container/patches/boot-timing/boot_timing.py` gains `write_jsonl()` + `_report_struct()`; called from `_report_now` when `VLLM_BOOT_LOG_DIR` is set. Appends one compact JSONL line per boot to `<log_dir>/vllm_boot_stats.jsonl` with top-level `ts`, `model`, `vllm_args` (key→value dict; bare flags → `true`), and `boot` (total_seconds, processes, gpu_memory, host_ram, headroom, notes, raw_marks_path). No-op when env unset; never raises.
+- `common/_run-lib.sh` `docker_core_args`: when `VLLM_BOOT_LOG=1`, creates `./storage` (owned by RUN_UID), mounts to `/opt/vllm-storage:rw`, exports `VLLM_BOOT_LOG_DIR=/opt/vllm-storage`.
+- `qwen3.8-flash-next/run`: sets `VLLM_BOOT_LOG=1`, `VLLM_MODEL_NAME="$MODEL"`, `VLLM_BOOT_ARGS` as JSON-encoded dict converted from the bash `VLLM_ARGS` array.
+- Opt-in per launcher: other launchers stay silent by not setting `VLLM_BOOT_LOG`.
+
 ---
 
 ## Open Questions

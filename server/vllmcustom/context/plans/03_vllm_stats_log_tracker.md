@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 83% complete (5/6 tasks)
+- Status: 100% complete (6/6 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/03_vllm_stats_log.md`
 - Evidence: `./storage/vllm_boot_stats.jsonl` (one JSONL line per boot, append-only). Test environment: image tag from `container/.last-build`, `VLLM_REF` from `container/versions.env`, model from `qwen3.8-flash-next/run` `$MODEL`.
@@ -28,7 +28,7 @@
 | 3 | T3: Add JSONL writer to boot_timing.py | `container/patches/boot-timing/boot_timing.py` | done | Added write_jsonl() + _report_struct(); called from _report_now when VLLM_BOOT_LOG_DIR set; no-op when unset; never raises; tested host-side (valid JSONL, model+vllm_args dict, append-only); patch tests 4/4 ok. |
 | 4 | T4: Wire launcher to mount storage + pass model/args | `common/_run-lib.sh`, `qwen3.8-flash-next/run` | done | docker_core_args creates/mounts ./storage to /opt/vllm-storage + sets VLLM_BOOT_LOG_DIR when VLLM_BOOT_LOG=1; qwen3.8-flash-next/run sets VLLM_BOOT_LOG=1, VLLM_MODEL_NAME=$MODEL, VLLM_BOOT_ARGS as JSON-encoded key->value dict from VLLM_ARGS; dry-run verified storage mount + env vars present; ./storage auto-created owned by RUN_UID. |
 | 5 | T5: Verify with project gate | all touched files | done | Gate step 1: no FAIL, 28 b / 23 p, env ok. Step 2: skip (shellcheck absent). Step 3: 4/4 patch tests ok. Step 4: preflight OK (default set). Step 5: last-build matches, 1 image ID. write_jsonl host-side test passed (valid JSONL, model+vllm_args dict, append-only). |
-| 6 | T6: Commit plan + tracker + SERIES | `context/plans/03_vllm_stats_log*.md`, `context/plans/SERIES.md` | pending | `[P3][plan] add ...` |
+| 6 | T6: Commit plan + tracker + SERIES | `context/plans/03_vllm_stats_log*.md`, `context/plans/SERIES.md` | done | All tasks done; plan committed as [P3][plan]; SERIES row in-progress; next free = 04. |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` — the last three always carry a reason in the row's Notes cell.
 

@@ -29,7 +29,7 @@ still stand — see `context/distilled.md`.
 **02 — No sudo anywhere** is **done** (2026-10-13, `completed/`). Nothing left active: the next move is
 Plan 01's T4, or a new plan against the north star.
 
-**Plan 03 — vLLM boot stats JSONL log**: in progress, 1/6 tasks done; next T2 (design JSONL schema).
+**Plan 03 — vLLM boot stats JSONL log**: done (6/6 tasks), committed as [P3].
 
 ## Plans <!-- hp:plans -->
 
@@ -39,7 +39,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 |------|-------|-----------|--------|-------|
 | 01 | Run everything as uid/gid 1000:1000, host and container | — | pending | Containers run as root today; cache mount target is unreadable to uid 1000, so identity and mount must move together. |
 | 02 | No sudo anywhere: plain `docker` is the only privilege path | 01 | done | Closed 2026-10-13, gate rc 0. Root refusal kept — `su` still reaches root; `ALLOW_ROOT` deleted, no escape hatch. |
-| 03 | Persist vLLM post-startup stats as JSONL in ./storage, with model name and VLLM args | — | in-progress | Boot-timing report is stdout-only today; marks live in per-container /tmp and vanish on --rm. T1 done, T2 next. |
+| 03 | Persist vLLM post-startup stats as JSONL in ./storage, with model name and VLLM args | — | done | All six tasks complete. JSONL writer in boot_timing.py; launcher mounts ./storage, passes VLLM_MODEL_NAME and JSON-encoded VLLM_BOOT_ARGS; gate green. |
 
 ## Pre-existing material <!-- hp:pre-existing -->
 
