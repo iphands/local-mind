@@ -1,0 +1,11 @@
+#!/bin/bash
+set -e
+cd /home/iphands/prog/ai/local-mind/pi
+
+podman build -t pi .
+#   --security-opt label=disable \
+podman run --rm -it --name pi \
+  --userns=keep-id \
+  -v /home/iphands/prog:/home/iphands/prog:Z \
+  -v /home/iphands/prog/ai/local-mind/pi/container_data/models.json:/home/iphands/.pi/agent/models.json:Z \
+  pi

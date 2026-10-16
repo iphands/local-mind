@@ -1,0 +1,85 @@
+#!/bin/bash
+# Self-contained launcher for the M2 Asahi Linux laptop (podman, aarch64).
+#   ./run-air [model.gguf]
+# Env overrides: MODEL PORT NAME ALIAS CTX THREADS IMAGE VULKAN=1
+#   VULKAN=1 passes /dev/dri through and uses the vulkan image. It needs the
+#   Asahi Mesa (Honeykrisp) inside the container, so it is experimental; the
+#   default is CPU-only on the 4 M2 performance cores.
+set -ue
+
+cd "$(dirname "$(realpath "$0")")"
+
+MODEL=${1:-${MODEL:-models/gguf/LFM2.5-24B-A2B-UD-Q4_K_XL.gguf}}
+PORT=${PORT:-8701}
+NAME=${NAME:-llama-server-air}
+ALIAS=${ALIAS:-air}
+CTX=${CTX:-32768}        # 24B Q4 is ~15GB of 23GB RAM; keep context modest
+THREADS=${THREADS:-4}    # M2 has 4 P + 4 E cores; E cores stall the P cores
+VULKAN=${VULKAN:-0}
+
+[[ -f "$MODEL" ]] || { echo "[FATAL] model not found: $MODEL"; exit 1; }
+command -v podman >/dev/null || { echo "[FATAL] podman not installed"; exit 1; }
+
+MODEL_PATH=$(realpath "$MODEL")
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL_FILE=${MODEL_PATH##*/}
+
+IMAGE=${IMAGE:-ghcr.io/ggml-org/llama.cpp:server}
+
+CONTAINER_ARGS=(
+  run -it --rm
+  --name "$NAME"
+  -p ${PORT}:8799
+  # :z relabels for SELinux (Fedora Asahi); read-only mount of the model dir
+  -v "$MODEL_FOLDER":/models:ro,z
+  # Host Mesa (>=26.2) honours heap_memory_percent in ~/.drirc; the image's
+  # Mesa 26.0 doesn't, so overlay the host Honeykrisp ICD (+ its SPIRV-Tools dep).
+  -v /usr/lib64/libvulkan_asahi.so:/usr/lib/aarch64-linux-gnu/libvulkan_asahi.so:ro
+  -v /usr/lib64/libSPIRV-Tools.so:/usr/lib/aarch64-linux-gnu/libSPIRV-Tools.so:ro
+  -v "$HOME/.drirc":/root/.drirc:ro
+  --entrypoint /app/llama-server
+)
+
+LLAMA_ARGS=(
+  --model /models/$MODEL_FILE
+  --alias "$ALIAS"
+  --port 8799
+  --host ::  # dual-stack: localhost resolves to ::1 first
+  --ctx-size "$CTX"
+  --threads "$THREADS"
+  --threads-batch "$THREADS"
+  --batch-size 1024
+  --ubatch-size 256
+  --flash-attn on
+  --cache-type-k q8_0
+  --cache-type-v q8_0
+  # mmap is the default; this build rejects an explicit --mmap
+  --jinja
+  --parallel 1
+  --no-context-shift
+  --cache-ram 2048
+  --temp 0.6 --top-p 0.95 --top-k 20
+)
+
+if [[ "$VULKAN" == "1" ]]; then
+  IMAGE=${IMAGE/:server/:server-vulkan}
+  CONTAINER_ARGS+=(--device /dev/dri --group-add keep-groups --security-opt label=disable)
+  LLAMA_ARGS+=(--n-gpu-layers 99)
+else
+  LLAMA_ARGS+=(--n-gpu-layers 0)
+fi
+
+echo "## Detected settings:
+PORT:    $PORT
+MODEL:   $MODEL_FILE
+NAME:    $NAME
+ALIAS:   $ALIAS
+CTX:     $CTX
+THREADS: $THREADS
+VULKAN:  $VULKAN
+IMAGE:   $IMAGE
+"
+
+podman pull "$IMAGE"
+echo podman "${CONTAINER_ARGS[@]}" "$IMAGE" "${LLAMA_ARGS[@]}"
+exec podman "${CONTAINER_ARGS[@]}" "$IMAGE" "${LLAMA_ARGS[@]}"
