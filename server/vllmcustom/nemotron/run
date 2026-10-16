@@ -1,0 +1,160 @@
+#!/bin/bash
+# Serve NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4 on the RTX PRO 6000
+# from our sm120 vLLM image (release set, not the main snapshot).
+#
+#   ./nemotron/run                                    # default model
+#   ./nemotron/run ./models/vllm/nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+#   ./nemotron/run NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+#
+# Knobs (env-overridable):
+#   SPEC_TOKENS=3          # MTP speculative tokens (model card: 3 on H100/H200, 5 on GB200)
+#   GPU_MEM_UTIL=0.75      # model card's single-seq value
+#   MAX_NUM_SEQS=1         # single-stream (model card)
+#   MAX_MODEL_LEN=1048576  # 1M native context
+#   MAX_BATCHED_TOKENS=8192 # model card
+#   BLOCK_SIZE=64          # model card
+#   PREFIX_MATCH_UNIT=64   # model card
+#   MOE_BACKEND=           # empty = vLLM auto (NOT humming - that's Qwen4Exp-only)
+#   NVFP4_BACKEND=cutlass  # --linear-backend; cutlass = bench-fastest on sm120f
+#   KV_FP8=1               # 1 = --kv-cache-dtype fp8; 0 = BF16 (checkpoint's kv_cache_quant_algo is FP8)
+#   VISION=1               # 0 = --language-model-only (drops the C-RADIO vision encoder)
+#   ATTN_BACKEND=          # empty = vLLM auto
+#   CUDAGRAPH_MODE=        # e.g. FULL_AND_PIECEWISE
+#   FLASHINFER_AUTOTUNE=   # 1 = autotune during warmup (A/B)
+#   BOOT_TIMING=1          # boot waterfall report at serve-ready (mount container/patches/boot-timing)
+#   IMAGE_TAG=             # specific image variant (default latest = release build)
+#   CACHE_DIR=             # cache root
+#
+# Image: the SAME pinned main snapshot ./qwen3.8-flash-next/run uses (flashinfer
+# 0.7.1, torch 2.14) — NOT :latest. The release set (:latest, vLLM v0.29.0) does
+# not recognize the Mamba flags below and its build-time CCACHE_DIR points at
+# /root, which uid 1000 cannot write — a :latest boot dies at argparse on
+# --enable-mamba-shared-prefix-checkpoint, and the release flashinfer's Mamba SSU
+# JIT dies on "ccache: Permission denied". The snapshot does neither. See the
+# label lookup in the image block below.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=../common/_run-lib.sh
+source "$HERE/../common/_run-lib.sh"
+
+# shellcheck disable=SC2034  # read by docker_core_args in common/_run-lib.sh
+NAME=vllm
+# Same pinned main-snapshot image ./qwen3.8-flash-next/run uses, never :latest.
+# Looked up by the ai.vllmcustom.vllm.ref label the Dockerfile stamps, against
+# VLLM_MAIN_SHA in container/versions.env -- a snapshot rebuild is picked up here
+# with no edit. Newest match wins, restricted to the default CUDA variant.
+# IMAGE_TAG=... still overrides.
+# shellcheck source-path=SCRIPTDIR source=../container/versions.env
+source "$HERE/../container/versions.env"
+IMAGE=${IMAGE:-iphands/vllm-blackwell}
+if [[ -z ${IMAGE_TAG:-} ]]; then
+  IMAGE_TAG=$("${DOCKER[@]}" images "$IMAGE" --filter "label=ai.vllmcustom.vllm.ref=$VLLM_MAIN_SHA" \
+                --format '{{.Tag}}' | grep -m1 "^cu${DEFAULT_CUDA_VERSION//./}-sm120-main-vllm" || true)
+  if [[ -z $IMAGE_TAG ]]; then
+    echo "No $IMAGE image built from vLLM $VLLM_MAIN_SHA (VLLM_MAIN_SHA in container/versions.env)."
+    echo "Build the main snapshot first:"
+    echo "  VLLM_REF=main ./container/build"; exit 1
+  fi
+fi
+vllm_image
+
+# shellcheck disable=SC2034  # read by resolve_model in common/_model-lib.sh
+DEFAULT_MODEL=nvidia/NVIDIA-Nemotron-3.5-Super-VL-120B-A12B-NVFP4
+resolve_model "${1:-}"
+
+# Model family. "nemotron" = Nemotron-H omni (this launcher's target): Mamba-2 +
+# MoE hybrid with a C-RADIO vision encoder. No PLE/engram table, no QSA, no GDN,
+# no Humming MoE -- all of those are Qwen4Exp-only and are deliberately skipped.
+# Detected from config.json architectures; FAMILY= overrides.
+_fam=$(python3 - "$MODEL_ROOT/$MODEL" "${FAMILY:-}" <<'PY'
+import json, pathlib, sys
+cfg = json.load(open(pathlib.Path(sys.argv[1]) / "config.json"))
+fam = sys.argv[2] or ("nemotron" if any("NemotronH" in a for a in cfg.get("architectures", [])) else "unknown")
+moe = int(((cfg.get("text_config") or cfg).get("num_experts") or 0) > 0)
+print(fam, moe)
+PY
+) || { echo "model family check failed"; exit 1; }
+read -r FAMILY HAS_MOE <<< "$_fam"
+case "$FAMILY" in
+  nemotron) ;;
+  *) echo "FAMILY must be nemotron (got '$FAMILY')"; exit 1 ;;
+esac
+echo "## family  $FAMILY (moe=$HAS_MOE)"
+
+PORT=${PORT:-8700}
+ATTN_BACKEND=${ATTN_BACKEND-}                    # EMPTY = vLLM auto-select
+MOE_BACKEND=${MOE_BACKEND-}                      # empty = vLLM default (humming is Qwen4Exp-only)
+NVFP4_BACKEND=${NVFP4_BACKEND:-cutlass}          # --linear-backend; cutlass = bench-fastest on sm120f
+SPEC_TOKENS=${SPEC_TOKENS:-3}                    # MTP speculative tokens (model card: 3 on single-card-class GPUs)
+BLOCK_SIZE=${BLOCK_SIZE:-64}                     # model card
+PREFIX_MATCH_UNIT=${PREFIX_MATCH_UNIT:-64}       # model card
+GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.95}               # model card's single-seq value
+MAX_MODEL_LEN=${MAX_MODEL_LEN:-1048576}          # 1M native context 1048576
+MAX_MODEL_LEN=524288
+MAX_NUM_SEQS=${MAX_NUM_SEQS:-1}                  # single-stream per model card
+MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-8192}   # model card
+CUDAGRAPH_MODE=${CUDAGRAPH_MODE:-}               # e.g. FULL_AND_PIECEWISE (A/B)
+FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-}     # 1 = FlashInfer autotuning during warmup (A/B)
+KV_FP8=${KV_FP8-1}                               # 1 = --kv-cache-dtype fp8; 0 = BF16
+VISION=${VISION:-1}                              # 0 = --language-model-only
+CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
+BOOT_TIMING=${BOOT_TIMING:-1}                    # mount container/patches/boot-timing on PYTHONPATH
+
+# Validate SPEC_TOKENS is numeric before it is interpolated into JSON.
+[[ "$SPEC_TOKENS" =~ ^[0-9]+$ ]] || { echo "SPEC_TOKENS must be a non-negative integer (got '$SPEC_TOKENS')"; exit 1; }
+
+case "$KV_FP8" in
+  1) KV_DTYPE=fp8 ;;
+  0) KV_DTYPE= ;;
+  *) echo "KV_FP8 must be 0 or 1 (got '$KV_FP8')"; exit 1 ;;
+esac
+
+require_image
+
+docker_core_args
+CONTAINER_ARGS+=(
+  -e VLLM_SLEEP_WHEN_IDLE=1                      # release SMs when no requests pending (idle power)
+  -e HF_HUB_OFFLINE=1                            # the model is a directory under /models, loaded in place
+)
+# Boot timing: a PYTHONPATH dir with sitecustomize.py + boot_timing.py. No
+# upstream file is replaced, so there is nothing to sha-check. The image ships
+# no PYTHONPATH; sitecustomize chains Debian's own regardless.
+BOOT_TIMING_DIR="$HERE/../container/patches/boot-timing"
+if [[ "$BOOT_TIMING" != "0" ]]; then
+  [[ -f "$BOOT_TIMING_DIR/sitecustomize.py" && -f "$BOOT_TIMING_DIR/boot_timing.py" ]] || {
+    echo "missing $BOOT_TIMING_DIR/{sitecustomize,boot_timing}.py"; exit 1; }
+  CONTAINER_ARGS+=( -v "$BOOT_TIMING_DIR:/opt/boot-timing:ro" -e PYTHONPATH=/opt/boot-timing )
+fi
+env_extra_args
+
+# Omit the shared plumbing's Qwen alias list; nemotron uses its own served name.
+CORE_OMIT=(--served-model-name)
+vllm_core_args
+VLLM_ARGS+=(
+  --served-model-name cosmo-6000
+  --reasoning-parser nemotron_v3
+  --tool-call-parser qwen3_coder
+  --enable-auto-tool-choice
+  # The checkpoint's generation_config.json (temp 1.0, top_p 0.95) governs sampling;
+  # do NOT override it here (unlike qwen3.8-flash-next/run which bakes in Qwen defaults).
+  --default-chat-template-kwargs '{"enable_thinking": true}'
+  --block-size "$BLOCK_SIZE"
+  --prefix-match-unit "$PREFIX_MATCH_UNIT"
+  # Mamba-2 tuning (model card):
+  --mamba-backend flashinfer
+  --mamba-ssm-cache-dtype float16
+  --enable-mamba-cache-stochastic-rounding
+  --mamba-cache-philox-rounds 5
+  --enable-mamba-shared-prefix-checkpoint
+)
+[[ -n "$KV_DTYPE" ]] && VLLM_ARGS+=( --kv-cache-dtype "$KV_DTYPE" )
+[[ "$VISION" == "0" ]] && VLLM_ARGS+=( --language-model-only )
+# MTP speculative decoding (native MTP head, no separate drafter needed).
+[[ "$SPEC_TOKENS" != "0" ]] && VLLM_ARGS+=( --speculative-config '{"method":"mtp","num_speculative_tokens":'"$SPEC_TOKENS"'}' )
+nvfp4_backend_args
+vllm_extra_args
+
+echo
+echo "## Running $CONTAINER  (family=$FAMILY attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS block=$BLOCK_SIZE pm_unit=$PREFIX_MATCH_UNIT ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS kv=${KV_DTYPE:-bf16} vision=$([[ "$VISION" == "0" ]] && echo off || echo on) gpu0)"
+vllm_launch
