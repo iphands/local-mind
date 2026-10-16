@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `03`.** <!-- hp:next-free -->
+**Next free plan number: `04`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-10-13):** single-stream decode throughput on one RTX PRO 6000
 > (sm_120), from a vLLM stack we build ourselves — torch, FlashInfer and vLLM all compiled from
@@ -37,6 +37,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 |------|-------|-----------|--------|-------|
 | 01 | Run everything as uid/gid 1000:1000, host and container | — | pending | Containers run as root today; cache mount target is unreadable to uid 1000, so identity and mount must move together. |
 | 02 | No sudo anywhere: plain `docker` is the only privilege path | 01 | done | Closed 2026-10-13, gate rc 0. Root refusal kept — `su` still reaches root; `ALLOW_ROOT` deleted, no escape hatch. |
+| 03 | Persist vLLM post-startup stats as JSONL in ./storage, with model name and VLLM args | — | pending | Boot-timing report is stdout-only today; marks live in per-container /tmp and vanish on --rm. |
 
 ## Pre-existing material <!-- hp:pre-existing -->
 
