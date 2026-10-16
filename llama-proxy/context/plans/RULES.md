@@ -143,11 +143,12 @@ finished.
    for the plan to finish.**
 2. One task per commit — do not batch tasks unless they are truly inseparable.
 3. Message format:
-   `[llama-proxy][P<n>][T<n>][<topic>] <imperative summary>` — plan number (not zero-padded),
+   `[proxy][P<n>][T<n>][<topic>] <imperative summary>` — plan number (not zero-padded),
    task number, short area tag. Outside a plan: `[proxy] <summary>`. Plan bookkeeping replaces
-   the task tag: `[llama-proxy][P<n>][plan] add <title>`,
-   `[llama-proxy][P<n>][revise] …`, `[llama-proxy][P<n>][close] <title>: <outcome>`.
-   - `[llama-proxy][P1][T1][stats] reorder and pad the stats line`
+   the task tag: `[proxy][P<n>][plan] add <title>`,
+   `[proxy][P<n>][revise] …`, `[proxy][P<n>][close] <title>: <outcome>`.
+   In both forms the leading `[proxy]` is the project scope tag.
+   - `[proxy][P1][T1][stats] reorder and pad the stats line`
    - `[proxy] scaffold context/plans + context/ knowledge base (hands-plan v1)`
 4. **Tracker row in the same commit.** The row update — and any `context/` update the task
    produced — lands with the work. Stage explicit paths: `git add <paths>`, never `git add -A`.
@@ -155,6 +156,24 @@ finished.
 6. A change in observable behavior updates `README.md` in the same commit.
 7. **Never push** — the human pushes after review. **No co-author trailers** unless asked.
 8. Every task in a plan carries its `**Commit**:` line, so the reminder is baked in.
+
+#### Project addendum
+
+The commit scope tag for this project is **`[proxy]`** — never `[llama-proxy]`, which is the
+directory name, not a commit tag. `[proxy]` is not a rename: it is what this project has used since
+the commit that created it (`[proxy] initial commit`, 2026-02-15) and what the hands-plan scaffold
+itself used. `[llama-proxy]` appears only in the Plan 01/02 commits — that was the drift, and this
+rule corrects it.
+
+Every commit example in this file and in the `NN_example` skeletons uses `[proxy]`. If a
+`hands-plan` re-sync re-stamps a different tag into the Rule B body, `[proxy]` wins and those
+examples are stale: fix them, don't follow them.
+
+Match history by tag, not by date: the Plan 01/02 subjects still read `[llama-proxy][P…]` and were
+left untouched, history being append-only (Rule B2). So `git log --grep='\[proxy\]\[P1\]'` finds
+nothing for Plan 01 — search it by summary text or SHA. The dated provenance blockquote under the
+header of each `plans/completed/` plan is sanctioned: leave it, and don't strip it as a Plan Format
+deviation.
 
 ### Rule B2 — Git history is append-only <!-- hp:append-only -->
 
