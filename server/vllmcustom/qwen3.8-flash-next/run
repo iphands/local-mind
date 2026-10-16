@@ -252,6 +252,7 @@ PLE_OFFLOAD=${PLE_OFFLOAD:-$_d_ple}              # 1 = --engram-config cpu_offlo
 PLE_DTYPE=${PLE_DTYPE-$_d_ple_dtype}             # auto = read the shard; a dtype name = force; EMPTY = trust config.json / skip (the qwen family)
 PINNED_ROUND_MB=${PINNED_ROUND_MB:-1024}         # pinned requests above this are not rounded to a power of 2; 0 = torch default (see header)
 BOOT_TIMING=${BOOT_TIMING:-1}                    # mount container/patches/boot-timing on PYTHONPATH: per-section boot report at "Application startup complete"
+VLLM_BOOT_LOG=${VLLM_BOOT_LOG:-1}                # 1 = append boot stats JSONL to ./storage (mounted by docker_core_args when set)
 DRAFT_LOAD_FILTER=${DRAFT_LOAD_FILTER:-1}        # skip checkpoint tensors a model drops, before reading them (see below)
 GDN_KERNEL=${GDN_KERNEL:-triton}                 # VLLM_GDN_DECODE_KERNEL
 EXECUTOR=${EXECUTOR:-}                           # --distributed-executor-backend; empty = default
@@ -692,6 +693,33 @@ _spec+='}'
 [[ -n "$BLOCK_ARG" ]] && VLLM_ARGS+=( --block-size "$BLOCK_ARG" )
 nvfp4_backend_args
 vllm_extra_args
+
+# Boot-stats JSONL: pass the model name and the resolved serve args into the
+# container so boot_timing.py's write_jsonl can make them top-level fields.
+# VLLM_ARGS is a bash array like (--flag value --bare-flag ...); convert to a
+# JSON key->value dict (bare flags -> true) so the log is easy to query later.
+CONTAINER_ARGS+=( -e VLLM_MODEL_NAME="$MODEL" )
+VLLM_BOOT_ARGS="$(python3 -c '
+import json, sys
+args = sys.argv[1:]
+d = {}
+i = 0
+while i < len(args):
+    a = args[i]
+    if a.startswith("--"):
+        k = a[2:]
+        if "=" in k:
+            k, v = k.split("=", 1)
+            d[k] = v
+        elif i + 1 < len(args) and not args[i + 1].startswith("--"):
+            d[k] = args[i + 1]
+            i += 1
+        else:
+            d[k] = True
+    i += 1
+print(json.dumps(d))
+' "${VLLM_ARGS[@]}")"
+CONTAINER_ARGS+=( -e VLLM_BOOT_ARGS="$VLLM_BOOT_ARGS" )
 
 echo
 _ple_note=; [[ "$PLE_OFFLOAD" != "0" ]] && _ple_note=", PLE table pinned in host RAM via --engram-config"

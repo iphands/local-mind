@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 50% complete (3/6 tasks)
+- Status: 67% complete (4/6 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/03_vllm_stats_log.md`
 - Evidence: `./storage/vllm_boot_stats.jsonl` (one JSONL line per boot, append-only). Test environment: image tag from `container/.last-build`, `VLLM_REF` from `container/versions.env`, model from `qwen3.8-flash-next/run` `$MODEL`.
@@ -26,7 +26,7 @@
 | 1 | T1: Grounding & key facts | `container/patches/boot-timing/boot_timing.py`, `common/_run-lib.sh`, `qwen3.8-flash-next/run` | done | All Key Facts line numbers verified against source: format_report=585, _record=719, vllm_launch=370, BOOT_TIMING_DIR=610, BOOT_TIMING=254. |
 | 2 | T2: Design JSONL schema & storage layout | `context/plans/03_vllm_stats_log.md` | done | Schema defined in plan with validated example JSONL object; vllm_args is a key→value dict (not array); storage at ./storage/vllm_boot_stats.jsonl, mounted to /opt/vllm-storage, gated by VLLM_BOOT_LOG_DIR env. |
 | 3 | T3: Add JSONL writer to boot_timing.py | `container/patches/boot-timing/boot_timing.py` | done | Added write_jsonl() + _report_struct(); called from _report_now when VLLM_BOOT_LOG_DIR set; no-op when unset; never raises; tested host-side (valid JSONL, model+vllm_args dict, append-only); patch tests 4/4 ok. |
-| 4 | T4: Wire launcher to mount storage + pass model/args | `common/_run-lib.sh`, `qwen3.8-flash-next/run` | pending | mirrors cache-dir ownership pattern |
+| 4 | T4: Wire launcher to mount storage + pass model/args | `common/_run-lib.sh`, `qwen3.8-flash-next/run` | done | docker_core_args creates/mounts ./storage to /opt/vllm-storage + sets VLLM_BOOT_LOG_DIR when VLLM_BOOT_LOG=1; qwen3.8-flash-next/run sets VLLM_BOOT_LOG=1, VLLM_MODEL_NAME=$MODEL, VLLM_BOOT_ARGS as JSON-encoded key->value dict from VLLM_ARGS; dry-run verified storage mount + env vars present; ./storage auto-created owned by RUN_UID. |
 | 5 | T5: Verify with project gate | all touched files | pending | gate step 2 = skip (shellcheck absent) |
 | 6 | T6: Commit plan + tracker + SERIES | `context/plans/03_vllm_stats_log*.md`, `context/plans/SERIES.md` | pending | `[P3][plan] add ...` |
 

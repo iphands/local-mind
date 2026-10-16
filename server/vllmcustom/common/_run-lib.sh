@@ -270,6 +270,32 @@ docker_core_args() {
     --ulimit memlock=-1
     --ulimit stack=67108864
   )
+  # Boot-stats JSONL log: when VLLM_BOOT_LOG=1, create ./storage (owned by
+  # RUN_UID like the cache dir), mount it to /opt/vllm-storage, and export
+  # VLLM_BOOT_LOG_DIR so boot_timing.py's write_jsonl knows where to append.
+  # Opt-in per launcher; other launchers stay silent by not setting it.
+  if [[ "${VLLM_BOOT_LOG:-0}" == "1" ]]; then
+    STORAGE_HOST_DIR="${STORAGE_DIR:-./storage}"
+    if mkdir -m 0750 "$STORAGE_HOST_DIR" 2>/dev/null || [[ -d $STORAGE_HOST_DIR ]]; then
+      [[ -w $STORAGE_HOST_DIR ]] || {
+        echo "## $STORAGE_HOST_DIR is not writable by uid $EUID — it is not yours." >&2
+        echo "##   fix: point STORAGE_DIR= at a directory you own." >&2
+        return 1
+      }
+      STORAGE_UID=$(stat -c '%u' "$STORAGE_HOST_DIR" 2>/dev/null) \
+        || { echo "## cannot stat $STORAGE_HOST_DIR" >&2; return 1; }
+      if [[ $STORAGE_UID != "$RUN_UID" ]]; then
+        echo "## $STORAGE_HOST_DIR is owned by uid $STORAGE_UID; the container writes as uid $RUN_UID." >&2
+        echo "##   fix: chown it, or point STORAGE_DIR= at a directory you own." >&2
+        return 1
+      fi
+      CONTAINER_ARGS+=( -v "$STORAGE_HOST_DIR:/opt/vllm-storage:rw" -e VLLM_BOOT_LOG_DIR=/opt/vllm-storage )
+    else
+      echo "## cannot create $STORAGE_HOST_DIR, and it is not a directory either." >&2
+      echo "##   fix: remove that path, or point STORAGE_DIR= somewhere else." >&2
+      return 1
+    fi
+  fi
   return 0
 }
 
