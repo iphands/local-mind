@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `03`.** <!-- hp:next-free -->
+**Next free plan number: `04`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-10-16):** An OpenAI-compatible reverse proxy for LLM
 > backends (VLLM, llama.cpp); fixes malformed model responses and collects/exports inference
@@ -32,6 +32,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 |---|---|---|---|---|
 | 01 | stats columnar + prefill fix | N/A | done | columnar compact stats + corrected prefill TPS |
 | 02 | vllm-first docs + read-only vendor discovery | N/A | done | vLLM-first docs landed; `/vendor` read-only discovery + P3 rule; stale `PLAN.md` OBSOLETE-stamped |
+| 03 | columnar compact stats + honest vLLM prefill | Plan 1 | pending | Plan 01's columnar claim and prefill fix are both false on the live vLLM backend |
 
 ## Abandoned / Superseded <!-- hp:abandoned -->
 
