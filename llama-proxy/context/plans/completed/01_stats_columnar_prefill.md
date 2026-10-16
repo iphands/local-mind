@@ -9,6 +9,11 @@
 > **Before writing any code, re-read `context/plans/RULES.md` in full.**
 > For historical context, completed plans live in `context/plans/completed/`.
 
+> **Commit-tag provenance (2026-10-16)**: the `**Commit**:` messages here use the project's
+> `[proxy]` scope tag; the commits themselves landed as `[llama-proxy][P…]` and history was not
+> rewritten (Rule B2). `git log` is the authority on what was committed — and it holds **no** commit
+> for T4, whose tracker row still reads `pending` against the Overview's "5/5".
+
 ## TL;DR
 
 **What**: Reorder and pad the compact stats line for columnar readability, and correct the prefill TPS that llama.cpp inflates when prefix-cache hits are present.
@@ -85,7 +90,7 @@ cargo check --workspace --features influxdb -- -D warnings && cargo clippy --all
 
 **Expected observation**: gate green; no pre-existing fmt/clippy/test failures remain unaccounted for.
 
-**Commit**: `[llama-proxy][P1][T1][gate] make project gate green at init`
+**Commit**: `[proxy][P1][T1][gate] make project gate green at init`
 
 ### T2: Fix inflated prefill TPS from prefix-cache hits
 
@@ -112,7 +117,7 @@ cargo test stats::collector
 
 **Expected observation**: corrected rate ≈ 1,600.00 tok/s for the cached case (true compute rate), not 2,000.00 (inflated backend value).
 
-**Commit**: `[llama-proxy][P1][T2][stats] fix inflated prefill tps from prefix-cache hits`
+**Commit**: `[proxy][P1][T2][stats] fix inflated prefill tps from prefix-cache hits`
 
 ### T3: Reorder and pad compact stats columns, update affected tests
 
@@ -132,7 +137,7 @@ cargo test stats::formatter
 
 **Expected observation**: column order is `model, tps, dur, ctx, cache, tokens, stream, finish, concurrent`; numbers right-aligned within their widths; no leading zeros; gate green.
 
-**Commit**: `[llama-proxy][P1][T3][stats] reorder and pad compact stats columns`
+**Commit**: `[proxy][P1][T3][stats] reorder and pad compact stats columns`
 
 ### T4: Remaining stats tests (full suite)
 
@@ -148,7 +153,7 @@ cargo test --workspace --lib
 
 **Expected observation**: all tests pass; no assertions reference the old order, old values, or the inflated rate.
 
-**Commit**: `[llama-proxy][P1][T4][stats] update remaining stats tests`
+**Commit**: `[proxy][P1][T4][stats] update remaining stats tests`
 
 ### T5: Document breaking compact format change in README
 
@@ -160,7 +165,7 @@ cargo test --workspace --lib
 
 **Expected observation**: README example is consistent with the new compact line; breaking change is called out.
 
-**Commit**: `[llama-proxy][P1][T5][docs] document breaking compact stats format change`
+**Commit**: `[proxy][P1][T5][docs] document breaking compact stats format change`
 
 ## Critical Files
 

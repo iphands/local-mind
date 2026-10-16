@@ -7,11 +7,16 @@
 - Plan: `context/plans/01_stats_columnar_prefill.md`
 - Evidence: unit test outputs in `src/stats/collector.rs` and `src/stats/formatter.rs`
 
+> **Commit-tag provenance (2026-10-16)**: the commit tags here use the project's `[proxy]` scope
+> tag; the commits themselves landed as `[llama-proxy][P…]` and history was not rewritten
+> (Rule B2). `git log` is the authority on what was committed — and it holds **no** commit for T4,
+> whose row below still reads `pending` against the Overview's "5/5".
+
 ## Resume Instructions
 
 1. Read the project's root `AGENTS.md`/`CLAUDE.md`, `context/plans/RULES.md` (in full), then `01_stats_columnar_prefill.md`.
 2. Environment: Rust toolchain with `cargo` available; no live backend required — unit tests use synthetic `timings` bodies.
-3. Ordering: T1 (gate green) first, then T2 (prefill fix), then T3 (reorder + pad + affected tests), T4 (remaining tests), T5 (README). Commit per task as `[llama-proxy][P1][T<n>][<topic>] <summary>`, with this tracker's row in the same commit.
+3. Ordering: T1 (gate green) first, then T2 (prefill fix), then T3 (reorder + pad + affected tests), T4 (remaining tests), T5 (README). Commit per task as `[proxy][P1][T<n>][<topic>] <summary>`, with this tracker's row in the same commit.
 4. First task: also flip plan metadata `Status` to `in-progress`, the SERIES row to `in-progress` under *Currently Active*, and the tracker `Start date` — all in T1's commit. Later tasks keep the Currently Active line current.
 
 ## Open Unknowns
