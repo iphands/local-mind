@@ -101,7 +101,7 @@ Expected: <the observable result that proves this task works — not just "the b
 - **Refutes if**: …
 - **Within noise if**: …
 
-**Commit**: `[llama-proxy][P<n>][T1][<topic>] <short description>` — *commit before marking done (Rule B), tracker row in the same commit.*
+**Commit**: `[proxy][P<n>][T1][<topic>] <short description>` — *commit before marking done (Rule B), tracker row in the same commit; the scope tag must match RULES.md Rule B.*
 
 ### T2: [Task title]
 

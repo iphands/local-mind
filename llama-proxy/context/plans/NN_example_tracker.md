@@ -14,7 +14,7 @@
    `context/plans/RULES.md` (in full), then `NN_name.md`.
 2. Environment: <anything a fresh session needs set up — env vars, services, test data>.
 3. Ordering: <which task is next and why; constraints between tasks>.
-4. Commit per task as `[llama-proxy][P<n>][T<n>][<topic>] <summary>`, with **this tracker's row in the same commit**.
+4. Commit per task as `[proxy][P<n>][T<n>][<topic>] <summary>`, with **this tracker's row in the same commit**; the scope tag must match RULES.md Rule B.
 
 ## Open Unknowns
 

@@ -305,7 +305,7 @@ The proxy requires `config.yaml` (copy from `config.yaml.default`). Key settings
   needs a plan), then `context/plans/SERIES.md` (active plans, next free number, north star).
   New plan = copy `NN_example.md` + `NN_example_tracker.md`, register it in SERIES.
 - **Working a plan:** follow the tracker's Resume Instructions → pass the project gate
-  (Rule A) → commit `[llama-proxy][P<n>][T<n>][<topic>] <summary>` with the tracker row in the
+  (Rule A) → commit `[proxy][P<n>][T<n>][<topic>] <summary>` with the tracker row in the
   same commit. One task per commit.
 - **Git:** never push; no co-author trailers; history is append-only — fix a bad commit with a
   new one, and chain `edit && git commit`.
