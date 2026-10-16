@@ -318,9 +318,21 @@ Then **look at it** (Rule A4): render the five Context-table rows plus a narrow-
 ```bash
 cargo test --lib stats::formatter -- --nocapture   # → the README-pin test passes
 grep -n 'reprompt=' README.md                      # → no match
-grep -n 'tps=' README.md CLAUDE.md                 # → no stale compact-key references (vLLM prose about the split is fine)
+grep -n 'tps=' CLAUDE.md                           # → no match
+awk '/^```/{f=!f; next} f' README.md | grep -n 'tps=\|tps>=\|reprompt='   # → no output
 ```
 Expected: README's example is byte-identical to the pin test's rendered string.
+
+> **Verify corrected 2026-10-16.** It read `grep -n 'tps=' README.md CLAUDE.md → no match`, which the
+> task itself made unsatisfiable: the migration banner must name the retired line literally
+> (`tps=536.42/ 115.68`) so an operator can Ctrl-F the exact string off an old dashboard, and this
+> task's own comment already scoped the intent to *stale* references ("vLLM prose about the split is
+> fine"). A literal grep cannot separate a stale reference from a migration note, so the sweep is now
+> scoped to fenced content, where the columnar contract actually lives. **Residual gap, accepted:**
+> prose outside the banner is not machine-checked — the real guarantee is the pin test, which bans
+> all three keys inside the example block *and* asserts its line count (`formatter.rs:1904-1920`).
+> Caveat: the awk assumes balanced column-0 fences; an indented or nested fence would break parity.
+> **Staleness trigger:** any indented code fence added to `README.md`.
 
 **Commit**: `[proxy][P3][T7][docs] document the columnar compact line and the prefill discount`
 

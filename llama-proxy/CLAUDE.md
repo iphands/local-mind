@@ -33,7 +33,7 @@ The proxy sits between **an LLM backend (vLLM, llama.cpp, or any OpenAI-compatib
 - ✅ **vLLM Extensions** (primary documented backend)
   - Per-request `metrics` object carrying the measured prefill/generation tokens/sec split —
     present only when vLLM runs with `--enable-per-request-metrics`; otherwise vLLM sends
-    `metrics: null` and the proxy falls back to the wall-bounded floor (`tps>=`) plus a cost rate
+    `metrics: null` and the proxy falls back to the wall-bounded floor (`tg>=`) plus a cost rate
     (`work=`), never a fabricated split (`src/stats/collector.rs`)
   - `/v1/models` `max_model_len` is the advertised context window for backends that serve no
     `/props` (i.e. everything except llama.cpp), chosen by `preflight::select_max_model_len` —
@@ -167,11 +167,11 @@ cp config.yaml.default config.yaml
 **stats/** - Metrics collection
 - `collector.rs`: `RequestMetrics` struct, calculates tokens/sec, context usage, extended token details
 - `formatter.rs`: Formats metrics as pretty/json/compact for logging (includes reasoning tokens when present).
-  The throughput cell is three-tier: a backend-reported split prints `tps=prefill/gen`;
-  otherwise `tps>=N work=M` (a wall-bounded FLOOR on decode, plus a COST rate - never
-  present either as engine speed); `tps=n/a work=M` when no output tokens were counted.
-  `cache=N` prints when the backend reported prefix-cache hits. These lines carry the
-  `llama_proxy::stats` log target.
+  The throughput cell is three-tier: a backend-reported split prints `pp=<k tok/s> tg=<tok/s>`;
+  otherwise `pp=n/a tg>=<tok/s> work=<tok/s>` (a wall-bounded FLOOR on decode, plus a COST rate -
+  never present either as engine speed); `pp=n/a tg=n/a` when no output tokens were counted.
+  `cache=N` prints when the backend reported prefix-cache hits; it discounts the `pp` numerator
+  only, never `work`. These lines carry the `llama_proxy::stats` log target.
 - Metrics collected for both streaming and non-streaming requests
 - Context usage calculated from model's KV cache via /slots endpoint
 - Extended metrics: reasoning_tokens, accepted_prediction_tokens, rejected_prediction_tokens (Opencode/Copilot)
@@ -223,7 +223,7 @@ fixes DETECT but do NOT repair on that path. Both modes run fixes on buffered re
      (llama.cpp `timings`, vLLM `metrics`; vLLM needs `--enable-per-request-metrics`)
    - `decode_tps_min` = completion/wall - always computed, ALWAYS a floor (its
      denominator contains prefill, network and fake-mode synthesis). Never sets
-     `has_timing_split`, and the compact line prints it as `tps>=`
+     `has_timing_split`, and the compact line prints it as `tg>=`
    - `total_tps` = (prompt+completion)/wall - a COST rate. On a long-context agent turn
      with a short completion it reads in the thousands while decode runs in the tens.
      Printed as `work=`; kept on the wire because it reconciles with `sum(total_tokens)`.

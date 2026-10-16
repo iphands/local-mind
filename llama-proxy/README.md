@@ -294,45 +294,177 @@ not "zero cached".
 
 ### Compact Format
 
-Columnar, right-aligned fixed widths (never leading zeros) so the line reads
-left-to-right as `model, tps, dur, ctx, cache, tokens, stream, finish`,
-with `queue=` and `concurrent=` appended after:
+One line per completed request, on the `llama_proxy::stats` log target. Fields are
+`key=value`, space-joined, right-aligned to fixed widths, never zero-padded.
+
+**The head is columnar; the tail is not.** Everything from `model=` through `finish=`
+sits at a fixed offset whatever the numbers say — prefill is swept from 1 to 9,999,999
+tok/s and the decode floor from 0.07 to 99,999.9 — so a head cell can be sliced by
+position:
+
+| Cell | Columns | Slice |
+|---|---|---|
+| `model=` | 1-22 | `cut -c1-22` |
+| rate (`pp=`/`tg=`) | 24-46 | `cut -c24-46` |
+| `dur=` | 48-60 | `cut -c48-60` |
+| `ctx=` | 62-78 | `cut -c62-78` |
+| `tok=` | 80-96 | `cut -c80-96` |
+| `stream=` | 98-111 | `cut -c98-111` |
+| `finish=` | 113-129 | `cut -c113-129` |
+| whole head | 1-129 | `cut -c1-129` |
+| tail | 130- | `cut -c130-` |
+
+Five limits on that table, all structural:
+
+- **Offsets hold only through `finish=`, and `finish=` is a start offset.** After it the
+  tail — `group=`, `work=`, `queue=`, `concurrent=`, `cache=`, in that order — is emitted
+  conditionally, so its columns depend on what the request reported. A line with no tail
+  at all simply ends at 129 (line 6); `cut -c130-` on it returns nothing. Slice the head
+  by position, read the tail by key.
+- **`content_filter` overflows `finish=` on purpose.** The pad is 10 cells: `tool_calls`
+  fills it exactly, `content_filter` (14) pushes everything after it right. That is
+  deliberate — a rare diagnostic is never clamped into invisibility — and it only moves
+  tail columns, which were never columnar.
+- **The table is bytes; the contract is display cells.** Widths are computed in terminal
+  cells, so an ASCII name and a CJK name both occupy 22 cells and neither shifts the line.
+  But `cut -c` counts bytes, so a non-ASCII model name misaligns the *slice*, not the
+  line.
+- **`model=` is truncated to 16 cells with a trailing `...`**, as line 5 shows:
+  `Qwen3-14B-128K-Q3_K_S.gguf` prints as `Qwen3-14B-128...`. A full-name grep therefore
+  never matches, and two models sharing their first 13 cells are indistinguishable here —
+  read the true name from the `json` format.
+- **Whitespace splitting is tier-dependent.** `pp=` disappears in tiers 2 and 3, and
+  `work=` sits in the tail on tier 2 — on tier 3 only when the backend still reported a
+  `usage.total_tokens`, which an abandoned stream usually has not — so field 2 is not the
+  same quantity on two different lines. Don't `awk '{print $2}'`; use the offsets above or
+  the recipe below.
+
+Pulling one number out, whichever tier rendered it — both commands run against the lines
+below, not typed from memory:
+
+```bash
+# decode tok/s, tier-tagged: "= 146.3" measured · ">= 131.0" a floor · "= n/a" nothing counted
+sed -nE 's/.* tg([>=]+)[[:space:]]*([^ ]+)[[:space:]]+dur=.*/\1 \2/p'
+
+# whole head, for lining two requests up side by side
+cut -c1-129
+```
+
+The tag is not decoration: `>=` is a bound and `=` is a measurement, so a panel that
+averages the column it gets from that command is averaging a number with a bound — the one
+thing this line exists to prevent. Keep them in separate series.
+
+The lines below **are** the formatter's output, not a description of it: a test renders
+these same fixtures and fails if the file and the code ever disagree. Lines 1-4 are one
+request four ways — 9,074 prompt tokens of which 3,200 came from the prefix cache, 412
+generated, 3.144 s of wall clock, on a node advertising 262,144 tokens. Lines 5 and 6 are
+separate requests, there to show the cells those four never reach: a truncated model
+name, `finish=tool_calls`, `group=`, the `trunc` badge, and an empty tail.
 
 ```
-model=cosmo-6000 tps= 53.64/115.68 dur= 184.0ms ctx=57/262144  57  8 stream=ok finish=length concurrent=1
+model=cosmo-6000       pp=  14.765k tg=  146.3 dur=   3144ms ctx=  9074/262144 tok=  9074/   412 stream=ok      finish=stop       concurrent=1 cache=3200
+model=cosmo-6000       pp=     n/a tg>=  131.0 dur=   3144ms ctx=  9074/262144 tok=  9074/   412 stream=ok      finish=stop       work=3017.18 concurrent=1 cache=3200
+model=cosmo-6000       pp=     n/a tg=     n/a dur=   3144ms ctx=  9074/262144 tok=  9074/   n/a stream=gone    finish=n/a        concurrent=1
+model=cosmo-6000       pp=     n/a tg=     n/a dur=     12ms ctx=   n/a/262144 tok=   n/a/   n/a stream=sync    finish=n/a        concurrent=1
+model=Qwen3-14B-128... pp=  12.858k tg=   51.1 dur=   2841ms ctx=  4100/262144 tok=  4100/   118 stream=ok      finish=tool_calls group=local concurrent=3
+model=cosmo-6000       pp=     n/a tg=     n/a dur=  30000ms ctx=  2048/262144 tok=  2048/   n/a stream=trunc   finish=n/a
 ```
 
-The `tps=` cell has three tiers, and which one you see is a fact about the
-backend, not about the request:
+The rate group has three tiers, and which one you see is a fact about the **backend**,
+not about the request:
 
 | Rendered | Meaning | Source |
 |---|---|---|
-| `tps=536.42/ 115.68` | prefill / decode, **measured** | backend split: llama.cpp `timings`, or vLLM `metrics` (`--enable-per-request-metrics`) |
-| `tps>= 146.32 work=125.00` | decode is **at least** 146 tok/s; the request moved 125.00 tok/s of work | completion / wall, and (prompt+completion) / wall |
-| `tps=n/a work= 125.00` | no decode to measure (0 counted output tokens) | — |
+| `pp=  14.765k tg=  146.3` | prefill and decode, **backend-sourced** — not both engine-computed | llama.cpp `timings` supplies `prompt_per_second`/`predicted_per_second`, computed by the engine; vLLM `metrics` (needs `--enable-per-request-metrics`) supplies counts and durations and **the proxy does the division** |
+| `pp=     n/a tg>=  131.0` | no prefill rate exists; decode is **at least** 131.0 | `completion / wall`; its `work=` partner is in the tail |
+| `pp=     n/a tg=     n/a` | nothing to measure (no counted output tokens) | — |
 
-`tps>=` is a floor, never a measurement: the wall clock still contains prefill,
-network and (in `fake` mode) the proxy's own synthesis, so it understates. It is
-the best available number when the backend reports no split — which is the
-normal case for the Anthropic `/v1/messages` path, where the proxy has to buffer
-the response to repair it and the backend's per-request timing block is not part
-of the payload at all. `work=` is a **cost** rate: on a long-context agent turn
-with a short completion it runs to thousands while decode runs at tens.
+`tg>=` is a floor, never a measurement: the wall clock still contains prefill, network
+and (in `fake` mode) the proxy's own synthesis, so it understates. It is the best
+available number when the backend reports no split — the normal case for the Anthropic
+`/v1/messages` path, where the proxy must buffer the response to repair it and the
+backend's per-request timing block is not in the payload at all. `work=` is a **cost**
+rate, not engine speed: on a long-context agent turn with a short completion it runs to
+thousands while decode runs at tens.
 
-**Prefill TPS is corrected for prefix-cache hits.** llama.cpp reports
-`prompt_per_second = prompt_n / prompt_ms * 1000`, but `prompt_n` counts cached
-tokens while `prompt_ms` only covers the non-cached compute, so the raw figure
-is inflated (e.g. 164,663 tokens at 880k tok/s when only ~567 were actually
-computed). When `cache=` is present, the proxy instead reports
-`(prompt_n - cache_n) / prompt_ms * 1000` — the rate for the tokens the engine
-actually processed. If the deployed llama.cpp already excludes cached tokens from
-`prompt_n`, the proxy falls back to the backend value verbatim.
+A tier-2 line prints `pp=n/a` where the `pretty` box for the same sample prints a
+`Decode (floor)` / `Work rate` pair: the head has room for one honest number per cell, so
+it drops a derived figure rather than letting a fixed-width slot imply it is a measurement.
 
-`cache=N`, when present, is how many prompt tokens the engine served from its
-prefix cache — a discount on `work=`, since the engine did not recompute them.
+**Prefill is corrected for prefix-cache hits — but only where the body proves the
+correction is well-defined.** A cache hit makes vLLM's `prompt_tokens` include tokens the
+engine never recomputed, so the proxy discounts the cached prefix from the prefill
+numerator, and only when the OpenAI `usage.prompt_tokens` shape proves that count is a
+subset of the prompt (`collector.rs:591`). On the Anthropic shape `cached_tokens` is
+`cache_read_input_tokens`, **disjoint** from `input_tokens`, so it is left alone —
+subtracting it would understate prefill by the whole cached amount, and the rate would
+merely look slow. A **full** hit (`cached == prompt_tokens`) is legitimate and left
+undiscounted, which makes it the most inflated number this line can carry; `cached >
+prompt_tokens` is reported as a data error rather than saturating. llama.cpp's `timings`
+path runs the same formula but **saturates** where the vLLM path keeps the raw rate, and
+whether it should subtract at all is unresolved upstream. The mechanics, and why a single
+`if` cannot cover both shapes, are under *A prefill rate that looks too good to be true*.
 
-A request whose first token the proxy had to re-ask for prints `reprompt=N/2`
-before the `finish=` cell.
+`cache=N` is how many prompt tokens the engine served from its prefix cache. It is a
+discount on the **`pp=` numerator only**. `work=` deliberately still counts those tokens:
+it is a cost rate over everything the request moved and is kept on the wire precisely
+because it reconciles with `sum(total_tokens)`, so subtracting the cache there too would
+double-count the discount against a number that has to add up.
+
+A prefill rate your hardware could not physically produce is counted by the canary at
+`stats.max_plausible_prefill_tps` — see *A prefill rate that looks too good to be true*
+below. Like the other stats counters it is **inert while `stats.enabled: false`**, and it
+never reaches an exporter.
+
+The `stream=` badge says how the proxy **obtained** the body, not what the client
+received. There are five values and only these: `ok` a completed SSE stream; `gone` a
+stream the client abandoned before the final chunk; `trunc` a stream cut short by the
+backend or left incomplete; `stalled` a stream that stopped making progress; and `sync`
+one buffered JSON — `fake` mode or `/v1/messages`. A client that asked for SSE still
+receives synthesized SSE on a `sync` line.
+
+`gone` is why line 3 looks thin: the final chunk is the only one carrying
+`usage`/`timings`, so an abandoned stream has no **completion count** and no rate at all.
+The prompt count is still there on it, because prompt tokens come from the request rather
+than from the response — `ctx=` and the left side of `tok=` are filled while the right
+side and both rates are not.
+
+`finish=n/a` means the value was absent or arrived as `unknown`, as on line 4's backend
+error body. Note the head and the log disagree here: the exporter's WARN prints
+`finish_reason=unknown` while the head normalises it to `n/a`, so search them
+differently.
+
+**`dur=` is the only cell that saturates.** It is the proxy's own wall clock rather than a
+backend-reported quantity, and it caps at 9,999,999 ms (~2.8 h): past that a request is
+stuck, not slow, and a column that shifts during a stuck request teaches nothing. A
+**non-finite** wall clock prints `NaN` (or `inf`) inside those same 7 cells — it is
+deliberately *not* clamped to the cap, because `f64::min` returns the other operand when
+one side is NaN, and a wedged backend would otherwise be logged as a plausible 2.8 hour
+request. `ctx=`, `tok=` and the rate cells are never clamped at all: they are
+backend-reported, and an out-of-band figure must widen the line rather than be rounded
+into a number the engine never printed.
+
+Nothing here records whether the proxy had to re-ask for a first token; that signal is the
+reprompt counters (`curl -s localhost:8066/proxy/metrics | grep reprompt`), documented
+under *Troubleshooting*.
+
+**Arriving from the previous compact line?** The old line put prefill and decode behind a
+single label: `tps=536.42/ 115.68` when the backend reported a split, `tps>= 146.32
+work= 125.00` when it did not. Both are retired — grep this file for `tps=` and every hit
+is in this section, which is the only place the old strings still appear. Five things
+changed, each of which reads as data loss rather than as a rename if you are looking at a
+dashboard:
+
+- `tps=A/B` and `tps>=N` became three separate keys: `pp=`, `tg=` and `tg>=`. A panel
+  keying either old form now finds *nothing*, rather than finding a number whose meaning
+  silently split.
+- The unlabelled bare number pair after `ctx=` gained a key: `tok=`.
+- `dur= 184.0ms` became `dur=   3144ms`: integer milliseconds, still glued to the unit.
+- Cells are space-padded to fixed widths, so a hand-typed single-space version of a line
+  no longer matches it. Match the keys you need, or slice by the offsets above.
+- The cell that used to sit before `finish=`, recording re-asked first tokens, is gone. It
+  was never emitted by the formatter; the counters above are the real signal.
+
 
 ---
 
@@ -799,8 +931,8 @@ Unknown fields in requests/responses are preserved for forward compatibility. Th
 The proxy maintains full compatibility with:
 
 - **OpenAI Chat Completions API**: Standard request/response format
-- **vLLM**: per-request `metrics` for the measured prefill/decode `tps=A/B` split, `/v1/models` `max_model_len` for the context window, and the `vllm:cache_config_info` gauge read by the `vram-estimate` endpoint
-  - The split needs the backend started with `--enable-per-request-metrics`; without it the proxy shows a wall-bounded floor `tps>=` plus a cost rate `work=` instead of a fabricated split
+- **vLLM**: per-request `metrics` for the measured prefill/decode split (the compact line's `pp=` and `tg=` cells), `/v1/models` `max_model_len` for the context window, and the `vllm:cache_config_info` gauge read by the `vram-estimate` endpoint
+  - The split needs the backend started with `--enable-per-request-metrics`; without it the proxy shows a wall-bounded floor `tg>=` plus a cost rate `work=` instead of a fabricated split
 - **llama.cpp Extensions**: `timings` object, `/props`, `/slots` endpoints
 - **Opencode Extensions**: `reasoning_text`, `reasoning_opaque`, extended usage details
 - **Claude Code**: All standard features work seamlessly
@@ -844,7 +976,7 @@ curl -N http://localhost:8066/v1/chat/completions \
 ```
 - `passthrough`: chunks trickle in over the whole generation, and the per-request log line
   reads `stream=ok`.
-- `fake`: nothing, then every chunk at once after the backend finishes; the log line reads `sync`.
+- `fake`: nothing, then every chunk at once after the backend finishes; the log line reads `stream=sync`.
 
 `curl -s localhost:8066/proxy/metrics | grep openai_stream_passthrough_total` moves once per
 streamed OpenAI request in `passthrough` and never in `fake`. `/v1/messages` (Claude Code)
@@ -882,7 +1014,7 @@ token totals under-count actual backend work by roughly the skipped count.
 
 ### A prefill rate that looks too good to be true
 
-If the `tps=PREFILL/DECODE` cell reports a prefill rate your hardware could not
+If the compact line's `pp=` cell reports a prefill rate your hardware could not
 physically produce, the proxy flags it: any exported sample whose prefill rate exceeds
 `stats.max_plausible_prefill_tps` (default `50000` tok/s) increments
 `llama_proxy_stats_prefill_implausible_total` on `/proxy/metrics`.

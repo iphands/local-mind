@@ -148,13 +148,14 @@ backend:
 #   format: "pretty"
 #   max_plausible_prefill_tps: 50000.0
 # The throughput cell has three tiers, and which one you see is a fact about the
-# backend, not the request: `tps=PREFILL/DECODE` is measured (llama.cpp `timings`,
-# or vLLM `metrics` with --enable-per-request-metrics). With no backend split you
-# get `tps>=N work=M`: N is a FLOOR on decode (completion tokens over the whole
-# wall clock, so it understates), and M is a COST rate - (prompt+completion) per
-# wall - which on a long-context turn with a short completion runs to thousands
-# while decode runs at tens. Never read M as engine speed. `cache=N`, when shown,
-# is prompt tokens the engine served from its prefix cache: a discount on M.
+# backend, not the request: `pp=` and `tg=` are both measured (llama.cpp `timings`,
+# or vLLM `metrics` with --enable-per-request-metrics). With no backend split `pp=`
+# reads n/a and you get `tg>=N work=M`: N is a FLOOR on decode (completion tokens over
+# the whole wall clock, so it understates), and M is a COST rate - (prompt+completion)
+# per wall - which on a long-context turn with a short completion runs to thousands
+# while decode runs at tens. Never read M as engine speed. `cache=N`, when shown, is
+# prompt tokens the engine served from its prefix cache: it discounts the `pp=`
+# numerator only, never M.
 # These lines carry the `llama_proxy::stats` target, so
 # `RUST_LOG=llama_proxy::stats=info` selects them and nothing else.
 # max_plausible_prefill_tps is a CANARY, not a fault threshold. A prefill rate above it is

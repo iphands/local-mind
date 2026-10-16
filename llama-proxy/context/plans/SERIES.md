@@ -22,7 +22,9 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 03** — columnar compact stats + honest vLLM prefill: in progress, 6/7 tasks done; next T7
+- **Plan 03** — columnar compact stats + honest vLLM prefill: in progress, 7/7 tasks done; all tasks
+  committed, **not yet closed** — Rule C Verification Checklist and the `completed/` move are a human
+  call. T7's one deferred item is the dead-notes-reference row below (human decision by its own cell)
   (rewrite `format_compact` against the red contract, then un-`#[ignore]` it).
 
 ## Plans <!-- hp:plans -->

@@ -1714,4 +1714,217 @@ mod tests {
             bad.join("\n")
         );
     }
+
+    /// The four lines `README.md` shows as its compact examples, built to be **read**
+    /// rather than to be adversarial — that is `contract_fixtures`'s job. Four outcomes
+    /// of one 9,074-token request, so the tiers are comparable line to line. Every
+    /// figure comes from this deployment's own vLLM measurements (tracker Evidence
+    /// 2026-10-16: engine compute 14,765 tok/s, warm corrected prefill 12.8k-14.3k, a
+    /// 9,074-token prompt with a 3,200-token prefix-cache hit). Nothing is invented.
+    ///
+    /// Each fixture is a state the COLLECTOR can produce, not merely one the renderer
+    /// accepts: a counted completion implies the floor and the cost rate derived from
+    /// it, and a measured prefill implies `prompt_ms`, because the vLLM path sets both
+    /// from ttft. A doc example the proxy could never have emitted is a fake screenshot
+    /// of a log line — the class `contract_fixtures` already refuses to tolerate.
+    fn readme_examples() -> Vec<(&'static str, RequestMetrics)> {
+        // One request: 9,074 prompt tokens, 412 generated, 3.144 s of wall clock.
+        const WALL_MS: f64 = 3_144.0;
+        const DECODE_FLOOR: f64 = 412.0 / (WALL_MS / 1_000.0);
+        const COST_RATE: f64 = (9_074.0 + 412.0) / (WALL_MS / 1_000.0);
+
+        let base = |finish: &str| {
+            let mut m = fixture("cosmo-6000", finish);
+            m.context_total = Some(262_144);
+            m.concurrent_requests = Some(1);
+            m
+        };
+
+        // 1. Tier 1 — vLLM started with --enable-per-request-metrics: the backend
+        // reported both halves, so both print as measured. `prompt_ms` is the ttft the
+        // discounted rate came from: (9074 - 3200) / 14765 tok/s = 397.8 ms.
+        let mut measured = base("stop");
+        measured.has_timing_split = true;
+        measured.prompt_tps = Some(14_765.0);
+        measured.generation_tps = Some(146.32);
+        measured.prompt_ms = 397.8;
+        measured.generation_ms = 2_815.7;
+        measured.decode_tps_min = DECODE_FLOOR;
+        measured.total_tps = COST_RATE;
+        measured.duration_ms = WALL_MS;
+        measured.context_used = Some(9_074);
+        measured.prompt_tokens = Some(9_074);
+        measured.completion_tokens = Some(412);
+        measured.cached_tokens = Some(3_200);
+        measured.streaming = true;
+        measured.stream_end = Some("ok");
+
+        // 2. Tier 2 — the SAME request against a vLLM without that flag, which is the
+        // normal case. No backend decode rate exists, so `pp` is suppressed and the
+        // decode figure is a floor while `work` runs in the thousands beside it. That
+        // contrast is the trap the README exists to teach.
+        let mut floor = base("stop");
+        floor.decode_tps_min = DECODE_FLOOR;
+        floor.total_tps = COST_RATE;
+        floor.duration_ms = WALL_MS;
+        floor.context_used = Some(9_074);
+        floor.prompt_tokens = Some(9_074);
+        floor.completion_tokens = Some(412);
+        floor.cached_tokens = Some(3_200);
+        floor.streaming = true;
+        floor.stream_end = Some("ok");
+
+        // 3. Tier 3 — a stream the client abandoned before the backend's final chunk,
+        // the only chunk carrying `usage`/`timings`: half the token counts are absent
+        // and no rate exists.
+        let mut gone = base("unknown");
+        gone.duration_ms = WALL_MS;
+        gone.context_used = Some(9_074);
+        gone.prompt_tokens = Some(9_074);
+        gone.completion_tokens = None;
+        gone.streaming = true;
+        gone.stream_end = Some("client_gone");
+
+        // 4. Tier 3 from the other direction — a backend error body. Buffered, so the
+        // badge reads `sync` (no other example in these docs shows it), no usage at all,
+        // and the finish value arrives as "unknown", which the head renders `n/a`.
+        let mut error_body = base("unknown");
+        error_body.duration_ms = 12.0;
+        error_body.streaming = false;
+
+        // 5. The cells every dashboard keys on that no other line here exercises: a
+        // model name past the 16-cell budget (truncated with an ASCII "...", so the head
+        // still measures 129 and a full-name grep never matches) and `finish=tool_calls`,
+        // the dominant agent value, which fills its 10 cells exactly. `group=` is the
+        // multi-backend tail cell. Rates are the deployment's warm corrected cluster.
+        const AT_PROMPT: u64 = 4_100;
+        const AT_COMPLETION: u64 = 118;
+        const AT_WALL_MS: f64 = 2_841.0;
+        let mut agent_turn = base("tool_calls");
+        agent_turn.model = "Qwen3-14B-128K-Q3_K_S.gguf".to_string();
+        agent_turn.has_timing_split = true;
+        agent_turn.prompt_tps = Some(12_858.0);
+        agent_turn.generation_tps = Some(51.06);
+        agent_turn.prompt_ms = AT_PROMPT as f64 / 12_858.0 * 1_000.0;
+        agent_turn.generation_ms = 2_313.0;
+        agent_turn.decode_tps_min = AT_COMPLETION as f64 / (AT_WALL_MS / 1_000.0);
+        agent_turn.total_tps = (AT_PROMPT + AT_COMPLETION) as f64 / (AT_WALL_MS / 1_000.0);
+        agent_turn.duration_ms = AT_WALL_MS;
+        agent_turn.context_used = Some(AT_PROMPT);
+        agent_turn.prompt_tokens = Some(AT_PROMPT);
+        agent_turn.completion_tokens = Some(AT_COMPLETION);
+        agent_turn.group_name = Some("local".to_string());
+        agent_turn.concurrent_requests = Some(3);
+        agent_turn.streaming = true;
+        agent_turn.stream_end = Some("ok");
+
+        // 6. A stream the backend cut short — the `trunc` badge — with NO tail at all.
+        // This is the line where `cut -c130-` returns nothing and the head's trailing pad
+        // is trimmed, which is the case an operator otherwise reads as a broken line.
+        let mut cut_short = base("unknown");
+        cut_short.duration_ms = 30_000.0;
+        cut_short.context_used = Some(2_048);
+        cut_short.prompt_tokens = Some(2_048);
+        cut_short.completion_tokens = None;
+        cut_short.concurrent_requests = None;
+        cut_short.streaming = true;
+        cut_short.stream_end = Some("truncated");
+
+        vec![
+            ("tier 1: measured split", measured),
+            ("tier 2: wall-bounded floor", floor),
+            ("tier 3: abandoned stream", gone),
+            ("tier 3: backend error body", error_body),
+            ("agent turn: truncation, tool_calls, group=", agent_turn),
+            ("backend-cut stream, empty tail", cut_short),
+        ]
+    }
+
+    /// The README's compact examples must BE `format_compact`'s output, not a
+    /// description of it.
+    ///
+    /// This test exists because Plan 03 shipped a rewritten compact line while
+    /// `README.md` still showed the retired rate key beside an unlabelled token pair,
+    /// with a three-tier table teaching operators to grep for a cell that no longer
+    /// existed — and the entire suite stayed green throughout. A doc example that nothing
+    /// renders is not documentation, it is a false positive an operator pastes into a
+    /// ticket.
+    ///
+    /// Matching is whole-line against a located fenced block, not `contains` over the
+    /// file: a substring check would pass with the stale block still present, and a
+    /// file-wide "any matching line" check would pass while a *second*, hand-typed stale
+    /// block sat elsewhere in the doc. Scoping the retired-key sweep to that one block is
+    /// what lets the migration banner name the keys it retires outright — a retired key
+    /// in prose is a migration note an operator Ctrl-Fs for, while a retired key in the
+    /// example block is a command that silently returns nothing. Banning the literal
+    /// file-wide would have degraded the operator-facing artifact to satisfy a gate.
+    ///
+    /// Read at runtime rather than `include_str!` so editing the README does not
+    /// recompile the crate. On a mismatch the failure prints the rendered line and the
+    /// block's location, which makes regeneration a copy-paste: the formatter is the
+    /// oracle, never a hand-typed string — this plan's own hand-typed T6 golden came out
+    /// two cells short.
+    #[test]
+    fn readme_compact_example_is_the_rendered_line() {
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
+            .expect("README.md must sit beside Cargo.toml for the docs pin");
+
+        let examples = readme_examples();
+        assert!(!examples.is_empty(), "the docs pin has no examples to pin");
+        let rendered: Vec<String> = examples.iter().map(|(_, m)| format_compact(m)).collect();
+
+        // The fenced block an operator actually pastes from, found by a needle no other
+        // block in the file carries.
+        let block = readme
+            .split("```")
+            .find(|b| b.contains("model=cosmo-6000"))
+            .expect("README must carry the fenced compact example block");
+        let block_lines: Vec<&str> = block.lines().filter(|l| !l.trim().is_empty()).collect();
+        let anchor = readme
+            .lines()
+            .position(|l| l.contains("model=cosmo-6000"))
+            .map_or(0, |i| i + 1);
+
+        let mut stale = String::new();
+        for ((label, _), line) in examples.iter().zip(&rendered) {
+            if !block_lines.contains(&line.as_str()) {
+                stale.push_str(&format!("{label}\n  rendered: {line}\n\n"));
+            }
+        }
+
+        // Reported first on purpose: this is the failure that carries the lines needed to
+        // repair the file, and the structural checks below cannot be acted on until it is
+        // fixed.
+        assert!(
+            stale.is_empty(),
+            "README's compact examples (block near line {anchor}) are stale — paste these \
+             rendered lines over them:\n{stale}"
+        );
+
+        let mut distinct = rendered.clone();
+        distinct.sort();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            rendered.len(),
+            "two README examples render identically, so one of them proves nothing: {rendered:?}"
+        );
+
+        assert_eq!(
+            block_lines.len(),
+            rendered.len(),
+            "the pinned block carries {} example lines but the formatter has {}; one side is \
+             undocumented (near line {anchor})",
+            block_lines.len(),
+            rendered.len()
+        );
+
+        for retired in ["tps=", "tps>=", "reprompt="] {
+            assert!(
+                !block.contains(retired),
+                "the pinned example block advertises `{retired}`, which format_compact does not \
+                 emit (near line {anchor})"
+            );
+        }
+    }
 }
