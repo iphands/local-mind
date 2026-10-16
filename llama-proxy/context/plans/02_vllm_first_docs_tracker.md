@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 33% complete (2/6 tasks)
+- Status: 50% complete (3/6 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/02_vllm_first_docs.md`
 - Evidence: doc-framing plan — evidence is the grep output each Verify prints (the claim flipping
@@ -40,7 +40,7 @@
 |---|------|---------------|--------|-------|
 | 1 | T1: P3 read-only vendor rule + `rg --no-ignore` | `context/plans/RULES.md` | done | added at :262; wording corrected to reality (see Notes) |
 | 2 | T2: register vendor in context KB map | `context/CLAUDE.md` | done | Map + Findings rows; wording diverged from draft (see Notes) |
-| 3 | T3: gitignore `/vendor/`, observe ignore took | `.gitignore` | pending | record rg blindness pair |
+| 3 | T3: gitignore `/vendor/`, observe ignore took | `.gitignore` | done | landed as `/vendor` (symlink cover); P3 state-sync follow-on |
 | 4 | T4: root CLAUDE.md vLLM-first | `CLAUDE.md` | pending | keep hands-plan block + Preservation List |
 | 5 | T5: README + fixrate vLLM-first | `README.md`, `fixrate.md` | pending | don't rename cited headings |
 | 6 | T6: triage docs + stamp PLAN.md obsolete | `PLAN.md` (+grep) | pending | stamp, don't delete |
@@ -58,8 +58,11 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-10-16 | `git check-ignore -v vendor/vllm/README.md` | **exit 1 — not ignored**; `git status` → `?? llama-proxy/vendor/` | 1 | invalidated P3's drafted "gitignored, edit silently lost" premise → corrected |
 | 2026-10-16 | `RUSTFLAGS='-D warnings' cargo check/clippy …` + `cargo fmt --check` + `cargo test --workspace --lib` | check/clippy/fmt exit 0; 915 passed | 1 | T1 gate. `just gate` (`-- -D warnings`) errors in this cargo — see Follow-ups |
 | 2026-10-16 | T2 verify: `grep 'vendor/vllm' context/CLAUDE.md` + `grep 'read-only' …` + `diff -q context/AGENTS.md context/CLAUDE.md` | both greps hit at `:19`; `SYMLINK-OK`; check/fmt exit 0 | 1 | two KB rows added (Map + Findings); no `.rs` touched |
+| 2026-10-16 | `git check-ignore -v vendor/vllm/README.md` (post-T3) | **`llama-proxy/.gitignore:8:/vendor`** exit 0 — source column names OUR file (not `info/exclude`/global) | 1 | causal proof the ignore came from the edited file |
+| 2026-10-16 | `git status --porcelain vendor/` (post-T3) | empty, exit 0 (was `?? llama-proxy/vendor/`) | 1 | tree now git-ignored |
+| 2026-10-16 | rg blindness pair (observed, not asserted) | root `rg --files`→ grep `^vendor/`=**0**; `rg --no-ignore --files vendor`=**11212**; `RIPGREP_CONFIG_PATH=unset` | 1 | invisible to normal search, fully readable with `--no-ignore` — P3 recipe works |
 
-_(T3 adds the `rg --files vendor`=0 vs `rg --no-ignore --files vendor`>0 pair on the day it runs.)_
+_(T3 ran: the `rg` blindness pair — root `^vendor/`=0 vs `--no-ignore` vendor=11212 — is recorded in the Evidence table above.)_
 
 ## Notes / Deviations
 
@@ -93,6 +96,17 @@ _(T3 adds the `rg --files vendor`=0 vs `rg --no-ignore --files vendor`>0 pair on
   (`never edit, never git add`) and pointing at RULES P3 for the ignore-state + full search recipe. The
   Findings row uses P3's concrete cite form `vendor/<tree>/<path>:<line>` + `[REPO]`. Dropping the
   "gitignored from T3" clause also removes the stale-by-construction cell, so no T3 update is owed here.
+- **(T3) The drafted comment and pattern were corrected in review (Rule E).** The plan drafted the
+  ignore as `/vendor/` with a comment offering only `rg --no-ignore` and citing "Plan 02". Both
+  reviewers flagged the comment as a *divergent partial* of P3's canonical recipe (drops `--hidden`
+  and `-g '!**/build/**'`) that reads complete → replaced with the full flags + a `context/plans/RULES.md
+  (P3)` pointer (hoodie: "Plan 02" rots once the plan closes; P3 outlives it). Pattern changed
+  `/vendor/` → **`/vendor`** (no trailing slash) so a *symlinked* `vendor` can't slip past a dir-only
+  match; the leading `/` still anchors it to `llama-proxy/`, so it neither matches `src/vendor/` nor the
+  workspace-root `/vendor`. Comment also now warns an edit here is invisible/unrevertable by git (hoodie)
+  — which is the honest hazard *post*-ignore. Verified safe: `git ls-files vendor/`=0 (nothing tracked to
+  hide), file ended in a newline. **Follow-on (neckbeard's T1 ask):** landing T3 makes RULES P3's
+  "not yet ignored" clause stale — syncing P3 to the post-ignore state ships as `[P2][T3][docs]` next.
 
 ## Follow-ups
 

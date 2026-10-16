@@ -1,2 +1,8 @@
 target/
 /captures/
+
+# Read-only upstream backend checkouts (vendor/vllm, vendor/llama.cpp) — paths relative to
+# llama-proxy/, NOT the dead ../vendor/. Policy + full search recipe: context/plans/RULES.md (P3).
+# Invisible to git and rg; to search the tree: rg --no-ignore --hidden -g '!**/build/**' <pat> vendor/
+# Never edit (git cannot see an edit here — there is nothing to revert), never commit.
+/vendor
