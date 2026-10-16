@@ -1,0 +1,26 @@
+# csf-scale-decode notes. NO BASE_SHA256 here, deliberately: like draft-load-filter
+# and boot-timing this NEVER replaces an upstream file. csf_scale_decode.pth is a
+# new file mounted into site-packages; it installs a sys.meta_path hook that wraps
+# one upstream method post-import, looked up by name. If upstream renames or
+# removes it the hook prints "[csf-scale-decode] NOT applied ..." and vLLM then
+# fails on a CSF checkpoint exactly as it does without this patch.
+#
+# Hook table (module -> attr), confirmed at vLLM 4d9a8d6 (2026-10-15):
+#   vllm.model_executor.model_loader.default_loader
+#       DefaultModelLoader.get_all_weights(self, model_config, model)
+#           -- generator of (name, tensor); yields from _get_weights_iterator(
+#              primary_weights) then the model's secondary_weights sources.
+#              Wrapped, not replaced: every non-CSF pair passes through.
+#
+# Format source (the format is NOT in vLLM; read these, do not guess):
+#   local-inference-lab/b12x  tests/quantization/test_nvfp4_csf.py  _fixture(codec=0)
+#       -- the CPU reference ENCODER; this patch is its inverse.
+#   local-inference-lab/vllm  vllm/model_executor/layers/quantization/utils/
+#       nvfp4_csf_utils.py:_slice_scale_plane -- stream/exception geometry.
+#   Checkpoint codec string: byte-window4-fixed-stream-u24-exceptions/1 (HF card of
+#   local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD).
+#
+# Shares default_loader with draft-load-filter (which wraps load_weights, not this
+# method); the finders chain in either order -- the host test covers both.
+# Drift signals in the container log: "NOT applied ...", or vLLM's own
+# "has no parameter '…nvfp4_csf_exceptions'" if this patch never ran.

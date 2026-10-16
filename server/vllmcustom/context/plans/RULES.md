@@ -133,10 +133,11 @@ false-fails and false-passes. Extension second: 16 of the 20 tracked `.py` files
 with no shebang at all, and the three sourced libs (`common/_run-lib.sh`, `common/_model-lib.sh`,
 `bench/_bench-lib.sh`) open with `# shellcheck shell=bash` instead of one. A shebang-only classifier
 syntax-checks none of those nineteen and still prints a green run — it reported `24 b / 8 p` here on
-2026-10-13 while the true set was `27 b / 24 p`. Pass: no `FAIL` line, counts `27 b` / **`23 p`**,
+2026-10-13 while the true set was `27 b / 24 p`. Pass: no `FAIL` line, counts `28 b` / **`25 p`**,
 `env ok`. (Python was 24 until the `4d9a8d6` repin deleted `qwen3.8-flash-next/patches/ple-ct-ignore/`,
 whose `ngram_embedding.py` was a tracked no-shebang `.py` and so counted here. Removal on purpose, so
-the number moves — a count that drops with no such story is still the failure this step exists for.)
+the number moves. Then +2 `p` for `csf-scale-decode` (Plan 04 T1: the patch and its test, both no-shebang) and
+`b` 27 → 28 for `nemotron/run`, added by an earlier commit without this line being bumped (2026-10-15) — a count that drops with no such story is still the failure this step exists for.)
 
 ```bash
 # 1a — syntax, over tracked files only (in-memory compile: no __pycache__ written)
@@ -184,7 +185,7 @@ it hooks and drives it, **including every graceful-degradation path**. Pass: the
 many `ok` lines.
 
 ```bash
-ls container/patches/*/test_*.py | wc -l        # want 4 — it grows only when a patch adds a test
+ls container/patches/*/test_*.py | wc -l        # want 5 — it grows only when a patch adds a test
 for t in container/patches/*/test_*.py; do
   PYTHONDONTWRITEBYTECODE=1 python3 "$t" >/dev/null && echo "ok   $t" || echo "FAIL $t"
 done

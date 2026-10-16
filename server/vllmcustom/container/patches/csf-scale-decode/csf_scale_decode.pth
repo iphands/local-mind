@@ -1,0 +1,2 @@
+/opt/csf-scale-decode
+import sys; exec("try:\n import csf_scale_decode; csf_scale_decode.install()\nexcept Exception as e:\n print('[csf-scale-decode] disabled (install failed: %r)' % (e,), file=sys.stderr)")

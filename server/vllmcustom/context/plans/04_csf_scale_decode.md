@@ -1,6 +1,6 @@
 # Plan 04 — Decode NVFP4-CSF expert scales at load time
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-10-15
 > **Depends on**: N/A
 > **Goal**: `nvidia/Qwen3.8-Flash-Next-FP4-Local` boots on our source-built image, via a runtime patch that turns the checkpoint's compressed expert scales back into ordinary E4M3 `weight_scale` tensors before vLLM's own loader sees them.
@@ -95,7 +95,7 @@ Expected: tests cover decode vs an independent encoder, exception override, inte
 
 ### T3: Wire the launcher, docs and gate counts
 
-**File**: `qwen3.8-flash-next/run-fp4local`, `README.md`, `context/plans/RULES.md` (step 1 `p` count, step 3 test count), `context/distilled.md`, `context/pitfalls.md`.
+**File**: `qwen3.8-flash-next/run-fp4local`, `README.md`, `context/distilled.md`, `context/pitfalls.md`. (The gate-count bump in `RULES.md` moved into T1: the count changes in the commit that adds the files.)
 
 **What to do**: mount the patch dir + `.pth` as `draft-load-filter` is mounted, behind `CSF_SCALE_DECODE=${:-1}`, and add it to the `## Running` line. Record the format facts (distilled) and the `tensors/`-layout trap (pitfalls). `run-fp4local` is untracked in this tree; the edit is made but **not committed** (it is the owner's file) — recorded in the tracker.
 
@@ -135,7 +135,7 @@ Expected: tests cover decode vs an independent encoder, exception override, inte
 
 ## Verification Checklist
 
-- [ ] T1: `python3 container/patches/csf-scale-decode/test_csf_scale_decode.py` → `ALL TESTS PASS`
+- [x] T1: `python3 container/patches/csf-scale-decode/test_csf_scale_decode.py` → `ALL TESTS PASS`
 - [ ] T2: real-shard seam run prints the expected dtype/shape for every decoded tensor and no `csf` name; numbers in the tracker
 - [ ] T3: `bash -n` clean; gate steps 1, 3 report the new counts
 - [ ] T4: owner boot log shows the decode line and a coherent completion — or the tracker says it did not run
