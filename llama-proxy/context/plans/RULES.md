@@ -266,19 +266,27 @@ the `../vendor/…` that root `CLAUDE.md` still references, which does not exist
 checkouts dropped in to learn how the backends actually behave. They are **read-only**: never edit,
 never `git add`, never commit.
 
-**State, verified 2026-10-16:** they are untracked and, from the repo root (`../..`, a single repo),
-**not yet ignored** — the root `.gitignore` `/vendor` is anchored to the workspace root and misses
-`llama-proxy/vendor/`. **Plan 02 T3 adds `/vendor/` to `llama-proxy/.gitignore`.** So today the real
-hazard is not a vanished edit but a `git add -A` staging a whole upstream checkout into a commit —
-stage explicit paths (Rule B4), always; once T3 lands they become invisible to git and ripgrep.
+**State, verified 2026-10-16 (Plan 02 T3, `55a6bf3`):** the tree is **gitignored** via `/vendor` in
+`llama-proxy/.gitignore` (proof in the Plan 02 tracker row; `git ls-files vendor/` is `0`, so the
+ignore hides nothing tracked). Being ignored changed what the outer git *sees*, not what you may *do*
+— read-only still binds, and the trees are real checkouts (each keeps its own `.git`):
 
-1. **Cite them like any source**: `vendor/vllm/<path>:<line>`.
-2. **A zero-hit search is not evidence of absence.** Search explicitly and widen past ripgrep's
-   defaults: `rg --no-ignore --hidden -n '<symbol>' vendor/vllm/ -g '!**/build/**'`. `--no-ignore`
-   covers ignore files (once T3 ignores the tree), `--hidden` covers `.cache/`, `.github/` and
-   other dot-paths, and the `-g` keeps a stale local build from faking a hit upstream never shipped.
-   Re-run widened before concluding anything is absent — and distrust a lone *hit* for the same reason.
-3. A backend-behavior fact learned here goes in `context/distilled.md` tagged `[REPO]` with its
+1. **Never `git add` it.** A plain `git add -A` now skips the tree, but that is not a safety net:
+   `git add <path>` only *refuses* (re-exposing takes `-f`), and `git stash -a` sweeps it. Stage
+   explicit paths (Rule B4), never into `vendor/`.
+2. **Never `git clean -fdx` from the repo root** — `-x` deletes exactly the ignored tree and the outer
+   repo's history cannot bring it back. Clean with `git clean -fdx -e vendor`.
+3. **An edit is invisible to *this* repo, not to the checkout.** Each tree keeps its own `.git`, so
+   there is always something to revert — just with the inner repo: `git -C vendor/<tree> status` /
+   `git -C vendor/<tree> checkout -- .` (the outer `git checkout -- vendor/…` errors: pathspec
+   unmatched). Never edit anyway — cite, don't patch.
+4. **Cite them like any source**: `vendor/vllm/<path>:<line>`, naming the pinned build (Rule P1) via
+   `git -C vendor/<tree> rev-parse HEAD`.
+5. **A zero-hit search is not evidence of absence.** `--no-ignore` is now **required**, not optional:
+   `rg --no-ignore --hidden -n '<symbol>' vendor/vllm/ -g '!**/build/**'`. `--no-ignore` covers the
+   ignore files, `--hidden` covers dot-paths (`.cache/`, `.github/`), and the `-g` stops a stale local
+   build faking a hit upstream never shipped — distrust a lone *hit* as much as a zero.
+6. A backend-behavior fact learned here goes in `context/distilled.md` tagged `[REPO]` with its
    `path:line` (see `context/AGENTS.md`, "Where Findings Go").
 
 ---

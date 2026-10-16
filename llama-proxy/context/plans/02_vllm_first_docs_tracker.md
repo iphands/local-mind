@@ -61,6 +61,7 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-10-16 | `git check-ignore -v vendor/vllm/README.md` (post-T3) | **`llama-proxy/.gitignore:8:/vendor`** exit 0 — source column names OUR file (not `info/exclude`/global) | 1 | causal proof the ignore came from the edited file |
 | 2026-10-16 | `git status --porcelain vendor/` (post-T3) | empty, exit 0 (was `?? llama-proxy/vendor/`) | 1 | tree now git-ignored |
 | 2026-10-16 | rg blindness pair (observed, not asserted) | root `rg --files`→ grep `^vendor/`=**0**; `rg --no-ignore --files vendor`=**11212**; `RIPGREP_CONFIG_PATH=unset` | 1 | invisible to normal search, fully readable with `--no-ignore` — P3 recipe works |
+| 2026-10-16 | P3-sync verify: `ls vendor/*/.git`; `git -C vendor/<t> rev-parse HEAD`; `git add --dry-run vendor/vllm/README.md`; `git checkout -- vendor/…` | both `.git` present (vllm@`642c18d`, llama.cpp@`b6334e3`); `git add` **refused** ("Use -f"); outer `git checkout` errors "pathspec did not match" | 1 | proves the three review corrections before baking into the rule (inner repo is the revert path; ignore is outer-scoped) |
 
 _(T3 ran: the `rg` blindness pair — root `^vendor/`=0 vs `--no-ignore` vendor=11212 — is recorded in the Evidence table above.)_
 
@@ -105,8 +106,18 @@ _(T3 ran: the `rg` blindness pair — root `^vendor/`=0 vs `--no-ignore` vendor=
   match; the leading `/` still anchors it to `llama-proxy/`, so it neither matches `src/vendor/` nor the
   workspace-root `/vendor`. Comment also now warns an edit here is invisible/unrevertable by git (hoodie)
   — which is the honest hazard *post*-ignore. Verified safe: `git ls-files vendor/`=0 (nothing tracked to
-  hide), file ended in a newline. **Follow-on (neckbeard's T1 ask):** landing T3 makes RULES P3's
-  "not yet ignored" clause stale — syncing P3 to the post-ignore state ships as `[P2][T3][docs]` next.
+   hide), file ended in a newline. **(P3 sync, this commit):** landing T3 made RULES P3's "not yet
+   ignored" clause stale, so P3 was rewritten to the verified post-ignore state (Rule E). Review caught
+   three of my own errors before they shipped: (a) "re-exposing takes `git add -f` *or an explicit
+   path*" is false — `git add <ignored path>` *refuses* ("Use -f"), only `-f` forces (verified); (b)
+   "an edit → nothing to revert" is false for the **outer** repo only — `vendor/{vllm,llama.cpp}` are
+   real checkouts each with its own `.git` (verified: vllm@`642c18d`, llama.cpp@`b6334e3`; outer
+   `git checkout -- vendor/…` errors "pathspec did not match"), so the inner repo is the revert path;
+   (c) I omitted the real post-ignore data-loss risk — **`git clean -fdx` deletes the ignored tree**
+   with no outer history to restore it. P3 now scopes "invisible" to the outer repo, gives the inner-
+   repo revert + SHA commands, and bans `git clean -fdx`. The `.gitignore:7` comment was corrected to
+   match (both reviewers: the two files must teach one recovery model). Pre-T3 wording is kept ONLY here
+   in the tracker (authoritative rule states current verified state + dated commit, no archaeology).
 
 ## Follow-ups
 

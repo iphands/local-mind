@@ -3,6 +3,7 @@ target/
 
 # Read-only upstream backend checkouts (vendor/vllm, vendor/llama.cpp) — paths relative to
 # llama-proxy/, NOT the dead ../vendor/. Policy + full search recipe: context/plans/RULES.md (P3).
-# Invisible to git and rg; to search the tree: rg --no-ignore --hidden -g '!**/build/**' <pat> vendor/
-# Never edit (git cannot see an edit here — there is nothing to revert), never commit.
+# Skipped by rg unless you pass the flags below, and unseen by the OUTER repo's git — but each
+# checkout keeps its OWN .git, so an edit is revertible there (git -C vendor/<tree> checkout -- .),
+# never via the outer repo. Never edit, never commit. `git clean -fdx` deletes this tree — use -e vendor.
 /vendor
