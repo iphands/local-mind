@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 20% complete (1/5 tasks)
+- Status: 100% complete (5/5 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/01_stats_columnar_prefill.md`
 - Evidence: unit test outputs in `src/stats/collector.rs` and `src/stats/formatter.rs`
@@ -26,7 +26,7 @@
 | 2 | T2: Fix inflated prefill TPS from prefix-cache hits | `src/stats/collector.rs` | done | corrected rate = (prompt_n - cache_n) / prompt_ms * 1000 when cache hits present; unit tests pass |
 | 3 | T3: Reorder and pad compact stats columns + update affected tests | `src/stats/formatter.rs` | done | new column order + right-aligned widths; affected formatter tests updated; full suite 915 passed |
 | 4 | T4: Remaining stats tests (full suite) | `src/stats/formatter.rs`, `src/stats/collector.rs` | pending | depends on T3 |
-| 5 | T5: Document breaking compact format change in README | `README.md` | pending | depends on T4 |
+| 5 | T5: Document breaking compact format change in README | `README.md` | done | compact example regenerated; new column order, widths, prefill-cache correction and cache discount documented |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` — the last three always carry a reason in the row's Notes cell.
 

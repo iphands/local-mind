@@ -291,8 +291,13 @@ the backend counted output tokens). `cached_tokens` and
 not "zero cached".
 
 ### Compact Format
+
+Columnar, right-aligned fixed widths (never leading zeros) so the line reads
+left-to-right as `model, tps, dur, ctx, cache, tokens, stream, finish`,
+with `queue=` and `concurrent=` appended after:
+
 ```
-model=cosmo-6000 tokens=57/8 tps=536.42/115.68 ctx=57/262144 sync finish=length dur=184.0ms concurrent=1
+model=cosmo-6000 tps= 53.64/115.68 dur= 184.0ms ctx=57/262144  57  8 stream=ok finish=length concurrent=1
 ```
 
 The `tps=` cell has three tiers, and which one you see is a fact about the
@@ -300,9 +305,9 @@ backend, not about the request:
 
 | Rendered | Meaning | Source |
 |---|---|---|
-| `tps=536.42/115.68` | prefill / decode, **measured** | backend split: llama.cpp `timings`, or vLLM `metrics` (`--enable-per-request-metrics`) |
-| `tps>=146.32 work=6073.63` | decode is **at least** 146 tok/s; the request moved 6073.63 tok/s of work | completion / wall, and (prompt+completion) / wall |
-| `tps=n/a work=6073.63` | no decode to measure (0 counted output tokens) | — |
+| `tps=536.42/ 115.68` | prefill / decode, **measured** | backend split: llama.cpp `timings`, or vLLM `metrics` (`--enable-per-request-metrics`) |
+| `tps>= 146.32 work=125.00` | decode is **at least** 146 tok/s; the request moved 125.00 tok/s of work | completion / wall, and (prompt+completion) / wall |
+| `tps=n/a work= 125.00` | no decode to measure (0 counted output tokens) | — |
 
 `tps>=` is a floor, never a measurement: the wall clock still contains prefill,
 network and (in `fake` mode) the proxy's own synthesis, so it understates. It is
@@ -311,6 +316,15 @@ normal case for the Anthropic `/v1/messages` path, where the proxy has to buffer
 the response to repair it and the backend's per-request timing block is not part
 of the payload at all. `work=` is a **cost** rate: on a long-context agent turn
 with a short completion it runs to thousands while decode runs at tens.
+
+**Prefill TPS is corrected for prefix-cache hits.** llama.cpp reports
+`prompt_per_second = prompt_n / prompt_ms * 1000`, but `prompt_n` counts cached
+tokens while `prompt_ms` only covers the non-cached compute, so the raw figure
+is inflated (e.g. 164,663 tokens at 880k tok/s when only ~567 were actually
+computed). When `cache=` is present, the proxy instead reports
+`(prompt_n - cache_n) / prompt_ms * 1000` — the rate for the tokens the engine
+actually processed. If the deployed llama.cpp already excludes cached tokens from
+`prompt_n`, the proxy falls back to the backend value verbatim.
 
 `cache=N`, when present, is how many prompt tokens the engine served from its
 prefix cache — a discount on `work=`, since the engine did not recompute them.
