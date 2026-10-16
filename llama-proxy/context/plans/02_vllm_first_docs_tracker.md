@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 17% complete (1/6 tasks)
+- Status: 33% complete (2/6 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/02_vllm_first_docs.md`
 - Evidence: doc-framing plan — evidence is the grep output each Verify prints (the claim flipping
@@ -39,7 +39,7 @@
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 1 | T1: P3 read-only vendor rule + `rg --no-ignore` | `context/plans/RULES.md` | done | added at :262; wording corrected to reality (see Notes) |
-| 2 | T2: register vendor in context KB map | `context/CLAUDE.md` | pending | symlink to AGENTS.md |
+| 2 | T2: register vendor in context KB map | `context/CLAUDE.md` | done | Map + Findings rows; wording diverged from draft (see Notes) |
 | 3 | T3: gitignore `/vendor/`, observe ignore took | `.gitignore` | pending | record rg blindness pair |
 | 4 | T4: root CLAUDE.md vLLM-first | `CLAUDE.md` | pending | keep hands-plan block + Preservation List |
 | 5 | T5: README + fixrate vLLM-first | `README.md`, `fixrate.md` | pending | don't rename cited headings |
@@ -57,6 +57,7 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-10-16 | `rg --files target` | listed gitignored `target/` files | 1 | env rg shows ignored tree when passed explicitly |
 | 2026-10-16 | `git check-ignore -v vendor/vllm/README.md` | **exit 1 — not ignored**; `git status` → `?? llama-proxy/vendor/` | 1 | invalidated P3's drafted "gitignored, edit silently lost" premise → corrected |
 | 2026-10-16 | `RUSTFLAGS='-D warnings' cargo check/clippy …` + `cargo fmt --check` + `cargo test --workspace --lib` | check/clippy/fmt exit 0; 915 passed | 1 | T1 gate. `just gate` (`-- -D warnings`) errors in this cargo — see Follow-ups |
+| 2026-10-16 | T2 verify: `grep 'vendor/vllm' context/CLAUDE.md` + `grep 'read-only' …` + `diff -q context/AGENTS.md context/CLAUDE.md` | both greps hit at `:19`; `SYMLINK-OK`; check/fmt exit 0 | 1 | two KB rows added (Map + Findings); no `.rs` touched |
 
 _(T3 adds the `rg --files vendor`=0 vs `rg --no-ignore --files vendor`>0 pair on the day it runs.)_
 
@@ -79,8 +80,19 @@ _(T3 adds the `rg --files vendor`=0 vs `rg --no-ignore --files vendor`>0 pair on
 - **(T1) The project gate command is broken in this toolchain.** `RULES.md:122/124` and `justfile:16`
   run `cargo check/clippy … -- -D warnings`, which this cargo rejects
   (`unexpected argument '-D' found`); `just gate` cannot pass as written. Ran the equivalent
-  `RUSTFLAGS='-D warnings' cargo check/clippy` + `cargo fmt --check` + `cargo test --workspace --lib`
+    `RUSTFLAGS='-D warnings' cargo check/clippy` + `cargo fmt --check` + `cargo test --workspace --lib`
   (all exit 0, 915 tests pass). Not silently rewritten (gate is authoritative) → Follow-up below.
+- **(T2) The drafted Map row was corrected before writing (Rule E), per both reviewers.** The plan's
+  T2 spec drafted it as "…`vendor/vllm`, `vendor/llama.cpp` | upstream backend sources, **read-only +
+  gitignored** …search with `rg --no-ignore`". Two defects caught in review: (a) "**gitignored**" as a
+  present-tense fact repeats the exact claim blocked in T1 — the tree is not ignored until T3; and
+  (b) a truncated `rg` recipe in the Read-when column is a lossy copy of P3's canonical command (drops
+  `-g '!**/build/**'`, the guard against a stale build faking a hit) sitting in a *trigger* column.
+  Written instead as P3's canonical `vendor/vllm/` + `vendor/llama.cpp/` spelling with an explicit base
+  anchor `(project root: llama-proxy/vendor/)`, marked **outside this KB**, carrying the *real* hazard
+  (`never edit, never git add`) and pointing at RULES P3 for the ignore-state + full search recipe. The
+  Findings row uses P3's concrete cite form `vendor/<tree>/<path>:<line>` + `[REPO]`. Dropping the
+  "gitignored from T3" clause also removes the stale-by-construction cell, so no T3 update is owed here.
 
 ## Follow-ups
 

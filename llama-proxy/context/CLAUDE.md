@@ -16,6 +16,7 @@ full before writing or executing a plan.
 | `plans/SERIES.md` | Dependency chain, status, next free plan number, north star | Before creating or picking a plan |
 | `plans/NN_example.md`, `plans/NN_example_tracker.md` | The skeletons to copy | Writing a plan |
 | `plans/completed/`, `plans/abandoned/` | Closed plans (newest = current conventions) | Looking for precedent |
+| `vendor/vllm/`, `vendor/llama.cpp/` (project root: `llama-proxy/vendor/`; **outside this KB**) | upstream backend checkouts — **read-only**: never edit, never `git add` | learning exact vLLM/llama.cpp behavior (metrics, `/props`, gauges); read-only rule + search recipe in RULES P3 |
 
 ## Where Findings Go <!-- hp:context-routing -->
 
@@ -25,6 +26,7 @@ full before writing or executing a plan.
 | A bug or gotcha that took more than one attempt | `pitfalls.md` (create on first use) | Tagged [OBSERVED YYYY-MM-DD] |
 | A dependency choice (pros/cons, revisit-if) | `high_level.md` (create on first use) | Table form |
 | Progress, a deviation from a plan, a negative result | The active plan's tracker | A row or a Notes/Deviations line |
+| Backend behavior read from `vendor/*` | `distilled.md` (create on first use); after a split, the matching `distilled/<topic>.md` (see House Style) | Tagged [REPO] with `vendor/<tree>/<path>:<line>` |
 
 ## Provenance <!-- hp:context-provenance -->
 

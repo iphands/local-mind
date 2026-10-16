@@ -347,7 +347,7 @@ Expected: PLAN.md stamped; no tracked doc still claims llama.cpp is *the* target
 ## Verification Checklist
 
 - [x] T1: `grep 'P3 — Vendor sources are read-only' RULES.md` → 1 match; `grep -- '--no-ignore'` → hit; gate exits 0
-- [ ] T2: `grep 'vendor/vllm' context/CLAUDE.md` → ≥1 match; `diff -q context/AGENTS.md context/CLAUDE.md` → SYMLINK-OK; gate exits 0
+- [x] T2: `grep 'vendor/vllm' context/CLAUDE.md` → ≥1 match; `diff -q context/AGENTS.md context/CLAUDE.md` → SYMLINK-OK; gate exits 0
 - [ ] T3: `git check-ignore -v vendor/vllm/docs/features/per_request_metrics.md` → `/vendor/` rule AND `git status --porcelain vendor/` empty (the pass/fail); `rg --files | grep -c '^vendor/'`=0 and `rg --no-ignore --files vendor`>0 recorded as observation; gate exits 0
 - [ ] T4: new vLLM-first sentence present + first `vllm` hit in Overview; `grep 'reverse proxy for llama.cpp server' CLAUDE.md` → no match; BOTH hands-plan markers present; `ls -l AGENTS.md` shows `-> CLAUDE.md`; gate exits 0
 - [ ] T5: README intro + diagram lead vLLM; `Is it really streaming?` heading intact; flag named at :256 & :308; `grep '\*\*vLLM\*\*' README.md` = 1 (the new API-Compatibility bullet — the discriminating check); **all three Preservation greps hit**; gate exits 0
