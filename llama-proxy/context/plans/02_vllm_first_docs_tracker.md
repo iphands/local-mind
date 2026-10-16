@@ -2,7 +2,8 @@
 
 ## Overview
 
-- Status: 83% complete (5/6 tasks)
+- Status: 100% complete (6/6 tasks) — all tasks done; closing (harvest + `git mv` + SERIES) is the
+  next and final step (Rule C/D).
 - Start date: 2026-10-16
 - Plan: `context/plans/02_vllm_first_docs.md`
 - Evidence: doc-framing plan — evidence is the grep output each Verify prints (the claim flipping
@@ -43,7 +44,7 @@
 | 3 | T3: gitignore `/vendor/`, observe ignore took | `.gitignore` | done | landed as `/vendor` (symlink cover); P3 state-sync follow-on |
 | 4 | T4: root CLAUDE.md vLLM-first | `CLAUDE.md` | done | tagline/framing/vLLM-Extensions block landed; `../vendor/`+`examples/server` pointers → zero; hands-plan block + `../context/` notes refs untouched |
 | 5 | T5: README + fixrate vLLM-first | `README.md`, `fixrate.md` | done | intro/diagram/API-Compat vLLM bullet + fixrate producer-doc block; all 3 Preservation greps hit; cited heading intact; box re-measured 63==63 |
-| 6 | T6: triage docs + stamp PLAN.md obsolete | `PLAN.md` (+grep) | pending | stamp, don't delete |
+| 6 | T6: triage docs + stamp PLAN.md obsolete | `PLAN.md` (+grep) | done | OBSOLETE banner stamped (not deleted); 7 framing edits + triage table (see Notes); hard grep `reverse proxy for llama`→**0**; inventory survivor = `CLAUDE.md:282` vendor pointer → **Leave** (accurate); gate 915 passed |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
 the last three always carry a reason in the row's Notes cell.
@@ -67,6 +68,8 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-10-16 | `RUSTFLAGS='-D warnings' cargo check --workspace --features influxdb` + `cargo fmt --check` + `cargo test --workspace --lib` (post-T4) | check exit 0 (cached 0.20s); fmt exit 0; **915 passed** | 1 | T4 gate — no `.rs` touched (markdown-only), gate stays green |
 | 2026-10-16 | T5 Verify battery: plan greps (intro `for **vLLM**`, diagram `vLLM / llama.cpp / OpenAI`, old `proxy for [llama.cpp]` gone exit=1, `Is it really streaming?` intact, flag at README :258/:310/:803+fixrate) + 3 Preservation greps (prefix-cache :322, `tps>=` :311, absent≠zero :292-293) + box width re-measure | ALL pass; box 392/393/394 all =63 (aligned); `**vLLM**` count=**2** (intro L6 + bullet L802), not the plan's stated 1 — the plan's own intro edit also bolds vLLM, so 2 is the correct outcome (plan Verify self-inconsistent, see Notes) | 1 | T5 evidence; Preservation = Risk #1 guard all green |
 | 2026-10-16 | T5 gate (post-edit, markdown-only) | `RUSTFLAGS='-D warnings' cargo check` cached 0.20s; fmt 0; **915 passed** | 1 | no `.rs` touched |
+| 2026-10-16 | T6 source probe (banner assertions, ground-truthed before baking): `grep -rn <sym> src/` for the three deleted symbols + `grep 'fn find_string_end'`; `git log -1 21f0548`; `grep -n 'Streaming Fixes…' CLAUDE.md` | `calculate_completion_delta`/`apply_stream_with_accumulation_default`/`safe_completion` → **0 in `src/`** (so "Changes Made" is a false record); `find_string_end` **live @:231**; `21f0548`="big-fix 29: delete dead legacy streaming machinery"; heading verbatim carries **(Important!)** @:341 | 1 | hoodie's claims held this time (unlike the T4 vendor glob artifact) — every one verified, then adopted |
+| 2026-10-16 | T6 authoritative greps verbatim (plan:287-289 inventory + plan:312-314 hard criterion; `--exclude-dir=vendor\|target\|.git` + plan's own `grep -v 'completed/\|PLAN.md\|02_'`) + gate | hard criterion → **0**; inventory → **1** survivor `CLAUDE.md:282` (→ Leave); `grep -n OBSOLETE PLAN.md`→**L1**; gate check/fmt 0, **915 passed** | 1 | first improvised grep (no plan-file exclude) matched the plan's *own* quoted Before/After — plan:291 forbids editing those; re-ran the defined command; markdown-only, no `.rs` |
 
 _(T3 ran: the `rg` blindness pair — root `^vendor/`=0 vs `--no-ignore` vendor=11212 — is recorded in the Evidence table above.)_
 
@@ -173,7 +176,39 @@ _(T3 ran: the `rg` blindness pair — root `^vendor/`=0 vs `--no-ignore` vendor=
   `grep '\*\*vLLM\*\*' README.md → 1 after` is unreachable by the plan's own contract: its drafted intro
   (line 250) *also* bolds `**vLLM**`, so after intro+bullet the count is **2**. Both hits are correct
   (L6 intro, L802 bullet). Recorded rather than chased; the real check (the API-Compatibility section gains
-  a vLLM bullet) passed at L802 with `max_model_len`/`cache_config_info` content present.
+   a vLLM bullet) passed at L802 with `max_model_len`/`cache_config_info` content present.
+
+### T6 triage table (every inventory hit → disposition; Rule A grep, plan:287-289 verbatim)
+
+| Hit | Disposition |
+|---|---|
+| `README.md:106` `# Single backend llama-server location` | **Fixed** → "the example URL below is llama.cpp" (the config sample genuinely targets llama.cpp `:8080`, so naming it is accurate, not a target claim) |
+| `README.md:202` `Point … at the proxy instead of llama.cpp directly` | **Fixed** → "instead of the backend directly" (hoodie-flagged; not enumerated by the plan's grep) |
+| `CLAUDE.md:255` `# …point it at proxy instead of llama.cpp directly` | **Fixed** → "the backend directly" (curl-recipe comment) |
+| `CLAUDE.md:291` `backend.host/port: llama-server location (default: localhost:8080)` | **Fixed** → `backend.url` + "the default config targets llama.cpp at `http://localhost:8080`" (hoodie/neckbeard: `BackendConfig` has `url` only, `config/mod.rs:101` — the old key name was a doc bug; neckbeard's "no `http://` under a host/port key" moot once key→`url`) |
+| `e2e/README.md:3` `the **backend** (llama.cpp server)` | **Fixed** → "an OpenAI-compatible mock; its default payloads are llama.cpp-shaped" (hoodie: suite tests the *proxy*; neckbeard: keep the llama.cpp-shaped-defaults accuracy — both honored) |
+| `e2e/README.md:182` `(what \`llama.cpp\` would return)` | **Fixed** → "(what an OpenAI-compatible backend would return)" — twin of :3, kept consistent |
+| `CLAUDE.md:282` `llama.cpp server API: vendor/llama.cpp/tools/server/` | **Leave** — accurate pointer to the real read-only checkout; both reviewers said do not touch (T4 owns it) |
+| `CLAUDE.md:203` `Supports CLI overrides for port, backend host/port` | **Leave** — CLI-override prose (`--port`/`--backend-url`), not a "llama.cpp is the target" claim; surfaced only as a `.`-regex false positive (fixed-string `grep -F` → 0) |
+| `config.yaml.default:19/21` `llama-server` | **Follow-up** — non-`.md`, so outside the plan's `--include='*.md'` grep by design; it is what operators `cp` → highest-value mirror, logged below |
+| `src/main.rs:47` `about = "HTTP reverse proxy for llama.cpp server"` | **Follow-up** (pre-existing) — code / observable `--help`, out of a docs plan; not matched by the `.md` grep |
+
+- **(T6) Both reviewers redirected the drafted banner; every reviewer source-claim was ground-truthed
+  before baking (the T4 gitignore-artifact lesson).** neckbeard: **drop the drafted "Superseded by Plan
+  01"** — topic mismatch (Plan 01 is stats-columnar/prefill; PLAN.md is streaming-delta), the true cause
+  of obsolescence is the `21f0548` deletion, not a stats plan. hoodie: **front-load "DO NOT IMPLEMENT"**
+  (a bare "obsolete" invites an agent to mine the file for a plausible task), cover the **"Changes Made"
+  false-completion**, and add one honest line that the **Unicode `filePath` bug is still live** so the
+  stamp does not over-generalize to "ignore everything here". All adopted. Verified before writing: the
+  three symbols the banner calls deleted → **0 hits in `src/`**; `find_string_end` **live @:231** (byte-
+  slicing bug real, tracked by the e2e `toolcall/bad_filepath/special_chars` KNOWN BUG @`e2e/README.md`
+  :238-242); `21f0548`="big-fix 29: delete dead legacy streaming machinery". The live streaming section
+  is cited **descriptively** ("streaming-fixes guidance in `CLAUDE.md`"), **not** as a verbatim quote —
+  hoodie flagged the real heading carries "(Important!)" @:341, so a paraphrase quoted-as-verbatim is the
+  rot-to-avoid. **Rejected a reviewer false-positive:** hoodie's `safe_completion` "still referenced"
+  worry — `grep -F 'backend.host/port'` and the symbol greps showed the only "survivor" was `CLAUDE.md:203`
+  matched by the `.` regex wildcard (a *space*: "backend host/port"), a CLI-override line, not the L291
+  config key I fixed → left untouched, out of scope.
 
 ## Follow-ups
 
@@ -185,3 +220,5 @@ _(T3 ran: the `rg` blindness pair — root `^vendor/`=0 vs `--no-ignore` vendor=
 | **Fix the gate**: `justfile:16` + `RULES.md:122/124` use `cargo … -- -D warnings`, rejected by this cargo (`unexpected argument '-D' found`); `just gate` cannot pass as written | Reproducibility: every task's gate claim rests on this command; workaround is `RUSTFLAGS='-D warnings' cargo …` | separate bookkeeping commit (authoritative file — human sign-off first) |
 | Fix root `CLAUDE.md` "Reference Implementation" `../vendor/claude-code`, `../vendor/opencode`, `../vendor/llama.cpp` — resolve to a **nonexistent** `local-mind/vendor/`; real checkouts are `llama-proxy/vendor/{vllm,llama.cpp}` | Dead pointers misroute discovery work; P3 now warns against them | **LANDED T4** — `../vendor/`→0; checkouts now `vendor/…` (no `../`), client code → upstream "not vendored here", llama.cpp→`tools/server/` |
 | Resolve the 3× dead `../context/opencode_claude_llama_notes.md` reference (`CLAUDE.md` L93/L284/L404) — `find` shows the file exists **nowhere** (deleted, not mis-pathed), so no prefix swap fixes it | Cited as "the comprehensive client notes"; a dead pointer an agent will trust and chase. Needs a content call (restore the file / rewrite the refs / drop them), not a path edit | human decision — all 3 refs are outside the hands-plan block, safe to edit once decided |
+| Neutralize `config.yaml.default:19/21` (`# Backend llama-server configuration`, `# Full URL to llama-server`) | Mirror drift: README/CLAUDE are now engine-neutral but the file an operator actually `cp`'s still names llama-server; flagged by **both** reviewers (neckbeard MEDIUM, hoodie "highest-value"); non-`.md`, so out of this plan's `--include='*.md'` grep by design | a later docs plan — bundle with the `src/main.rs:47` CLI-`about` row (both are the shipped default-config surface an operator sees first) |
+| Deepen the e2e mock beyond `:3`/`:182`: default `/props` + `/slots` payloads stay llama.cpp-shaped (`.gguf`, `n_ctx`) | neckbeard's accuracy caveat vs hoodie's genericize — the *proxy* is under test and the doc is now engine-neutral, but an engine-neutral default payload (or a vLLM-shaped sample) is a harness change, not a doc fix; left to avoid a reviewer-verified accuracy loss | a later e2e plan — touches `e2e/src/backend.rs` default handlers (= code, out of a docs plan) |

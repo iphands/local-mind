@@ -1,3 +1,24 @@
+> **[OBSOLETE — DO NOT IMPLEMENT — stamped 2026-10-16]**
+>
+> This is a **historical record, not a backlog**. Every streaming symbol this document
+> plans work against — `calculate_completion_delta` and `apply_stream_with_accumulation_default`,
+> plus the `safe_completion` its own "Changes Made" section below claims to have fixed — was
+> deleted in `21f0548` ("big-fix 29: delete dead legacy streaming machinery"). Those symbols have
+> **zero** occurrences in `src/` today; the fix layer now runs only on buffered responses (see the
+> streaming-fixes guidance in `CLAUDE.md`).
+>
+> Do **not** act on the "Recommended Actions", "Files to Modify", "Testing Strategy", or
+> "Changes Made" sections below — they describe machinery that no longer exists, and "Changes Made"
+> records a fix to a `safe_completion` function that is not in this repo.
+>
+> One concern here is **still real** and tracked elsewhere: the Unicode `filePath` truncation bug
+> behind section 3's `find_string_end` byte-slicing is a live KNOWN BUG, exercised by the e2e
+> `toolcall/bad_filepath/special_chars` test (`e2e/README.md`). Fix it there, not from this file.
+>
+> Active planning lives under `context/plans/`.
+
+---
+
 # Plan for llama-proxy Bug Fixes
 
 ## Context

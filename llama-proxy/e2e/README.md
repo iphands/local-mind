@@ -1,6 +1,6 @@
 # llama-proxy e2e Tests
 
-End-to-end test harness for `llama-proxy`. Simulates both the **client** (Claude Code / Opencode) and the **backend** (llama.cpp server), with the **real compiled proxy** running in between.
+End-to-end test harness for `llama-proxy`. Simulates both the **client** (Claude Code / Opencode) and the **backend** (an OpenAI-compatible mock; its default payloads are llama.cpp-shaped), with the **real compiled proxy** running in between.
 
 ```
 Mock Client (e2e) → [REAL llama-proxy binary] → Mock Backend (e2e)
@@ -179,7 +179,7 @@ distinct backend URL is the isolation mechanism; the reasoning is documented on
 1. `e2e` starts a **mock backend** (axum HTTP server) on port 18080
 2. The **real proxy** is started (auto-spawned or pre-running) pointing at port 18080
 3. Each test:
-   - Queues a mock response on the backend (what `llama.cpp` would return)
+   - Queues a mock response on the backend (what an OpenAI-compatible backend would return)
    - Sends a request to the proxy (what Claude Code / Opencode would send)
    - Validates the proxy's response (JSON or SSE stream)
 

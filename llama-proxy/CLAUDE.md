@@ -252,7 +252,7 @@ Key test files:
 
 **Testing with Real Clients:**
 ```bash
-# Test with Claude Code (point it at proxy instead of llama.cpp directly)
+# Test with Claude Code (point it at the proxy instead of the backend directly)
 # Configure in Claude Code settings to use http://localhost:8066 as base URL
 
 # Test with Opencode
@@ -288,7 +288,7 @@ For understanding how clients interact with the API:
 The proxy requires `config.yaml` (copy from `config.yaml.default`). Key settings:
 
 - `server.port`: Proxy listen port (default: 8066)
-- `backend.host/port`: llama-server location (default: localhost:8080)
+- `backend.url`: backend server location (single-backend mode; the default config targets llama.cpp at `http://localhost:8080`)
 - `fixes.enabled`: Global fix toggle
 - `fixes.modules.<name>.enabled`: Per-fix toggle
 - `stats.enabled`: Enable metrics logging

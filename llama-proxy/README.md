@@ -103,7 +103,7 @@ server:
   host: "0.0.0.0"
   port: 8066
 
-# Single backend llama-server location
+# Single backend server location (the example URL below is llama.cpp)
 backend:
   url: "http://localhost:8080"
   timeout_seconds: 300
@@ -199,7 +199,7 @@ cargo run -- run --config config.yaml --dump ./debug-dumps
 
 ### Usage with Clients
 
-Point your AI coding tool at the proxy instead of llama.cpp directly:
+Point your AI coding tool at the proxy instead of the backend directly:
 
 ```bash
 # Instead of: http://localhost:8080
