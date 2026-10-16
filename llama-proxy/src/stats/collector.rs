@@ -31,12 +31,21 @@ pub struct RequestMetrics {
     pub completion_tokens: Option<u64>,
     /// Total tokens
     pub total_tokens: u64,
-    /// Prompt processing tokens per second. Only meaningful when the backend
-    /// reported a real prefill/decode split (llama.cpp `timings` or vLLM
-    /// `metrics`); 0.0 otherwise.
-    pub prompt_tps: f64,
-    /// Generation tokens per second. Same caveat as `prompt_tps`.
-    pub generation_tps: f64,
+    /// Prefill (prompt processing) tokens/sec, or `None` when the backend reported no
+    /// prefill rate at all. `None` is the ABSENCE of a measurement; the old `0.0`
+    /// sentinel made "the engine never said" indistinguishable from "prefill was
+    /// instant", which is how a vLLM body carrying only a ttft could print a decode
+    /// rate of `0.00` under a label the README defines as *measured*.
+    ///
+    /// Exporters OMIT this field when `None` and the plausibility canary never sees it;
+    /// `json` serializes it as `null` rather than dropping the key, because it appears
+    /// in the documented core example, so every line keeps one schema shape and
+    /// `jq '.prompt_tps'` never means "missing" on one backend and "null" on another.
+    pub prompt_tps: Option<f64>,
+    /// Decode (generation) tokens/sec. Same absent-vs-zero contract as `prompt_tps`.
+    /// This is the number an operator actually scans the line for, so the compact
+    /// renderer refuses to print a split without it -- see the tier gate there.
+    pub generation_tps: Option<f64>,
     /// Prompt processing time in ms. 0.0 when the backend did not report it.
     pub prompt_ms: f64,
     /// Generation time in ms. 0.0 when the backend did not report it.
@@ -131,8 +140,8 @@ impl RequestMetrics {
             prompt_tokens: None,
             completion_tokens: None,
             total_tokens: 0,
-            prompt_tps: 0.0,
-            generation_tps: 0.0,
+            prompt_tps: None,
+            generation_tps: None,
             prompt_ms: 0.0,
             generation_ms: 0.0,
             total_tps: 0.0,
@@ -186,6 +195,19 @@ impl RequestMetrics {
         extract_usage(&mut metrics, response);
 
         extract_timings(&mut metrics, response, duration_ms);
+
+        // The ONE writer of `has_timing_split`, derived from the RATES. Both extraction
+        // branches used to set this themselves -- the llama.cpp branch unconditionally on
+        // seeing a `timings` object, the vLLM branch from `prompt_ms`/`generation_ms` --
+        // which is how `tps= 0.00/ 0.00` reached a line whose label means *measured*.
+        //
+        // This is PROVENANCE only ("the engine supplied a rate"). It deliberately does
+        // not claim the durations exist: `prompt_ms`/`generation_ms` keep their own
+        // `0.0 == not reported` convention and can be > 0 while this is false, which is
+        // a new combination on the wire -- `prompt_ms > 0` used to imply this flag was
+        // true -- so any consumer using the flag as a proxy for "durations present" is
+        // wrong from here on. Pinned by `split_flag_is_rate_provenance_not_duration_presence`.
+        metrics.has_timing_split = metrics.prompt_tps.is_some() || metrics.generation_tps.is_some();
 
         // Always available, whether or not the backend reported a split.
         // finite_rate is not decoration here: `u64::MAX tokens / MIN_POSITIVE ms`
@@ -251,7 +273,19 @@ impl RequestMetrics {
         // `decode_tps_min` is likewise not worth a term of its own: it is
         // derived from `completion_tokens`, so a nonzero floor always implies
         // `total_tokens > 0` and the disjunction below already admits it.
-        self.total_tokens > 0 || self.total_tps > 0.0 || self.prompt_tps > 0.0 || self.generation_tps > 0.0
+        //
+        // The rate terms stay `> 0.0` and are NOT `.is_some()`. This is a filter that
+        // decides what reaches every exporter, not a renderer: its documented purpose
+        // is to stop a run of literal zeros reaching every throughput aggregate, and
+        // the aborted-stream traffic it targets is exactly the class that reports
+        // `predicted_per_second: 0.0`. `.is_some()` would promote those samples to
+        // "signal" and post the zeros this exists to block. `finite_rate_opt` already
+        // maps 0.0 to `None`; this guard is the second lock, so a caller that
+        // constructs a sample directly cannot defeat the filter.
+        self.total_tokens > 0
+            || self.total_tps > 0.0
+            || self.prompt_tps.is_some_and(|v| v > 0.0)
+            || self.generation_tps.is_some_and(|v| v > 0.0)
     }
 
     /// How the request ended, as a label. Shared by the log line and the InfluxDB
@@ -342,6 +376,29 @@ fn finite_rate(value: f64, field: &str, model: &str) -> f64 {
     0.0
 }
 
+/// `finite_rate` for the RATE fields, whose absent marker is `None`.
+///
+/// A deliberate SIBLING, not a signature change: `finite_rate`'s `0.0 == absent`
+/// contract is what the millisecond fields still rely on, and routing a rate through
+/// the `f64` version would yield `Some(0.0)` -- the fabricated zero smuggled *inside*
+/// an `Option`, which is the exact defect this shape exists to remove.
+///
+/// Non-finite maps to `None`, not to `Some(0.0)`: an overflowed `tokens/ms*1000` is
+/// not a measurement of anything. So is an exact `0.0` -- a rate of zero tokens per
+/// second is not a slow speed, it is the absence of a speed. The reachable source is
+/// the llama.cpp corrected-prefill path when `prompt_n == cache_n` (a full prefix
+/// cache hit: zero tokens were computed), which would otherwise read as "prefill ran
+/// at 0 tok/s". `has_throughput_signal` ALSO gates on `> 0.0`; both guards stay, so
+/// neither the export filter nor `has_timing_split` can be poisoned by a caller that
+/// bypasses this function.
+fn finite_rate_opt(value: f64, field: &str, model: &str) -> Option<f64> {
+    if value.is_finite() && value > 0.0 {
+        return Some(value);
+    }
+    tracing::debug!(field, model, raw = %value, "backend rate not usable - reporting absent (not reported), never 0.0 or inf");
+    None
+}
+
 /// Extract llama.cpp `timings`, with the token-count fallback and, when timings
 /// are absent, the context_used fallback and the vLLM `metrics` path.
 fn extract_timings(metrics: &mut RequestMetrics, response: &Value, duration_ms: f64) {
@@ -358,11 +415,12 @@ fn extract_timings(metrics: &mut RequestMetrics, response: &Value, duration_ms: 
             .and_then(|t| t.as_f64())
             .map(|v| finite_rate(v, "generation_ms", &metrics.model))
             .unwrap_or(0.0);
-        metrics.generation_tps = finite_rate(
-            timings.get("predicted_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0),
-            "generation_tps",
-            &metrics.model,
-        );
+        // `None` when the key is absent. The old `.unwrap_or(0.0)` here was a second
+        // fabrication site: it reported "0 tok/s" for a field the engine never sent.
+        metrics.generation_tps = timings
+            .get("predicted_per_second")
+            .and_then(|t| t.as_f64())
+            .and_then(|v| finite_rate_opt(v, "generation_tps", &metrics.model));
 
         // Read prompt_n / cache_n from timings before assigning them, so the
         // corrected prefill rate can use them.
@@ -386,12 +444,12 @@ fn extract_timings(metrics: &mut RequestMetrics, response: &Value, duration_ms: 
                 let computed = used.saturating_sub(cached) as f64;
                 computed / metrics.prompt_ms * 1000.0
             });
-        metrics.prompt_tps = finite_rate(
-            corrected_prompt_tps.unwrap_or_else(|| timings.get("prompt_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0)),
-            "prompt_tps",
-            &metrics.model,
-        );
-        metrics.has_timing_split = true;
+        metrics.prompt_tps = corrected_prompt_tps
+            .or_else(|| timings.get("prompt_per_second").and_then(|t| t.as_f64()))
+            .and_then(|v| finite_rate_opt(v, "prompt_tps", &metrics.model));
+        // `has_timing_split` is NOT set here. It is derived once, from the rates, at
+        // the end of `from_response` -- see the note there on why a branch that only
+        // saw a `timings` object must not claim a split it produced no rate for.
 
         // Context info - use prompt_n for actual context consumption
         if let Some(prompt_n) = prompt_n {
@@ -490,17 +548,24 @@ fn extract_vllm_usage(metrics: &mut RequestMetrics, response: &Value, duration_m
         if let Some(ttft) = f("time_to_first_token_ms") {
             metrics.prompt_ms = ttft;
             if let Some(prompt_tokens) = metrics.prompt_tokens.filter(|p| *p > 0) {
-                metrics.prompt_tps = finite_rate(prompt_tokens as f64 / ttft * 1000.0, "prompt_tps", &metrics.model);
+                metrics.prompt_tps = finite_rate_opt(prompt_tokens as f64 / ttft * 1000.0, "prompt_tps", &metrics.model);
             }
         }
         if let Some(gen_ms) = f("generation_time_ms") {
             metrics.generation_ms = gen_ms;
             if let Some(completion_tokens) = metrics.completion_tokens.filter(|c| *c > 0) {
                 metrics.generation_tps =
-                    finite_rate(completion_tokens as f64 / gen_ms * 1000.0, "generation_tps", &metrics.model);
+                    finite_rate_opt(completion_tokens as f64 / gen_ms * 1000.0, "generation_tps", &metrics.model);
             }
         }
-        metrics.has_timing_split = metrics.prompt_ms > 0.0 || metrics.generation_ms > 0.0;
+        // `has_timing_split` is deliberately NOT assigned here. It used to read
+        // `prompt_ms > 0.0 || generation_ms > 0.0` -- derived from the DURATIONS, while
+        // the two rates above are only set when the matching TOKEN COUNT is present.
+        // That mismatch is what produced the fabricated split: a body carrying
+        // `time_to_first_token_ms` with no `prompt_tokens` got a true "measured split"
+        // flag with both rates still zero, and the compact line printed
+        // `tps=  0.00/  0.00` under a label meaning *measured*. It is derived once from
+        // the rates at the end of `from_response`.
 
         tracing::debug!(
             "vLLM per-request metrics: ttft={:.1}ms gen={:.1}ms queue={:?}ms itl={:?}ms",
@@ -716,8 +781,8 @@ mod tests {
         assert_eq!(metrics.prompt_tokens, None);
         assert_eq!(metrics.completion_tokens, None);
         assert_eq!(metrics.total_tokens, 0);
-        assert_eq!(metrics.prompt_tps, 0.0);
-        assert_eq!(metrics.generation_tps, 0.0);
+        assert_eq!(metrics.prompt_tps, None, "no split reported is absent, not zero");
+        assert_eq!(metrics.generation_tps, None);
         assert!(!metrics.streaming);
         assert_eq!(metrics.finish_reason, "unknown");
     }
@@ -796,11 +861,11 @@ mod tests {
         assert_eq!(metrics.generation_ms, 100.25);
         // Prefix cache present: corrected prefill rate = (42 - 10) / 50.5 * 1000
         assert!(
-            (metrics.prompt_tps - 633.66).abs() < 0.01,
-            "prompt_tps = {}",
+            metrics.prompt_tps.is_some_and(|v| (v - 633.66).abs() < 0.01),
+            "prompt_tps = {:?}",
             metrics.prompt_tps
         );
-        assert_eq!(metrics.generation_tps, 99.75);
+        assert_eq!(metrics.generation_tps, Some(99.75));
         assert_eq!(metrics.cached_tokens, Some(10));
         assert_eq!(metrics.context_used, Some(42)); // Uses prompt_n, not cache_n
     }
@@ -822,7 +887,7 @@ mod tests {
         let metrics = RequestMetrics::from_response(&response, &request, false, 150.0);
 
         // No cache_n -> backend prompt_per_second is reported verbatim.
-        assert_eq!(metrics.prompt_tps, 198.0);
+        assert_eq!(metrics.prompt_tps, Some(198.0));
         assert_eq!(metrics.cached_tokens, None);
     }
 
@@ -934,11 +999,64 @@ mod tests {
             let mut m = RequestMetrics::new();
             match rate {
                 "total_tps" => m.total_tps = 12.5,
-                "prompt_tps" => m.prompt_tps = 12.5,
-                _ => m.generation_tps = 12.5,
+                "prompt_tps" => m.prompt_tps = Some(12.5),
+                _ => m.generation_tps = Some(12.5),
             }
             assert!(m.has_throughput_signal(), "{rate} alone should be a signal");
         }
+    }
+
+    /// The second lock on the export filter. `has_timing_split` is derived with
+    /// `is_some()`, so a `Some(0.0)` that reached the struct by any route other than
+    /// the extractor would otherwise certify itself as a measurement and ship a run
+    /// of literal zeros into every throughput aggregate -- the exact failure the
+    /// filter exists to stop.
+    #[test]
+    fn a_constructed_zero_rate_is_not_a_throughput_signal() {
+        let mut m = RequestMetrics::new();
+        m.prompt_tps = Some(0.0);
+        m.generation_tps = Some(0.0);
+        assert!(
+            !m.has_throughput_signal(),
+            "zero is absence, not a slow measurement -- and not a signal"
+        );
+    }
+
+    /// The collector's side of the same rule: a rate the backend never usablely
+    /// reported is `None`, never `0.0` and never `inf`.
+    #[test]
+    fn finite_rate_opt_reports_absent_not_zero() {
+        let model = "test-model".to_string();
+        assert_eq!(finite_rate_opt(42.5, "x", &model), Some(42.5));
+        assert_eq!(finite_rate_opt(0.0, "x", &model), None, "0.0 is not reported");
+        assert_eq!(finite_rate_opt(-1.0, "x", &model), None);
+        assert_eq!(finite_rate_opt(f64::NAN, "x", &model), None);
+        assert_eq!(finite_rate_opt(f64::INFINITY, "x", &model), None);
+    }
+
+    /// `has_timing_split` is a statement about RATES, not about durations. A
+    /// backend that sends `timings` carrying only millisecond fields proves the
+    /// request took time -- it does not prove anything measured a prefill/decode
+    /// split. This is the assignment that used to live in the llama branch as
+    /// `= true` and in the vLLM branch as `prompt_ms > 0.0 || ...`, and it is what
+    /// produced the fabricated `tps= 0.00/ 0.00`.
+    #[test]
+    fn split_flag_is_rate_provenance_not_duration_presence() {
+        let response = serde_json::json!({
+            "model": "test-model",
+            "timings": { "prompt_ms": 500.0, "predicted_ms": 100.0 },
+            "usage": { "prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15 },
+            "choices": [{ "finish_reason": "stop" }]
+        });
+        let request = serde_json::json!({ "messages": [] });
+
+        let m = RequestMetrics::from_response(&response, &request, false, 1000.0);
+
+        assert!(m.prompt_ms > 0.0, "the duration is a real measurement and survives");
+        assert_eq!(m.prompt_tps, None, "no rate reported");
+        assert_eq!(m.generation_tps, None, "no rate reported");
+        assert!(!m.has_timing_split, "milliseconds are not a split");
+        assert!(m.total_tps > 0.0, "the cost rate is still computable, and still a cost");
     }
 
     /// The operator's line: 24.8s of wall clock, `stream=gone finish=unknown`,
@@ -1203,7 +1321,7 @@ mod tests {
 
         assert_eq!(m.prompt_tokens, None);
         assert_eq!(m.completion_tokens, None);
-        assert_eq!(m.prompt_tps, 100.0);
+        assert_eq!(m.prompt_tps, Some(100.0));
         assert!(m.has_throughput_signal(), "the rate alone is a measurement");
     }
 
@@ -1336,8 +1454,8 @@ mod tests {
         let m = RequestMetrics::from_response(&response, &request, false, 1731.0);
 
         assert!(!m.has_timing_split);
-        assert_eq!(m.prompt_tps, 0.0, "must not invent a prefill rate");
-        assert_eq!(m.generation_tps, 0.0, "must not invent a decode rate");
+        assert_eq!(m.prompt_tps, None, "must not invent a prefill rate");
+        assert_eq!(m.generation_tps, None, "must not invent a decode rate");
         // the old code produced 113344.89 here, on a server measured at ~14.5k tok/s
         assert!((m.total_tps - 22753.32).abs() < 0.1, "total_tps was {}", m.total_tps);
         // ... and this is what the same request ACTUALLY did: 146 tokens over a
@@ -1370,8 +1488,8 @@ mod tests {
         let m = RequestMetrics::from_response(&response, &request, false, 1676.0);
 
         assert!(m.has_timing_split);
-        assert_eq!(m.prompt_tps, 200.5);
-        assert_eq!(m.generation_tps, 42.5);
+        assert_eq!(m.prompt_tps, Some(200.5));
+        assert_eq!(m.generation_tps, Some(42.5));
         assert!(m.total_tps > 0.0, "total_tps should still be populated");
         // The floor is populated on tier-1 samples too, so the InfluxDB field is
         // never a sparse hole. It is simply not what the line prints when a real
@@ -1396,7 +1514,7 @@ mod tests {
         assert!((m.decode_tps_min - 146.32).abs() < 0.01, "got {}", m.decode_tps_min);
         assert!((m.total_tps - 6073.63).abs() < 0.1, "got {}", m.total_tps);
         assert!(!m.has_timing_split, "a derived floor is not a backend split");
-        assert_eq!(m.prompt_tps, 0.0);
+        assert_eq!(m.prompt_tps, None);
     }
 
     /// No counted output means no floor. A 0 here would read as "instantly slow"
@@ -1579,7 +1697,11 @@ mod tests {
         assert!((m.generation_ms - 760.3733).abs() < 0.01);
         // 120 tokens over the decode interval -- matches the 157.6 tok/s measured
         // independently by scripts/qwen-conc-sweep for this config.
-        assert!((m.generation_tps - 157.82).abs() < 0.1, "got {}", m.generation_tps);
+        assert!(
+            m.generation_tps.is_some_and(|v| (v - 157.82).abs() < 0.1),
+            "got {:?}",
+            m.generation_tps
+        );
         assert_eq!(m.queue_ms, Some(12.5));
         assert!((m.mean_itl_ms.unwrap() - 6.3897).abs() < 0.01);
     }
@@ -1598,8 +1720,8 @@ mod tests {
         let m = RequestMetrics::from_response(&response, &request, false, 1731.0);
 
         assert!(!m.has_timing_split);
-        assert_eq!(m.prompt_tps, 0.0);
-        assert_eq!(m.generation_tps, 0.0);
+        assert_eq!(m.prompt_tps, None);
+        assert_eq!(m.generation_tps, None);
         assert_eq!(m.queue_ms, None);
         assert!((m.total_tps - 22753.32).abs() < 0.1);
     }
@@ -1623,10 +1745,11 @@ mod tests {
         let request = serde_json::json!({"messages": []});
         let m = RequestMetrics::from_response(&response, &request, false, 1000.0);
 
-        assert!(!m.prompt_tps.is_infinite(), "prompt_tps = {}", m.prompt_tps);
-        assert_eq!(m.prompt_tps, 0.0);
-        assert!(!m.generation_tps.is_infinite(), "generation_tps = {}", m.generation_tps);
-        assert_eq!(m.generation_tps, 0.0);
+        assert_eq!(m.prompt_tps, None, "an overflowing rate is absent, never inf and never 0.0");
+        assert_eq!(
+            m.generation_tps, None,
+            "an overflowing rate is absent, never inf and never 0.0"
+        );
         assert_eq!(m.prompt_ms, 0.0, "a subnormal duration is not a measurement");
         assert_eq!(m.generation_ms, 0.0);
         assert!(!m.has_timing_split);
@@ -1656,10 +1779,14 @@ mod tests {
         let request = serde_json::json!({"messages": []});
         let m = RequestMetrics::from_response(&response, &request, false, 1000.0);
 
-        assert!(!m.prompt_tps.is_infinite(), "prompt_tps = {}", m.prompt_tps);
-        assert_eq!(m.prompt_tps, 0.0, "u64::MAX/MIN_POSITIVE*1000 overflows f64 -> not reported");
-        assert!(!m.generation_tps.is_infinite(), "generation_tps = {}", m.generation_tps);
-        assert_eq!(m.generation_tps, 0.0);
+        assert_eq!(
+            m.prompt_tps, None,
+            "u64::MAX/MIN_POSITIVE*1000 overflows f64 -> absent, never 0.0"
+        );
+        assert_eq!(
+            m.generation_tps, None,
+            "an overflowing rate is absent, never inf and never 0.0"
+        );
         // The durations themselves are real (if absurd) measurements and survive.
         assert_eq!(m.prompt_ms, f64::MIN_POSITIVE);
         assert_eq!(m.generation_ms, f64::MIN_POSITIVE);

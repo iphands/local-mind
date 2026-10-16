@@ -2,6 +2,7 @@
 
 use super::RequestMetrics;
 use crate::config::StatsFormat;
+use std::borrow::Cow;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// Format metrics according to the configured format
@@ -56,27 +57,121 @@ fn pretty_identity_lines(m: &RequestMetrics) -> String {
     out
 }
 
+/// A measured rate in a 6-cell numeric slot, or `n/a` -- deliberately the same absence
+/// marker the token cells already use, so the line speaks one spelling.
+///
+/// Width-neutral on purpose. `{:>6.2}` only holds values below 1000, so any real prefill
+/// rate overflows this cell -- llama.cpp's cache-inflated figure is documented at 880k
+/// tok/s. That is a PRE-EXISTING defect of `tps={:>6.2}/{:>6.2}`, not something this
+/// introduced; T6 replaces it with the k-unit form pinned by the golden. Never clamp
+/// silently here: a fabricated ceiling on a measured rate is the exact sin this plan
+/// exists to prevent.
+fn tps_side(v: Option<f64>) -> Cow<'static, str> {
+    match v {
+        Some(v) if v > 0.0 => Cow::Owned(format!("{v:>6.2}")),
+        _ => Cow::Borrowed("   n/a"),
+    }
+}
+
+/// A backend duration in a 7-cell slot, `n/a` on its own `0.0 == not reported` sentinel.
+/// Without this a one-sided split printed `n/a tokens/sec (    0.0ms)` -- an honest
+/// absence sitting beside a zero meaning the same thing, and two conventions in adjacent
+/// columns is worse than either alone.
+fn ms_side(v: f64) -> Cow<'static, str> {
+    if v > 0.0 {
+        Cow::Owned(format!("{v:>7.1}"))
+    } else {
+        Cow::Borrowed("    n/a")
+    }
+}
+
+/// The wall-bounded floor in an 8-cell slot. `0.0` here means "never computed"
+/// (no counted output, or no wall clock) rather than "decoded instantly", so it
+/// gets the same `n/a` as everywhere else: `0.00 tokens/sec (wall-bounded)` is
+/// the lie `tps>=0.00` was on the compact line.
+fn floor_side(v: f64) -> Cow<'static, str> {
+    if v > 0.0 {
+        Cow::Owned(format!("{v:>8.2}"))
+    } else {
+        Cow::Borrowed("     n/a")
+    }
+}
+
+/// Which rate tier a sample renders in: `1` = backend-measured decode,
+/// `2` = the wall-bounded floor, `3` = nothing to measure at all.
+///
+/// ONE predicate, shared by `format_compact`, `format_pretty` and the alignment
+/// test's row bucketing. When that test re-derived the tier from
+/// `has_timing_split` it silently disagreed with the renderer as soon as the
+/// gate moved onto the rates -- and "all three tiers appear in the fixture"
+/// could then pass without the formatter ever rendering what the test believed
+/// it had seen.
+fn tps_tier(m: &RequestMetrics) -> u8 {
+    // `is_some_and(|v| v > 0.0)`, not `is_some()`: `tps_side` prints a value only
+    // above zero, so a directly-built `Some(0.0)` would enter tier 1 and emit the
+    // exact half-row this gate exists to prevent (`tps=200.50/   n/a`). The
+    // collector cannot produce that value -- `finite_rate_opt` rejects it -- but
+    // the tier is a rendering decision, and this is the same second lock
+    // `has_throughput_signal` keeps in collector.rs.
+    if m.generation_tps.is_some_and(|v| v > 0.0) {
+        1
+    } else if m.decode_tps_min > 0.0 {
+        2
+    } else {
+        3
+    }
+}
+
 /// Performance rows. A prefill/decode split is only real when the backend
 /// reported one. With none, name both derived numbers for what they are: a
 /// wall-bounded floor on decode and a cost rate. Neither is a speed, and
 /// neither is invented -- the invented 20/80 split this replaced is gone.
+///
+/// Gated on the DECODE side (via [`tps_tier`]) for the same reason as the
+/// compact line, and pretty is the DEFAULT format, so leaving this on
+/// `has_timing_split` would have the box print a *measured* `Prompt Processing`
+/// row for a half split -- an impressive prefill figure under a "measured"
+/// heading, `Generation: n/a` beneath it, and no floor anywhere in the format
+/// most operators actually read. A half split is not a split.
 fn pretty_performance_lines(m: &RequestMetrics) -> String {
-    if m.has_timing_split {
+    if tps_tier(m) == 1 {
         box_row(&format!(
-            "   Prompt Processing: {:8.2} tokens/sec ({:7.1}ms)",
-            m.prompt_tps, m.prompt_ms
+            "   Prompt Processing: {:>8} tokens/sec ({}ms)",
+            tps_side(m.prompt_tps),
+            ms_side(m.prompt_ms)
         )) + &box_row(&format!(
-            "   Generation:        {:8.2} tokens/sec ({:7.1}ms)",
-            m.generation_tps, m.generation_ms
+            "   Generation:        {:>8} tokens/sec ({}ms)",
+            tps_side(m.generation_tps),
+            ms_side(m.generation_ms)
         ))
     } else {
-        box_row(&format!(
-            "   Decode (floor):    {:8.2} tokens/sec (wall-bounded)",
-            m.decode_tps_min
-        )) + &box_row(&format!(
+        let mut out = String::new();
+        // A measured prefill with no measured decode is HALF a split: it stays in
+        // the box, as its own labelled row and not as a split, sitting beside the
+        // bound that actually speaks to decode. Dropping it entirely would delete
+        // the only backend measurement the sample carries.
+        let prefill_measured = m.prompt_tps.is_some_and(|v| v > 0.0);
+        if prefill_measured {
+            out.push_str(&box_row(&format!(
+                "   Prompt Processing: {:>8} tokens/sec ({}ms)",
+                tps_side(m.prompt_tps),
+                ms_side(m.prompt_ms)
+            )));
+        }
+        out.push_str(&box_row(&format!(
+            "   Decode (floor):    {} tokens/sec (wall-bounded)",
+            floor_side(m.decode_tps_min)
+        )));
+        out.push_str(&box_row(&format!(
             "   Work rate:         {:8.2} tokens/sec (all tokens/wall)",
             m.total_tps
-        )) + &box_row("   (no backend split: decode is a floor, work is cost)")
+        )));
+        out.push_str(&box_row(if prefill_measured {
+            "   (no backend decode rate: prefill measured, floor is a bound)"
+        } else {
+            "   (no backend split: decode is a floor, work is cost)"
+        }));
+        out
     }
 }
 
@@ -161,19 +256,30 @@ fn format_compact(m: &RequestMetrics) -> String {
         .map(|c| format!(" concurrent={}", c))
         .unwrap_or_default();
 
-    // Three tiers, best available wins. Only a backend-reported split (llama.cpp
-    // `timings`, vLLM `metrics`) is a measured prefill/decode pair. With none,
-    // print the honest FLOOR on decode speed and the cost rate, and mark the
-    // floor with `>=` so it cannot be read as a measurement. Never invent a
-    // split: that was the hardcoded 20/80 estimate this replaced.
-    let tps_str = if m.has_timing_split {
-        format!("tps={:>6.2}/{:>6.2}", m.prompt_tps, m.generation_tps)
-    } else if m.decode_tps_min > 0.0 {
-        format!("tps>={:>6.2} work={:>6.2}", m.decode_tps_min, m.total_tps)
-    } else {
-        // A counted prompt with no counted output (a 0-token completion, an
+    // Three tiers, best available wins. Only a backend-reported split is a measured
+    // prefill/decode pair. With none, print the honest FLOOR on decode speed and the
+    // cost rate, and mark the floor with `>=` so it cannot be read as a measurement.
+    // Never invent a split: that was the hardcoded 20/80 estimate this replaced.
+    //
+    // Tier 1 is gated on the DECODE side specifically, not on `has_timing_split`
+    // (see [`tps_tier`]). Decode tok/s is the number an operator actually scans this
+    // line for, and half a split is not a split: with decode unreported,
+    // `pp=<impressive number> tg=n/a` puts a big figure where the eye lands and
+    // leaves the column that matters empty, so a wall of such lines reads "fast".
+    // The floor tier instead bounds exactly the missing quantity. What is dropped
+    // from THIS line is the prefill measurement of a half split -- it is not lost,
+    // it stays on the wire: `json` and InfluxDB still carry `prompt_tps`, and this
+    // line is a scan surface, not the record of truth.
+    //
+    // `has_timing_split` stays the broader `||` PROVENANCE fact on the wire. Display and
+    // provenance are different questions, and conflating them is exactly what produced
+    // the fabricated `tps= 0.00/ 0.00`.
+    let tps_str = match tps_tier(m) {
+        1 => format!("tps={}/{}", tps_side(m.prompt_tps), tps_side(m.generation_tps)),
+        2 => format!("tps>={:>6.2} work={:>6.2}", m.decode_tps_min, m.total_tps),
+        // No backend decode rate and no counted output (a 0-token completion, an
         // abort before the finish chunk): there is no floor to report, only cost.
-        format!("tps=n/a work={:>6.2}", m.total_tps)
+        _ => format!("tps=n/a work={:>6.2}", m.total_tps),
     };
 
     // Lets a reader discount `work=` for a prompt the engine never recomputed.
@@ -265,8 +371,8 @@ mod tests {
         m.prompt_tokens = Some(100);
         m.completion_tokens = Some(50);
         m.total_tokens = 150;
-        m.prompt_tps = 200.5;
-        m.generation_tps = 42.5;
+        m.prompt_tps = Some(200.5);
+        m.generation_tps = Some(42.5);
         m.prompt_ms = 500.0;
         m.generation_ms = 1176.0;
         m.has_timing_split = true; // llama.cpp-style backend
@@ -302,8 +408,8 @@ mod tests {
     fn test_format_compact_without_timing_split() {
         let mut m = create_test_metrics();
         m.has_timing_split = false;
-        m.prompt_tps = 0.0;
-        m.generation_tps = 0.0;
+        m.prompt_tps = None;
+        m.generation_tps = None;
         m.total_tps = 125.0;
         m.decode_tps_min = 50.0 / 1.2;
 
@@ -321,13 +427,66 @@ mod tests {
     fn compact_without_counted_output_prints_no_floor() {
         let mut m = create_test_metrics();
         m.has_timing_split = false;
+        // A backend that reports no split reports NO rates: collector.rs derives
+        // `has_timing_split` as `prompt_tps.is_some() || generation_tps.is_some()`,
+        // so rates-plus-false-flag is a state the only writer of that field cannot
+        // produce. Leaving the inherited rates in place made this test pass against
+        // the tier gate's blind spot rather than against behaviour.
+        m.prompt_tps = None;
+        m.generation_tps = None;
         m.completion_tokens = None;
         m.decode_tps_min = 0.0;
         m.total_tps = 125.0;
+        assert_eq!(
+            m.has_timing_split,
+            m.prompt_tps.is_some() || m.generation_tps.is_some(),
+            "fixture desynced from the collector's own derivation (collector.rs:210)"
+        );
 
         let output = format_compact(&m);
         assert!(output.contains("tps=n/a work=125.00"), "got: {output}");
         assert!(!output.contains("tps>=0.00"), "a zero is not a floor: {output}");
+    }
+
+    /// The case the decode-side gate exists for, and the one the old
+    /// `has_timing_split` gate got wrong: a HALF split. llama.cpp with a warm
+    /// prefix cache yields a cache-inflated prefill rate and no usable
+    /// `predicted_per_second` (`finite_rate_opt` maps the 0.0 to `None`), so
+    /// `has_timing_split` is TRUE -- collector.rs:210 derives it with `||` -- while
+    /// decode stays unmeasured. The old gate printed `tps=88000.00/   n/a`: a huge
+    /// figure in the scan column and nothing in the half that matters.
+    #[test]
+    fn compact_half_split_falls_to_the_floor_tier() {
+        let mut m = create_test_metrics();
+        m.has_timing_split = true; // as the collector derives it from the prefill rate
+        m.prompt_tps = Some(88_000.0); // cache-inflated, and genuinely backend-reported
+        m.generation_tps = None; // the column the operator scans is empty
+
+        let out = format_compact(&m);
+        assert!(out.contains("tps>="), "must bound the missing quantity: {out}");
+        assert!(out.contains("41.67"), "floor value missing: {out}");
+        assert!(
+            !out.contains("88000") && !out.contains("88,000"),
+            "prefill printed where decode belongs: {out}"
+        );
+    }
+
+    /// A backend that measured decode but sent no `usage` block still gets its
+    /// measurement shown. `tps=n/a` would be a false claim about the backend's
+    /// silence, and the floor is strictly worse than the number it would replace:
+    /// `decode_tps_min`'s denominator carries prefill, network and fake-mode
+    /// synthesis, so it understates -- and `tps=n/a work=` is the exact shape of the
+    /// abandoned-stream class, which this line must not absorb.
+    #[test]
+    fn compact_measured_decode_beats_the_floor_without_usage_counts() {
+        let mut m = create_test_metrics();
+        m.completion_tokens = None; // no usage block at all
+        m.decode_tps_min = 0.0; // so no floor exists either
+
+        let out = format_compact(&m);
+        assert!(out.contains("tps=200.50/ 42.50"), "got: {out}");
+        assert!(!out.contains(">="), "a bound replaced a measurement: {out}");
+        assert!(!out.contains("work="), "tier 3 leaked into tier 1: {out}");
     }
 
     /// Tier 1 wins outright: a backend-split line carries neither the floor nor
@@ -349,6 +508,11 @@ mod tests {
     fn compact_cache_cell_appears_only_when_nonzero() {
         let mut m = create_test_metrics();
         m.has_timing_split = false;
+        // Clear the rates too, or the decode gate silently promotes this row to
+        // tier 1 -- where every assertion below still passes, but `cache=` is no
+        // longer being checked beside the `work=` it exists to discount.
+        m.prompt_tps = None;
+        m.generation_tps = None;
         m.cached_tokens = None;
         assert!(!format_compact(&m).contains("cache="), "None must print nothing");
 
@@ -370,8 +534,8 @@ mod tests {
     fn test_no_split_is_invented_from_duration() {
         let mut m = create_test_metrics();
         m.has_timing_split = false;
-        m.prompt_tps = 0.0;
-        m.generation_tps = 0.0;
+        m.prompt_tps = None;
+        m.generation_tps = None;
         m.prompt_tokens = Some(39240);
         m.completion_tokens = Some(146);
         m.total_tokens = 39386;
@@ -682,8 +846,8 @@ mod tests {
     #[test]
     fn test_format_compact_all_fields() {
         let mut m = create_test_metrics();
-        m.prompt_tps = 123.45; // Prompt processing TPS
-        m.generation_tps = 150.00; // Generation TPS
+        m.prompt_tps = Some(123.45); // Prompt processing TPS
+        m.generation_tps = Some(150.00); // Generation TPS
         m.has_timing_split = true;
         m.finish_reason = "length".to_string();
         m.duration_ms = 600.0;
@@ -727,11 +891,25 @@ mod tests {
         // `{:8.2}` value so the budget is proven at the wide end, not just for
         // the 7-char values a healthy server happens to produce.
         m.has_timing_split = false;
+        // Rates must go with the flag: `tps_tier` is what selects these rows now,
+        // so inherited rates would re-measure the split rows and leave the wide
+        // floor/work labels unproven against the frame.
+        m.prompt_tps = None;
+        m.generation_tps = None;
         m.total_tps = 12345678.99;
         m.decode_tps_min = 12345678.99;
         for line in format_pretty(&m).lines() {
             let cells = UnicodeWidthStr::width(line);
             assert_eq!(cells, frame, "no-split row {line:?} spans {cells} cells");
+        }
+
+        // The third shape the box can take: a HALF split, where a measured prefill
+        // row joins the floor branch. It carries the split rows' label width into
+        // rows the frame test had never seen together.
+        m.prompt_tps = Some(12345678.99);
+        for line in format_pretty(&m).lines() {
+            let cells = UnicodeWidthStr::width(line);
+            assert_eq!(cells, frame, "half-split row {line:?} spans {cells} cells");
         }
     }
 
@@ -742,8 +920,8 @@ mod tests {
     fn pretty_no_split_names_both_numbers() {
         let mut m = create_test_metrics();
         m.has_timing_split = false;
-        m.prompt_tps = 0.0;
-        m.generation_tps = 0.0;
+        m.prompt_tps = None;
+        m.generation_tps = None;
         m.total_tps = 6073.63;
         m.decode_tps_min = 146.32;
 
@@ -757,6 +935,40 @@ mod tests {
         assert!(
             !output.contains("Prompt Processing"),
             "fabricated split row in the no-split box: {output}"
+        );
+    }
+
+    /// Pretty is the DEFAULT format, so this box -- not the compact line -- is what
+    /// most operators see. A half split must not render as a measured split: the old
+    /// `has_timing_split` gate printed a `Prompt Processing` row beside
+    /// `Generation: n/a` and then never entered the floor branch at all, so the
+    /// default format had no bound on decode to show while an inflated prefill figure
+    /// sat under a "measured" heading. The measured prefill stays (it is real); it
+    /// just stops posing as a split.
+    #[test]
+    fn pretty_half_split_shows_the_floor_and_keeps_the_measured_prefill() {
+        let mut m = create_test_metrics();
+        m.has_timing_split = true; // as collector.rs:210 derives it from the prefill rate
+        m.prompt_tps = Some(88_000.0);
+        m.generation_tps = None;
+        m.generation_ms = 0.0; // 0.0 == never reported, so it must print n/a too
+
+        let output = format_pretty(&m);
+        assert!(output.contains("Prompt Processing"), "prefill dropped: {output}");
+        assert!(output.contains("88000"), "measured prefill value lost: {output}");
+        assert!(output.contains("Decode (floor):"), "floor unreachable: {output}");
+        assert!(output.contains("Work rate:"), "cost rate missing: {output}");
+        assert!(
+            !output.contains("Generation:"),
+            "a half split rendered itself as a split: {output}"
+        );
+        assert!(
+            !output.contains("(    0.0ms)"),
+            "an unreported duration printed a bare zero instead of n/a: {output}"
+        );
+        assert!(
+            output.contains("no backend decode rate"),
+            "footer claimed no split at all, but prefill WAS measured: {output}"
         );
     }
 
@@ -945,8 +1157,8 @@ mod tests {
         // not collapse on.
         let mut s1 = fixture("qwen3-7b", "stop");
         s1.has_timing_split = true;
-        s1.prompt_tps = 53.64;
-        s1.generation_tps = 42.5;
+        s1.prompt_tps = Some(53.64);
+        s1.generation_tps = Some(42.5);
         s1.duration_ms = 184.0;
         // LOAD-BEARING: the only row exercising the non-streaming shape. Today that
         // renders bare `sync` with no `stream=` label, which is why the contract test
@@ -965,8 +1177,8 @@ mod tests {
         // overflowing finish value.
         let mut s2 = fixture("Qwen3-14B-128K-Q3_K_S.gguf-batch-instruct-realigned", "content_filter");
         s2.has_timing_split = true;
-        s2.prompt_tps = 88_000.0;
-        s2.generation_tps = 9_999.99;
+        s2.prompt_tps = Some(88_000.0);
+        s2.generation_tps = Some(9_999.99);
         s2.duration_ms = 1_234_567.0;
         s2.context_used = Some(999_999);
         s2.context_total = Some(999_999);
@@ -1057,15 +1269,10 @@ mod tests {
         let completion: Vec<usize> = rows.iter().map(|(_, m)| digits(m.completion_tokens)).collect();
         let tiers: Vec<usize> = rows
             .iter()
-            .map(|(_, m)| {
-                if m.has_timing_split {
-                    1
-                } else if m.decode_tps_min > 0.0 {
-                    2
-                } else {
-                    3
-                }
-            })
+            // Must be the renderer's own predicate: bucketing these rows by
+            // `has_timing_split` let "all three tiers appear" pass on a fixture the
+            // formatter would render as two tiers.
+            .map(|(_, m)| tps_tier(m) as usize)
             .collect();
         let optionals: Vec<usize> = rows
             .iter()
@@ -1200,8 +1407,8 @@ mod tests {
     fn an_over_wide_context_is_never_clamped() {
         let mut m = fixture("cosmo-6000", "stop");
         m.has_timing_split = true;
-        m.prompt_tps = 13_619.0;
-        m.generation_tps = 146.2;
+        m.prompt_tps = Some(13_619.0);
+        m.generation_tps = Some(146.2);
         m.duration_ms = 3_144.0;
         m.context_used = Some(1_048_576);
         m.context_total = Some(1_048_576);

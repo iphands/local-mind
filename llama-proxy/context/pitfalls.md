@@ -28,6 +28,24 @@ entry in place, dated — do not append a second entry for the same thing.
   error. **Staleness trigger:** re-run `just gate` after any toolchain update; if it passes, delete
   this entry.
 
+- **[HAZARD — verified 2026-10-16, bit once] `cargo test --workspace --lib` never executes the
+  influxdb exporter's tests, so a wire-format test can be dead on arrival while the gate stays
+  green.** `Cargo.toml` has `default = []`, and the exporter's test modules are
+  `#[cfg(all(test, feature = "influxdb"))]` (`wire_tests`, `queue_tests`, `url_gate_tests`,
+  `feature_on`). The gate's `cargo clippy --all-targets --features influxdb` *compiles* them, which
+  is what hides the hole: type errors surface, assertions never run. Symptom when you filter on one:
+  `0 passed; 0 failed; N filtered out` — the test is not skipped, it does not exist in that binary.
+  Found because `decode_tps_min_is_written_on_every_point` asserted `contains("decode_tps_min=84.34 ")`
+  — a trailing space that can never occur: `influxdb2` sorts field keys alphabetically and comma-joins
+  them, so the only space following a value is the one before the timestamp, after the **last** field.
+  Booleans are written `f`/`t`, not `false`/`true`, for the same reason (assert against the real
+  encoding, not the Rust one). Do this: run the test command in **both** feature states (RULES.md
+  step 4). Do **not** replace the plain command with `--features influxdb` — `exporters/mod.rs`'s
+  `mod feature_off` is `cfg(not(feature = "influxdb"))`, and the task-80 tests proving a compiled-out
+  stub refuses instead of returning a fake `Ok` compile only *without* the feature. Two commands, or
+  half the matrix is blind. **Staleness trigger:** any new optional dependency that carries a
+  feature-gated test module, or any gate edit that drops one of the two test lines.
+
 ## Editing the agent docs
 
 - **[HAZARD — verified 2026-10-16, has not bitten] `AGENTS.md` is a symlink → `CLAUDE.md`; a

@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 29% complete (2/7 tasks)
+- Status: 43% complete (3/7 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/03_columnar_stats_honest_prefill.md`
 - Evidence: `captures/vllm_metrics_2026-10-16_*.json` (gitignored, RULES P2) for the backend payload;
@@ -82,7 +82,7 @@
 |---|------|---------------|--------|-------|
 | 1 | T1: Establish what vLLM's `metrics` object actually contains | `captures/` | done | 6 payloads captured; **no** `prefill_time_ms` ⇒ ttft confirmed as T4's denominator; `queue_time_ms` ≈0.01 ms ⇒ not subtracted; corrected pp mean 12,858 (n=4) |
 | 2 | T2: Write the columnar contract as a red test | `src/stats/formatter.rs` | done | lands `#[ignore]`d; **34 cells red**, all genuine and all clearable by T6; golden positive control added (ASCII + CJK) and it caught a wrong *expectation* |
-| 3 | T3: Make an unmeasured rate absent, not zero | `src/stats/collector.rs`, `src/exporters/influxdb.rs`, `src/stats/formatter.rs` | pending | `prompt_tps`/`generation_tps` → `Option<f64>`; `total_tps`/`decode_tps_min` stay `f64` |
+| 3 | T3: Make an unmeasured rate absent, not zero | `src/stats/collector.rs`, `src/exporters/influxdb.rs`, `src/stats/formatter.rs` | done | `prompt_tps`/`generation_tps` → `Option<f64>`; `total_tps`/`decode_tps_min` stay `f64`. **Beyond plan:** compact tier-1 gate moved onto decode-presence, `pretty` follows it, one `tps_tier()` predicate, 4 lying fixtures fixed, gate gained the feature-on test line |
 | 4 | T4: Correct the vLLM prefill rate for prefix-cache hits | `src/stats/collector.rs` | pending | five Context rows are the test data; none may exceed 15k |
 | 5 | T5: Add the prefill plausibility canary | `src/exporters/mod.rs`, `src/proxy/handler.rs`, `src/config/mod.rs` | pending | first-WARN-then-1-in-100; counter exact |
 | 6 | T6: Rewrite `format_compact` against the contract | `src/stats/formatter.rs` | pending | pinned head, free tail, `cache=` last |
@@ -106,6 +106,10 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-10-16 | T2 gate: `RUSTFLAGS='-D warnings'` + check/clippy/fmt/`test --workspace --lib` | exit 0; **919 passed / 0 failed / 1 ignored** (baseline 915; +4 = discrimination, head-constants, golden control, over-wide witness) | 1 | not a measurement |
 | 2026-10-16 | `cargo test --lib stats::formatter -- --ignored` (the red contract) | 1 failed, **34 cell(s) wrong** | 1 | decomposition, each row independently attributable: **19** label offsets moved (`dur`×5, `ctx`×5, `finish`×5, `stream`×4) + **5** `tok=` ABSENT + **1** `stream=` ABSENT (s1 non-streaming prints bare `sync`) + **5** rate-group width (9/67/34/20/4 vs 23) + **3** trailing whitespace (s1, s3, s4 — s2/s5 end on `concurrent=` so have none) + **1** control char (`\n`, s5's forged `finish=stop\nforged 2`). Reconciles with the first red run: 19+1 = 20 label failures, and the +4 is exactly the whole-line assertions added in review |
 | 2026-10-16 | golden positive control `the_head_offsets_describe_a_buildable_line` vs a **hand-typed** expectation | first hand-typed golden measured **127 cells, not 129** (a dropped space after the model field and after `stream=ok`); regenerated from a display-width script, both literals now assert 129 at offsets 0/47/61/79/97/112 | 1 | **[OBSERVED]** the positive control earned its keep: a 34/34 red cannot distinguish "formatter is ragged" from "expected offsets are wrong", and here it caught a wrong *expectation*. Both reviewers had asked for this test sight unseen |
+| 2026-10-16 | T3 gate: `RUSTFLAGS='-D warnings'` + check / clippy `--all-targets` / fmt / **test twice** (`--workspace --lib`, then `--workspace --lib --features influxdb`) | exit 0; **925 passed / 0 failed / 1 ignored** feature-off and **947 / 0 / 1** feature-on | 3 identical feature-on runs | baseline 919; +6 tests authored. The 947−925 = **22 tests execute under the feature that the gate never ran** — hence the 3 repeats, which are for `queue_tests` (threaded, loopback sockets, never once executed here) |
+| 2026-10-16 | `cargo test --lib measured_rate_fields_are_omitted_when_absent` **without** the feature flag | `0 passed; 0 failed; 926 filtered out` | 1 | **[OBSERVED]** the test is not *skipped* — it does not exist in that binary. `Cargo.toml` has `default = []` and the exporter test modules are `cfg(all(test, feature = "influxdb"))`. clippy **compiles** them, so type errors surface while assertions never run: the gate was green over ~20 dead tests |
+| 2026-10-16 | `decode_tps_min_is_written_on_every_point` (pre-existing, untouched by T3) under `--features influxdb` | FAILED both asserts: expects `decode_tps_min=84.34 ` and `decode_tps_min=0 ` with a trailing space; the wire emits `decode_tps_min=84.34,duration_ms=…` | 1 | **[OBSERVED]** dead on arrival since the day it was written, **not** a T3 regression — T3 alters only `prompt_tps`/`generation_tps` presence. influxdb2 sorts field keys and comma-joins them, so the only space after a value is the one before the timestamp, after the **last** field. Same family: bools emit `f`/`t`, never `false`/`true` — which also sank the first draft of the new exporter test |
+| 2026-10-16 | `cargo test --lib stats::formatter -- --ignored` after T3 | 1 failed, **34 cell(s) wrong** — profile identical to T2 | 1 | T3 left the contract untouched: still exactly the 34 T6 owns. Asserted rather than assumed, because T3 rewrote the very tier logic the head is built from |
 | | | | | |
 
 *(T1 adds the captured payload rows here; T4 adds the post-fix rates from a real run, with the build
@@ -183,6 +187,53 @@ in the test was found and fixed, and four things were pinned that T6 must not re
   the oracle**. They agree on CJK but `unicodedata`/`wcwidth` and `unicode-width` diverge on
   ambiguous-width and emoji classes, so wide-glyph fixtures stay **CJK-only, no emoji**, or the two
   oracles drift and the next bug is a width-library disagreement.
+
+**Deviation / T3 review record** — both reviewers, on the tier gate and on the exporter. The plan
+said T3 was a type change; it became a display-semantics change, and every step below is something
+`cargo test` did not tell us.
+
+- **The compact tier-1 gate moved from `has_timing_split` to decode-presence, and this cannot
+  fabricate a split.** Proof, not reassurance: `has_timing_split` has exactly **one** writer —
+  `prompt_tps.is_some() || generation_tps.is_some()` — so `generation_tps.is_some()` ⟹
+  `has_timing_split`, which makes the new tier-1 set a strict **subset** of the old one. Every line
+  that printed a split before prints a split now. What it closes is the half split: the old gate
+  could fire on prefill-only and print `tps=12345.00/   n/a` — a big number in the column the eye
+  lands on, under a key that means *measured*.
+- **Tier 1 does NOT additionally require a counted completion, and must not start to.** The vLLM path
+  cannot yield `generation_tps=Some` without a count; the llama `timings` path can (it reads
+  `predicted_per_second` unconditionally, and the `predicted_n` fallback writes `None` when the key is
+  simply absent), so a self-contradictory backend body can. Rendering the backend's own rate there is
+  garbage-in-honestly-reported; requiring a count would drop the only real measurement on the line and
+  leave a prompt-only `work=` standing alone — that is the regression, not the opposite.
+- **`format_pretty` was moved onto the same gate. The plan did not ask for this.** One reviewer called
+  the old flag-gate a documented divergence, the other a must-fix; the must-fix won because pretty is
+  the **default** format: a half split printed `Prompt Processing: 880000` beside `Generation: n/a`
+  under a measured heading and **never entered the floor branch**, so the format most operators read
+  had no bound on decode at all. The measured prefill is kept — as its own labelled row, not as a split
+  — and the footer now distinguishes `(no backend decode rate…)` from `(no backend split…)`. A third
+  box shape exists, so the frame-width test gained a third pass.
+- **One tier predicate, `tps_tier()`, shared by `format_compact`, `format_pretty` and the alignment
+  test.** That test had been re-deriving tiers from `has_timing_split` and had silently drifted from
+  the renderer — "all three tiers appear in the fixture" was on its way to being satisfiable without
+  the formatter ever rendering what the test believed. Gate predicate is `is_some_and(|v| v > 0.0)`,
+  matching `tps_side`'s render predicate and `has_throughput_signal`'s second lock: `is_some()` alone
+  would let a directly-built `Some(0.0)` produce the very half-row this gate exists to kill.
+- **Four fixtures were lying** (`has_timing_split = false` with the rates left populated) — a state the
+  sole writer of that field cannot produce. Two of them were **passing while testing the wrong branch**:
+  the cache-cell test had silently moved to tier 1, losing `cache=`-beside-`work=` coverage, and the
+  pretty frame test would have measured the split rows twice. A fixture self-consistency assertion
+  (`flag == rates-are-some`) now guards the class, which is what the failing test lacked.
+- **Rejected, with reason:** a `fields()` line-protocol parser for the exporter tests. Its stated
+  rationale (`completion_tokens` substring-matches `prompt_tokens`) is simply false, so the existing
+  absence assertions are not passing for the wrong reason. Filed for T7 rather than rewriting green
+  tests inside T3.
+- **The project gate gained a second test command (RULES.md step 4), per Rule A #5** — and **both**
+  lines are required, never one replacing the other: `exporters/mod.rs`'s `mod feature_off` is
+  `cfg(not(feature = "influxdb"))`, so the task-80 tests proving a compiled-out stub refuses instead of
+  returning a fake `Ok` exist only in the feature-**off** run. Full write-up in `context/pitfalls.md`.
+  A dead pre-existing test (`decode_tps_min_is_written_on_every_point`) had to be fixed first or the
+  flipped gate was red on arrival — kept in this commit because the gate update that exposed it is
+  mandated by this task.
 
 ## Follow-ups
 

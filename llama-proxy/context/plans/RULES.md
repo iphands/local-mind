@@ -123,7 +123,11 @@ After every task, in order:
    (`cargo check --workspace` on default features also passes at init.)
 2. **Lint:** `cargo clippy --all-targets --features influxdb -- -D warnings` → exit 0.
 3. **Format:** `cargo fmt --check` → clean (no diff).
-4. **Test:** `cargo test --workspace --lib` → exit 0.
+4. **Test (both feature states):** `cargo test --workspace --lib` → exit 0, **and**
+   `cargo test --workspace --lib --features influxdb` → exit 0. Not redundant: the exporter's
+   `feature_off` tests compile ONLY in the first, and `wire_tests`/`queue_tests`/`url_gate_tests`/
+   `feature_on` ONLY in the second. Step 2 *compiles* the feature-on set but never runs it, so a
+   single test line leaves half the matrix unexercised — see `context/pitfalls.md`, Toolchain.
 
 Baseline at init (2026-10-16): step 1 (check) PASSES; steps 2–4 (clippy, fmt, test) FAIL on
 pre-existing issues, including a formatting diff in `src/stats/formatter.rs` — the file this

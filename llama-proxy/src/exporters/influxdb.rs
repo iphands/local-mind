@@ -201,7 +201,6 @@ fn build_data_point(metrics: &RequestMetrics) -> Result<Option<influxdb2::models
 
     let mut point = builder
         .field("total_tokens", metrics.total_tokens as f64)
-        .field("prompt_tps", metrics.prompt_tps)
         // Cost rate, NOT a speed: (prompt + completion) / wall. Every token the
         // request moved over one duration that covers prefill and decode
         // together. Kept for `sum()` reconciliation; graph speed with
@@ -211,7 +210,6 @@ fn build_data_point(metrics: &RequestMetrics) -> Result<Option<influxdb2::models
         // counted output tokens -- so this field is never a sparse hole.
         .field("decode_tps_min", metrics.decode_tps_min)
         .field("has_timing_split", metrics.has_timing_split)
-        .field("generation_tps", metrics.generation_tps)
         .field("prompt_ms", metrics.prompt_ms)
         .field("generation_ms", metrics.generation_ms)
         .field("duration_ms", metrics.duration_ms)
@@ -224,6 +222,20 @@ fn build_data_point(metrics: &RequestMetrics) -> Result<Option<influxdb2::models
     }
     if let Some(completion) = metrics.completion_tokens {
         point = point.field("completion_tokens", completion as f64);
+    }
+    // The measured rates are OMITTED when absent, never written as 0. A gap lets Flux
+    // `mean()` average the real samples; a fabricated zero is indistinguishable
+    // downstream from a genuinely stalled engine and drags every aggregate toward the
+    // floor -- the same failure class as the 880k-tok/s prefill this repo documents.
+    // Safe to omit rather than fall back to a value: `decode_tps_min` above is always
+    // present so no panel loses its speed number, and `total_tokens` is unconditional so
+    // a point can never be field-less (which line protocol rejects). `has_timing_split`
+    // stays the filter key for "measured only" panels.
+    if let Some(prompt_tps) = metrics.prompt_tps {
+        point = point.field("prompt_tps", prompt_tps);
+    }
+    if let Some(generation_tps) = metrics.generation_tps {
+        point = point.field("generation_tps", generation_tps);
     }
 
     // Prefix-cache accounting. Written only when the backend reported it: a
@@ -378,13 +390,48 @@ mod wire_tests {
     fn decode_tps_min_is_written_on_every_point() {
         let mut m = measurable();
         m.decode_tps_min = 84.34;
-        assert!(line(&m).contains("decode_tps_min=84.34 "), "got: {}", line(&m));
+        // No trailing space: `influxdb2` sorts field keys alphabetically and joins
+        // them with commas, so the space a field is followed by is the one before
+        // the timestamp, after the LAST field only. `decode_tps_min` is never last
+        // while the unconditional fields exist.
+        assert!(line(&m).contains("decode_tps_min=84.34,"), "got: {}", line(&m));
 
         assert!(
-            line(&measurable()).contains("decode_tps_min=0 "),
+            line(&measurable()).contains("decode_tps_min=0,"),
             "no counted output is 0.0 = not reported, never a hole: {}",
             line(&measurable())
         );
+    }
+
+    /// The measured rates are the one pair that goes ABSENT rather than zero when
+    /// the backend never reported them: a fabricated `prompt_tps=0` is
+    /// indistinguishable downstream from a genuinely stalled engine and drags every
+    /// `mean()` toward the floor. `has_timing_split` and `decode_tps_min` stay on
+    /// every point, so no panel loses its speed number and "measured only" panels
+    /// keep their filter key.
+    #[test]
+    fn measured_rate_fields_are_omitted_when_absent() {
+        let mut m = measurable();
+        m.decode_tps_min = 84.34;
+        let wire = line(&m);
+        assert!(!wire.contains("prompt_tps"), "absent prefill rate fabricated: {wire}");
+        assert!(!wire.contains("generation_tps"), "absent decode rate fabricated: {wire}");
+        assert!(
+            wire.contains("decode_tps_min=84.34"),
+            "the floor must survive the omission: {wire}"
+        );
+        assert!(
+            wire.contains("has_timing_split=f"),
+            "provenance must stay on the wire: {wire}"
+        );
+
+        m.prompt_tps = Some(200.5);
+        m.generation_tps = Some(42.5);
+        m.has_timing_split = true;
+        let wire = line(&m);
+        assert!(wire.contains("prompt_tps=200.5"), "measured prefill dropped: {wire}");
+        assert!(wire.contains("generation_tps=42.5"), "measured decode dropped: {wire}");
+        assert!(wire.contains("has_timing_split=t"), "provenance lost: {wire}");
     }
 
     /// Absent and zero mean different things: "this backend never says" is not
