@@ -27,10 +27,10 @@ CONTAINER_ARGS=(
   -v ${ROOT}/opencode/container_data/claude_transcripts:/home/iphands/.claude/transcripts:rw
 
   -v /mnt/noir/scratch:/mnt/noir/scratch:ro
-
   -v /mnt/noir/scratch/ai:/ai:ro
   -v /mnt/noir/scratch/ai/data/scratch:/scratch:rw
   -v /mnt/noir/scratch/relocate:/mnt/noir/scratch/relocate:rw
+  -v /mnt/noir/scratch/ai/vllm:/mnt/noir/scratch/ai/vllm:rw
 
   -v /run/docker.sock:/var/run/docker.sock:rw
 
