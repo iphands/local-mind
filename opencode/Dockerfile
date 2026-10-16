@@ -1,4 +1,5 @@
-FROM iphands/pkgcache-fedora:44 AS builder
+ARG BASE_IMAGE=iphands/pkgcache-fedora:44
+FROM ${BASE_IMAGE} AS builder
 
 RUN echo "bump_017"
 
@@ -44,7 +45,8 @@ RUN sudo dnf remove -y rust
 RUN yes 1 | rustup-init
 RUN .cargo/bin/cargo install just
 RUN sudo flatpak remote-add --if-not-exists flathub https://flathub.org/repo/flathub.flatpakrepo
-RUN sudo flatpak install -y org.ghidra_sre.Ghidra
+# Ghidra flatpak is x86_64 only on flathub
+RUN if [ "$(uname -m)" = x86_64 ]; then sudo flatpak install -y org.ghidra_sre.Ghidra; fi
 
 RUN curl -fsSL https://opencode.ai/install | bash
 RUN curl -fsSL https://bun.com/install | bash
@@ -63,7 +65,7 @@ RUN source /home/iphands/.bash_profile ; rustup component add rust-analyzer
 ## FAST UPGRADE PATH
 RUN echo bump_008
 RUN /home/iphands/.opencode/bin/opencode upgrade
-RUN npm install -g oh-my-opencode-linux-x64
+RUN if [ "$(uname -m)" = x86_64 ]; then npm install -g oh-my-opencode-linux-x64; else npm install -g oh-my-opencode-linux-arm64; fi
 RUN source /home/iphands/.bash_profile ; source /home/iphands/.bashrc ; echo "PATH=${PATH}:${HOME}/.bun/bin" >> .bashrc
 RUN source /home/iphands/.bash_profile ; source /home/iphands/.bashrc ; which bun
 RUN source /home/iphands/.bash_profile ; source /home/iphands/.bashrc ; ./.bun/bin/bunx oh-my-opencode install --no-tui --claude=no --gemini=no --copilot=no --opencode-zen=no --zai-coding-plan=no

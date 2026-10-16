@@ -1,4 +1,13 @@
 #!/bin/bash
+# Container runtime: docker if present, else podman (override with CONTAINER_RUNTIME)
+CRT=${CONTAINER_RUNTIME:-$(command -v docker >/dev/null 2>&1 && echo docker || echo podman)}
+
+BUILD_ARGS=()
+if [ "$(uname -m)" != x86_64 ]; then
+  # separate arm64 tag of the pkgcache base image
+  BUILD_ARGS+=(--build-arg BASE_IMAGE=iphands/pkgcache-fedora:latest-arm64)
+fi
+
 cd ./opencode
 # docker build --target builder -t ocli .
-docker build -t ocli .
+${CRT} build "${BUILD_ARGS[@]}" -t ocli .
