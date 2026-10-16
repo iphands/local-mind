@@ -23,7 +23,7 @@
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 1 | T1: Make the project gate green at init | `src/stats/formatter.rs` | done | gate green: check/clippy/fmt/test all exit 0 |
-| 2 | T2: Fix inflated prefill TPS from prefix-cache hits | `src/stats/collector.rs` | pending | depends on T1 (gate must be green) |
+| 2 | T2: Fix inflated prefill TPS from prefix-cache hits | `src/stats/collector.rs` | done | corrected rate = (prompt_n - cache_n) / prompt_ms * 1000 when cache hits present; unit tests pass |
 | 3 | T3: Reorder and pad compact stats columns + update affected tests | `src/stats/formatter.rs` | pending | depends on T2; gate must stay green |
 | 4 | T4: Remaining stats tests (full suite) | `src/stats/formatter.rs`, `src/stats/collector.rs` | pending | depends on T3 |
 | 5 | T5: Document breaking compact format change in README | `README.md` | pending | depends on T4 |
@@ -33,7 +33,8 @@
 ## Evidence
 
 | Date | What ran (command / build / input) | Result | Runs | Spread / notes |
-|------|------------------------------------|--------|------|----------------|
+| 2026-10-16 | cargo test stats::collector (synthetic timings: prompt_n=42, cache_n=10, prompt_ms=50.5) | corrected prompt_tps ≈ 633.66 (not 198.0); no-cache case verbatim 198.0 | 1 | N/A |
+| 2026-10-16 | full gate: check/clippy/fmt/test --workspace --lib --features influxdb | all exit 0; 915 passed / 0 failed | 1 | N/A |
 
 ## Notes / Deviations
 

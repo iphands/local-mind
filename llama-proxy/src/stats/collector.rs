@@ -358,22 +358,43 @@ fn extract_timings(metrics: &mut RequestMetrics, response: &Value, duration_ms: 
             .and_then(|t| t.as_f64())
             .map(|v| finite_rate(v, "generation_ms", &metrics.model))
             .unwrap_or(0.0);
-        // Same finite gate as the vLLM path: serde_json turns 1e400 into +inf,
-        // and an inf rate poisons the whole exporter batch (see `finite_rate`).
-        metrics.prompt_tps = finite_rate(
-            timings.get("prompt_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0),
-            "prompt_tps",
-            &metrics.model,
-        );
         metrics.generation_tps = finite_rate(
             timings.get("predicted_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0),
             "generation_tps",
             &metrics.model,
         );
+
+        // Read prompt_n / cache_n from timings before assigning them, so the
+        // corrected prefill rate can use them.
+        let prompt_n = timings.get("prompt_n").and_then(|t| t.as_u64());
+        let cache_n = timings.get("cache_n").and_then(|t| t.as_u64());
+
+        // llama.cpp computes `prompt_per_second = prompt_n / prompt_ms * 1000`.
+        // With a prefix cache, `prompt_n` includes the cached tokens but
+        // `prompt_ms` only covers the non-cached compute, so the backend's
+        // figure is inflated (e.g. 164,663 tokens reported at 880k tok/s when
+        // only ~567 were actually computed). Rate the tokens the engine really
+        // processed: (prompt_n - cache_n) / prompt_ms * 1000.
+        // Open question (tracker Open Unknown 1): confirm llama.cpp counts
+        // cached tokens in prompt_n; if it already excludes them, this would
+        // double-subtract and we should fall back to the backend value instead.
+        let corrected_prompt_tps = prompt_n
+            .zip(cache_n)
+            .filter(|(_, cached)| *cached > 0)
+            .filter(|_| metrics.prompt_ms > 0.0)
+            .map(|(used, cached)| {
+                let computed = used.saturating_sub(cached) as f64;
+                computed / metrics.prompt_ms * 1000.0
+            });
+        metrics.prompt_tps = finite_rate(
+            corrected_prompt_tps.unwrap_or_else(|| timings.get("prompt_per_second").and_then(|t| t.as_f64()).unwrap_or(0.0)),
+            "prompt_tps",
+            &metrics.model,
+        );
         metrics.has_timing_split = true;
 
         // Context info - use prompt_n for actual context consumption
-        if let Some(prompt_n) = timings.get("prompt_n").and_then(|t| t.as_u64()) {
+        if let Some(prompt_n) = prompt_n {
             metrics.context_used = Some(prompt_n);
         }
 
@@ -382,7 +403,7 @@ fn extract_timings(metrics: &mut RequestMetrics, response: &Value, duration_ms: 
         // stays correct untouched. extract_timings runs after extract_usage, so
         // where a body somehow carries both spellings this one wins: llama.cpp
         // is authoritative for its own extension, and vLLM never sends timings.
-        metrics.cached_tokens = timings.get("cache_n").and_then(|t| t.as_u64());
+        metrics.cached_tokens = cache_n;
 
         // Fallback to timings for token counts when usage is missing (e.g., timeout
         // scenarios). Absent and zero are one trigger class here, matching the
@@ -773,9 +794,36 @@ mod tests {
 
         assert_eq!(metrics.prompt_ms, 50.5);
         assert_eq!(metrics.generation_ms, 100.25);
-        assert_eq!(metrics.prompt_tps, 198.0);
+        // Prefix cache present: corrected prefill rate = (42 - 10) / 50.5 * 1000
+        assert!(
+            (metrics.prompt_tps - 633.66).abs() < 0.01,
+            "prompt_tps = {}",
+            metrics.prompt_tps
+        );
         assert_eq!(metrics.generation_tps, 99.75);
+        assert_eq!(metrics.cached_tokens, Some(10));
         assert_eq!(metrics.context_used, Some(42)); // Uses prompt_n, not cache_n
+    }
+
+    #[test]
+    fn test_request_metrics_prefill_rate_no_cache_uses_backend_verbatim() {
+        let response = serde_json::json!({
+            "model": "test-model",
+            "timings": {
+                "prompt_ms": 50.5,
+                "prompt_per_second": 198.0,
+                "predicted_per_second": 99.75,
+                "prompt_n": 42,
+            },
+            "choices": [{"finish_reason": "stop"}]
+        });
+
+        let request = serde_json::json!({});
+        let metrics = RequestMetrics::from_response(&response, &request, false, 150.0);
+
+        // No cache_n -> backend prompt_per_second is reported verbatim.
+        assert_eq!(metrics.prompt_tps, 198.0);
+        assert_eq!(metrics.cached_tokens, None);
     }
 
     #[test]
