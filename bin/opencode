@@ -2,6 +2,9 @@
 set -e
 ROOT=`git rev-parse --show-toplevel`
 
+# Container runtime: docker if present, else podman (override with CONTAINER_RUNTIME)
+CRT=${CONTAINER_RUNTIME:-$(command -v docker >/dev/null 2>&1 && echo docker || echo podman)}
+
 ${ROOT}/bin/build-container-opencode || {
   echo "BUILD FAILED"
   exit 1
@@ -26,15 +29,6 @@ CONTAINER_ARGS=(
   -v ${HOME}/.claude/skills:/home/iphands/.claude/skills:ro
   -v ${ROOT}/opencode/container_data/claude_transcripts:/home/iphands/.claude/transcripts:rw
 
-  -v /mnt/noir/scratch:/mnt/noir/scratch:ro
-  -v /mnt/noir/scratch/ai:/ai:ro
-  -v /mnt/noir/scratch/ai/data/scratch:/scratch:rw
-  -v /mnt/noir/scratch/relocate:/mnt/noir/scratch/relocate:rw
-  -v /mnt/noir/scratch/ai/vllm:/mnt/noir/scratch/ai/vllm:rw
-
-  -v /run/docker.sock:/var/run/docker.sock:rw
-
-  --gpus all
   --device /dev/dri
   -e DISPLAY=$DISPLAY
   -e XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR
@@ -42,4 +36,24 @@ CONTAINER_ARGS=(
   -v $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY
 )
 
-docker run --rm -it "${CONTAINER_ARGS[@]}" ocli
+# Optional host mounts: only if the source exists (podman errors on missing paths)
+for m in \
+  /mnt/noir/scratch:/mnt/noir/scratch:ro \
+  /mnt/noir/scratch/ai:/ai:ro \
+  /mnt/noir/scratch/ai/data/scratch:/scratch:rw \
+  /mnt/noir/scratch/relocate:/mnt/noir/scratch/relocate:rw \
+  /mnt/noir/scratch/ai/vllm:/mnt/noir/scratch/ai/vllm:rw
+do
+  [ -e "${m%%:*}" ] && CONTAINER_ARGS+=(-v "$m")
+done
+
+if [ "$CRT" = docker ]; then
+  CONTAINER_ARGS+=(-v /run/docker.sock:/var/run/docker.sock:rw --gpus all)
+else
+  # rootless podman: keep host uid mapping, skip SELinux relabel issues
+  CONTAINER_ARGS+=(--userns=keep-id --security-opt label=disable)
+  PSOCK=${XDG_RUNTIME_DIR}/podman/podman.sock
+  [ -S "$PSOCK" ] && CONTAINER_ARGS+=(-v "$PSOCK:/var/run/docker.sock:rw")
+fi
+
+${CRT} run --rm -it "${CONTAINER_ARGS[@]}" ocli
