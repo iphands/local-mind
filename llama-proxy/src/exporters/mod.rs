@@ -133,7 +133,8 @@ pub fn log_sample_and_should_export(metrics: &RequestMetrics, format: StatsForma
                          counted un-discounted by design - so compare those two before believing \
                          anything is broken; cached_tokens=n/a means no prefix cache is \
                          reported, so judge prompt_tps against your own measured engine rate. \
-                         This rate prints as a measured tps= and, when an exporter is enabled, \
+                         This rate prints as `pp=` (a proxy division, not an engine figure) \
+                         and, when an exporter is enabled, \
                          ships to InfluxDB as-is. If your engine is genuinely this fast, RAISE \
                          the knob",
                         WARN_SAMPLE_INTERVAL

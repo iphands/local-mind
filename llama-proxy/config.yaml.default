@@ -147,15 +147,19 @@ backend:
 #   enabled: true
 #   format: "pretty"
 #   max_plausible_prefill_tps: 50000.0
-# The throughput cell has three tiers, and which one you see is a fact about the
-# backend, not the request: `pp=` and `tg=` are both measured (llama.cpp `timings`,
-# or vLLM `metrics` with --enable-per-request-metrics). With no backend split `pp=`
-# reads n/a and you get `tg>=N work=M`: N is a FLOOR on decode (completion tokens over
-# the whole wall clock, so it understates), and M is a COST rate - (prompt+completion)
-# per wall - which on a long-context turn with a short completion runs to thousands
-# while decode runs at tens. Never read M as engine speed. `cache=N`, when shown, is
-# prompt tokens the engine served from its prefix cache: it discounts the `pp=`
-# numerator only, never M.
+# The throughput cell has three tiers. Which one you see is a fact about the backend AND
+# the endpoint shape, not the request: `pp=` and `tg=` are backend-SOURCED, but the only
+# figure an engine actually computed is llama.cpp's `timings.predicted_per_second`.
+# Everything else is the proxy dividing backend measurements -- both cells on vLLM (whose
+# `metrics` needs --enable-per-request-metrics), and llama.cpp's prefill whenever the
+# backend reported cache hits. Any Anthropic /v1/messages response is tier 2 whatever the
+# backend. With no backend split `pp=` reads n/a and you get `tg>=N work=M`: N is a FLOOR
+# on decode (completion tokens over the whole wall clock -- prefill, network, and in fake
+# mode the proxy's own synthesis -- so it understates), and M is a COST rate,
+# (prompt+completion) per wall, which on a long-context turn with a short completion runs
+# to thousands while decode runs at tens. Never read M as engine speed. `cache=N`, when
+# shown, is prompt tokens the engine served from its prefix cache: it discounts the `pp=`
+# numerator only, never M. Full provenance: README, "The rate group has three tiers".
 # These lines carry the `llama_proxy::stats` target, so
 # `RUST_LOG=llama_proxy::stats=info` selects them and nothing else.
 # max_plausible_prefill_tps is a CANARY, not a fault threshold. A prefill rate above it is

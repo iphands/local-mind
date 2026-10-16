@@ -370,8 +370,9 @@ model=Qwen3-14B-128... pp=  12.858k tg=   51.1 dur=   2841ms ctx=  4100/262144 t
 model=cosmo-6000       pp=     n/a tg=     n/a dur=  30000ms ctx=  2048/262144 tok=  2048/   n/a stream=trunc   finish=n/a
 ```
 
-The rate group has three tiers, and which one you see is a fact about the **backend**,
-not about the request:
+The rate group has three tiers, and which one you see is a fact about the **backend** and
+the **endpoint shape**, not about the request (an Anthropic `/v1/messages` response is tier 2
+on any backend, since that shape carries no per-request timing block):
 
 | Rendered | Meaning | Source |
 |---|---|---|
@@ -1044,8 +1045,8 @@ occurrence, then one in a fixed interval — the WARN line prints the interval i
 not hunt the log for a specific request; it only moves when `stats.enabled: true`, because a
 run with stats off builds no sample at all; and it is process-global and **resets on
 restart**, so a zero after a deploy proves nothing. It is never exported to InfluxDB — but
-the rate that tripped it is: that number ships to your dashboard as a measured
-`prompt_tps`, which is exactly why the canary is worth having.
+the rate that tripped it is: that number ships to your dashboard as a `prompt_tps`
+indistinguishable from an engine figure, which is why the canary is worth having.
 
 Size the threshold by **measuring**, not by guessing, because it fails in both
 directions: set below roughly 2x your real engine prefill rate and it warns on healthy

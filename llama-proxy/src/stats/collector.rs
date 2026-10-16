@@ -614,10 +614,11 @@ fn extract_vllm_usage(metrics: &mut RequestMetrics, response: &Value, duration_m
                         // Saturating to zero would report a full-cache prefill that never
                         // happened, and blanking to `None` is indistinguishable on the
                         // wire from "this backend reports no split" -- either would erase
-                        // a rate that really was measured. (Saturating is not even a third
-                        // option: `finite_rate_opt` maps 0.0 to None, so saturate and blank
-                        // are the same wire outcome.) Keep the uncorrected figure, and say
-                        // so loudly -- this number ships to InfluxDB as `measured`.
+                        // a rate the request really did produce. (Saturating is not even a
+                        // third option: `finite_rate_opt` maps 0.0 to None, so saturate and
+                        // blank are the same wire outcome.) Keep the uncorrected figure, and
+                        // say so loudly -- this number ships to InfluxDB as a backend
+                        // `prompt_tps`, indistinguishable on the wire from an engine figure.
                         tracing::warn!(
                             model = %metrics.model,
                             prompt_tokens,

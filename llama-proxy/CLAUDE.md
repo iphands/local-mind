@@ -167,9 +167,12 @@ cp config.yaml.default config.yaml
 **stats/** - Metrics collection
 - `collector.rs`: `RequestMetrics` struct, calculates tokens/sec, context usage, extended token details
 - `formatter.rs`: Formats metrics as pretty/json/compact for logging (includes reasoning tokens when present).
-  The throughput cell is three-tier: a backend-reported split prints `pp=<k tok/s> tg=<tok/s>`;
-  otherwise `pp=n/a tg>=<tok/s> work=<tok/s>` (a wall-bounded FLOOR on decode, plus a COST rate -
-  never present either as engine speed); `pp=n/a tg=n/a` when no output tokens were counted.
+  The throughput cell is three-tier: a backend-SOURCED split prints `pp=<k tok/s> tg=<tok/s>`
+  (only llama.cpp's `timings.predicted_per_second` is engine-computed; every other rate on that
+  line is the proxy dividing backend durations and counts -- the note at the `has_timing_split`
+  writer in `collector.rs` is authoritative); otherwise `pp=n/a tg>=<tok/s> work=<tok/s>` (a
+  wall-bounded FLOOR on decode, plus a COST rate - never present either as engine speed);
+  `pp=n/a tg=n/a` when no output tokens were counted.
   `cache=N` prints when the backend reported prefix-cache hits; it discounts the `pp` numerator
   only, never `work`. These lines carry the `llama_proxy::stats` log target.
 - Metrics collected for both streaming and non-streaming requests

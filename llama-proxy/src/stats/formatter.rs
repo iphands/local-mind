@@ -298,7 +298,9 @@ fn count_cell(count: Option<u64>) -> String {
 }
 
 /// The rate group: ONE width for all three tiers, so the line cannot betray which
-/// tier it rendered. Which tier you see is a fact about the backend, not the request.
+/// tier it rendered. Which tier you see is a fact about the backend **and the endpoint
+/// shape**, not the request: an Anthropic `/v1/messages` body carries no per-request
+/// timing block at all, so it is tier 2 whatever backend serves it.
 ///
 /// Built as two fixed-width fields rather than three hand-spaced literals. A
 /// hand-spaced tier string is 22, 23 or 24 cells depending on how many spaces someone
