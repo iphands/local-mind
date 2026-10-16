@@ -1149,3 +1149,51 @@ The reprompt engine adds its own three, also process-global and reset on restart
 `llama_proxy_reprompt_triggered_total` (a premature stop it acted on), and
 `llama_proxy_reprompt_exhausted_total` (a loop that ran out of rounds or budget and returned the
 text unchanged — a subset of triggered).
+
+### Ctrl-C took a while / a request died on shutdown
+
+**An idle proxy exits immediately. A request in flight gets up to 5 seconds first.** Ctrl-C or
+SIGTERM drops the listener, so new connections are refused at once and idle keep-alives close on
+the signal itself; the drain then returns as soon as the last in-flight request finishes, and
+force-closes whatever is left when `GRACEFUL_SHUTDOWN_GRACE` (`src/proxy/server.rs`, currently 5s)
+expires.
+
+What you see, in order. The signal line always appears: `INFO Ctrl-C received`, or
+`INFO SIGTERM received` under `systemctl stop` / `docker stop` — they are different lines, so grep
+for both on a deployed proxy. Only while a connection is still open — a request in flight **or an
+idle keep-alive** — do you then get
+`INFO shutdown signal: draining in-flight connections connections=N grace=5s`, followed by
+**one** of:
+
+- `INFO all in-flight connections drained` — they finished, the proxy exits early (well under 5s).
+- `WARN grace exhausted: force-closing requests still generating; their clients see an empty
+  response or a reset, and no metrics sample is recorded - expected on shutdown, not data
+  corruption` (with `remaining=N grace=5s` on the line) — the full grace was paid.
+
+That WARN is the **normal** outcome when an agent was mid-turn, not a fault. A live keep-alive
+counts toward `connections=` even when no request is being served, so a nonzero count there does
+not by itself mean a request is at risk.
+
+What the killed client sees depends on the path. In `fake` mode nothing has been written until the
+backend finishes, so the transfer dies with no bytes at all: measured **curl exit 52** (empty
+reply), or a reset. On the `passthrough` path headers and SSE bytes already flowed, so expect
+**curl exit 18** (partial file), or 56 if the socket was reset rather than closed — that half is
+reasoned from the protocol, not measured here. Either way the request produces **no metrics
+sample** — the handler is aborted before the stats path runs, so it is absent from the log and from
+`llama_proxy_metrics_export_skipped_total`. It never shows up as `stream=trunc`, which marks a
+stream the *backend* cut short. A quiet dashboard after a restart is therefore not evidence that
+nothing was running.
+
+In `fake` mode the proxy holds a request open for the entire backend generation, so a long
+generation is expected to lose that race. Shortening the grace from 30s did not change the
+mechanism, but it did move the cliff: **a generation taking 5s–30s used to survive a restart and
+now does not**, which on a local backend is most of them. The grace is a bound on how long a hung
+client can hold the process open, not a guarantee that a generation completes. The value is
+guarded by a test to a 5s..=120s band because deploys size their stop-timeout on it; lowering it
+past the bound fails `t78_production_grace_is_bounded`.
+
+One case the 5s does not cover: the exporters are closed **after** the connection drain, and the
+InfluxDB worker bounds its own join at 120s. With `exporters.influxdb.enabled: true` and that
+endpoint unreachable, a restart waits on the exporter rather than the grace, so it can take far
+longer than 5s even though the connections are already gone.
+

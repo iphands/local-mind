@@ -352,10 +352,34 @@ async fn bind_addr(host: &str, port: u16) -> std::io::Result<(tokio::net::TcpLis
     Err(last_err)
 }
 
-/// Cap on the post-signal drain (D11). A hung client cannot extend it: when
-/// the grace expires the remaining connections are force-closed, so the
-/// process exits within `grace` of the signal, always.
-pub(crate) const GRACEFUL_SHUTDOWN_GRACE: Duration = Duration::from_secs(30);
+/// Cap on the post-signal drain (D11). A hung client cannot extend it: when the
+/// grace expires the remaining connections are force-closed, so the DRAIN ends
+/// within `grace` of the signal, always.
+///
+/// 5s is a bound on shutdown latency, NOT a completion guarantee. In `fake` mode
+/// the proxy holds a connection open for the whole backend generation, which
+/// routinely outlives any grace this process could justify waiting for, so a long
+/// generation is expected to lose that race. What the client sees depends on the
+/// path: in `fake` mode nothing has been written yet, so the transfer dies with no
+/// bytes (measured: curl exit 52, empty reply); on the `passthrough` path headers
+/// and SSE bytes already flowed, so expect a truncated transfer (curl exit 18, or
+/// 56 on a reset) — reasoned from the protocol, not measured.
+/// Either way NO metrics sample is produced — force-close aborts the handler task
+/// mid-await, so the request is absent from both the log and
+/// `llama_proxy_metrics_export_skipped_total`. It never renders `stream=trunc`,
+/// which is set only where the BACKEND closed a stream early (see `streaming.rs`).
+///
+/// The mechanism is unchanged from the previous 30s cap, but the cliff moved:
+/// every generation taking 5s..30s used to survive a restart and now does not,
+/// which on a local backend is most of them. Idle keep-alives close on the signal
+/// itself and the loop returns once `conns` empties, so the full grace is paid
+/// only when a real generation is in flight.
+///
+/// The DRAIN is bounded here; the PROCESS is not. Exporters are closed AFTER it
+/// (`drain_then_close_exporters`), and the InfluxDB worker bounds its join at
+/// `JOIN_BUDGET` (120s, `exporters/influxdb/worker.rs`), so with the exporter
+/// enabled and its endpoint wedged, shutdown still runs well past the grace.
+pub(crate) const GRACEFUL_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// The serve loop with task 78's three-tier shutdown:
 /// 1. signal → stop accepting; the listener is dropped, so new connections are
@@ -476,7 +500,20 @@ impl<S: Future<Output = ()>> GracefulServe<S> {
                     }
                 }
                 _ = &mut deadline => {
-                    tracing::warn!(remaining = conns.len(), "grace exhausted: force-closing the remaining in-flight connections");
+                    // This is the COMMON restart line at a 5s grace, not a rare one:
+                    // a normal agent turn outlives the grace. It must therefore be
+                    // self-sufficient (grep/journal frequently show it without the
+                    // INFO above it), name who is being killed, and say it is expected.
+                    // The duration comes from the `grace` field only — repeating it in
+                    // the message would put a tunable number (band 5s..=120s) inside a
+                    // string the README quotes verbatim, so it would drift on retune.
+                    tracing::warn!(
+                        remaining = conns.len(),
+                        ?grace,
+                        "grace exhausted: force-closing requests still generating; \
+                         their clients see an empty response or a reset, and no metrics \
+                         sample is recorded - expected on shutdown, not data corruption"
+                    );
                     // Force-close IS the drain end: the tasks die with the
                     // JoinSet, so no handler can enqueue after this point.
                     drop(conns);
@@ -1008,8 +1045,12 @@ mod tests {
     #[test]
     fn t78_production_grace_is_bounded() {
         // The D11 cap is a CONTRACT (deploys size their stop-timeout on it):
-        // long enough for real generations to finish, finite so no client can
-        // make it infinite.
+        // non-zero so short requests and idle keep-alives still drain, and
+        // finite so no client can make it infinite. It is NOT sized to finish a
+        // generation — see the const's rustdoc. The production value sits ON the
+        // lower bound deliberately; do NOT lower the bound to admit a smaller
+        // grace, that is the instant-death class (RED: curl exit 18) task 78
+        // exists to prevent.
         assert!(
             GRACEFUL_SHUTDOWN_GRACE >= Duration::from_secs(5) && GRACEFUL_SHUTDOWN_GRACE <= Duration::from_secs(120),
             "grace {GRACEFUL_SHUTDOWN_GRACE:?} must stay in the 5s..=120s deploy band"
