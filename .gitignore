@@ -14,3 +14,4 @@
 /server/vllm/vendor/
 /vendor
 /model-holder/target
+/server/vllmcustom/storage/
