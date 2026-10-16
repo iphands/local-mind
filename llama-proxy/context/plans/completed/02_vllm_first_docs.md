@@ -1,6 +1,6 @@
 # Plan 02 — VLLM-first docs + read-only vendor discovery space
 
-> **Status**: in-progress
+> **Status**: done
 > **Created**: 2026-10-16
 > **Depends on**: N/A (Plan 01 is `done`; this plan only cites its `fixrate.md`)
 > **Goal**: Re-frame the project's own markdown to lead with **vLLM** (still naming llama.cpp and any OpenAI-compatible backend), and make `./vendor/*` a gitignored, read-only discovery space with written rules for using it.
@@ -349,9 +349,9 @@ Expected: PLAN.md stamped; no tracked doc still claims llama.cpp is *the* target
 - [x] T1: `grep 'P3 — Vendor sources are read-only' RULES.md` → 1 match; `grep -- '--no-ignore'` → hit; gate exits 0
 - [x] T2: `grep 'vendor/vllm' context/CLAUDE.md` → ≥1 match; `diff -q context/AGENTS.md context/CLAUDE.md` → SYMLINK-OK; gate exits 0
 - [x] T3: `git check-ignore -v vendor/vllm/docs/features/per_request_metrics.md` → `/vendor/` rule AND `git status --porcelain vendor/` empty (the pass/fail); `rg --files | grep -c '^vendor/'`=0 and `rg --no-ignore --files vendor`>0 recorded as observation; gate exits 0
-- [ ] T4: new vLLM-first sentence present + first `vllm` hit in Overview; `grep 'reverse proxy for llama.cpp server' CLAUDE.md` → no match; BOTH hands-plan markers present; `ls -l AGENTS.md` shows `-> CLAUDE.md`; gate exits 0
-- [ ] T5: README intro + diagram lead vLLM; `Is it really streaming?` heading intact; flag named at :256 & :308; `grep '\*\*vLLM\*\*' README.md` = 1 (the new API-Compatibility bullet — the discriminating check); **all three Preservation greps hit**; gate exits 0
-- [ ] T6: PLAN.md `OBSOLETE` present; no un-triaged `reverse proxy for llama` hit; gate exits 0
-- [ ] All: the project gate (Rule A) passes on the final commit
-- [ ] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read
-- [ ] All: plan + tracker `git mv`'d to `completed/`, `SERIES.md` marked done (Rule C)
+- [x] T4: new vLLM-first sentence present + first `vllm` hit in Overview; `grep 'reverse proxy for llama.cpp server' CLAUDE.md` → no match (exit 1 re-verified); BOTH hands-plan markers present; `ls -l AGENTS.md` shows `-> CLAUDE.md`; gate exits 0
+- [x] T5: README intro + diagram lead vLLM; `Is it really streaming?` heading intact (re-verified :838); flag named at :256 & :308; `grep '\*\*vLLM\*\*' README.md` = 1 (the new API-Compatibility bullet — the discriminating check; actual count 2, plan-Verify self-inconsistency recorded in the tracker, the API-Compat bullet itself present); **all three Preservation greps hit**; gate exits 0
+- [x] T6: PLAN.md `OBSOLETE` present (L1); no un-triaged `reverse proxy for llama` hit (plan:312-314 verbatim → 0; sole inventory survivor `CLAUDE.md:282` = Leave); gate exits 0
+- [x] All: the project gate (Rule A) passes on the final commit — RUSTFLAGS-equivalent (the documented `-- -D warnings` gate is broken, see `context/pitfalls.md`): check 0, fmt 0, 915 lib tests
+- [x] All: findings harvested into `context/` (Rule D) — `context/pitfalls.md` created (gate command + AGENTS.md symlink hazard), bytes re-read; product facts already in README/CLAUDE, vendor rule already in RULES P3, so no `distilled.md` (would duplicate)
+- [x] All: plan + tracker `git mv`'d to `completed/`, `SERIES.md` marked done (Rule C) — this close commit; tracker:8 path repointed; live human-decision follow-ups copied into SERIES Standing Constraints so they don't orphan on archive

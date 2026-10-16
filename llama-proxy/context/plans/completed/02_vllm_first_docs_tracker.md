@@ -5,7 +5,7 @@
 - Status: 100% complete (6/6 tasks) — all tasks done; closing (harvest + `git mv` + SERIES) is the
   next and final step (Rule C/D).
 - Start date: 2026-10-16
-- Plan: `context/plans/02_vllm_first_docs.md`
+- Plan: `context/plans/completed/02_vllm_first_docs.md` (moved to `completed/` on close)
 - Evidence: doc-framing plan — evidence is the grep output each Verify prints (the claim flipping
   vLLM-first) plus the `git check-ignore` / `rg` blindness pair in T3. No live perf numbers, so
   the Evidence table records commands + observed output, not measurements.

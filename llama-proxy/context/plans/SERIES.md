@@ -22,7 +22,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 02** — vllm-first docs + read-only vendor discovery: in progress, 5/6 tasks done; next T6 (triage docs + stamp PLAN.md obsolete).
+None in progress — next up: Plan 03 (`/hands-plan resume 03`).
 
 ## Plans <!-- hp:plans -->
 
@@ -31,7 +31,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | Plan | Title | Depends on | Status | Notes |
 |---|---|---|---|---|
 | 01 | stats columnar + prefill fix | N/A | done | columnar compact stats + corrected prefill TPS |
-| 02 | vllm-first docs + read-only vendor discovery | N/A | in-progress | re-frame docs vLLM-first; gitignore + rules for ./vendor/* |
+| 02 | vllm-first docs + read-only vendor discovery | N/A | done | vLLM-first docs landed; `/vendor` read-only discovery + P3 rule; stale `PLAN.md` OBSOLETE-stamped |
 
 ## Abandoned / Superseded <!-- hp:abandoned -->
 
@@ -43,7 +43,18 @@ doesn't know it failed.)*
 
 ## Standing Constraints <!-- hp:constraints -->
 
-None recorded yet.
+Follow-ups carried from Plan 02 (full detail in `completed/02_vllm_first_docs_tracker.md`); recorded
+here so they don't orphan when the tracker archives:
+
+| Constraint / owed decision | Why it must not be lost | Owner / where |
+|---|---|---|
+| Delete `PLAN.md` only after **human** review — currently OBSOLETE-stamped, kept for history | append-only ethos; deletion is a human call, never an agent's | human; next resync |
+| Resolve the 3× dead `../context/opencode_claude_llama_notes.md` reference (`CLAUDE.md` L93/L284/L404) — the file exists **nowhere** (deleted, not mis-pathed) | cited as "the comprehensive client notes"; a dead pointer an agent will trust and chase; needs a content call, not a path edit | human content decision (all 3 refs sit outside the hands-plan managed block) |
+
+Deferred to a later **code/docs plan** (not forgotten, tracked in the archived tracker's Follow-ups):
+the shipped-default surface still names llama.cpp — `src/main.rs:47` CLI `about` string and
+`config.yaml.default:19/21` — plus deepening the e2e mock's llama.cpp-shaped default payloads; and the
+authoritative gate fix (`justfile:16` / `RULES.md:122/124` `-- -D warnings`, needs human sign-off).
 
 ---
 
