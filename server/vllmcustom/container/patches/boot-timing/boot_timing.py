@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import functools
 import inspect
+import json
 import math
 import os
 import sys
@@ -705,6 +706,239 @@ def format_report(rows: list[Row], now: float, width: int = 74) -> str:
     return "\n".join(out)
 
 
+def _report_struct(rows: list[Row], now: float) -> dict:
+    """Same boot data as format_report, but as a nested dict for JSON.
+
+    Reuses the module's pure helpers (match_spans, _gpu_parts, _mem_map,
+    _mem_notes, ...) so the JSONL line and the text report always describe
+    the same boot. Every numeric field is rounded; None means the mark was
+    missing and the renderer degraded — same as the text report.
+    """
+    procs: dict[int, list[Row]] = {}
+    for r in rows:
+        procs.setdefault(r.pid, []).append(r)
+    starts = {
+        pid: min(r.ts for r in rws if r.kind == "start")
+        for pid, rws in procs.items()
+        if any(r.kind == "start" for r in rws)
+    }
+    total = now - min(starts.values()) if starts else 0.0
+
+    procs_out: list[dict] = []
+    seen_engine: list[int] = []
+    order = sorted(
+        procs,
+        key=lambda p: (
+            0 if any(r.role == "api" for r in procs[p]) else 1,
+            p,
+        ),
+    )
+    for pid in order:
+        rws = procs[pid]
+        role = next((r.role for r in rws if r.kind == "start"), rws[0].role)
+        spans = [
+            s
+            for s in match_spans([r for r in rws if r.kind in ("enter", "exit")], now)
+            if s.t1 - s.t0 >= 0.05
+        ]
+        if not spans and pid not in starts:
+            continue
+        if not spans:
+            procs_out.append(
+                {
+                    "pid": pid,
+                    "role": role,
+                    "name": _proc_name(role, pid, seen_engine),
+                    "wall_seconds": None,
+                    "spans": [],
+                    "note": "no phases recorded",
+                }
+            )
+            continue
+        spans.sort(key=lambda s: (s.t0, -(s.t1 - s.t0)))
+        start = starts.get(pid, spans[0].t0 if spans else now)
+        wall = max((s.t1 for s in spans), default=start) - start
+
+        first_t0 = spans[0].t0 if spans else now
+        imports = first_t0 - start
+        pid_mem = _pid_mem(rws)
+
+        spans_out: list[dict] = []
+        for sp in spans:
+            if sp.t1 - sp.t0 < 0.5 and sp.name != "api.uvicorn":
+                continue
+            depth = _depth(sp, spans)
+            label = LABELS.get((sp.name, sp.detail), sp.name)
+            rate = _rate_suffix(pid_mem, sp)
+            spans_out.append(
+                {
+                    "name": sp.name,
+                    "label": label,
+                    "offset_seconds": round(sp.t0 - start, 6),
+                    "offset_formatted": _fmt_off(sp.t0 - start),
+                    "duration_seconds": round(sp.t1 - sp.t0, 6),
+                    "duration_formatted": _fmt_dur(sp.t1 - sp.t0),
+                    "depth": depth,
+                    "rate": rate or None,
+                }
+            )
+
+        covered = imports + sum(
+            s.t1 - s.t0 for s in spans if _depth(s, spans) == 0
+        )
+        other = wall - covered
+
+        procs_out.append(
+            {
+                "pid": pid,
+                "role": role,
+                "name": _proc_name(role, pid, seen_engine),
+                "wall_seconds": round(wall, 6),
+                "wall_formatted": _fmt_dur(wall),
+                "imports_seconds": round(imports, 6) if imports >= 0.3 else None,
+                "imports_formatted": _fmt_dur(imports) if imports >= 0.3 else None,
+                "spans": spans_out,
+                "other_glue_seconds": round(other, 6) if other >= 1.0 else None,
+            }
+        )
+
+    # memory sections
+    api_rss = _host_mem().get("rss")
+    m = _mem_map(rows)
+
+    gpu_out: dict = {}
+    p = _gpu_parts(m)
+    if p["total"] is not None:
+        gpu_out = {
+            "total_gib": round(p["total"] / _GIB, 2),
+            "util": p["util"],
+            "budget_gib": round(p["budget"] / _GIB, 2) if p["budget"] else None,
+            "weights_gib": round(p["weights"] / _GIB, 2) if p["weights"] else None,
+            "kv_cache_gib": round(p["kv"] / _GIB, 2) if p["kv"] else None,
+            "graphs_gib": round(p["graphs"] / _GIB, 2) if p["graphs"] else None,
+            "context_gib": round(p["ctx"] / _GIB, 2) if p["ctx"] else None,
+            "overhead_gib": round(p["overhead"] / _GIB, 2) if p["overhead"] else None,
+            "outside_budget_gib": (
+                round(p["outside"] / _GIB, 2) if p["outside"] else None
+            ),
+            "final_used_gib": (
+                round(p["final_used"] / _GIB, 2) if p["final_used"] else None
+            ),
+        }
+
+    host_out: dict = {}
+    _avail = _mv(m, "mem.final", "avail")
+    _rss = _mv(m, "mem.final", "rss")
+    _avail0 = _mv(m, "mem.host0", "avail")
+    _mtotal = _mv(m, "mem.final", "mtotal")
+    if _avail is not None and _avail0 is not None and _avail0 >= _avail:
+        host_out["consumed_by_boot_gib"] = round((_avail0 - _avail) / _GIB, 2)
+    parts: list[str] = []
+    if _rss is not None and _rss / _GIB >= 0.05:
+        parts.append(f"engine {_rss / _GIB:.1f} GiB")
+    if api_rss and api_rss / _GIB >= 0.05:
+        parts.append(f"api {api_rss / _GIB:.1f} GiB")
+    if parts:
+        host_out["rss"] = " · ".join(parts)
+    if _avail is not None:
+        host_out["mem_available_gib"] = round(_avail / _GIB, 2)
+        if _mtotal is not None:
+            host_out["mem_total_gib"] = round(_mtotal / _GIB, 2)
+
+    headroom_out: dict = {}
+    _p = _gpu_parts(m)
+    _total, _util, _kv, _final_used = (
+        _p["total"],
+        _p["util"],
+        _p["kv"],
+        _p["final_used"],
+    )
+    if _total is not None and _util is not None and _kv is not None and _final_used is not None:
+        _non_kv = _final_used - _kv
+        _safety = max(_SAFETY_MIN, _SAFETY_FRAC * _total)
+        _hard = _non_kv / _total
+        _safe = math.ceil((_non_kv + _MIN_KV + _safety) / _total * 100) / 100
+        headroom_out = {
+            "current_util": round(_util, 2),
+            "safe_util": round(_safe, 2),
+            "freed_gib": round((_util - _safe) * _total / _GIB, 2),
+            "kv_at_safe_gib": round(max(0.0, _safe * _total - _non_kv) / _GIB, 2),
+            "hard_floor": round(_hard, 2),
+            "trade_rate_gib_per_001": round(0.01 * _total / _GIB, 4),
+            "floor_build_up_gib": round(_total / _GIB, 2),
+        }
+
+    notes_out: list[str] = []
+    all_spans: list[tuple[int, Span]] = []
+    for pid, rws in procs.items():
+        all_spans += [
+            (pid, s)
+            for s in match_spans([r for r in rws if r.kind in ("enter", "exit")], now)
+        ]
+    for pid, sp in all_spans:
+        if sp.name == "worker.load" and total > 0:
+            notes_out.append(
+                f"weight load = {round(100 * (sp.t1 - sp.t0) / total)}% "
+                "of total boot (cold NFS read; page cache helps the next boot)"
+            )
+    if any(sp.name == "warmup.autotune" for _, sp in all_spans):
+        notes_out.append(
+            "flashinfer autotune result is cached under /root/.cache/vllm "
+            "(~free on later boots with the same build)"
+        )
+    misses = sorted({r.detail for r in rows if r.kind == "miss"})
+    if misses:
+        notes_out.append(
+            "hooks NOT applied (upstream drift — those rows are missing "
+            "above): " + ", ".join(misses)
+        )
+    notes_out += _mem_notes(m)
+    unfired = sorted({name for name, _ in LABELS} - {r.name for r in rows})
+    if unfired:
+        notes_out.append("spans not seen this boot: " + ", ".join(unfired))
+
+    return {
+        "total_seconds": round(total, 3),
+        "total_formatted": _fmt_dur(total),
+        "processes": procs_out,
+        "gpu_memory": gpu_out,
+        "host_ram": host_out,
+        "headroom": headroom_out,
+        "notes": notes_out,
+        "raw_marks_path": _MARKS,
+    }
+
+
+def write_jsonl(rows: list[Row], now: float, log_dir: str) -> None:
+    """Append one JSONL line to <log_dir>/vllm_boot_stats.jsonl.
+
+    No-op when VLLM_BOOT_LOG_DIR is unset. Never raises: the rest of this
+    module degrades silently, and so does this. model and vllm_args come
+    from env (set by the launcher); they are None when unset.
+    """
+    if not log_dir:
+        return
+    try:
+        os.makedirs(log_dir, exist_ok=True)
+        path = os.path.join(log_dir, "vllm_boot_stats.jsonl")
+        struct = _report_struct(rows, now)
+        line = {
+            "ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime(now))
+            + f".{int((now % 1) * 1_000_000):06d}Z",
+            "model": os.environ.get("VLLM_MODEL_NAME"),
+            "vllm_args": (
+                json.loads(os.environ["VLLM_BOOT_ARGS"])
+                if "VLLM_BOOT_ARGS" in os.environ
+                else None
+            ),
+            "boot": struct,
+        }
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(json.dumps(line, separators=(",", ":")) + "\n")
+    except (OSError, ValueError, TypeError):
+        pass
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # process-local state / mark I/O
 # ──────────────────────────────────────────────────────────────────────────────
@@ -922,6 +1156,9 @@ def _report_now() -> None:
     try:
         rows = read_marks(_MARKS)
         print("\n" + format_report(rows, time.time()) + "\n", flush=True)
+        log_dir = os.environ.get("VLLM_BOOT_LOG_DIR", "")
+        if log_dir:
+            write_jsonl(rows, time.time(), log_dir)
     except Exception as e:  # never take the API server down with us
         print(f"[boot-timing] report failed: {e!r}", file=sys.stderr, flush=True)
 
