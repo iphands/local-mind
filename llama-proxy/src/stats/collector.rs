@@ -201,7 +201,15 @@ impl RequestMetrics {
         // seeing a `timings` object, the vLLM branch from `prompt_ms`/`generation_ms` --
         // which is how `tps= 0.00/ 0.00` reached a line whose label means *measured*.
         //
-        // This is PROVENANCE only ("the engine supplied a rate"). It deliberately does
+        // This is PROVENANCE only: every INPUT to the rates came from the backend. It
+        // does NOT mean the backend computed a rate. On the vLLM path the engine
+        // supplies a DURATION (`time_to_first_token_ms`) plus token counts and the
+        // proxy does the division -- and after the prefix-cache discount it divides a
+        // numerator the engine never reported either. So `prompt_tps` there is
+        // backend-sourced arithmetic, not an engine-measured figure; the only value on
+        // this line that a backend actually produced is llama.cpp's
+        // `predicted_per_second`. Label it accordingly in any dashboard.
+        // It deliberately does
         // not claim the durations exist: `prompt_ms`/`generation_ms` keep their own
         // `0.0 == not reported` convention and can be > 0 while this is false, which is
         // a new combination on the wire -- `prompt_ms > 0` used to imply this flag was
@@ -433,9 +441,16 @@ fn extract_timings(metrics: &mut RequestMetrics, response: &Value, duration_ms: 
         // figure is inflated (e.g. 164,663 tokens reported at 880k tok/s when
         // only ~567 were actually computed). Rate the tokens the engine really
         // processed: (prompt_n - cache_n) / prompt_ms * 1000.
-        // Open question (tracker Open Unknown 1): confirm llama.cpp counts
-        // cached tokens in prompt_n; if it already excludes them, this would
-        // double-subtract and we should fall back to the backend value instead.
+        // Plan 1's Open Unknown 1 is still open and CANNOT be settled here: it asks
+        // whether llama.cpp already excludes cached tokens from `prompt_n`, in which
+        // case this double-subtracts and the backend value should stand. The live
+        // backend is vLLM 0.33.0 (T1: `/props` 404, and no `timings` object appears in
+        // any of the six captured payloads), so this entire branch is UNEXERCISED on
+        // this box and no capture can speak to it. Settling it requires a llama.cpp
+        // backend -- do not "verify" it against the running server, which never
+        // reaches this code. Note the two branches deliberately differ: this one may
+        // saturate because `prompt_n - cache_n` is llama.cpp's own accounting, whereas
+        // the vLLM path below treats `cached > prompt` as a data error to report.
         let corrected_prompt_tps = prompt_n
             .zip(cache_n)
             .filter(|(_, cached)| *cached > 0)
@@ -548,7 +563,86 @@ fn extract_vllm_usage(metrics: &mut RequestMetrics, response: &Value, duration_m
         if let Some(ttft) = f("time_to_first_token_ms") {
             metrics.prompt_ms = ttft;
             if let Some(prompt_tokens) = metrics.prompt_tokens.filter(|p| *p > 0) {
-                metrics.prompt_tps = finite_rate_opt(prompt_tokens as f64 / ttft * 1000.0, "prompt_tps", &metrics.model);
+                // vLLM's `prompt_tokens` counts tokens served from the prefix cache,
+                // while `time_to_first_token_ms` covers only the compute the engine
+                // actually did. Dividing one by the other therefore rates tokens that
+                // were never processed: the captured 186,417-token request at a
+                // 321.6 ms ttft reads 580k tok/s, when 182,400 of those tokens were
+                // cached and the honest figure is 12,491. Same correction the
+                // llama.cpp branch above applies, with this path's inputs.
+                //
+                // The denominator stays `ttft` alone. T1 measured `queue_time_ms` at
+                // 0.0077-0.0118 ms across all six captures, so subtracting it would
+                // move the rate by well under 0.01%; and vLLM measures ttft from
+                // scheduling, which already excludes queue wait. Cite the captures,
+                // not a guess.
+                //
+                // `cached_tokens` is a subset of `prompt_tokens` ONLY on the OpenAI
+                // usage shape (extract_usage: "prompt_tokens ALREADY contains the
+                // cached prefix"). The Anthropic branch fills it from
+                // `cache_read_input_tokens`, which is DISJOINT from `input_tokens` --
+                // which is exactly why `context_used` there is the SUM of the three.
+                // Subtracting it on that shape deletes a prefix that was never in the
+                // numerator and under-states prefill by the whole cached amount, and
+                // nothing downstream can see it: the rate merely looks slow. Stats are
+                // built from the backend's raw body and this path runs for any body
+                // without `timings`, so an Anthropic-format backend that also passes
+                // vLLM per-request metrics through reaches it.
+                let cache_is_a_subset = response.get("usage").is_some_and(|u| u.get("prompt_tokens").is_some());
+                let raw_rate = prompt_tokens as f64 / ttft * 1000.0;
+                let computed_tokens = match metrics.cached_tokens.filter(|_| cache_is_a_subset).filter(|c| *c > 0) {
+                    Some(c) if c < prompt_tokens => Some(prompt_tokens - c),
+                    Some(c) if c == prompt_tokens => {
+                        // Every token cached is a legitimate state, not a data error --
+                        // `finite_rate_opt`'s own doc names the full prefix cache hit as
+                        // reachable. So this is DEBUG, not WARN: warning per request on
+                        // healthy traffic is a flood. It is also the worst case for the
+                        // number itself -- ttft is at its minimum here, so the
+                        // uncorrected rate is the most inflated it can be.
+                        tracing::debug!(
+                            model = %metrics.model,
+                            prompt_tokens,
+                            cached_tokens = c,
+                            time_to_first_token_ms = ttft,
+                            reported_prompt_tps = raw_rate,
+                            "cached_tokens == prompt_tokens: full prefix cache hit (or a backend data error); reporting the uncorrected prefill rate"
+                        );
+                        None
+                    }
+                    Some(c) => {
+                        // More cached than sent is unambiguously a backend DATA ERROR.
+                        // Saturating to zero would report a full-cache prefill that never
+                        // happened, and blanking to `None` is indistinguishable on the
+                        // wire from "this backend reports no split" -- either would erase
+                        // a rate that really was measured. (Saturating is not even a third
+                        // option: `finite_rate_opt` maps 0.0 to None, so saturate and blank
+                        // are the same wire outcome.) Keep the uncorrected figure, and say
+                        // so loudly -- this number ships to InfluxDB as `measured`.
+                        tracing::warn!(
+                            model = %metrics.model,
+                            prompt_tokens,
+                            cached_tokens = c,
+                            time_to_first_token_ms = ttft,
+                            queue_ms = ?metrics.queue_ms,
+                            reported_prompt_tps = raw_rate,
+                            "cached_tokens > prompt_tokens: backend data error, reporting the uncorrected prefill rate"
+                        );
+                        None
+                    }
+                    None => None,
+                };
+                if let Some(computed) = computed_tokens {
+                    tracing::debug!(
+                        model = %metrics.model,
+                        prompt_tokens,
+                        cached_tokens = prompt_tokens - computed,
+                        computed_tokens = computed,
+                        time_to_first_token_ms = ttft,
+                        "prefill rated on non-cached tokens only"
+                    );
+                }
+                let numerator = computed_tokens.unwrap_or(prompt_tokens) as f64;
+                metrics.prompt_tps = finite_rate_opt(numerator / ttft * 1000.0, "prompt_tps", &metrics.model);
             }
         }
         if let Some(gen_ms) = f("generation_time_ms") {
@@ -1704,6 +1798,400 @@ mod tests {
         );
         assert_eq!(m.queue_ms, Some(12.5));
         assert!((m.mean_itl_ms.unwrap() - 6.3897).abs() < 0.01);
+    }
+
+    /// A vLLM body on the `metrics` path: OpenAI usage shape, optional
+    /// `prompt_tokens_details.cached_tokens`, optional ttft.
+    fn vllm_response(prompt: u64, cached: Option<u64>, completion: u64, ttft: f64) -> Value {
+        let mut usage = serde_json::json!({
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": prompt + completion,
+        });
+        if let Some(c) = cached {
+            usage["prompt_tokens_details"] = serde_json::json!({ "cached_tokens": c });
+        }
+        serde_json::json!({
+            "model": "cosmo-6000",
+            "usage": usage,
+            "metrics": {
+                "time_to_first_token_ms": ttft,
+                // Arbitrary decode duration, never asserted -- every test on this
+                // builder targets prompt_tps. Deliberately non-zero so no fixture can
+                // reach the wall-clock fallback. It is NOT from a log line: the compact
+                // line prints decode tps, never decode ms.
+                "generation_time_ms": 2546.0,
+                "queue_time_ms": 0.0095,
+            },
+            "choices": [{"finish_reason": "stop", "message": {"content": ""}}]
+        })
+    }
+
+    /// Wall clock for the `metrics`-path fixtures. Inert here -- `extract_vllm_usage`
+    /// only consults `duration_ms` in its `else if` fallback, which `metrics` being
+    /// present makes unreachable -- but deliberately non-zero so no fixture can slide
+    /// onto a wall-derived rate without the test noticing. It is the `dur=3163.0ms`
+    /// of the 186417-token logged line, plan 03 Context (2).
+    const WALL_MS: f64 = 3163.0;
+
+    /// "Over 15k prefill is probably a bug" -- plan 03 Context (2)
+    /// (context/plans/03_columnar_stats_honest_prefill.md). T5 promotes this to the
+    /// `stats.max_plausible_prefill_tps` config key; here it is the test's oracle. Only
+    /// the ceiling is checked here; the expected floor comes from the exact
+    /// `corrected_pps` assertions.
+    const PLAUSIBLE_MAX_PPS: f64 = 15_000.0;
+
+    fn metrics_of(response: &Value) -> RequestMetrics {
+        RequestMetrics::from_response(response, &serde_json::json!({"messages": []}), false, WALL_MS)
+    }
+
+    fn prefill_of(response: &Value) -> Option<f64> {
+        metrics_of(response).prompt_tps
+    }
+
+    /// One message shape for the verbatim cases: the arithmetic, the expectation and
+    /// what actually came back, so a failure needs no scrollback to diagnose.
+    fn assert_pps(got: Option<f64>, want: f64, arithmetic: &str) {
+        assert!(
+            got.is_some_and(|v| (v - want).abs() < 1.0),
+            "{arithmetic} => {want:.2} tok/s, got {got:?}"
+        );
+    }
+
+    /// One row of plan 03's Context (2) table
+    /// (context/plans/03_columnar_stats_honest_prefill.md:78-84), captured live
+    /// 2026-10-16 from `stats.format: compact` against cosmo-6000 (vLLM).
+    /// `logged_pps` is what the buggy build printed; `corrected_pps` is the plan's
+    /// hand-computed answer for these inputs.
+    #[derive(Debug, Clone, Copy)]
+    struct Row {
+        prompt: u64,
+        cached: u64,
+        ttft_ms: f64,
+        corrected_pps: f64,
+        logged_pps: f64,
+    }
+
+    /// The five live log lines that opened plan 03, replayed as unit-test data.
+    ///
+    /// Every `ttft_ms` below is RECONSTRUCTED as `prompt / logged_pps * 1000` -- it is
+    /// not an independently captured figure. So the `raw` assertion is a transcription
+    /// guard on that literal, NOT a second measurement of the backend: the backend's
+    /// own numbers enter this test only through `logged_pps` and `cached`. What it does
+    /// establish is that the implementation reproduces the plan's independently
+    /// hand-computed `corrected_pps` from those inputs.
+    ///
+    /// The shape of a correct discount is the *spread*, not the shift: the heavily
+    /// cached rows fall 46x-96x while the barely-cached control row moves
+    /// 15098 -> 12798. A formula subtracting a constant would land in plausible range
+    /// and still fail here.
+    #[test]
+    fn vllm_prefill_is_rated_on_non_cached_tokens_across_the_five_logged_rows() {
+        const ROWS: [Row; 5] = [
+            Row {
+                prompt: 59_043,
+                cached: 51_200,
+                ttft_ms: 1221.5584,
+                corrected_pps: 6_421.0,
+                logged_pps: 48_334.16,
+            },
+            // control row: barely cached, so plan 03 requires it to move LEAST.
+            Row {
+                prompt: 21_001,
+                cached: 3_200,
+                ttft_ms: 1390.9384,
+                corrected_pps: 12_797.0,
+                logged_pps: 15_098.44,
+            },
+            Row {
+                prompt: 105_798,
+                cached: 99_200,
+                ttft_ms: 506.7069,
+                corrected_pps: 13_021.0,
+                logged_pps: 208_795.26,
+            },
+            Row {
+                prompt: 162_906,
+                cached: 156_800,
+                ttft_ms: 519.7498,
+                corrected_pps: 11_748.0,
+                logged_pps: 313_431.57,
+            },
+            Row {
+                prompt: 186_417,
+                cached: 182_400,
+                ttft_ms: 321.5830,
+                corrected_pps: 12_491.0,
+                logged_pps: 579_685.47,
+            },
+        ];
+        let mut measured: Vec<(Row, f64)> = Vec::new();
+        for row in ROWS {
+            // completion is inert for prompt_tps (any non-zero keeps the fixture
+            // realistic); 498 is the 186417-row completion from plan-03 line 71, reused
+            // for every row rather than each row's own 201/622/401/101/498.
+            let m = metrics_of(&vllm_response(row.prompt, Some(row.cached), 498, row.ttft_ms));
+            let actual = m.prompt_tps.unwrap_or_else(|| panic!("{row:?}: prefill rate went absent"));
+            assert!(
+                (actual - row.corrected_pps).abs() / row.corrected_pps < 0.01,
+                "{row:?}: got {actual:.2}, expected {:.0} +-1%",
+                row.corrected_pps
+            );
+            let raw = row.prompt as f64 / row.ttft_ms * 1000.0;
+            // Removing cached tokens from the numerator can only LOWER the rate; this
+            // path must never exceed the figure it exists to correct.
+            assert!(
+                actual <= raw + 1e-9,
+                "{row:?}: discount RAISED the rate ({actual:.2} > raw {raw:.2})"
+            );
+            assert!(
+                actual < PLAUSIBLE_MAX_PPS,
+                "{row:?}: corrected rate still implausible: {actual:.2}"
+            );
+            // Guards against a mistyped `ttft_ms` literal, nothing more -- see the
+            // reconstruction note on this test.
+            assert!(
+                (raw - row.logged_pps).abs() / row.logged_pps < 0.01,
+                "{row:?}: ttft literal drifted from the logged line (raw {raw:.2} vs logged {:.2})",
+                row.logged_pps
+            );
+            measured.push((row, actual));
+        }
+        // Plan 03's T4 acceptance line: "the control row (cache 3200) moves least".
+        // Off the MEASURED rates, not the expected literals: a discount applied as a
+        // constant factor rather than a proportion flattens this ordering, and that is
+        // precisely the failure this catches.
+        let shrink = |r: &Row, rate: f64| (r.prompt as f64 / r.ttft_ms * 1000.0) / rate;
+        let (control, control_rate) = *measured.iter().find(|(r, _)| r.cached == 3_200).expect("control row present");
+        let control_shrink = shrink(&control, control_rate);
+        for (row, rate) in &measured {
+            if row.cached != 3_200 {
+                let s = shrink(row, *rate);
+                assert!(
+                    s > control_shrink,
+                    "{row:?}: shrank {s:.2}x, no more than the control row's {control_shrink:.2}x"
+                );
+            }
+        }
+    }
+
+    /// No cache reported is not "nothing cached" -- the numerator stays the full
+    /// prompt, because there is no evidence any of it was served from cache.
+    #[test]
+    fn vllm_prefill_is_verbatim_when_the_backend_reports_no_cache() {
+        assert_pps(
+            prefill_of(&vllm_response(21_001, None, 622, 1390.9384)),
+            15_098.44,
+            "21001 tok / 1390.9384 ms, no cache reported",
+        );
+    }
+
+    /// A measured zero cache hit leaves the rate verbatim. This pins the OUTCOME only:
+    /// routing `Some(0)` through the discount arm computes `p - 0` and prints the same
+    /// number, so no value assertion can separate it from the `.filter(|c| *c > 0)`
+    /// guard at the match head. That guard exists to stop the discount path logging
+    /// that it discounted zero tokens, and it is pinned by
+    /// `vllm_prefill_logs_at_the_level_its_case_deserves`, not here.
+    #[test]
+    fn vllm_prefill_is_verbatim_when_cache_is_measured_zero() {
+        assert_pps(
+            prefill_of(&vllm_response(21_001, Some(0), 622, 1390.9384)),
+            15_098.44,
+            "21001 tok / 1390.9384 ms, cache reported as 0",
+        );
+    }
+
+    /// `cached > prompt` is a backend data error. Saturating to zero would report a
+    /// prefill that ran at 0 tok/s (and `finite_rate_opt` maps that to `None`
+    /// anyway), and blanking is indistinguishable from "no split" on the wire -- both
+    /// delete a measurement. The uncorrected rate is the only honest survivor.
+    #[test]
+    fn vllm_prefill_is_verbatim_when_cache_exceeds_the_prompt() {
+        assert_pps(
+            prefill_of(&vllm_response(1_000, Some(5_000), 100, 500.0)),
+            2_000.0,
+            "1000 tok / 500 ms, cache 5000 > prompt (data error)",
+        );
+    }
+
+    /// `cached == prompt` is a legitimate FULL prefix cache hit, not a data error --
+    /// the same case `finite_rate_opt`'s doc names as reachable. Same verbatim
+    /// outcome, different reason, so it is pinned separately: this is the state where
+    /// the uncorrected number is most inflated, and the one that must not be treated
+    /// as backend misbehaviour.
+    #[test]
+    fn vllm_prefill_is_verbatim_on_a_full_prefix_cache_hit() {
+        assert_pps(
+            prefill_of(&vllm_response(50_000, Some(50_000), 100, 250.0)),
+            200_000.0,
+            "50000 tok / 250 ms, fully cached",
+        );
+    }
+
+    /// A cache figure with no prefill window is not a rate: no duration, no
+    /// measurement. Absent, never zero and never a guess off the wall clock.
+    #[test]
+    fn vllm_prefill_is_absent_when_ttft_is_missing_even_with_a_cache() {
+        let mut response = vllm_response(186_417, Some(182_400), 498, 321.583);
+        response["metrics"] = serde_json::json!({ "generation_time_ms": 2546.0 });
+        let m = prefill_of(&response);
+        assert_eq!(m, None, "no prefill window means no prefill rate");
+    }
+
+    /// The fabricated-split guard. A body carrying `metrics` but no usable
+    /// `prompt_tokens` has no prefill numerator, so there is no prefill rate to report
+    /// -- and the split flag must not be set from durations either, which is exactly
+    /// how `tps= 0.00/ 0.00` once reached a line whose label means *measured*. The
+    /// wall clock is present and non-zero here, so this also proves the `else if`
+    /// duration fallback does not leak a wall-derived prefill onto the `metrics` path.
+    #[test]
+    fn vllm_metrics_without_a_prompt_count_yield_no_prefill_rate() {
+        // The two rows differ in more than the numerator. `prompt_tokens: 0` still
+        // parses, so the OpenAI usage branch runs and `completion_tokens` survives;
+        // `prompt_tokens: null` fails `as_u64()`, which skips BOTH usage branches --
+        // so this body loses its completion count too and has no decode rate to
+        // report. That is `extract_usage`'s shape dispatch, not the discount, but it
+        // is recorded here because it is otherwise invisible.
+        for (prompt_json, decode_counted) in [("0", true), ("null", false)] {
+            let body = format!(
+                r#"{{"model":"cosmo-6000","usage":{{"prompt_tokens":{prompt_json},"completion_tokens":10}},
+                    "metrics":{{"time_to_first_token_ms":250.0,"generation_time_ms":100.0}}}}"#
+            );
+            let response: Value = serde_json::from_str(&body).unwrap();
+            let m = metrics_of(&response);
+            assert_eq!(m.prompt_tps, None, "prompt_tokens={prompt_json} produced a rate");
+            // ttft WAS parsed into prompt_ms, so a duration is present with no rate
+            // beside it -- the combination that used to force the flag true and put
+            // `tps= 0.00/...` on a line labelled *measured*. The flag tracks rates only.
+            assert!(m.prompt_ms > 0.0, "ttft should still be recorded as a duration");
+            assert_eq!(
+                m.has_timing_split,
+                m.prompt_tps.is_some() || m.generation_tps.is_some(),
+                "prompt_tokens={prompt_json}: split flag drifted from its rates"
+            );
+            assert_eq!(
+                m.generation_tps.is_some(),
+                decode_counted,
+                "prompt_tokens={prompt_json}: decode countedness changed unexpectedly"
+            );
+        }
+    }
+
+    /// In-file tracing capture (the `backends/node.rs` / `augment.rs` pattern):
+    /// thread-local `set_default` keeps this parallel-safe.
+    #[derive(Clone)]
+    struct CaptureWriter(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = Self;
+        fn make_writer(&self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    fn capture_logs<R>(f: impl FnOnce() -> R) -> (R, String) {
+        let buf = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter(tracing_subscriber::EnvFilter::new("off,llama_proxy::stats::collector=debug"))
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(CaptureWriter(buf.clone()))
+            .finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+        let r = f();
+        drop(_guard);
+        let captured = String::from_utf8(buf.lock().unwrap().clone()).unwrap();
+        (r, captured)
+    }
+
+    /// The four prefill cases collapse to two observable rates, so the ONLY thing
+    /// separating a legitimate full cache hit from a backend data error is the log
+    /// level -- and getting that backwards is a production incident either way: `warn!`
+    /// on a healthy full hit floods one line per request on the busiest traffic there
+    /// is, while `debug!` on `cached > prompt` hides a backend that is lying about its
+    /// token counts. Untestable from `RequestMetrics`, so it is asserted through a real
+    /// subscriber. Also pins the `Some(0)` path, which no value assertion can reach: a
+    /// zero cache must never claim in the log that it discounted anything.
+    #[test]
+    fn vllm_prefill_logs_at_the_level_its_case_deserves() {
+        let (_, logged) = capture_logs(|| {
+            metrics_of(&vllm_response(50_000, Some(50_000), 100, 250.0));
+        });
+        assert!(
+            logged.contains("full prefix cache hit"),
+            "full cache hit logged nothing, got: {logged:?}"
+        );
+        assert!(
+            !logged.contains("WARN"),
+            "a healthy full cache hit warned per request: {logged}"
+        );
+
+        let (_, logged) = capture_logs(|| {
+            metrics_of(&vllm_response(1_000, Some(5_000), 100, 500.0));
+        });
+        assert!(
+            logged.contains("WARN") && logged.contains("backend data error"),
+            "cached > prompt did not warn: {logged}"
+        );
+
+        let (_, logged) = capture_logs(|| {
+            metrics_of(&vllm_response(59_043, Some(51_200), 201, 1221.5584));
+        });
+        assert!(
+            logged.contains("prefill rated on non-cached tokens only"),
+            "the discount ran silently: {logged}"
+        );
+        assert!(!logged.contains("WARN"), "a normal cached request warned: {logged}");
+
+        let (_, logged) = capture_logs(|| {
+            metrics_of(&vllm_response(21_001, Some(0), 622, 1390.9384));
+        });
+        assert!(
+            !logged.contains("prefill rated on non-cached tokens only"),
+            "a zero cache was logged as a discount: {logged}"
+        );
+    }
+
+    /// THE shape guard. On the Anthropic usage shape `cached_tokens` comes from
+    /// `cache_read_input_tokens`, which is DISJOINT from `input_tokens` -- that is why
+    /// `context_used` there sums the three. Discounting it would subtract a prefix
+    /// that was never in the numerator and silently under-report prefill by the whole
+    /// cached amount, which the plausibility canary cannot see (it only catches rates
+    /// that are too HIGH). Stats are built from the backend's raw body, so an
+    /// Anthropic-format backend passing vLLM metrics through reaches this path.
+    #[test]
+    fn anthropic_cache_read_tokens_are_never_discounted_from_the_prompt() {
+        let response = serde_json::json!({
+            "model": "cosmo-6000",
+            "usage": {
+                "input_tokens": 50_000,
+                "completion_tokens": 100,
+                "cache_read_input_tokens": 10_000,
+                "cache_creation_input_tokens": 500,
+            },
+            "metrics": { "time_to_first_token_ms": 500.0, "generation_time_ms": 2546.0 },
+            "content": [{"type": "text", "text": ""}]
+        });
+        let m = RequestMetrics::from_response(&response, &serde_json::json!({"messages": []}), false, 3163.0);
+        assert_eq!(m.prompt_tokens, Some(50_000));
+        assert_eq!(m.cached_tokens, Some(10_000), "disjoint from the prompt");
+        // Verbatim 50000/500ms = 100k. The discount would have said 80k.
+        assert!(
+            m.prompt_tps.is_some_and(|v| (v - 100_000.0).abs() < 1.0),
+            "Anthropic shape was discounted: got {:?}",
+            m.prompt_tps
+        );
+        assert_ne!(m.prompt_tps, Some(80_000.0), "the disjoint cache was subtracted");
     }
 
     /// A null `metrics` (server without --enable-per-request-metrics) must fall
