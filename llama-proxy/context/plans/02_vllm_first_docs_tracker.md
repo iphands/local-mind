@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 50% complete (3/6 tasks)
+- Status: 67% complete (4/6 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/02_vllm_first_docs.md`
 - Evidence: doc-framing plan — evidence is the grep output each Verify prints (the claim flipping
@@ -41,7 +41,7 @@
 | 1 | T1: P3 read-only vendor rule + `rg --no-ignore` | `context/plans/RULES.md` | done | added at :262; wording corrected to reality (see Notes) |
 | 2 | T2: register vendor in context KB map | `context/CLAUDE.md` | done | Map + Findings rows; wording diverged from draft (see Notes) |
 | 3 | T3: gitignore `/vendor/`, observe ignore took | `.gitignore` | done | landed as `/vendor` (symlink cover); P3 state-sync follow-on |
-| 4 | T4: root CLAUDE.md vLLM-first | `CLAUDE.md` | pending | keep hands-plan block + Preservation List |
+| 4 | T4: root CLAUDE.md vLLM-first | `CLAUDE.md` | done | tagline/framing/vLLM-Extensions block landed; `../vendor/`+`examples/server` pointers → zero; hands-plan block + `../context/` notes refs untouched |
 | 5 | T5: README + fixrate vLLM-first | `README.md`, `fixrate.md` | pending | don't rename cited headings |
 | 6 | T6: triage docs + stamp PLAN.md obsolete | `PLAN.md` (+grep) | pending | stamp, don't delete |
 
@@ -62,6 +62,9 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-10-16 | `git status --porcelain vendor/` (post-T3) | empty, exit 0 (was `?? llama-proxy/vendor/`) | 1 | tree now git-ignored |
 | 2026-10-16 | rg blindness pair (observed, not asserted) | root `rg --files`→ grep `^vendor/`=**0**; `rg --no-ignore --files vendor`=**11212**; `RIPGREP_CONFIG_PATH=unset` | 1 | invisible to normal search, fully readable with `--no-ignore` — P3 recipe works |
 | 2026-10-16 | P3-sync verify: `ls vendor/*/.git`; `git -C vendor/<t> rev-parse HEAD`; `git add --dry-run vendor/vllm/README.md`; `git checkout -- vendor/…` | both `.git` present (vllm@`642c18d`, llama.cpp@`b6334e3`); `git add` **refused** ("Use -f"); outer `git checkout` errors "pathspec did not match" | 1 | proves the three review corrections before baking into the rule (inner repo is the revert path; ignore is outer-scoped) |
+| 2026-10-16 | `ls -la vendor/llama.cpp/tools/server/README.md`; `ls vendor/llama.cpp/examples`; `ls -l AGENTS.md` (`-ef` test); `find .. -name opencode_claude_llama_notes.md` | README.md = **117 KB, real**; `examples/` present but `tools/server/` is the live server; **AGENTS.md→CLAUDE.md same inode**; notes file **found: nowhere** | 1 | T4 ground-truth probe: settles the reviewer gitignore-artifact dispute (see Notes) — `vendor/` IS on disk; the pointer target `tools/server/` is correct |
+| 2026-10-16 | grep verify of reframed `CLAUDE.md`: `grep '\.\./vendor/'` + `grep 'examples/server'` + `grep -i vllm \| head -1` + hands-plan markers + `grep opencode_claude_llama_notes` | `../vendor/`=**0**, `examples/server`=**0**, first `vllm`=**L7 (Overview)**, block @298/317 intact, notes refs=**3** (L93/284/404, none in block) | 1 | dead `../vendor/` pointers eliminated, vLLM-first landed in Overview |
+| 2026-10-16 | `RUSTFLAGS='-D warnings' cargo check --workspace --features influxdb` + `cargo fmt --check` + `cargo test --workspace --lib` (post-T4) | check exit 0 (cached 0.20s); fmt exit 0; **915 passed** | 1 | T4 gate — no `.rs` touched (markdown-only), gate stays green |
 
 _(T3 ran: the `rg` blindness pair — root `^vendor/`=0 vs `--no-ignore` vendor=11212 — is recorded in the Evidence table above.)_
 
@@ -117,7 +120,36 @@ _(T3 ran: the `rg` blindness pair — root `^vendor/`=0 vs `--no-ignore` vendor=
    with no outer history to restore it. P3 now scopes "invisible" to the outer repo, gives the inner-
    repo revert + SHA commands, and bans `git clean -fdx`. The `.gitignore:7` comment was corrected to
    match (both reviewers: the two files must teach one recovery model). Pre-T3 wording is kept ONLY here
-   in the tracker (authoritative rule states current verified state + dated commit, no archaeology).
+    in the tracker (authoritative rule states current verified state + dated commit, no archaeology).
+- **(T4) The two reviewers disagreed on the one load-bearing fact, and it was a gitignore artifact —
+  `ls` settled it, not either reviewer.** hoodie asserted `vendor/` does not exist and recommended
+  pointing the doc at `../server/llamacpp/`; neckbeard first said the same, then caught its own blind
+  spot ("`vendor/` is gitignored, so glob-based verification silently returns nothing — use `ls`").
+  Both used glob/read tools that respect the ignore **T3 just landed** — so a missing tree was a tool
+  artifact, not reality. Ground truth (`ls`): `vendor/llama.cpp/tools/server/README.md` = 117 KB and
+  real; `AGENTS.md`→`CLAUDE.md` same inode (so hoodie's "sync the separate AGENTS.md" was moot). The
+  correct pointer is `vendor/llama.cpp/tools/server/` with **no `../`** (CLAUDE.md sits at
+  `llama-proxy/`, checkout at `llama-proxy/vendor/`), matching P3's own convention — hoodie's "dropping
+  `../` is a bug" was backwards. Overrides recorded here per the protocol (Rule E honesty: name where
+  a reviewer was overruled and why).
+- **(T4) Reviewers' substantive advice was adopted; one phrasing was refused on honesty.** Both agreed:
+  promote vLLM to a standalone `✅ **vLLM Extensions**` block (don't bury it under the llama.cpp
+  heading), drop the framing-note blockquote + rotting date, and say "re-ordering **plus pointer
+  corrections**" (not "re-ordering only" — the edit changes pointers and adds claims). neckbeard's open
+  check — are the vLLM claims real or aspirational? — was closed against source before writing:
+  `--enable-per-request-metrics` gates the per-request `metrics` split (`collector.rs:444/465/699`,
+  `streaming.rs:1833`) and `select_max_model_len` (never `data[0]`) drives the `/v1/models` tier
+  (`preflight.rs:289`, `context.rs:239`). **Refused:** hoodie's tagline "vLLM **by default**" — the
+  shipped default config points at `llama.cpp:8080`, so "by default" is a false runtime claim; conveyed
+  vLLM-first by list *order* + "primary **documented** backend" instead.
+- **(T4) New dead pointer found, deliberately NOT fixed (scope + no valid target).** Fixing the
+  `../vendor/` pointers surfaced that `../context/opencode_claude_llama_notes.md` — cited 3× (L93, L284,
+  L404) as "the comprehensive client notes" — **exists nowhere** (`find … -name` → nothing), at any
+  prefix: the file is gone, not mis-pathed. Left untouched: outside the human-approved `../vendor/`
+  scope, no valid target exists to repoint to (a prefix swap would still be dead), and deleting three
+  "see the comprehensive docs" references is a content call, not a mechanical fix. All three are
+  OUTSIDE the hands-plan managed block (L298–317), so it is safely editable whenever the human decides →
+  Follow-up below. (An earlier note wrongly said one sat *inside* the block; the block does not cite it.)
 
 ## Follow-ups
 
@@ -127,4 +159,5 @@ _(T3 ran: the `rg` blindness pair — root `^vendor/`=0 vs `--no-ignore` vendor=
 | Delete `PLAN.md` after human review (currently OBSOLETE-stamped) | Deletion is a human call; append-only until then | next resync / human |
 | Consider a "which backend gives me what" table (`/props`, `/slots`, `timings`, `metrics`, `vllm:cache_config_info`, `max_model_len`) in README | Single table answers most vLLM-first positioning questions | optional README follow-up |
 | **Fix the gate**: `justfile:16` + `RULES.md:122/124` use `cargo … -- -D warnings`, rejected by this cargo (`unexpected argument '-D' found`); `just gate` cannot pass as written | Reproducibility: every task's gate claim rests on this command; workaround is `RUSTFLAGS='-D warnings' cargo …` | separate bookkeeping commit (authoritative file — human sign-off first) |
-| Fix root `CLAUDE.md` "Reference Implementation" `../vendor/claude-code`, `../vendor/opencode`, `../vendor/llama.cpp` — resolve to a **nonexistent** `local-mind/vendor/`; real checkouts are `llama-proxy/vendor/{vllm,llama.cpp}` | Dead pointers misroute discovery work; P3 now warns against them | ride T4 (same file) or a later docs pass |
+| Fix root `CLAUDE.md` "Reference Implementation" `../vendor/claude-code`, `../vendor/opencode`, `../vendor/llama.cpp` — resolve to a **nonexistent** `local-mind/vendor/`; real checkouts are `llama-proxy/vendor/{vllm,llama.cpp}` | Dead pointers misroute discovery work; P3 now warns against them | **LANDED T4** — `../vendor/`→0; checkouts now `vendor/…` (no `../`), client code → upstream "not vendored here", llama.cpp→`tools/server/` |
+| Resolve the 3× dead `../context/opencode_claude_llama_notes.md` reference (`CLAUDE.md` L93/L284/L404) — `find` shows the file exists **nowhere** (deleted, not mis-pathed), so no prefix swap fixes it | Cited as "the comprehensive client notes"; a dead pointer an agent will trust and chase. Needs a content call (restore the file / rewrite the refs / drop them), not a path edit | human decision — all 3 refs are outside the hands-plan block, safe to edit once decided |

@@ -4,19 +4,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-`llama-proxy` is an HTTP reverse proxy for llama.cpp server that:
-- Proxies requests to llama-server's OpenAI-compatible API
+`llama-proxy` is an HTTP reverse proxy for **OpenAI-compatible LLM servers — vLLM, llama.cpp, or any compatible server** — that:
+- Proxies requests to the backend's OpenAI-compatible API
 - Fixes malformed LLM responses (specifically tool call issues from models like Qwen3-Coder)
 - Collects and logs performance metrics (tokens/sec, timing, context usage)
 - Exports metrics to external systems (InfluxDB)
 
+**Framing:** vLLM is the primary documented backend; llama.cpp and any OpenAI-compatible server remain fully supported, and the `llama-proxy` name is historical. This is a documentation re-framing (re-ordering plus pointer corrections) — **no proxy behavior changed**.
+
 ### Client Compatibility
 
-The proxy sits between **llama.cpp server** and AI client tools, supporting:
+The proxy sits between **an LLM backend (vLLM, llama.cpp, or any OpenAI-compatible server)** and AI client tools, supporting:
 
 **Supported Clients:**
-1. **Claude Code CLI/TUI** (`../vendor/claude-code`) - Anthropic's official Claude CLI
-2. **Opencode CLI/TUI** (`../vendor/opencode`) - Open-source AI coding assistant
+1. **Claude Code CLI/TUI** (upstream: [anthropics/claude-code](https://github.com/anthropics/claude-code) — not vendored here) - Anthropic's official Claude CLI
+2. **Opencode CLI/TUI** (upstream: [sst/opencode](https://github.com/sst/opencode) — not vendored here) - Open-source AI coding assistant
 3. **AnythingLLM** - Desktop AI app whose LocalAI provider speaks the OpenAI chat API and
    probes `POST /api/models/vram-estimate`, an endpoint no backend implements, so the proxy
    answers it itself (see the AnythingLLM block under "API Standards Supported")
@@ -27,6 +29,17 @@ The proxy sits between **llama.cpp server** and AI client tools, supporting:
   - Streaming via Server-Sent Events (SSE)
   - Tool calls in OpenAI format with index-based accumulation
   - All standard parameters (temperature, top_p, max_tokens, etc.)
+
+- ✅ **vLLM Extensions** (primary documented backend)
+  - Per-request `metrics` object carrying the measured prefill/generation tokens/sec split —
+    present only when vLLM runs with `--enable-per-request-metrics`; otherwise vLLM sends
+    `metrics: null` and the proxy falls back to the wall-bounded floor (`tps>=`) plus a cost rate
+    (`work=`), never a fabricated split (`src/stats/collector.rs`)
+  - `/v1/models` `max_model_len` is the advertised context window for backends that serve no
+    `/props` (i.e. everything except llama.cpp), chosen by `preflight::select_max_model_len` —
+    never `data[0]` (`src/proxy/context.rs`)
+  - `vllm:cache_config_info` gauge, surfaced as the nested `vllm` object of the AnythingLLM
+    `vram-estimate` answer (`src/kv_labels.rs`)
 
 - ✅ **llama.cpp Extensions**
   - `timings` object for performance metrics (prompt_n, predicted_n, tokens/sec)
@@ -264,9 +277,10 @@ curl -X POST http://localhost:8066/v1/chat/completions \
 
 **Reference Implementation:**
 For understanding how clients interact with the API:
-- Claude Code client code: `../vendor/claude-code/` (TypeScript/Node.js)
-- Opencode client code: `../vendor/opencode/packages/opencode/src/provider/sdk/copilot/` (TypeScript)
-- llama.cpp server API: `../vendor/llama.cpp/examples/server/` (C++)
+- Claude Code client code: upstream [anthropics/claude-code](https://github.com/anthropics/claude-code) (TypeScript/Node.js) — not vendored here
+- Opencode client code: upstream [sst/opencode](https://github.com/sst/opencode) (TypeScript) — not vendored here
+- llama.cpp server API: `vendor/llama.cpp/tools/server/` (C++) — read-only checkout, never `git add` (see `context/plans/RULES.md` P3)
+- vLLM OpenAI API source: `vendor/vllm/vllm/entrypoints/openai/` (Python) — read-only checkout, never `git add` (see `context/plans/RULES.md` P3)
 - Comprehensive client notes: `../context/opencode_claude_llama_notes.md`
 
 ## Configuration
@@ -388,6 +402,6 @@ When modifying the proxy, ensure these compatibility requirements:
 
 **When in Doubt:**
 - Consult `../context/opencode_claude_llama_notes.md` for client behavior
-- Check `../vendor/opencode/` for Opencode implementation patterns
-- Review `../vendor/llama.cpp/examples/server/README.md` for backend API
+- Check upstream [sst/opencode](https://github.com/sst/opencode) for Opencode implementation patterns — not vendored here
+- Review `vendor/llama.cpp/tools/server/README.md` for backend API (read-only checkout, never `git add`; see `context/plans/RULES.md` P3)
 - Prefer pass-through over modification (transparency principle)
