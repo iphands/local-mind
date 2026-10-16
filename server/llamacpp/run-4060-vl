@@ -2,7 +2,7 @@
 CTX=8192
 export CTX=16384
 # export MODEL="$1"
-export MODEL=models/gguf/Qwen3-VL-8B-Instruct-UD-Q4_K_XL.gguf
+export MODEL=models/gguf/Qwen3-VL-8B-Instruct-UD-Q5_K_XL.gguf
 
 export PORT=8701
 export NAME=llama-server-4060
