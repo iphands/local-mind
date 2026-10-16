@@ -9,6 +9,12 @@ test:
 test-all:
 	cargo test --workspace
 
+gate-quick:
+	cargo check --workspace && cargo fmt --check
+
+gate:
+	cargo check --workspace --features influxdb -- -D warnings && cargo clippy --all-targets --features influxdb -- -D warnings && cargo fmt --check && cargo test --workspace --lib
+
 run:
   cargo run --features influxdb --release run --hide-requests
 
