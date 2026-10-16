@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 57% complete (4/7 tasks)
+- Status: 71% complete (5/7 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/03_columnar_stats_honest_prefill.md`
 - Evidence: `captures/vllm_metrics_2026-10-16_*.json` (gitignored, RULES P2) for the backend payload;
@@ -84,7 +84,7 @@
 | 2 | T2: Write the columnar contract as a red test | `src/stats/formatter.rs` | done | lands `#[ignore]`d; **34 cells red**, all genuine and all clearable by T6; golden positive control added (ASCII + CJK) and it caught a wrong *expectation* |
 | 3 | T3: Make an unmeasured rate absent, not zero | `src/stats/collector.rs`, `src/exporters/influxdb.rs`, `src/stats/formatter.rs` | done | `prompt_tps`/`generation_tps` → `Option<f64>`; `total_tps`/`decode_tps_min` stay `f64`. **Beyond plan:** compact tier-1 gate moved onto decode-presence, `pretty` follows it, one `tps_tier()` predicate, 4 lying fixtures fixed, gate gained the feature-on test line |
 | 4 | T4: Correct the vLLM prefill rate for prefix-cache hits | `src/stats/collector.rs` | done | five Context rows reproduce 6,421 / 12,797 / 13,021 / 11,748 / 12,491 tok/s within ±1% (worst drift 0.008%), none above 15k; control row verified as the smallest shrink **off measured rates**, not the expected literals; discount gated to the OpenAI usage shape, with the Anthropic disjoint-cache case counter-tested; confirmed on live traffic (warm prints 14,257 corrected vs 22,025 raw) |
-| 5 | T5: Add the prefill plausibility canary | `src/exporters/mod.rs`, `src/proxy/handler.rs`, `src/config/mod.rs` | pending | first-WARN-then-1-in-100; counter exact |
+| 5 | T5: Add the prefill plausibility canary | `src/exporters/mod.rs`, `src/proxy/handler.rs`, `src/config/mod.rs` | done | counter exact, WARN first-then-1-in-100 off a shared `warns_at`; default **raised to 50,000** (human decision, plan said 15,000 — within 2% of the measured engine rate); non-finite threshold rejected at load; `/proxy/metrics` HELP pinned to `StatsConfig::default()`; two derived WARN fields **removed during review**, see Notes |
 | 6 | T6: Rewrite `format_compact` against the contract | `src/stats/formatter.rs` | pending | pinned head, free tail, `cache=` last |
 | 7 | T7: Regenerate the docs from the rendered line and harvest the lesson | `README.md`, `CLAUDE.md`, `context/pitfalls.md` | pending | delete `README.md:334`; pin the README example with a test |
 
@@ -116,6 +116,16 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-10-16 | **mutation:** delete `.filter(\|c\| *c > 0)` from the discount | the log-level test FAILS — `a zero cache was logged as a discount` — while `vllm_prefill_is_verbatim_when_cache_is_measured_zero` stays **green** | 1 | **[OBSERVED]** proves the measured-zero test was vacuous on its own (a `p−0` subtraction prints the same number) and that the log assertion is the only real pin for that guard — exactly the false-confidence neckbeard flagged, now closed by evidence |
 | 2026-10-16 | T4 gate: `RUSTFLAGS='-D warnings'` + check / clippy `--all-targets` / fmt / **test twice** | exit 0; **934 passed / 0 failed / 1 ignored** feature-off and **956 / 0 / 1** feature-on | 1 | baseline 925 / 947; **+9 tests** authored, both feature states agree on the delta |
 | 2026-10-16 | `cargo test --lib stats::formatter -- --ignored` after T4 | 1 failed, **34 cell(s) wrong** — profile identical to T2 and T3 | 1 | T4 touched only the collector's prefill numerator; the head contract is untouched, so the 34 remain exactly T6's |
+| 2026-10-16 | T5 gate: `RUSTFLAGS='-D warnings'` + check / clippy `--all-targets --features influxdb` / fmt / **test twice** | exit 0; **949 passed / 0 failed / 1 ignored** feature-off and **971 / 0 / 1** feature-on | 1 | baseline 934 / 956; **+15 tests** authored (10 `exporters`, 2 `config`, 2 `loader`, 1 `handler` render), both feature states agree on the delta |
+| 2026-10-16 | `cargo test --lib stats::formatter -- --ignored` after T5 | 1 failed, **34 cell(s) wrong** — profile identical to T2, T3 and T4 | 1 | T5 adds no formatter surface; the 34 stay exactly T6's, asserted rather than assumed |
+| 2026-10-16 | **mutation:** canary comparison `>` → `>=` | `prefill_canary_leaves_a_rate_at_or_below_the_threshold_alone` FAILS | 1 | **[OBSERVED]** the boundary is exclusive and load-bearing: at-threshold is healthy, not a trip |
+| 2026-10-16 | **mutation:** disable guard `> 0.0` → `>= 0.0` | `prefill_canary_is_off_at_zero_and_below` FAILS | 1 | **[OBSERVED]** `0` really does disable; without the guard a zero threshold counts every sample with a rate |
+| 2026-10-16 | **mutation:** WARN gated to `StatsFormat::Compact` only | `prefill_canary_arms_on_every_stats_format` FAILS | 1 | **[OBSERVED]** the canary is format-independent; a format-scoped check would go silent for the two non-compact formats, `pretty` being the **default** |
+| 2026-10-16 | **mutation:** `prompt_tps.or(Some(999_999.0))` | `prefill_canary_says_nothing_about_a_sample_with_no_prefill_rate` FAILS | 1 | **[OBSERVED]** absence is never promoted to a trip: a sample with no prefill rate is not evidence of an implausible one |
+| 2026-10-16 | **mutation:** increment the counter on the export-**skip** path too | `an_unexportable_sample_never_reaches_the_canary` FAILS | 1 | **[OBSERVED]** the counter means "an **exported** sample tripped", which is what makes it reconcile with InfluxDB row counts rather than with request counts |
+| 2026-10-16 | **mutation:** drop `occurrence == 1` from `warns_at` | `sampled_warnings_fire_first_then_every_interval` FAILS | 1 | **[OBSERVED]** the first occurrence always logs, so a single-trip anomaly is never invisible; only the tail is sampled |
+| 2026-10-16 | **mutation:** WARN identity field `model = ?…` → `%…` | `a_newline_in_the_model_name_cannot_forge_a_second_line_in_the_canary_warn` FAILS | 1 | **[OBSERVED]** `model` is client-supplied; Display writes a newline raw and the request forges its own log line — the F12-R4 line-protocol class |
+| 2026-10-16 | **mutation:** delete `\|\| prompt_tps.is_some_and(\|v\| v > 0.0)` from `has_throughput_signal` | **3** FAIL — `an_implausible_prefill_rate_is_counted_and_never_skipped`, `test_has_throughput_signal_needs_a_token_count_or_a_rate`, `timings_rate_without_counts_keeps_none_counts_and_real_signal` | 1 | **[OBSERVED, CORRECTED]** the disjunct is load-bearing on both sides of the seam at once. My **first** claim for this mutation was "fails only the new coupling test" — wrong, and neckbeard's challenge is what caught it: the two collector tests are the pre-existing pins. Reverted, `git diff` clean |
 | | | | | |
 
 *(T1 adds the captured payload rows here; T4 adds the post-fix rates from a real run, with the build
@@ -241,6 +251,45 @@ said T3 was a type change; it became a display-semantics change, and every step 
   flipped gate was red on arrival — kept in this commit because the gate update that exposed it is
   mandated by this task.
 
+**Deviation / T5 review record** — both reviewers, on the canary. Three of the four items below are
+reviewers removing things I had added, which is the only kind of review worth recording.
+
+- **The default moved 15,000 → 50,000 by explicit human decision**, not unilaterally (Rule E; the
+  threshold row in Evidence says why it had to move: 15k sat within 2% of the measured 14,765 tok/s
+  engine compute rate, so healthy warm traffic tripped it). **The cost of that choice, stated
+  plainly:** at 50,000 the canary does **not** fire on the very inflation T4 fixed — the raw warm
+  figure was 22,024.67, only ~1.5x the truth. It catches gross fabrication (the 880k-class llama.cpp
+  cached-token inflation), not a 1.5x overstatement. That is the "dead and silent" failure mode in
+  the plan's own framing, accepted knowingly: it is now spelled out numerically in `README.md`,
+  `config.yaml.default` and the `/proxy/metrics` HELP rather than left for an operator to discover.
+- **Two derived WARN fields were shipped and then deleted** — `uncached_tokens` and
+  `implied_prefill_ms`. Both looked useful; neither survived contact with the collector.
+  - `uncached_tokens` was `prompt_tokens − cached_tokens`. neckbeard: that subtraction is only sound
+    when the cache is a **subset** of the prompt. On the Anthropic shape it is **disjoint** —
+    `extract_usage` sets `prompt_tokens = input_tokens` alone (the three-field sum goes to
+    `context_used`, not to `prompt_tokens`), while `cached_tokens` is `cache_read_input_tokens`,
+    which `input_tokens` already excludes. So the WARN would subtract a prefix that was never in the
+    numerator: the exact error the collector guards with `cache_is_a_subset`. hoodie defended the
+    subtraction on the premise that Anthropic `prompt_tokens` is the sum; the source line above
+    refutes the premise, so the defense is on record and rejected.
+  - `implied_prefill_ms` was `uncached / prompt_tps × 1000`, meant as a cross-check. hoodie: it is
+    **tautological** — vLLM's path sets `prompt_ms = time_to_first_token_ms` and `prompt_tps =
+    numerator / time_to_first_token_ms`, so dividing the rate back out reproduces `prompt_ms`, a
+    field already on the same line. A number that cannot disagree with its neighbour is not a check.
+  - The WARN now prints the five raw fields (`prompt_tokens`, `cached_tokens`, `prompt_ms`,
+    `duration_ms`, `prompt_tps`) and the operator does the comparison. The deletion is **pinned** by
+    a negative assertion plus an in-code comment citing both proofs, so a future "helpful" re-add
+    fails a test rather than passing review.
+- **Three operator-facing lies removed from the HELP text**, all caught by hoodie reading the rendered
+  text rather than the code: `WAS logged` (the WARN is 1-in-100 — only the INFO line and the export
+  are unconditional), a hardcoded `1 in 100` (would keep saying 100 after anyone retunes
+  `WARN_SAMPLE_INTERVAL`; the WARN line itself now interpolates the constant, and a test asserts the
+  two agree), and `--dump does not count` (misleading causality — the counter is off because
+  `stats.enabled: false` builds no sample at all, not because of `--dump`).
+- **My own evidence was wrong once and a reviewer caught it.** The `has_throughput_signal` mutation
+  was reported as killing one test; the re-run kills three. The claim had been made from the new
+  test's name rather than from the run output. Recorded in Evidence with `[OBSERVED, CORRECTED]`.
+
 ## Follow-ups
 
 | Follow-up | Why | Lands in |
@@ -258,3 +307,4 @@ said T3 was a type change; it became a display-semantics change, and every step 
 | `extract_usage` silently loses `completion_tokens` when `prompt_tokens` is JSON `null` | discovered by a T4 test, not looked for: `usage.get("prompt_tokens").and_then(as_u64)` returns `None` on `null`, so **neither** the OpenAI nor the Anthropic branch runs and a valid completion count disappears with the prompt count — taking the decode rate with it. Nothing is fabricated, so it is a silent loss rather than a lie. Conforming OpenAI/vLLM backends emit `0`, never `null`, so the trigger is a nonconforming body: **LOW**, and pinned as current behavior by `vllm_metrics_without_a_prompt_count_yield_no_prefill_rate` until it is fixed | a later stats plan (neckbeard, T4 review) |
 | Derive the "cache is a subset of prompt" fact **once** instead of re-testing `usage.prompt_tokens.is_some()` in `extract_vllm_usage` | the shape predicate now exists in two places — `extract_usage`'s branch selection and the discount's `cache_is_a_subset` gate. They agree today; if shape detection ever widens or reorders, the discount silently subtracts a disjoint cache and under-states prefill, which the T5 canary cannot catch because it only fires high. `extract_usage` should record the fact (a flag or a small `UsageShape` enum) and the discount should read it | a later stats plan (hoodie, T4 review) |
 | Consolidate the now-**6** in-file `CaptureWriter`/`capture_logs` copies behind one `#[cfg(test)]` helper parameterised by `EnvFilter` | copies in `augment.rs`, `collector.rs`, `context.rs`, `registry.rs`, `exporters/mod.rs`, `node.rs`; bodies are identical except the module-specific target filter, which is why a shared version needs the filter as a parameter. Not done in T4: a cross-module test utility is a second deliverable inside a one-task commit. Both reviewers accepted the duplication **for now** — do it before copy #7 | a later test-hygiene pass |
+| Give `RequestMetrics` the collector's cache-**shape** fact (the flag/enum already proposed two rows up) and let the canary's WARN read it | T5 deleted `uncached_tokens` for exactly this gap: the WARN runs after `extract_usage` picked a shape and cannot tell subset-cache from disjoint-cache, so it may print no cache arithmetic at all. The same flag serves both consumers — the discount gate and the WARN — which is why this is one row and not a re-proposal of the deleted field | a later stats plan (neckbeard, T5 review) |

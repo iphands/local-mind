@@ -146,6 +146,7 @@ backend:
 # stats:
 #   enabled: true
 #   format: "pretty"
+#   max_plausible_prefill_tps: 50000.0
 # The throughput cell has three tiers, and which one you see is a fact about the
 # backend, not the request: `tps=PREFILL/DECODE` is measured (llama.cpp `timings`,
 # or vLLM `metrics` with --enable-per-request-metrics). With no backend split you
@@ -156,6 +157,22 @@ backend:
 # is prompt tokens the engine served from its prefix cache: a discount on M.
 # These lines carry the `llama_proxy::stats` target, so
 # `RUST_LOG=llama_proxy::stats=info` selects them and nothing else.
+# max_plausible_prefill_tps is a CANARY, not a fault threshold. A prefill rate above it is
+# counted in llama_proxy_stats_prefill_implausible_total on /proxy/metrics - counted exactly,
+# while the WARN is only the first occurrence and then one in a fixed interval (the WARN line
+# prints that interval), so the counter and not the log is the reconciliation number. A
+# non-zero counter does NOT mean the backend is broken: a full prefix-cache hit is counted with
+# its prefix UN-discounted by design and is an EXPECTED trip - compare cached_tokens with
+# prompt_tokens on that line before believing anything. The 50000.0 default is sized from this
+# box (engine compute 14,765 tok/s, corrected warm runs 12.8k-14.3k, so ~3.4x headroom). Size
+# yours by MEASURING, because it fails in BOTH directions: below ~2x your real engine rate it
+# warns on healthy traffic forever, and if your engine is genuinely faster than the threshold
+# the canary is simply DEAD and never fires - the silent one, and note how blind that leaves
+# you: at 50000.0 a 22,000 tok/s prefill on a 14,765 tok/s box (~1.5x overstated) is not
+# counted at all. 0.0 or negative disables the canary ENTIRELY, counter included - this is not
+# a log-only mute. It counts only while stats.enabled is true, because with stats off the
+# sample is never built. It is process-global, resets on restart and is never exported, so a
+# zero after a restart proves nothing.
 # Note: each request's context_total is the backend's advertised window (/props n_ctx, else
 # /v1/models max_model_len), probed at most once per backend and cached — the cache expires after
 # 600s, or immediately if that backend is marked failed. The 2s probe bound and the cache lifetime

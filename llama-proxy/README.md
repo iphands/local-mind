@@ -880,6 +880,53 @@ pass-through paths, which is why it does not match
 filter itself: load the proxy never observed no longer reaches InfluxDB, so remote
 token totals under-count actual backend work by roughly the skipped count.
 
+### A prefill rate that looks too good to be true
+
+If the `tps=PREFILL/DECODE` cell reports a prefill rate your hardware could not
+physically produce, the proxy flags it: any exported sample whose prefill rate exceeds
+`stats.max_plausible_prefill_tps` (default `50000` tok/s) increments
+`llama_proxy_stats_prefill_implausible_total` on `/proxy/metrics`.
+
+**Treat it as a canary, not a fault.** The most common trip is entirely expected: on a
+**full prefix-cache hit** vLLM reports `cached_tokens == prompt_tokens`, and the proxy
+deliberately leaves that rate un-discounted, because claiming it computed zero tokens is
+not a number it can stand behind (a *partial* hit is discounted — see the `cache=` cell).
+That un-discounted rate is also the most inflated figure the proxy can honestly report. So
+compare `cached_tokens` against `prompt_tokens` on the WARN line before believing anything
+is broken: at or near equal, that is the cache case. If `cached_tokens=n/a` the backend
+reports no prefix cache at all, and the WARN genuinely cannot separate benign from wrong —
+judge `prompt_tps` against your own measured engine rate instead.
+
+The WARN carries the raw fields and **no derived cache arithmetic**, deliberately. A
+`prompt_tokens - cached_tokens` figure would be wrong on half the traffic: on the Anthropic
+`/v1/messages` shape `cached_tokens` is `cache_read_input_tokens`, which `input_tokens`
+already excludes, so the subtraction removes a prefix that was never counted in the first
+place. The collector knows which shape it is holding; a log line printed later does not. And
+any "implied prefill duration" divided back out of the rate is just `prompt_ms` again — the
+rate *is* tokens over that same first-token interval. Compare the two printed numbers
+instead. Run with `RUST_LOG=llama_proxy::stats=debug` and the collector's own
+full-cache-hit line appears too, from the code that does know the shape.
+
+Like its sibling above, this counter is **exact while the log is sampled** (first
+occurrence, then one in a fixed interval — the WARN line prints the interval it used), so do
+not hunt the log for a specific request; it only moves when `stats.enabled: true`, because a
+run with stats off builds no sample at all; and it is process-global and **resets on
+restart**, so a zero after a deploy proves nothing. It is never exported to InfluxDB — but
+the rate that tripped it is: that number ships to your dashboard as a measured
+`prompt_tps`, which is exactly why the canary is worth having.
+
+Size the threshold by **measuring**, not by guessing, because it fails in both
+directions: set below roughly 2x your real engine prefill rate and it warns on healthy
+traffic forever, while an engine genuinely faster than the threshold leaves the canary
+**dead and silent** — the worse failure, because it looks like health. Concretely: on a box
+whose engine computes 14,765 tok/s, the `50000` default does **not** fire at a 22,000 tok/s
+prefill figure, even though that is ~1.5x what the hardware can do. The default comes from
+this deployment's own measurements (engine compute 14,765 tok/s, corrected warm runs
+clustering 12.8k–14.3k, so ~3.4x headroom); send one long uncached prompt, read the prefill
+figure off the compact line, and set yours from that. `0.0` or any negative value disables
+the canary **entirely** — the counter stops too, this is not a log-only mute — and a
+non-finite value (`inf`, `nan`) is rejected at load rather than silently disabling it.
+
 ### AnythingLLM assumed an 8192-token window
 
 AnythingLLM's LocalAI provider asks the server how large the context window is by POSTing

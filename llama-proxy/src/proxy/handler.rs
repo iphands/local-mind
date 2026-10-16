@@ -1025,6 +1025,7 @@ impl ProxyHandler {
                 self.state.fix_registry.clone(),
                 self.state.config.stats.enabled,
                 self.state.config.stats.format,
+                self.state.config.stats.max_plausible_prefill_tps,
                 self.state.exporter_manager.clone(),
                 request_json,
                 start,
@@ -1212,7 +1213,10 @@ impl ProxyHandler {
                         llama_proxy_reprompt_exhausted_total {}\n\
                         # HELP llama_proxy_context_cache_evictions_total Times a cached context window was evicted because its backend was marked failed, so the next request re-probes the (possibly restarted) backend instead of serving a stale window. Fast path for a backend restarted with a new -c; the cache TTL is the backstop. Resets on restart.\n\
                         # TYPE llama_proxy_context_cache_evictions_total counter\n\
-                        llama_proxy_context_cache_evictions_total {}\n",
+                        llama_proxy_context_cache_evictions_total {}\n\
+                        # HELP llama_proxy_stats_prefill_implausible_total Exported samples whose prefill rate exceeded stats.max_plausible_prefill_tps (default 50000 tok/s; 0 or negative disables the canary ENTIRELY, counter included — this is not a log-only mute; and a threshold set ABOVE your engine's real rate never fires at all, which is a third way a zero is not evidence of health, alongside the sampling and stats-off cases named below). Counted exactly, but only the first occurrence and then one in a fixed interval emit a WARN, and that interval is printed on the WARN line itself, so the absence of log lines is not evidence of health. A CANARY, not a fault counter: a full prefix-cache hit is counted with its prefix un-discounted by design and trips it legitimately, and a threshold set below your engine's real prefill rate trips on healthy traffic forever. Unlike llama_proxy_metrics_export_skipped_total, a sample counted here WAS exported and WAS printed at INFO — only the WARN line is sampled. Counts only while the stats path runs, which means stats.enabled: true — with stats off the sample is never built, so the counter sits at zero and that silence is NOT evidence of health. Resets on restart; never exported to InfluxDB.\n\
+                        # TYPE llama_proxy_stats_prefill_implausible_total counter\n\
+                        llama_proxy_stats_prefill_implausible_total {}\n",
                      fallback_hits,
                      concurrent,
                      rejected,
@@ -1236,6 +1240,7 @@ impl ProxyHandler {
                        crate::proxy::reprompt::reprompt_triggered_total(),
                        crate::proxy::reprompt::reprompt_exhausted_total(),
                        crate::proxy::context::context_cache_evictions_total(),
+                       l(&crate::exporters::PREFILL_IMPLAUSIBLE_TOTAL),
                   );
 
                 RouteDecision::Handled(
@@ -1818,7 +1823,11 @@ impl ProxyHandler {
         // The gate logs the sample and decides whether it is fit to export.
         if let Some(ref mut m) = metrics {
             m.concurrent_requests = Some(self.state.concurrent_requests.load(Ordering::Relaxed));
-            if crate::exporters::log_sample_and_should_export(m, self.state.config.stats.format) {
+            if crate::exporters::log_sample_and_should_export(
+                m,
+                self.state.config.stats.format,
+                self.state.config.stats.max_plausible_prefill_tps,
+            ) {
                 // Export to remote systems
                 let exporters = self.state.exporter_manager.clone();
                 let metrics_clone = m.clone();
@@ -2137,6 +2146,7 @@ mod tests {
             stats: crate::config::StatsConfig {
                 enabled: false,
                 format: crate::config::StatsFormat::Pretty,
+                max_plausible_prefill_tps: 0.0,
             },
             exporters: crate::config::ExportersConfig {
                 influxdb: crate::config::InfluxDbConfig {
@@ -2462,6 +2472,7 @@ mod tests {
             stats: crate::config::StatsConfig {
                 enabled: true,
                 format: crate::config::StatsFormat::Compact,
+                max_plausible_prefill_tps: 0.0,
             },
             exporters: crate::config::ExportersConfig {
                 influxdb: crate::config::InfluxDbConfig {
@@ -2993,6 +3004,51 @@ mod tests {
                 "{name} must render a value line"
             );
         }
+    }
+
+    /// The canary counter is the only operator-visible record of what the check did - the
+    /// WARN is sampled and the counter resets on restart - so it goes through the same
+    /// helper as its siblings: a `format!` with two dozen positional placeholders can
+    /// mislabel a counter without failing anything, and a series without `# TYPE` is not
+    /// scrapeable. Its HELP repeats the default and the conditions under which the counter
+    /// moves, so both are pinned to code rather than left to drift: the default against
+    /// `StatsConfig::default()`, and the reach against what the call sites really do
+    /// (`stats.enabled` only - with stats off no sample is built, so naming `--dump` would
+    /// teach an operator to read a meaningless zero as health).
+    #[tokio::test]
+    async fn prefill_canary_counter_renders_with_honest_help() {
+        use crate::proxy::test_support::scripted_backend;
+        const CANARY: &str = "llama_proxy_stats_prefill_implausible_total";
+
+        let (port, _state) = scripted_backend(shim_backend_routes(32_768)).await;
+        let handler = handler_with_balancer(
+            Arc::new(RoundRobinBalancer::new(vec![node_at_port(port)]).unwrap()),
+            None,
+            StreamingMode::default(),
+        );
+
+        let metrics = scrape_proxy_metrics(&handler).await;
+        prometheus_counter(&metrics, CANARY);
+
+        let help = metrics
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("# HELP {CANARY} ")))
+            .unwrap_or_else(|| panic!("{CANARY} needs a HELP line:\n{metrics}"));
+        let default = crate::config::StatsConfig::default().max_plausible_prefill_tps;
+        assert!(
+            help.contains(&format!("default {default:.0} tok/s")),
+            "the HELP text's advertised default drifted from StatsConfig::default() \
+             ({default}): {help}"
+        );
+        assert!(
+            help.contains("stats.enabled"),
+            "the HELP must say when the counter moves at all: {help}"
+        );
+        assert!(
+            !help.contains("--dump"),
+            "the counter does not move under --dump, because stats off builds no sample; \
+             the HELP must not imply otherwise: {help}"
+        );
     }
 
     /// ACCEPTED AND DOCUMENTED limitation, pinned on purpose: model routing happens in
@@ -5276,6 +5332,7 @@ mod tests {
             stats: crate::config::StatsConfig {
                 enabled: true,
                 format: crate::config::StatsFormat::Compact,
+                max_plausible_prefill_tps: 0.0,
             },
             exporters: crate::config::ExportersConfig {
                 influxdb: crate::config::InfluxDbConfig {

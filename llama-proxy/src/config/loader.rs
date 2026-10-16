@@ -26,6 +26,7 @@ pub fn load_config<P: AsRef<Path>>(path: P) -> Result<AppConfig, ConfigError> {
     validate_reprompt(config.reprompt.as_ref())?;
     validate_backends(&config)?;
     validate_synthesis(&config.synthesis)?;
+    validate_stats(&config.stats)?;
     if let Some(ref augment) = config.augment_backend {
         validate_http_url(&augment.url, "Augment backend")?;
         require_nonempty(&augment.model, "augment-backend model")?;
@@ -64,6 +65,22 @@ fn validate_reprompt(rep: Option<&super::RepromptConfig>) -> Result<(), ConfigEr
         require_nonempty(sentinel, "reprompt done_sentinels entry")?;
     }
     validate_reprompt_max_total_ms(r.max_total_ms)
+}
+
+/// `0.0` and any negative value are the documented off switch, so only finiteness is
+/// checkable - and `.inf` is the case that MUST be rejected: it passes the canary's
+/// `> 0.0` arm, installs a threshold no rate can ever exceed, and therefore reads as a
+/// configured canary that is permanently dead. That is worse than `0.0`, which says "off"
+/// out loud. NaN disables silently for the same reason. Both are operator typos, and
+/// `check-config` is the only place they can still be fixed on the day they are written.
+fn validate_stats(stats: &super::StatsConfig) -> Result<(), ConfigError> {
+    if !stats.max_plausible_prefill_tps.is_finite() {
+        return Err(ConfigError::Validation(format!(
+            "stats.max_plausible_prefill_tps {} is not a finite number; use a rate, or 0.0 to disable the canary",
+            stats.max_plausible_prefill_tps
+        )));
+    }
+    Ok(())
 }
 
 fn validate_backends(config: &AppConfig) -> Result<(), ConfigError> {
@@ -276,6 +293,77 @@ exporters:
                 msg.contains("batch_size") || msg.contains("flush_interval_seconds"),
                 "{key}: {msg}"
             );
+
+            let _ = std::fs::remove_file(&temp_file);
+        }
+    }
+
+    /// A canary threshold that is not a number is a dead canary wearing a configured
+    /// face: `.inf` clears the canary's `> 0.0` arm but no rate can exceed it, and `.nan`
+    /// disables silently. Both must fail at LOAD, because check-config is the only place
+    /// the typo is still fixable on the day it is written. Reaching the validator at all
+    /// requires a backend, or validate_backends rejects the file first.
+    #[test]
+    fn test_non_finite_prefill_canary_threshold_is_rejected() {
+        for value in [".inf", "-.inf", ".nan"] {
+            let temp_file = scratch(&format!("stats_canary_{value}.yaml").replace(|c: char| !c.is_alphanumeric(), "_"));
+            std::fs::write(
+                &temp_file,
+                format!(
+                    r#"
+server:
+  port: 8066
+  host: "127.0.0.1"
+
+backend:
+  url: "http://localhost:8080"
+
+stats:
+  enabled: true
+  max_plausible_prefill_tps: {value}
+"#
+                ),
+            )
+            .unwrap();
+
+            let err = load_config(&temp_file).expect_err(&format!("{value} must be rejected, not silently disabled"));
+            let msg = err.to_string();
+            assert!(msg.contains("max_plausible_prefill_tps"), "{value}: {msg}");
+            assert!(msg.contains("not a finite number"), "{value}: {msg}");
+
+            let _ = std::fs::remove_file(&temp_file);
+        }
+    }
+
+    /// The off switch must survive the loader: `0.0` is the documented way to silence
+    /// the canary, so rejecting it would leave "disable it" and "load the config" with
+    /// no overlap. Negative is off too, and is not a validation error.
+    #[test]
+    fn test_disabling_the_prefill_canary_loads() {
+        for value in ["0.0", "-1.0"] {
+            let temp_file = scratch(&format!("stats_canary_off_{value}.yaml").replace(|c: char| !c.is_alphanumeric(), "_"));
+            std::fs::write(
+                &temp_file,
+                format!(
+                    r#"
+server:
+  port: 8066
+  host: "127.0.0.1"
+
+backend:
+  url: "http://localhost:8080"
+
+stats:
+  enabled: true
+  max_plausible_prefill_tps: {value}
+"#
+                ),
+            )
+            .unwrap();
+
+            let config =
+                load_config(&temp_file).unwrap_or_else(|e| panic!("{value} is the documented off switch and must load: {e}"));
+            assert_eq!(config.stats.max_plausible_prefill_tps, value.parse::<f64>().unwrap());
 
             let _ = std::fs::remove_file(&temp_file);
         }

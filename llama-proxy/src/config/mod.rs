@@ -302,10 +302,27 @@ pub struct StatsConfig {
     pub enabled: bool,
     #[serde(default)]
     pub format: StatsFormat,
+    /// Prefill rates above this are counted in
+    /// `llama_proxy_stats_prefill_implausible_total` and WARNed (first occurrence, then
+    /// 1 in 100). It is a CANARY, not a fault threshold: a full prefix-cache hit is
+    /// counted with its prefix un-discounted by design (see `extract_vllm_usage`) and is
+    /// an EXPECTED trip. Measured on the deployment box: engine compute 14,765 tok/s,
+    /// corrected warm runs 12.8k-14.3k -- so the 50k default leaves ~3.4x headroom.
+    /// Setting it below ~2x a deployment's own measured engine rate makes it warn on
+    /// healthy traffic forever. `0.0` (or any negative value) disables the canary.
+    #[serde(default = "default_max_plausible_prefill_tps")]
+    pub max_plausible_prefill_tps: f64,
 }
 
 fn default_stats_enabled() -> bool {
     true
+}
+
+/// 50k, not the 15k Plan 03 originally specified: T4 measured this box's true prefill
+/// rate at 14,765 tok/s and a healthy warm request at 14,257, which put a 15k threshold
+/// within 2% of normal traffic. Human decision, recorded in the Plan 03 tracker Deviations.
+fn default_max_plausible_prefill_tps() -> f64 {
+    50_000.0
 }
 
 impl Default for StatsConfig {
@@ -313,6 +330,7 @@ impl Default for StatsConfig {
         Self {
             enabled: default_stats_enabled(),
             format: StatsFormat::default(),
+            max_plausible_prefill_tps: default_max_plausible_prefill_tps(),
         }
     }
 }
@@ -886,9 +904,38 @@ mod tests {
         let config = StatsConfig {
             enabled: true,
             format: StatsFormat::Json,
+            max_plausible_prefill_tps: default_max_plausible_prefill_tps(),
         };
         assert!(config.enabled);
         assert!(matches!(config.format, StatsFormat::Json));
+    }
+
+    /// `deny_unknown_fields` rejects keys unknown to the struct, so a NEW field carrying a
+    /// serde default must be optional rather than required -- otherwise every config
+    /// written before the canary existed stops loading. This is the backward-compat
+    /// witness for that: an old `stats:` block still parses, and lands on the default.
+    #[test]
+    fn stats_config_without_the_canary_key_keeps_the_default() {
+        let config: StatsConfig = serde_yaml::from_str("enabled: true\nformat: json\n").unwrap();
+        assert!(matches!(config.format, StatsFormat::Json));
+        assert_eq!(config.max_plausible_prefill_tps, default_max_plausible_prefill_tps());
+        assert_eq!(
+            StatsConfig::default().max_plausible_prefill_tps,
+            default_max_plausible_prefill_tps(),
+            "the Default impl and the serde default must not drift"
+        );
+    }
+
+    /// An explicit threshold round-trips, including the `0.0` that switches the canary off
+    /// and a negative value, which the gate treats as disabled too.
+    #[test]
+    fn stats_canary_threshold_round_trips() {
+        let config: StatsConfig = serde_yaml::from_str("enabled: true\nmax_plausible_prefill_tps: 250000.0\n").unwrap();
+        assert_eq!(config.max_plausible_prefill_tps, 250_000.0);
+        let off: StatsConfig = serde_yaml::from_str("max_plausible_prefill_tps: 0.0\n").unwrap();
+        assert_eq!(off.max_plausible_prefill_tps, 0.0);
+        let negative: StatsConfig = serde_yaml::from_str("max_plausible_prefill_tps: -1.0\n").unwrap();
+        assert_eq!(negative.max_plausible_prefill_tps, -1.0);
     }
 
     #[test]

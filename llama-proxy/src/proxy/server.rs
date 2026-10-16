@@ -1171,8 +1171,12 @@ mod tests {
         // AppConfig has no Default; the loader treats every absent section as
         // its default, so a minimal YAML doc is the honest minimal boot config.
         // No backend => the F-H1 zero-group path: no preflight network either.
+        // stats.max_plausible_prefill_tps is pinned off deliberately: its default ARMS the
+        // prefill canary, and an armed config here is the one way a test could bump that
+        // process-global counter without holding the exporters' counter turn.
         let config: AppConfig =
-            serde_yaml::from_str("server:\n  host: \"127.0.0.1\"\n  port: 19266\n").expect("minimal bootable AppConfig");
+            serde_yaml::from_str("server:\n  host: \"127.0.0.1\"\n  port: 19266\nstats:\n  max_plausible_prefill_tps: 0.0\n")
+                .expect("minimal bootable AppConfig");
         // run_server's Box<dyn Error> output is !Send, so the future is awaited
         // IN PLACE while a plain OS thread watches the port and delivers the
         // SIGTERM once the listener answers.

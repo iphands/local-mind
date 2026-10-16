@@ -543,6 +543,7 @@ struct StreamObserver {
     request_json: Option<serde_json::Value>,
     stats_enabled: bool,
     stats_format: StatsFormat,
+    max_plausible_prefill_tps: f64,
     streaming_mode: crate::config::StreamingMode,
     group_name: Option<String>,
     concurrent_requests: usize,
@@ -860,7 +861,7 @@ impl StreamObserver {
 
         // The gate logs the sample and decides whether it is fit
         // to export.
-        if crate::exporters::log_sample_and_should_export(&metrics, self.stats_format) {
+        if crate::exporters::log_sample_and_should_export(&metrics, self.stats_format, self.max_plausible_prefill_tps) {
             // Export to remote systems
             self.exporter_manager.export_all(&metrics).await;
         }
@@ -966,6 +967,7 @@ pub async fn handle_streaming_response(
     fix_registry: Arc<FixRegistry>,
     stats_enabled: bool,
     stats_format: StatsFormat,
+    max_plausible_prefill_tps: f64,
     exporter_manager: Arc<ExporterManager>,
     request_json: Option<serde_json::Value>,
     start: Instant,
@@ -1096,6 +1098,7 @@ pub async fn handle_streaming_response(
             request_json,
             stats_enabled,
             stats_format,
+            max_plausible_prefill_tps,
             streaming_mode,
             group_name,
             concurrent_requests,
