@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `02`.** <!-- hp:next-free -->
+**Next free plan number: `03`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-10-16):** An OpenAI-compatible reverse proxy for LLM
 > backends (VLLM, llama.cpp); fixes malformed model responses and collects/exports inference
@@ -29,11 +29,14 @@ None in progress — next up: Plan 02 (`/hands-plan resume 02`).
 Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 
 | Plan | Title | Depends on | Status | Notes |
+|---|---|---|---|---|
 | 01 | stats columnar + prefill fix | N/A | done | columnar compact stats + corrected prefill TPS |
+| 02 | vllm-first docs + read-only vendor discovery | N/A | pending | re-frame docs vLLM-first; gitignore + rules for ./vendor/* |
 
 ## Abandoned / Superseded <!-- hp:abandoned -->
 
 | Plan | Reason | Superseded by | Date |
+|---|---|---|---|
 
 *(Record the reason. A plan dropped without one gets re-attempted six months later by someone who
 doesn't know it failed.)*
