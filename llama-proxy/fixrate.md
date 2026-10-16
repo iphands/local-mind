@@ -65,6 +65,17 @@ Two secondary findings, same root cause ("cache fields are ignored"):
 - `timings.cache_n` is parsed into `api::openai::Timings` (`api/openai.rs:284`)
   but never reaches `RequestMetrics`.
 
+### Getting the split on the OpenAI path
+
+Start vLLM with `--enable-per-request-metrics` and read the `metrics` object shown above. The
+producer doc (`vendor/vllm/docs/features/per_request_metrics.md` — the tree is gitignored, read it
+with `rg --no-ignore`) lists three caveats:
+
+- the flag is rejected when `--disable-log-stats` is also set;
+- per-request metrics add non-negligible CPU overhead at high concurrency — benchmark first;
+- `metrics` is `null` for `n > 1`, since timing can't be attributed across the n sequences (token
+  usage stays accurate — the field is absent, never a fabricated zero).
+
 ## 2. Design: three tiers, best available wins
 
 | Tier | Condition | Number | Key in compact line | Nature |

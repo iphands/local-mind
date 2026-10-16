@@ -3,7 +3,9 @@
 [![Rust](https://img.shields.io/badge/rust-stable-orange.svg)](https://www.rust-lang.org)
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-An HTTP reverse proxy for [llama.cpp](https://github.com/ggerganov/llama.cpp) server that fixes malformed LLM responses, collects performance metrics, and exports telemetry to external systems.
+An HTTP reverse proxy for **vLLM** ([vllm-project/vllm](https://github.com/vllm-project/vllm)), [llama.cpp](https://github.com/ggerganov/llama.cpp), or any OpenAI-compatible server. It fixes malformed LLM responses, collects performance metrics, and exports telemetry to external systems.
+
+vLLM is the primary supported backend; llama.cpp and any OpenAI-compatible server remain fully supported.
 
 ## Features
 
@@ -388,7 +390,7 @@ before the `finish=` cell.
                        │
                        ▼
 ┌─────────────────────────────────────────────────────────────┐
-│          llama.cpp server / OpenAI-compatible API           │
+│          vLLM / llama.cpp / OpenAI-compatible API           │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -797,6 +799,8 @@ Unknown fields in requests/responses are preserved for forward compatibility. Th
 The proxy maintains full compatibility with:
 
 - **OpenAI Chat Completions API**: Standard request/response format
+- **vLLM**: per-request `metrics` for the measured prefill/decode `tps=A/B` split, `/v1/models` `max_model_len` for the context window, and the `vllm:cache_config_info` gauge read by the `vram-estimate` endpoint
+  - The split needs the backend started with `--enable-per-request-metrics`; without it the proxy shows a wall-bounded floor `tps>=` plus a cost rate `work=` instead of a fabricated split
 - **llama.cpp Extensions**: `timings` object, `/props`, `/slots` endpoints
 - **Opencode Extensions**: `reasoning_text`, `reasoning_opaque`, extended usage details
 - **Claude Code**: All standard features work seamlessly

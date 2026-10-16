@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 67% complete (4/6 tasks)
+- Status: 83% complete (5/6 tasks)
 - Start date: 2026-10-16
 - Plan: `context/plans/02_vllm_first_docs.md`
 - Evidence: doc-framing plan — evidence is the grep output each Verify prints (the claim flipping
@@ -42,7 +42,7 @@
 | 2 | T2: register vendor in context KB map | `context/CLAUDE.md` | done | Map + Findings rows; wording diverged from draft (see Notes) |
 | 3 | T3: gitignore `/vendor/`, observe ignore took | `.gitignore` | done | landed as `/vendor` (symlink cover); P3 state-sync follow-on |
 | 4 | T4: root CLAUDE.md vLLM-first | `CLAUDE.md` | done | tagline/framing/vLLM-Extensions block landed; `../vendor/`+`examples/server` pointers → zero; hands-plan block + `../context/` notes refs untouched |
-| 5 | T5: README + fixrate vLLM-first | `README.md`, `fixrate.md` | pending | don't rename cited headings |
+| 5 | T5: README + fixrate vLLM-first | `README.md`, `fixrate.md` | done | intro/diagram/API-Compat vLLM bullet + fixrate producer-doc block; all 3 Preservation greps hit; cited heading intact; box re-measured 63==63 |
 | 6 | T6: triage docs + stamp PLAN.md obsolete | `PLAN.md` (+grep) | pending | stamp, don't delete |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
@@ -65,6 +65,8 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-10-16 | `ls -la vendor/llama.cpp/tools/server/README.md`; `ls vendor/llama.cpp/examples`; `ls -l AGENTS.md` (`-ef` test); `find .. -name opencode_claude_llama_notes.md` | README.md = **117 KB, real**; `examples/` present but `tools/server/` is the live server; **AGENTS.md→CLAUDE.md same inode**; notes file **found: nowhere** | 1 | T4 ground-truth probe: settles the reviewer gitignore-artifact dispute (see Notes) — `vendor/` IS on disk; the pointer target `tools/server/` is correct |
 | 2026-10-16 | grep verify of reframed `CLAUDE.md`: `grep '\.\./vendor/'` + `grep 'examples/server'` + `grep -i vllm \| head -1` + hands-plan markers + `grep opencode_claude_llama_notes` | `../vendor/`=**0**, `examples/server`=**0**, first `vllm`=**L7 (Overview)**, block @298/317 intact, notes refs=**3** (L93/284/404, none in block) | 1 | dead `../vendor/` pointers eliminated, vLLM-first landed in Overview |
 | 2026-10-16 | `RUSTFLAGS='-D warnings' cargo check --workspace --features influxdb` + `cargo fmt --check` + `cargo test --workspace --lib` (post-T4) | check exit 0 (cached 0.20s); fmt exit 0; **915 passed** | 1 | T4 gate — no `.rs` touched (markdown-only), gate stays green |
+| 2026-10-16 | T5 Verify battery: plan greps (intro `for **vLLM**`, diagram `vLLM / llama.cpp / OpenAI`, old `proxy for [llama.cpp]` gone exit=1, `Is it really streaming?` intact, flag at README :258/:310/:803+fixrate) + 3 Preservation greps (prefix-cache :322, `tps>=` :311, absent≠zero :292-293) + box width re-measure | ALL pass; box 392/393/394 all =63 (aligned); `**vLLM**` count=**2** (intro L6 + bullet L802), not the plan's stated 1 — the plan's own intro edit also bolds vLLM, so 2 is the correct outcome (plan Verify self-inconsistent, see Notes) | 1 | T5 evidence; Preservation = Risk #1 guard all green |
+| 2026-10-16 | T5 gate (post-edit, markdown-only) | `RUSTFLAGS='-D warnings' cargo check` cached 0.20s; fmt 0; **915 passed** | 1 | no `.rs` touched |
 
 _(T3 ran: the `rg` blindness pair — root `^vendor/`=0 vs `--no-ignore` vendor=11212 — is recorded in the Evidence table above.)_
 
@@ -150,6 +152,28 @@ _(T3 ran: the `rg` blindness pair — root `^vendor/`=0 vs `--no-ignore` vendor=
   "see the comprehensive docs" references is a content call, not a mechanical fix. All three are
   OUTSIDE the hands-plan managed block (L298–317), so it is safely editable whenever the human decides →
   Follow-up below. (An earlier note wrongly said one sat *inside* the block; the block does not cite it.)
+- **(T5) Both reviewers redirected the drafted edits; two divergences resolved against source/audience
+  (Rule E).** neckbeard (correctness) verified every vLLM claim before I baked it: the producer-doc
+  caveats are real (`per_request_metrics.md:20-22/60-69`) and the "measured `tps=A/B`" label is honest
+  (`collector.rs:490-501`: `prompt_tps`=prompt/TTFT, `generation_tps`=completion/`generation_time_ms`
+  decode-only, gated by `has_timing_split`, never the prefill-inclusive `tokens_per_second`; `metrics:null`
+  → floor+cost). hoodie (usability) caught that my drafted README intro made `…or any OpenAI-compatible
+  server that fixes…` a garden-path (the `that` attaches to *server*) — adopted hoodie's two-sentence split
+  (kept the literal `for **vLLM**` the plan Verify needs). hoodie also objected to my `**Framing:** …
+  no proxy behavior changed` line as changelog-speak in an operator-facing README; **I sided with hoodie**
+  (README ≠ the contributor doc that CLAUDE.md is): dropped the label + the "no behavior changed" meta from
+  README, kept only the operator reassurance; that meta lives in CLAUDE.md (T4) where the audience is the
+  contributor. **Where I sided with neckbeard instead:** hoodie wanted the fixrate caveats all framed as
+  "honest absence, not zero", but neckbeard correctly noted only the `n>1` case is a null-vs-zero claim —
+  `--disable-log-stats` is a hard startup rejection and the CPU-overhead note is a perf caveat — so I
+  scoped the "never a fabricated zero" phrasing to the `n>1` bullet only. **One hoodie override:** hoodie
+  wanted the `rg --no-ignore` note dropped as an author's aside; I kept a tightened version because the
+  pointer targets a gitignored tree and the hint serves the *reader* (it is exactly the P3 zero-hit trap).
+- **(T5) Plan Verify self-inconsistency, not a failure.** The plan's T5 discriminator
+  `grep '\*\*vLLM\*\*' README.md → 1 after` is unreachable by the plan's own contract: its drafted intro
+  (line 250) *also* bolds `**vLLM**`, so after intro+bullet the count is **2**. Both hits are correct
+  (L6 intro, L802 bullet). Recorded rather than chased; the real check (the API-Compatibility section gains
+  a vLLM bullet) passed at L802 with `max_model_len`/`cache_config_info` content present.
 
 ## Follow-ups
 

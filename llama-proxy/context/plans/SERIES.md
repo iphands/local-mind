@@ -22,7 +22,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 02** — vllm-first docs + read-only vendor discovery: in progress, 4/6 tasks done; next T5 (README + fixrate vLLM-first).
+- **Plan 02** — vllm-first docs + read-only vendor discovery: in progress, 5/6 tasks done; next T6 (triage docs + stamp PLAN.md obsolete).
 
 ## Plans <!-- hp:plans -->
 
