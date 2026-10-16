@@ -167,13 +167,13 @@ fn format_compact(m: &RequestMetrics) -> String {
     // floor with `>=` so it cannot be read as a measurement. Never invent a
     // split: that was the hardcoded 20/80 estimate this replaced.
     let tps_str = if m.has_timing_split {
-        format!("tps={:.2}/{:.2}", m.prompt_tps, m.generation_tps)
+        format!("tps={:>6.2}/{:>6.2}", m.prompt_tps, m.generation_tps)
     } else if m.decode_tps_min > 0.0 {
-        format!("tps>={:.2} work={:.2}", m.decode_tps_min, m.total_tps)
+        format!("tps>={:>6.2} work={:>6.2}", m.decode_tps_min, m.total_tps)
     } else {
         // A counted prompt with no counted output (a 0-token completion, an
         // abort before the finish chunk): there is no floor to report, only cost.
-        format!("tps=n/a work={:.2}", m.total_tps)
+        format!("tps=n/a work={:>6.2}", m.total_tps)
     };
 
     // Lets a reader discount `work=` for a prompt the engine never recomputed.
@@ -196,31 +196,38 @@ fn format_compact(m: &RequestMetrics) -> String {
         .map(|q| format!(" queue={:.0}ms", q))
         .unwrap_or_default();
 
+    // Stream end badge, extracted so the line can list columns in the desired
+    // order without nesting a match inside format!.
+    let stream_str = if m.streaming {
+        match m.stream_end {
+            Some("truncated") => "stream=trunc",
+            Some("stalled") => "stream=stalled",
+            Some("client_gone") => "stream=gone",
+            Some("ok") => "stream=ok",
+            // Requests whose stream end was never observed (legacy/other
+            // paths) keep the historical bare marker.
+            _ if m.stream_incomplete => "stream=trunc",
+            _ => "stream=ok",
+        }
+    } else {
+        "sync"
+    };
+
+    // Column order: model, tps, dur, ctx, cache, tokens, stream, finish,
+    // then queue and concurrent. Right-aligned fixed widths (never leading
+    // zeros) keep the line columnar without faking precision.
     format!(
-        "model={}{} tokens={}/{} {}{} {} {} finish={} dur={:.1}ms{}{}",
+        "model={}{} {} dur={:>6.1}ms {} {} {} {} {} finish={} {} {}",
         m.model,
         group_str,
+        tps_str,
+        m.duration_ms,
+        context_str,
+        cache_str,
         token_cell(m.prompt_tokens),
         token_cell(m.completion_tokens),
-        tps_str,
-        cache_str,
-        context_str,
-        if m.streaming {
-            match m.stream_end {
-                Some("truncated") => "stream=trunc",
-                Some("stalled") => "stream=stalled",
-                Some("client_gone") => "stream=gone",
-                Some("ok") => "stream=ok",
-                // Requests whose stream end was never observed (legacy/other
-                // paths) keep the historical bare marker.
-                _ if m.stream_incomplete => "stream=trunc",
-                _ => "stream=ok",
-            }
-        } else {
-            "sync"
-        },
+        stream_str,
         m.finish_reason,
-        m.duration_ms,
         queue_str,
         concurrent_str
     )
@@ -280,10 +287,12 @@ mod tests {
 
         let output = format_compact(&m);
         assert!(output.contains("test-model"));
-        assert!(output.contains("100/50"));
-        assert!(output.contains("stream"));
-        assert!(output.contains("stop"));
-        assert!(output.contains("42.5"));
+        // New column order: model, tps, dur, ctx, cache, tokens, stream, finish.
+        assert!(output.contains("tps=200.50/ 42.50"));
+        assert!(output.contains("dur=1200.0ms"));
+        assert!(output.contains(" 100 50 "));
+        assert!(output.contains("stream=ok"));
+        assert!(output.contains("finish=stop"));
     }
 
     /// A backend that reports no `timings` (vLLM) must not be shown a
@@ -299,7 +308,7 @@ mod tests {
         m.decode_tps_min = 50.0 / 1.2;
 
         let output = format_compact(&m);
-        assert!(output.contains("tps>=41.67 work=125.00"), "got: {output}");
+        assert!(output.contains("tps>= 41.67 work=125.00"), "got: {output}");
         assert!(!output.contains("/0.00"), "must not print a fabricated split: {output}");
         // The old key read as a measured speed; it must not come back.
         assert!(!output.contains("tot"), "retired `tot` key is back: {output}");
@@ -329,7 +338,7 @@ mod tests {
         assert!(m.has_timing_split);
 
         let output = format_compact(&m);
-        assert!(output.contains("tps=200.50/42.50"), "got: {output}");
+        assert!(output.contains("tps=200.50/ 42.50"), "got: {output}");
         assert!(!output.contains("work="), "tier 3 leaked into a tier-1 line: {output}");
         assert!(!output.contains(">="), "tier 2 leaked into a tier-1 line: {output}");
     }
@@ -377,7 +386,7 @@ mod tests {
         // but under a key that cannot be read as a speed, next to the honest
         // floor: 146 tokens over a 1731ms wall is "at least 84", not "6000".
         assert!(output.contains("work=22753.32"), "got: {output}");
-        assert!(output.contains("tps>=84.34"), "got: {output}");
+        assert!(output.contains("tps>= 84.34"), "got: {output}");
     }
 
     #[test]
@@ -446,7 +455,7 @@ mod tests {
         m.completion_tokens = None;
 
         let compact = format_compact(&m);
-        assert!(compact.contains("tokens=n/a/n/a"), "got: {compact}");
+        assert!(compact.contains("n/a n/a"), "got: {compact}");
 
         let pretty = format_pretty(&m);
         assert!(pretty.contains("Input:    n/a"), "got: {pretty}");
@@ -461,7 +470,7 @@ mod tests {
         m.completion_tokens = Some(0);
 
         let compact = format_compact(&m);
-        assert!(compact.contains("tokens=0/0"), "got: {compact}");
+        assert!(compact.contains(" 0 0 "), "got: {compact}");
         assert!(!compact.contains("n/a"), "got: {compact}");
     }
 

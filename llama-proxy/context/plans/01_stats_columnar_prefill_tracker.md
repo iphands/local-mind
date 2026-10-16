@@ -24,7 +24,7 @@
 |---|------|---------------|--------|-------|
 | 1 | T1: Make the project gate green at init | `src/stats/formatter.rs` | done | gate green: check/clippy/fmt/test all exit 0 |
 | 2 | T2: Fix inflated prefill TPS from prefix-cache hits | `src/stats/collector.rs` | done | corrected rate = (prompt_n - cache_n) / prompt_ms * 1000 when cache hits present; unit tests pass |
-| 3 | T3: Reorder and pad compact stats columns + update affected tests | `src/stats/formatter.rs` | pending | depends on T2; gate must stay green |
+| 3 | T3: Reorder and pad compact stats columns + update affected tests | `src/stats/formatter.rs` | done | new column order + right-aligned widths; affected formatter tests updated; full suite 915 passed |
 | 4 | T4: Remaining stats tests (full suite) | `src/stats/formatter.rs`, `src/stats/collector.rs` | pending | depends on T3 |
 | 5 | T5: Document breaking compact format change in README | `README.md` | pending | depends on T4 |
 
