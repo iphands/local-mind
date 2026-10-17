@@ -299,9 +299,52 @@ docker_core_args() {
   return 0
 }
 
-# Appends ENV_EXTRA to CONTAINER_ARGS. Call last -- see rule 1 above.
+# ------------------------------------------------------------ b12x (Plan 06)
+
+# b12x is vLLM's optional SM12x kernel library: --moe-backend b12x and
+# --linear-backend b12x (NVFP4_BACKEND here) need it, and the image does not ship
+# it. ./container/patches/b12x/fetch unpacks the pinned wheel into $CACHE_DIR;
+# this mounts that tree read-only plus a .pth that appends it to sys.path.
+# Appends, so a b12x the image itself ships wins and the overlay goes inert.
+#   B12X=auto (default)  mount iff MOE_BACKEND or NVFP4_BACKEND is exactly "b12x"
+#                        ("flashinfer_b12x" is FlashInfer's own kernel: no mount)
+#   B12X=1               always mount (b12x attention, ENV_EXTRA-only b12x knobs)
+#   B12X=0               never; a backend still naming b12x then fails at engine init
+# Called by env_extra_args BEFORE its ENV_EXTRA loop, so ENV_EXTRA stays the last
+# CONTAINER_ARGS mutation (rule 1 above) and every launcher gets this for free.
+# Reads MOE_BACKEND, NVFP4_BACKEND, CACHE_DIR, B12X, B12X_SITE.
+b12x_args() {
+  local want=${B12X:-auto} asked=0 need=0
+  [[ ${MOE_BACKEND:-} == b12x || ${NVFP4_BACKEND:-} == b12x ]] && asked=1
+  case "$want" in
+    auto) need=$asked ;;
+    1)    need=1 ;;
+    0)    (( asked )) && echo "## WARNING: B12X=0 but a backend says b12x; vLLM will refuse it at engine init." >&2 ;;
+    *)    echo "B12X must be auto, 0 or 1 (got '$want')" >&2; return 1 ;;
+  esac
+  (( need )) || return 0
+  local dir; dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../container/patches/b12x" && pwd)"
+  # shellcheck source=../container/patches/b12x/b12x.env
+  source "$dir/b12x.env"
+  local site=${B12X_SITE:-$CACHE_DIR/b12x/$B12X_VERSION/site}
+  if [[ ! -f $site/b12x/__init__.py || ! -f $site/.wheel-sha256 || $(<"$site/.wheel-sha256") != "$B12X_WHEEL_SHA256" ]]; then
+    { echo "## b12x $B12X_VERSION is not fetched (or not the pinned wheel) at $site."
+      echo "##   fetch it once:  CACHE_DIR=$CACHE_DIR ./container/patches/b12x/fetch"; } >&2
+    return 1
+  fi
+  CONTAINER_ARGS+=(
+    -v "$site:/opt/b12x-site:ro"
+    -v "$dir/zz_b12x.pth:/opt/venv/lib/python3.12/site-packages/zz_b12x.pth:ro"
+  )
+  echo "## b12x: $B12X_VERSION mounted from $site (moe=${MOE_BACKEND:-auto} linear=${NVFP4_BACKEND:-auto})"
+  return 0
+}
+
+# Appends ENV_EXTRA to CONTAINER_ARGS. Call last -- see rule 1 above. The b12x
+# mount goes first, so ENV_EXTRA's -e lines are still the last word.
 env_extra_args() {
   local _kv
+  b12x_args || return 1
   # Word-splitting is the point: ENV_EXTRA is a space-separated KEY=VALUE list.
   # shellcheck disable=SC2086
   for _kv in ${ENV_EXTRA:-}; do CONTAINER_ARGS+=( -e "$_kv" ); done

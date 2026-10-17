@@ -223,6 +223,42 @@ prints `[csf-scale-decode] NOT applied`. `./qwen3.8-flash-next/run-fp4local` mou
 `CSF_SCALE_DECODE=0` turns it off. Codec, sources and what is and is not verified:
 `container/patches/csf-scale-decode/UPSTREAM`, `context/plans/04_csf_scale_decode.md`.
 
+### b12x SM12x kernels (`container/patches/b12x/`)
+
+vLLM carries b12x MoE / linear / attention kernels for SM12x, but the `b12x` package is an
+optional extra (`setup.py` pins `b12x==1.5.1`) and the image ships no extras, so `MOE_BACKEND=b12x`
+and `NVFP4_BACKEND=b12x` are dead there. The wheel is pure Python (kernels JIT through CuTe DSL into
+`$CACHE_DIR`, so only the first boot pays) and its dependencies are already in the image, so it is
+mounted rather than built in:
+
+```bash
+./container/patches/b12x/fetch                              # once: pinned wheel, sha256-checked -> $CACHE_DIR/b12x/1.5.1/site
+MOE_BACKEND=b12x ./qwen3.8-flash-next/run-fp4local          # any launcher: the mount follows the backend value
+MOE_BACKEND=b12x NVFP4_BACKEND=b12x ./qwen3.8-flash-next/run-fp4local
+```
+
+`B12X=auto` (default) mounts it whenever `MOE_BACKEND` or `NVFP4_BACKEND` is exactly `b12x`
+(`flashinfer_b12x` is FlashInfer's own kernel and needs nothing); `B12X=1` forces the mount, `B12X=0`
+refuses it. Not fetched → the launcher stops before docker and prints the `fetch` line. The `.pth`
+*appends* to `sys.path`, so if a later image ships b12x itself, that copy wins. b12x's own tuning
+knobs (`VLLM_B12X_MOE_FP4_FORCE_A16=1`, `B12X_*`) go through `ENV_EXTRA`. `auto` never picks the b12x
+MoE and ranks the b12x linears late, so having it mounted changes nothing unless asked for. Measured
+or not: `context/plans/06_b12x_kernels_tracker.md` (Plan 06).
+
+Which value does what on this card, by what the checkpoint actually quantizes:
+
+| Knob → flag | Value | Applies to | Notes |
+|---|---|---|---|
+| `MOE_BACKEND` → `--moe-backend` | `humming` | NVFP4 routed experts | Flash-Next default; the measured daily driver |
+| | `b12x` | NVFP4 routed experts | needs the mount above; unmeasured here |
+| | `flashinfer_b12x` | NVFP4 routed experts | in the image; excluded from vLLM's auto (SM121 guard) |
+| | `marlin` | NVFP4 experts, W4A16 | Flash-Next + MTP died at draft load on the PR image |
+| | `cutlass`, `flashinfer_cutlass` | NVFP4 experts, W4A4 | in auto's sm120 list, behind humming |
+| `NVFP4_BACKEND` → `--linear-backend` | `cutlass` | NVFP4 dense linears (`qwen/run`, `nemotron/run`) | bench-fastest on sm120f |
+| | `b12x` | MXFP8 linears (FP4-Local), NVFP4 / W4A16 linears, FP8 per-tensor or 128×128 block | **not** `ONLINE_FP8=1`'s dynamic per-channel FP8: those layers fall back to auto |
+| | `flashinfer_b12x`, `flashinfer_cudnn`, `marlin` | NVFP4 dense linears | see § A/B-testing below |
+| | *(empty)* | — | right for `Qwen3.8-Flash-Next-NVFP4`: its dense layers are BF16 (or online FP8), so there is nothing for an NVFP4/MXFP8 kernel to do |
+
 ### Why not newer (as of 2026-10-15)
 
 | candidate | status | blocker |
@@ -284,6 +320,8 @@ Backends and the main perf knobs are runtime env on `./qwen/run`:
 ATTN_BACKEND=flashinfer ./qwen/run ./models/vllm/Qwen3.6-27B   # default (correct for Qwen3.5)
 ATTN_BACKEND=triton     ./qwen/run ./models/vllm/Qwen3.6-27B
 MOE_BACKEND=flashinfer_b12x ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4  # SM12x fused MoE (opt-in)
+MOE_BACKEND=b12x        ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # b12x MoE (needs ./container/patches/b12x/fetch once)
+NVFP4_BACKEND=b12x      ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # b12x NVFP4 GEMM (same mount)
 NVFP4_BACKEND=cutlass   ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # NVFP4 GEMM kernel
 SPEC_TOKENS=3           ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4   # MTP tokens (default 2)
 CUDAGRAPH_MODE=FULL_AND_PIECEWISE ./qwen/run ./models/vllm/Qwen3.5-122B-A10B-NVFP4  # full CUDA graphs

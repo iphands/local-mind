@@ -97,6 +97,15 @@ section**, which always stays last. Keep it dense.
 - The community readers are bound to b12x kernels (and PP1/DP1, no EP); there is no upstream-vLLM reader. `container/patches/csf-scale-decode/` decodes in the weight stream instead. Real shard 1: 913 planes decoded in 0.3–0.4 s, torch backend == pure-Python reference on 6/6 planes. [LIVE 2026-10-15]
 - A decode of real data looks sane (bases 89–104, no NaN codes, 0.2–1 % exceptions, scales finite 14–448) but ground truth is only the b12x fixture; boot coherence is the test (Plan 04 T4).
 
+## b12x is a mount, not a build: pure-Python wheel, every dependency already in the image (Plan 06) [SOURCE][LIVE 2026-10-16]
+
+- vLLM's `b12x` extra pins `b12x==1.5.1` (`setup.py:1709` @ `4d9a8d6`); our Dockerfile installs no extras, so the `g4d9a8d6` image has no b12x and every b12x kernel reports unsupported. The image also has **no `pip`** (`/opt/venv/bin/python: No module named pip`). [LIVE 2026-10-16]
+- The 1.5.1 wheel is `py3-none-any` (no `.so`; CuTe-DSL JIT at runtime into `$XDG_CACHE_HOME`/`~/.cache`). Its `requires_dist` is met in the image: torch 2.14.0, cuda-python 13.4.4, nvidia-cutlass-dsl + 4× `-libs-*` 4.8.0, apache-tvm-ffi 0.1.11, rich 15.0.0, transformers 5.19.0, safetensors 0.8.0. [DOC: PyPI JSON][LIVE 2026-10-16]
+- Mounted `:ro` + a `.pth`, on `--gpus device=0`: all six `vllm/utils/b12x.py` submodules import, `B12xMxfp8LinearKernel` / `B12xNvFp4LinearKernel` / `B12xFp8BlockScaledMMKernel` / `B12xTensorFP8ScaledMMLinearKernel` return `(True, None)`, `B12xExperts._supports_current_device()` is `True`. Capability only — no GEMM executed. [LIVE 2026-10-16]
+- Auto-selection: `B12X` and `FLASHINFER_B12X` are both absent from the NVFP4 MoE `AVAILABLE_BACKENDS` (`fused_moe/oracle/nvfp4.py:199-213`), and b12x linears sit behind FlashInfer-CUTLASS + Marlin (MXFP8) and nine others (NVFP4) in `kernels/linear/__init__.py:556-596`. Installing it does not move an `auto` pick. [SOURCE]
+- b12x FP8 scaled-mm takes only static per-tensor or 128×128 block scales (`kernels/linear/scaled_mm/b12x.py:92,227-231`): `ONLINE_FP8=1`'s dynamic per-channel layers fall back to auto under `--linear-backend b12x`. [SOURCE]
+- `--gdn-decode-kernel b12x` (the FP4-Local card's recipe) is community-fork only: nothing matches `gdn.*b12x` in upstream `vllm/` at `4d9a8d6`. [SOURCE]
+
 ---
 
 ## Open Questions

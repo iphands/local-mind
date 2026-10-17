@@ -28,7 +28,7 @@ still stand — see `context/distilled.md`.
 
 **04 — Decode NVFP4-CSF expert scales at load time** (`in-progress`). T1 landed; T2 (real shards, CPU, in the image) is next, T4 is an owner boot.
 
-**06 — b12x SM12x kernels as an opt-in overlay** (`in-progress`). T1 landed; T2 (launcher plumbing) next, T3 is an owner boot.
+**06 — b12x SM12x kernels as an opt-in overlay** (`in-progress`). T1–T2 landed (fetch + launcher mount); T3 is the owner's A/B boots.
 
 **02 — No sudo anywhere** is **done** (2026-10-13, `completed/`). Nothing left active: the next move is
 Plan 01's T4, or a new plan against the north star.
