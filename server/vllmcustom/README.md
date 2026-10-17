@@ -234,10 +234,11 @@ mounted rather than built in:
 ```bash
 ./container/patches/b12x/fetch                              # once: pinned wheel, sha256-checked -> $CACHE_DIR/b12x/1.5.1/site
 MOE_BACKEND=b12x ./qwen3.8-flash-next/run-fp4local          # any launcher: the mount follows the backend value
-MOE_BACKEND=b12x NVFP4_BACKEND=b12x ./qwen3.8-flash-next/run-fp4local
+MXFP8_BACKEND=b12x ./qwen3.8-flash-next/run-fp4local         # b12x for the MXFP8 linears ONLY
+MOE_BACKEND=b12x MXFP8_BACKEND=b12x ./qwen3.8-flash-next/run-fp4local
 ```
 
-`B12X=auto` (default) mounts it whenever `MOE_BACKEND` or `NVFP4_BACKEND` is exactly `b12x`
+`B12X=auto` (default) mounts it whenever `MOE_BACKEND`, `NVFP4_BACKEND` or `MXFP8_BACKEND` is exactly `b12x`
 (`flashinfer_b12x` is FlashInfer's own kernel and needs nothing); `B12X=1` forces the mount, `B12X=0`
 refuses it. Not fetched → the launcher stops before docker and prints the `fetch` line. The `.pth`
 *appends* to `sys.path`, so if a later image ships b12x itself, that copy wins. b12x's own tuning
@@ -255,8 +256,9 @@ Which value does what on this card, by what the checkpoint actually quantizes:
 | | `marlin` | NVFP4 experts, W4A16 | Flash-Next + MTP died at draft load on the PR image |
 | | `cutlass`, `flashinfer_cutlass` | NVFP4 experts, W4A4 | in auto's sm120 list, behind humming |
 | `NVFP4_BACKEND` → `--linear-backend` | `cutlass` | NVFP4 dense linears (`qwen/run`, `nemotron/run`) | bench-fastest on sm120f |
-| | `b12x` | MXFP8 linears (FP4-Local), NVFP4 / W4A16 linears, FP8 per-tensor or 128×128 block | **not** `ONLINE_FP8=1`'s dynamic per-channel FP8: those layers fall back to auto |
+| | `b12x` | MXFP8 linears (FP4-Local), NVFP4 / W4A16 linears, FP8 per-tensor or 128×128 block | **not** `ONLINE_FP8=1`'s dynamic per-channel FP8 (falls back to auto). **Global**: on FP4-Local with vision on it dies at boot — `ValueError: A16 requires stored K32 and N8` on the vision `linear_fc2` (K=4304); use `MXFP8_BACKEND`, or `VISION=0` |
 | | `flashinfer_b12x`, `flashinfer_cudnn`, `marlin` | NVFP4 dense linears | see § A/B-testing below |
+| `MXFP8_BACKEND` → `--kernel-config {"linear_backend_per_quant":{"mxfp8":…}}` | `b12x` | MXFP8 linears **only** (FP4-Local: GDN, attention, indexer, shared experts, vision attention) | the way to b12x on FP4-Local with vision on; boot log says `Applied linear backend override for 'mxfp8'` |
 | | *(empty)* | — | right for `Qwen3.8-Flash-Next-NVFP4`: its dense layers are BF16 (or online FP8), so there is nothing for an NVFP4/MXFP8 kernel to do |
 
 ### Why not newer (as of 2026-10-15)

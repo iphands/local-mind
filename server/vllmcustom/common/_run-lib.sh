@@ -306,16 +306,16 @@ docker_core_args() {
 # it. ./container/patches/b12x/fetch unpacks the pinned wheel into $CACHE_DIR;
 # this mounts that tree read-only plus a .pth that appends it to sys.path.
 # Appends, so a b12x the image itself ships wins and the overlay goes inert.
-#   B12X=auto (default)  mount iff MOE_BACKEND or NVFP4_BACKEND is exactly "b12x"
+#   B12X=auto (default)  mount iff MOE_BACKEND, NVFP4_BACKEND or MXFP8_BACKEND is exactly "b12x"
 #                        ("flashinfer_b12x" is FlashInfer's own kernel: no mount)
 #   B12X=1               always mount (b12x attention, ENV_EXTRA-only b12x knobs)
 #   B12X=0               never; a backend still naming b12x then fails at engine init
 # Called by env_extra_args BEFORE its ENV_EXTRA loop, so ENV_EXTRA stays the last
 # CONTAINER_ARGS mutation (rule 1 above) and every launcher gets this for free.
-# Reads MOE_BACKEND, NVFP4_BACKEND, CACHE_DIR, B12X, B12X_SITE.
+# Reads MOE_BACKEND, NVFP4_BACKEND, MXFP8_BACKEND, CACHE_DIR, B12X, B12X_SITE.
 b12x_args() {
   local want=${B12X:-auto} asked=0 need=0
-  [[ ${MOE_BACKEND:-} == b12x || ${NVFP4_BACKEND:-} == b12x ]] && asked=1
+  [[ ${MOE_BACKEND:-} == b12x || ${NVFP4_BACKEND:-} == b12x || ${MXFP8_BACKEND:-} == b12x ]] && asked=1
   case "$want" in
     auto) need=$asked ;;
     1)    need=1 ;;
@@ -336,7 +336,7 @@ b12x_args() {
     -v "$site:/opt/b12x-site:ro"
     -v "$dir/zz_b12x.pth:/opt/venv/lib/python3.12/site-packages/zz_b12x.pth:ro"
   )
-  echo "## b12x: $B12X_VERSION mounted from $site (moe=${MOE_BACKEND:-auto} linear=${NVFP4_BACKEND:-auto})"
+  echo "## b12x: $B12X_VERSION mounted from $site (moe=${MOE_BACKEND:-auto} linear=${NVFP4_BACKEND:-auto} mxfp8=${MXFP8_BACKEND:-auto})"
   return 0
 }
 
@@ -416,6 +416,17 @@ vllm_core_args() {
 nvfp4_backend_args() {
   [[ -n "${MOE_BACKEND:-}" ]] && VLLM_ARGS+=( --moe-backend "$MOE_BACKEND" )
   [[ -n "${NVFP4_BACKEND:-}" ]] && VLLM_ARGS+=( --linear-backend "$NVFP4_BACKEND" )  # vLLM lowercases and maps - to _
+  # MXFP8_BACKEND: a backend for the MXFP8 linears ONLY, via vLLM's per-quant override
+  # (kernel_config.linear_backend_per_quant, which wins over --linear-backend for that
+  # scheme). Exists because --linear-backend is global: on Qwen3.8-Flash-Next-FP4-Local,
+  # NVFP4_BACKEND=b12x also sends the vision MLP to b12x, and b12x A16 cannot take its
+  # K=4304 linear_fc2 (Plan 06 tracker). Boot log line: "Applied linear backend override
+  # for 'mxfp8'".
+  if [[ -n "${MXFP8_BACKEND:-}" ]]; then
+    [[ $MXFP8_BACKEND =~ ^[a-z0-9_]+$ ]] || {
+      echo "MXFP8_BACKEND must be a vLLM linear backend name like b12x (got '$MXFP8_BACKEND')" >&2; return 1; }
+    VLLM_ARGS+=( --kernel-config '{"linear_backend_per_quant":{"mxfp8":"'"$MXFP8_BACKEND"'"}}' )
+  fi
   [[ -n "${CUDAGRAPH_MODE:-}" ]] && VLLM_ARGS+=( --compilation-config '{"cudagraph_mode":"'"$CUDAGRAPH_MODE"'"}' )
   [[ -n "${FLASHINFER_AUTOTUNE:-}" ]] && VLLM_ARGS+=( --enable-flashinfer-autotune )
   return 0

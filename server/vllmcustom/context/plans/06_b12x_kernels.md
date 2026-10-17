@@ -2,6 +2,7 @@
 
 > **Status**: in-progress
 > **Created**: 2026-10-16
+> **Revised**: 2026-10-17 — added T4 (`MXFP8_BACKEND` knob) after T3's first boot showed `--linear-backend b12x` is global and dies on FP4-Local's vision `linear_fc2` (K=4304).
 > **Depends on**: N/A
 > **Goal**: `MOE_BACKEND=b12x` / `NVFP4_BACKEND=b12x` work on any launcher against today's image, with no rebuild, and the Flash-Next A/B numbers say whether b12x earns a place in the Dockerfile.
 > **Agent**: implementation agent
@@ -154,6 +155,18 @@ runs: (a) `MOE_BACKEND=b12x` → both `-v` lines present and `--moe-backend b12x
 `CACHE_DIR` → refusal text naming `fetch`, exit 1. Then gate 1–5 + 7a.
 **Commit**: `[P6][T2][b12x] mount b12x when a backend asks for it`
 
+### T4: `MXFP8_BACKEND` — b12x for the MXFP8 linears only
+
+**File**: `common/_run-lib.sh` (`nvfp4_backend_args`, `b12x_args`), `README.md`
+**What to do**: `MXFP8_BACKEND=<name>` emits `--kernel-config '{"linear_backend_per_quant":{"mxfp8":"<name>"}}'`
+(vLLM's own per-quant override, `vllm/config/kernel.py:385`; it wins over `--linear-backend` for that
+scheme, `kernels/linear/__init__.py:252-257`). Name must match `^[a-z0-9_]+$`. `b12x_args`' `auto` also
+mounts on `MXFP8_BACKEND=b12x`. Added because T3's first boot proved `--linear-backend` is global.
+**Verify**: stub docker on `run-fp4local`: `MXFP8_BACKEND=b12x` → the `--kernel-config` line, the b12x
+mount, no `--linear-backend`; with `MOE_BACKEND=b12x` both flags; a bad name → rc 1, no `serve`;
+defaults → neither. vLLM's own `EngineArgs` parses the emitted JSON in the image. Then gate 1–5 + 7.
+**Commit**: `[P6][T4][b12x] add MXFP8_BACKEND for a per-quant linear backend`
+
 ### T3: Owner A/B on both Flash-Next checkpoints (gate step 6)
 
 **File**: none (tracker Evidence only)
@@ -178,6 +191,7 @@ written "within noise". A boot failure is a result too (record the error verbati
 | `common/_run-lib.sh` | new `b12x_args`, called from `env_extra_args` | P0 |
 | `container/patches/b12x/zz_b12x.pth`, `UPSTREAM` | new | P1 |
 | `README.md` | knob + backend table | P1 |
+| `common/_run-lib.sh` `nvfp4_backend_args` | `MXFP8_BACKEND` → `--kernel-config` per-quant override (T4) | P1 |
 | `context/plans/RULES.md` | step 1 count 29 → 31 b (`lfm2.5/run` + `fetch`) | P1 |
 
 ---
@@ -208,6 +222,7 @@ written "within noise". A boot failure is a result too (record the error verbati
 - [x] T1: `fetch` prints `fetched` then `already present`; a forced bad sha refuses and leaves no `site/`.
 - [x] T1: gate step 1 reads `31 b` / `25 p`, `env ok`; `shellcheck -x container/patches/b12x/fetch` prints nothing.
 - [x] T2: stub-docker run with `MOE_BACKEND=b12x` emits both b12x `-v` lines; defaults and `flashinfer_b12x` emit none; `B12X=1` with no fetch exits 1 naming `fetch`.
+- [x] T4: stub-docker `MXFP8_BACKEND=b12x` emits `--kernel-config {"linear_backend_per_quant":{"mxfp8":"b12x"}}` + the b12x mount; a bad name exits 1; vLLM's `EngineArgs` parses it.
 - [ ] T3: boot log names a B12X MoE / B12x linear kernel; ≥3 bench runs per arm with mean + spread in Evidence.
 - [ ] Findings harvested into `context/distilled.md` / `pitfalls.md` (Rule D).
 - [ ] Plan + tracker moved to `completed/`, SERIES updated (Rule C).
