@@ -1,0 +1,73 @@
+#!/bin/bash
+# Fetch the pinned b12x wheel and unpack it where the launchers mount it from.
+#
+#   ./container/patches/b12x/fetch                 # -> $CACHE_DIR/b12x/<version>/site
+#   CACHE_DIR=/elsewhere ./container/patches/b12x/fetch
+#
+# b12x is vLLM's optional SM12x kernel library (the "b12x" extra, setup.py:1709)
+# and our image ships no extras, so --moe-backend b12x / --linear-backend b12x
+# are dead there. The wheel is pure Python (py3-none-any: kernels JIT-compile
+# through CuTe DSL at runtime) and every dependency it declares is already in
+# the image at the pinned versions, so unpacking it is the whole install. The
+# image has no pip, and none is needed: a wheel is a zip.
+#
+# The pin lives in b12x.env beside this script. The download is checked against
+# its sha256 before anything is unpacked; a mismatch leaves nothing behind. The
+# result is stamped with that sha, so a second run is a no-op and a pin bump
+# fetches the new version into its own directory. Boots never touch the network:
+# common/_run-lib.sh (b12x_args) only mounts what this script left.
+#
+# Runs as yourself, like everything else here; refuses root, because the tree it
+# writes is mounted into containers that run as uid 1000.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=./b12x.env
+source "$HERE/b12x.env"
+
+if [[ $EUID == 0 ]]; then
+  echo "## refusing to run as root: the unpacked tree must be owned by the uid the containers run as." >&2
+  exit 1
+fi
+
+CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
+DEST=$CACHE_DIR/b12x/$B12X_VERSION
+SITE=$DEST/site
+STAMP=$SITE/.wheel-sha256
+
+if [[ -f $SITE/b12x/__init__.py && -f $STAMP && $(<"$STAMP") == "$B12X_WHEEL_SHA256" ]]; then
+  echo "## b12x $B12X_VERSION already present: $SITE"
+  exit 0
+fi
+
+mkdir -p "$DEST"
+TMP=$(mktemp -d "$DEST/.fetch.XXXXXX")
+trap 'rm -rf "$TMP"' EXIT
+
+echo "## b12x $B12X_VERSION: downloading $B12X_WHEEL"
+curl -sSfL --retry 3 -o "$TMP/$B12X_WHEEL" "$B12X_WHEEL_URL"
+if ! echo "$B12X_WHEEL_SHA256  $TMP/$B12X_WHEEL" | sha256sum -c --quiet -; then
+  echo "## sha256 mismatch for $B12X_WHEEL: want $B12X_WHEEL_SHA256" >&2
+  echo "##   got  $(sha256sum "$TMP/$B12X_WHEEL" | cut -d' ' -f1). Nothing was unpacked." >&2
+  exit 1
+fi
+
+# -I: isolated mode, so nothing in the cwd or the environment rides along.
+python3 -I -m zipfile -e "$TMP/$B12X_WHEEL" "$TMP/site"
+_have=$(python3 -I - "$TMP/site" <<'PY'
+import pathlib, sys
+meta = next(pathlib.Path(sys.argv[1]).glob("b12x-*.dist-info/METADATA"))
+print(next(l.split(":", 1)[1].strip() for l in meta.read_text().splitlines() if l.startswith("Version:")))
+PY
+)
+if [[ $_have != "$B12X_VERSION" ]]; then
+  echo "## the wheel says version $_have, the pin says $B12X_VERSION. Nothing was installed." >&2
+  exit 1
+fi
+[[ -f $TMP/site/b12x/__init__.py ]] || { echo "## the wheel has no b12x/__init__.py. Nothing was installed." >&2; exit 1; }
+echo "$B12X_WHEEL_SHA256" > "$TMP/site/.wheel-sha256"
+
+# Swap in whole: a half-written site never sits where a launcher would mount it.
+rm -rf "$SITE"
+mv "$TMP/site" "$SITE"
+echo "## b12x $B12X_VERSION fetched: $SITE"

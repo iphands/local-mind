@@ -1,6 +1,6 @@
 # Plan 06 — b12x SM12x kernels as an opt-in overlay
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-10-16
 > **Depends on**: N/A
 > **Goal**: `MOE_BACKEND=b12x` / `NVFP4_BACKEND=b12x` work on any launcher against today's image, with no rebuild, and the Flash-Next A/B numbers say whether b12x earns a place in the Dockerfile.
@@ -205,8 +205,8 @@ written "within noise". A boot failure is a result too (record the error verbati
 
 ## Verification Checklist
 
-- [ ] T1: `fetch` prints `fetched` then `already present`; a forced bad sha refuses and leaves no `site/`.
-- [ ] T1: gate step 1 reads `31 b` / `25 p`, `env ok`; `shellcheck -x container/patches/b12x/fetch` prints nothing.
+- [x] T1: `fetch` prints `fetched` then `already present`; a forced bad sha refuses and leaves no `site/`.
+- [x] T1: gate step 1 reads `31 b` / `25 p`, `env ok`; `shellcheck -x container/patches/b12x/fetch` prints nothing.
 - [ ] T2: stub-docker run with `MOE_BACKEND=b12x` emits both b12x `-v` lines; defaults and `flashinfer_b12x` emit none; `B12X=1` with no fetch exits 1 naming `fetch`.
 - [ ] T3: boot log names a B12X MoE / B12x linear kernel; ≥3 bench runs per arm with mean + spread in Evidence.
 - [ ] Findings harvested into `context/distilled.md` / `pitfalls.md` (Rule D).

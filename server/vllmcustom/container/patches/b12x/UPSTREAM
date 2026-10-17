@@ -1,0 +1,37 @@
+# b12x notes. NO BASE_SHA256 here, deliberately: nothing upstream is replaced or
+# hooked. This directory installs a third-party package (b12x, Apache-2.0,
+# https://pypi.org/project/b12x/) into the container by mounting it, and vLLM's
+# own b12x code -- already in the image -- takes it from there.
+#
+# Mechanism (Plan 06):
+#   ./fetch            downloads the wheel pinned in b12x.env, checks its sha256,
+#                      unpacks it to $CACHE_DIR/b12x/<version>/site (a wheel is a zip;
+#                      the image has no pip and needs none).
+#   zz_b12x.pth        one line, /opt/b12x-site. Mounted into the venv's site-packages,
+#                      it APPENDS that directory to sys.path, so a b12x the image itself
+#                      ships (a later Dockerfile line) wins and this overlay goes inert.
+#   b12x_args          common/_run-lib.sh: mounts site/ :ro at /opt/b12x-site plus the
+#                      .pth when MOE_BACKEND or NVFP4_BACKEND is exactly "b12x"
+#                      (B12X=1 forces, B12X=0 refuses).
+#
+# What vLLM imports from it (vllm/utils/b12x.py, _B12X_SUBMODULES @ 4d9a8d6):
+#   b12x.attention.paged, b12x.gemm.blockscaled, b12x._lib.intrinsics (private!),
+#   b12x.gemm.mxfp8_linear, b12x.gemm.tensor_fp8_linear, b12x.moe.fused_moe
+# A missing submodule degrades to "not supported" for that kernel, and an explicit
+# --moe-backend b12x / --linear-backend b12x then fails at engine init with vLLM's
+# own message rather than silently picking something else.
+#
+# Dependencies it declares (requires_dist) -- all already in the g4d9a8d6 image:
+#   torch>=2.12 (2.14.0), cuda-python (13.4.4), nvidia-cutlass-dsl and its four
+#   -libs-* ==4.8.0 (4.8.0), apache-tvm-ffi >=0.1.6,<0.2, !=0.1.8 (0.1.11),
+#   rich>=13 (15.0.0), transformers>=4.51 (5.19.0), safetensors>=0.6 (0.8.0).
+# Re-check them on every repin: vLLM pins b12x exactly (setup.py "b12x" extra), and a
+# torch or cutlass-dsl move in the image can break it with no change here.
+#
+# JIT cache: CuTe-DSL compiles go to $XDG_CACHE_HOME / ~/.cache, i.e. the launcher's
+# rw $CACHE_DIR mount -- a warm boot reuses them.
+#
+# Confirmed 2026-10-16 on iphands/vllm-blackwell:cu1321-sm120-main-vllm0.33.0.dev20261015-g4d9a8d6,
+# --gpus device=0: all six submodules import; B12xMxfp8LinearKernel, B12xNvFp4LinearKernel,
+# B12xFp8BlockScaledMMKernel, B12xTensorFP8ScaledMMLinearKernel is_supported() == (True, None);
+# B12xExperts._supports_current_device() == True.
