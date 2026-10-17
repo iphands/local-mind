@@ -1109,7 +1109,7 @@ mod tests {
                     shutdown: async {
                         trigger_rx.await.ok();
                     },
-                    grace: std::time::Duration::from_secs(60),
+                    grace: std::time::Duration::from_secs(10),
                     drain_started: None,
                     exporters_drained: Some(drained_tx),
                 }
