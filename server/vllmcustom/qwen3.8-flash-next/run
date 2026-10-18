@@ -7,7 +7,7 @@
 # offload, the PLE dtype probe, the pinned-RAM warning) are skipped for them.
 #
 #   VLLM_REF=main ./container/build                # build the snapshot first (the VLLM_MAIN_SHA pinned in container/versions.env)
-#   ./qwen3.8-flash-next/run                       # nvidia/Qwen3.8-Flash-Next-NVFP4 (default; MTP 4, humming MoE, fp8 KV, util 0.95)
+#   ./qwen3.8-flash-next/run                       # nvidia/Qwen3.8-Flash-Next-NVFP4 (default; MTP 3, humming MoE, sm120-skinny, fp8 KV, util 0.95)
 #   ./qwen3.8-flash-next/run <path-or-name>        # another Flash-Next checkpoint under models/vllm,
 #                                                  # e.g. primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8
 #                                                  # (does NOT boot on vLLM 042ab03 or later; see below)
@@ -142,7 +142,7 @@
 #   PINNED_ROUND_MB=0 ...                          # drop the pinned-allocator knob (reproduces the 128 GiB cudaHostAlloc OOM)
 #   GDN_KERNEL=cuda ...                            # VLLM_GDN_DECODE_KERNEL (default triton: REQUIRED by the FP8 GDN projections on the PR image)
 #   EXECUTOR=mp ...                                # --distributed-executor-backend (default EMPTY = vLLM's choice; mp was PR-image-only)
-#   SPEC_TOKENS=0 ./qwen3.8-flash-next/run         # MTP off (default 4)
+#   SPEC_TOKENS=0 ./qwen3.8-flash-next/run         # MTP off (default 3)
 #   BLOCK_SIZE=64 / BLOCK_SIZE= ...                # force --block-size / pass none (default auto: only when the QSA ring needs it, see below)
 #   MOE_BACKEND=marlin / MOE_BACKEND= ...          # force another backend / auto (default humming; see above)
 #   ATTN_BACKEND=flashinfer ...                    # default EMPTY = let vLLM pick
@@ -157,8 +157,8 @@
 #   ONLINE_FP8=1 ...                               # quantize the checkpoint's BF16 dense layers to FP8 at load (--quantization-config.linear
 #                                                  # fp8_per_channel); ONLINE_FP8=<scheme> for another vLLM scheme. EXPERIMENTAL, default 0; only for checkpoints
 #                                                  # whose dense layers are NOT already quantized (nvidia/Qwen3.8-Flash-Next-NVFP4), ignored otherwise (see "ONLINE_FP8")
-#   SM120_SKINNY=1 ...                             # give Qwen4Exp's skinny-GEMM path (BF16 projections + lm_head) a plan table on SM120 by
-#                                                  # reusing upstream's SM121 one. EXPERIMENTAL, default 0; Flash-Next only (see "SM120_SKINNY")
+#   SM120_SKINNY=0 ...                             # turn OFF the SM120 plan table for Qwen4Exp's skinny-GEMM path (BF16 projections + lm_head),
+#                                                  # which reuses upstream's SM121 one. Default 1 since 2026-10-18; Flash-Next only (see "SM120_SKINNY")
 #   GPU_MEM_UTIL=0.955 ...                         # the card value (default 0.95)
 #   VISION=0 ...                                   # --language-model-only (drops the ViT)
 #   MAX_NUM_SEQS=36 MAX_MODEL_LEN=32768 ...        # the card's exact measured config
@@ -234,7 +234,7 @@ PORT=${PORT:-8700}
 ATTN_BACKEND=${ATTN_BACKEND-}                    # EMPTY = vLLM auto-select
 MOE_BACKEND=${MOE_BACKEND-$_d_moe}               # humming on MoE checkpoints, none on dense; EMPTY = auto (may already be marlin on main; see header)
 NVFP4_BACKEND=${NVFP4_BACKEND-$_d_nvfp4_backend} # --linear-backend; Flash-Next's linear layers are FP8 (leave it); cutlass on NVFP4 base checkpoints; EMPTY = vLLM's choice
-SPEC_TOKENS=${SPEC_TOKENS:-4}                    # MTP speculative tokens; 3 = card optimum on the PR image; 0 = off
+SPEC_TOKENS=${SPEC_TOKENS:-3}                    # MTP speculative tokens; 0 = off. 3 since 2026-10-18 (was 4): K=3 beat K=4 by 7.6% on code (Plan 06 T3)
 BLOCK_SIZE=${BLOCK_SIZE-auto}                    # auto = --block-size lcm(16, QSA ring) only when needed; a number = forced; EMPTY = none
 GPU_MEM_UTIL=${GPU_MEM_UTIL:-0.95}               # 0.955 = card value (the Mamba-block budget was measured at it)
 MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}           # native; the PR image needed <=135168 beside the MTP draft head
@@ -250,7 +250,8 @@ SPEC_LIVE=${SPEC_LIVE:-0}                        # 1 = live-adjustable draft dep
 SPEC_LIVE_K=${SPEC_LIVE_K:-}                     # initial live depth; EMPTY = SPEC_TOKENS
 SPEC_LIVE_CAPTURE=${SPEC_LIVE_CAPTURE:-}         # K values to pre-capture CUDA graphs for, comma-separated, main one first; EMPTY = K..1
 ONLINE_FP8=${ONLINE_FP8:-0}                      # 1 = online FP8 (fp8_per_channel) for the BF16 dense layers; or a vLLM scheme name; 0 = off (see "ONLINE_FP8")
-SM120_SKINNY=${SM120_SKINNY:-0}                  # 1 = reuse the SM121 skinny-GEMM plan table on SM120 (see "SM120_SKINNY")
+_SKINNY_SET=${SM120_SKINNY+1}                    # remember whether the caller asked, for the non-Flash-Next note below
+SM120_SKINNY=${SM120_SKINNY:-1}                  # 1 = reuse the SM121 skinny-GEMM plan table on SM120 (default since 2026-10-18); 0 = off (see "SM120_SKINNY")
 VISION=${VISION:-1}                              # 0 = --language-model-only
 PLE_OFFLOAD=${PLE_OFFLOAD:-$_d_ple}              # 1 = --engram-config cpu_offload (the single-GPU path); default 1 for flashnext only
 PLE_DTYPE=${PLE_DTYPE-$_d_ple_dtype}             # auto = read the shard; a dtype name = force; EMPTY = trust config.json / skip (the qwen family)
@@ -519,7 +520,9 @@ fi
 # F.linear. vllm#59753 added SM121 TP=1 plans for this model's exact shapes (lm_head
 # 248320x2560, GDN 16384x2560, QSA 13952x2560, HC 10240x320, ...). The overlay in
 # container/patches/sm120-gemm-plans reuses that table for capability (12, 0). Tiles were
-# tuned on GB10 (273 GB/s), so UNVERIFIED on this card: A/B it. With ONLINE_FP8 the
+# tuned on GB10 (273 GB/s). ON BY DEFAULT since 2026-10-18 (owner's call: every Plan 06 T3 bench ran
+# with it and the daily driver uses it), but a clean SM120_SKINNY=1 vs 0 A/B on this card has still
+# not been run, so it is a default, not a measured win. With ONLINE_FP8 the
 # quantized layers leave this path (it only takes unquantized linears); the lm_head,
 # HyperConnection and router shapes still use it.
 SM120_SKINNY_DIR="$HERE/../container/patches/sm120-gemm-plans"
@@ -528,10 +531,11 @@ case "$SM120_SKINNY" in
   *) echo "SM120_SKINNY must be 0 or 1 (got '$SM120_SKINNY')"; exit 1 ;;
 esac
 if [[ "$SM120_SKINNY" == 1 && "$FAMILY" != flashnext ]]; then
-  echo "## SM120_SKINNY=1 ignored: only Qwen4Exp (family flashnext) has the skinny-GEMM path."
+  # Only say so when the caller asked: with the default on, every non-Flash-Next launch would print it.
+  [[ -n $_SKINNY_SET ]] && echo "## SM120_SKINNY=1 ignored: only Qwen4Exp (family flashnext) has the skinny-GEMM path."
   SM120_SKINNY=0
 fi
-[[ "$SM120_SKINNY" == 1 ]] && echo "## sm120-skinny: SM121 skinny-GEMM plans reused for SM120 (UNVERIFIED on this card; see container/patches/sm120-gemm-plans/UPSTREAM)"
+[[ "$SM120_SKINNY" == 1 ]] && echo "## sm120-skinny: SM121 skinny-GEMM plans reused for SM120 (default; no on/off A/B on this card yet; SM120_SKINNY=0 turns it off)"
 
 # SPEC_LIVE: change the MTP draft depth without a restart (GET/POST /spec_tokens).
 # vLLM has no live setter (num_speculative_tokens feeds the scheduler, the CUDA-graph

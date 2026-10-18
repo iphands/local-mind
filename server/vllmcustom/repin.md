@@ -285,11 +285,13 @@ Expect: no `ngram_embedding.py` `-v` on the `docker ` line (there is no overlay 
 this is a check that the removal stayed removed, not that a skip fired), PLE dtype override
 `float8_e4m3fn`, no `--block-size` (the QSA ring capacity divides every 16-aligned size, so
 `BLOCK_SIZE=auto` drops it), and `--kv-cache-dtype fp8 --kv-cache-dtype-skip-layers 48
---speculative-config {"method":"mtp","num_speculative_tokens":4} --moe-backend humming
---gpu-memory-utilization 0.95` on `/models/nvidia/Qwen3.8-Flash-Next-NVFP4`. Those three numbers are
-the launcher's own defaults (`SPEC_TOKENS:-4`, `GPU_MEM_UTIL:-0.95`), not constants of this
-procedure — this line said "MTP 3" and "0.96" from 2026-09-13 until the `4d9a8d6` repin ran the stub
-and caught it, so read them off `qwen3.8-flash-next/run` rather than trusting this file.
+--speculative-config {"method":"mtp","num_speculative_tokens":3} --moe-backend humming
+--gpu-memory-utilization 0.95` on `/models/nvidia/Qwen3.8-Flash-Next-NVFP4`, plus the
+`sm120_gemm_plans.pth` `-v` mount (`SM120_SKINNY` defaults to 1). Those numbers are the launcher's own
+defaults (`SPEC_TOKENS:-3`, `GPU_MEM_UTIL:-0.95`, `SM120_SKINNY:-1`), not constants of this
+procedure. This line said "MTP 3" and "0.96" from 2026-09-13 until the `4d9a8d6` repin ran the stub
+and caught it. It said MTP 4 with no skinny mount until 2026-10-18, when the defaults moved to K=3
+and skinny on. So read them off `qwen3.8-flash-next/run` rather than trusting this file.
 
 ## 8. Commit
 
