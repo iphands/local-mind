@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Flash-Next MoE x MTP matrix: humming vs b12x, SPEC_TOKENS 3 vs 4, all with SM120_SKINNY=1.
+# MATRIX_CONFIGS replaces that list (scripts/flashnext-skinny-ab is one such caller).
 #
 #   ./scripts/flashnext-matrix                               # 4 configs x 4 runs, run-fp4local
 #   ONLY=b12x-k3,b12x-k4 RUNS=2 ./scripts/flashnext-matrix   # a subset, fewer runs
@@ -51,13 +52,23 @@ DRAFT_MOE_BACKEND=${DRAFT_MOE_BACKEND:-}
 LOGS_PID=
 trap '[[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null' EXIT
 
-# label | env assignments passed to the launcher (SM120_SKINNY=1 is added to every one)
+# label | env assignments passed to the launcher. SM120_SKINNY=1 is the default for every one;
+# a config that sets SM120_SKINNY itself wins (its assignment comes later on the env line).
 CONFIGS=(
   "humming-k3|MOE_BACKEND=humming|SPEC_TOKENS=3"
   "humming-k4|MOE_BACKEND=humming|SPEC_TOKENS=4"
   "b12x-k3|MOE_BACKEND=b12x|SPEC_TOKENS=3"
   "b12x-k4|MOE_BACKEND=b12x|SPEC_TOKENS=4"
 )
+# MATRIX_CONFIGS="label|K=V|K=V;label|K=V" replaces the list above. Labels are [a-z0-9-] and each
+# assignment is KEY=VALUE with no spaces.
+if [[ -n ${MATRIX_CONFIGS:-} ]]; then
+  IFS=';' read -r -a CONFIGS <<<"$MATRIX_CONFIGS"
+  for entry in "${CONFIGS[@]}"; do
+    [[ $entry =~ ^[a-z0-9-]+(\|[A-Z][A-Z0-9_]*=[^|[:space:]]*)+$ ]] || {
+      echo "## bad MATRIX_CONFIGS entry '$entry' (want label|KEY=VALUE|...)"; exit 2; }
+  done
+fi
 
 # shellcheck source-path=SCRIPTDIR source=../bench/_bench-lib.sh
 source "$HERE/bench/_bench-lib.sh"
@@ -82,10 +93,10 @@ fi
 
 mkdir -p "$OUT"
 printf 'config\trun\tprompt\tdecode_tps\tttft_ms\ttokens\n' > "$OUT/results.tsv"
-declare -A BACKEND READY
+declare -A BACKEND READY SKINNY
 
 echo "## flashnext-matrix -> $OUT"
-echo "##   launcher $LAUNCHER, $RUNS recorded runs per config (+1 unrecorded warm-up), SM120_SKINNY=1"
+echo "##   launcher $LAUNCHER, $RUNS recorded runs per config (+1 unrecorded warm-up), SM120_SKINNY=1 unless a config sets it"
 
 for entry in "${CONFIGS[@]}"; do
   label=${entry%%|*}
@@ -95,11 +106,13 @@ for entry in "${CONFIGS[@]}"; do
   log="$OUT/$label.log"; : > "$log"
   [[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=
   stop_server
-  echo "## [$label] booting  ($envs SM120_SKINNY=1)"
+  [[ " $envs " == *" SM120_SKINNY="* ]] && shown=$envs || shown="$envs SM120_SKINNY=1"
+  echo "## [$label] booting  ($shown)"
   boot_t0=$(date +%s)
   extra=${EXTRA_ARGS:-}
   if [[ -n $DRAFT_MOE_BACKEND ]]; then
     k=$(grep -oE 'SPEC_TOKENS=[0-9]+' <<<"$envs"); k=${k#SPEC_TOKENS=}
+    [[ -n $k ]] || { echo "## [$label] DRAFT_MOE_BACKEND needs SPEC_TOKENS in the config"; exit 2; }
     spec='{"method":"mtp","num_speculative_tokens":'"$k"
     [[ -n $DRAFT_SAMPLE_EFF ]] && spec+=',"draft_sample_method":"'"$DRAFT_SAMPLE_EFF"'"'
     spec+=',"moe_backend":"'"$DRAFT_MOE_BACKEND"'"}'
@@ -107,7 +120,7 @@ for entry in "${CONFIGS[@]}"; do
     echo "## [$label] drafter MoE backend: $DRAFT_MOE_BACKEND  (--speculative-config $spec)"
   fi
   # shellcheck disable=SC2086  # $envs is a space-separated KEY=VALUE list on purpose
-  EXTRA_ARGS=$extra env $envs SM120_SKINNY=1 DETACH=1 PORT="$PORT" "$LAUNCHER" >> "$log" 2>&1
+  EXTRA_ARGS=$extra env SM120_SKINNY=1 $envs DETACH=1 PORT="$PORT" "$LAUNCHER" >> "$log" 2>&1
   docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
   if ! wait_ready; then
     echo "## [$label] BOOT FAILED -- see $log"
@@ -116,7 +129,9 @@ for entry in "${CONFIGS[@]}"; do
   fi
   READY[$label]=$(( $(date +%s) - boot_t0 ))
   BACKEND[$label]=$(grep -oE "Using '[A-Z0-9_]+' NvFp4 MoE backend" "$log" | head -1 | grep -oE "'[A-Z0-9_]+'" | tr -d "'")
-  echo "## [$label] ready in ${READY[$label]}s, MoE backend ${BACKEND[$label]:-<not logged>}"
+  # The overlay's own log line proves the plan table was installed; absence means plain F.linear.
+  if grep -q '\[sm120-gemm-plans\] SM120 skinny-GEMM plans on' "$log"; then SKINNY[$label]=on; else SKINNY[$label]=off; fi
+  echo "## [$label] ready in ${READY[$label]}s, MoE backend ${BACKEND[$label]:-<not logged>}, skinny ${SKINNY[$label]}"
 
   { echo "### warm-up (not recorded)"
     "$BENCH" "$label-warmup" --host "$HOST" --out "$OUT/bench-results.md" 2>&1; } > "$OUT/$label.bench"
@@ -139,14 +154,20 @@ stop_server
 {
   echo "# flashnext-matrix $(date -u '+%Y-%m-%d %H:%M UTC')"
   echo
-  echo "Launcher \`$LAUNCHER\`, SM120_SKINNY=1, $RUNS recorded runs per config, single stream."
+  echo "Launcher \`$LAUNCHER\`, $RUNS recorded runs per config, single stream. SM120_SKINNY=1 unless a config sets it."
   for v in ONLINE_FP8 DRAFT_SAMPLE DRAFT_MOE_BACKEND GPU_MEM_UTIL KV_FP8 MAX_NUM_SEQS MAX_BATCHED_TOKENS VISION EXTRA_ARGS ENV_EXTRA; do
     [[ -v $v ]] && printf 'Set: %s=%s  \n' "$v" "${!v}"
   done
   grep -h -m1 '^## Running' "$OUT"/*.log 2>/dev/null | sed 's/^## Running /Image: /; s/  (.*//' | sort -u
   echo
-  echo "| config | MoE backend (logged) | boot (s) | prompt | runs | decode tok/s mean | min | max | spread % | TTFT ms mean |"
-  echo "|---|---|---|---|---|---|---|---|---|---|"
+  echo
+  for entry in "${CONFIGS[@]}"; do
+    label=${entry%%|*}; [[ -n "${ONLY:-}" && ",$ONLY," != *",$label,"* ]] && continue
+    cfg_env=${entry#*|}; echo "- \`$label\`: ${cfg_env//|/ }"
+  done
+  echo
+  echo "| config | MoE backend (logged) | skinny (logged) | boot (s) | prompt | runs | decode tok/s mean | min | max | spread % | TTFT ms mean |"
+  echo "|---|---|---|---|---|---|---|---|---|---|---|"
   awk -F'\t' -v order="short code long" '
     NR == 1 { next }
     { k = $1 SUBSEP $3; n[k]++; s[k] += $4; t[k] += $5
@@ -161,11 +182,11 @@ stop_server
         printf "%s\t%s\t%d\t%.2f\t%.2f\t%.2f\t%.1f\t%.1f\n", cfgs[i], p[j], n[k], m, lo[k], hi[k], (m > 0 ? 100 * (hi[k] - lo[k]) / m : 0), t[k] / n[k]
       } }' "$OUT/results.tsv" |
   while IFS=$'\t' read -r cfg prompt cnt mean lo hi spread ttft; do
-    echo "| $cfg | ${BACKEND[$cfg]:-?} | ${READY[$cfg]:-?} | $prompt | $cnt | $mean | $lo | $hi | $spread | $ttft |"
+    echo "| $cfg | ${BACKEND[$cfg]:-?} | ${SKINNY[$cfg]:-?} | ${READY[$cfg]:-?} | $prompt | $cnt | $mean | $lo | $hi | $spread | $ttft |"
   done
   for entry in "${CONFIGS[@]}"; do
     label=${entry%%|*}
-    [[ ${BACKEND[$label]:-} == "boot failed" ]] && echo "| $label | BOOT FAILED | - | - | 0 | | | | | |"
+    [[ ${BACKEND[$label]:-} == "boot failed" ]] && echo "| $label | BOOT FAILED | - | - | - | 0 | | | | | |"
   done
   echo
   echo "Spread is (max - min) / mean over the recorded runs. A difference between two configs smaller"

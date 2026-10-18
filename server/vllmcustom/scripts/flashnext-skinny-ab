@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# Does SM120_SKINNY help on this card? FP4-Local, launcher defaults, SPEC_TOKENS=3, skinny on vs off.
+#
+#   REPLACE=1 ./scripts/flashnext-skinny-ab        # 2 configs x 4 runs on run-fp4local
+#   RUNS=6 ./scripts/flashnext-skinny-ab           # more runs, a tighter spread
+#
+# SM120_SKINNY=1 gives Qwen4Exp's skinny-GEMM path an SM120 plan table by reusing upstream's
+# SM121 (GB10) one (container/patches/sm120-gemm-plans). On FP4-Local that path only sees the BF16
+# layers: lm_head (248320x2560), the hyper-connection and router projections. The MXFP8 and NVFP4
+# layers never take it. Every Plan 06 bench ran with it on, and this is the A/B those benches never did.
+#
+# "All defaults" means nothing is passed except SPEC_TOKENS=3 and SM120_SKINNY: run-fp4local's own
+# MoE backend (humming), draft sampling (probabilistic), KV dtype, util and batch limits apply to
+# both arms. Launcher knobs set in the environment still pass through to both (summary.md lists them).
+#
+# This is scripts/flashnext-matrix with MATRIX_CONFIGS set. Same per-config flow: boot, wait,
+# one unrecorded warm-up, RUNS recorded passes of bench's short / code / long. Same output: summary.md,
+# results.tsv, per-config logs. Its "skinny (logged)" column shows whether the overlay's
+# "SM120 skinny-GEMM plans on" line appeared in each boot, so an arm that did not get what it asked
+# for is visible next to its numbers.
+# Output: bench/bench-logs/flashnext-skinny-ab-<UTC stamp>/
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+export MATRIX_CONFIGS="skinny-on|SPEC_TOKENS=3|SM120_SKINNY=1;skinny-off|SPEC_TOKENS=3|SM120_SKINNY=0"
+export LAUNCHER=${LAUNCHER:-qwen3.8-flash-next/run-fp4local}
+export OUT=${OUT:-$HERE/bench/bench-logs/flashnext-skinny-ab-$(date -u +%Y%m%d-%H%M%S)}
+exec "$HERE/scripts/flashnext-matrix" "$@"
