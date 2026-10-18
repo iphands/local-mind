@@ -3,6 +3,7 @@
 > **Status**: in-progress
 > **Created**: 2026-10-16
 > **Revised**: 2026-10-17 — added T4 (`MXFP8_BACKEND` knob) after T3's first boot showed `--linear-backend b12x` is global and dies on FP4-Local's vision `linear_fc2` (K=4304).
+> **Revised**: 2026-10-18 — added T5 (skip the mount on images that ship b12x). The `fe8f214` repin (`2f7fe38`) moves flashinfer to 0.7.2, which bundles b12x, and the owner chose to drop the mount there rather than make it win.
 > **Depends on**: N/A
 > **Goal**: `MOE_BACKEND=b12x` / `NVFP4_BACKEND=b12x` work on any launcher against today's image, with no rebuild, and the Flash-Next A/B numbers say whether b12x earns a place in the Dockerfile.
 > **Agent**: implementation agent
@@ -167,6 +168,31 @@ mount, no `--linear-backend`; with `MOE_BACKEND=b12x` both flags; a bad name →
 defaults → neither. vLLM's own `EngineArgs` parses the emitted JSON in the image. Then gate 1–5 + 7.
 **Commit**: `[P6][T4][b12x] add MXFP8_BACKEND for a per-quant linear backend`
 
+### T5: No mount on images that ship b12x
+
+**File**: `common/_run-lib.sh` (`b12x_args`, new `_image_ships_b12x`), `README.md`,
+`container/patches/b12x/UPSTREAM`, `context/distilled.md`
+**What to do**: flashinfer-python ≥ 0.7.2 bundles b12x 1.5.0 and installs a top-level `b12x`
+(flashinfer#5767). On such an image the appended `.pth` can never win. Read the image's
+`ai.vllmcustom.flashinfer.version` label with `docker image inspect --format`, which is metadata only
+and needs no container, and ask only when a mount is in question. At ≥ `B12X_IMAGE_SINCE_FLASHINFER`
+(0.7.2, compared with `sort -V`), `B12X=auto` mounts nothing, skips the not-fetched refusal and says
+so. `B12X=1` still mounts, with an "inert" warning, as the escape hatch. Under `B12X=0`, the warning
+"vLLM will refuse it" becomes a note that the image's copy serves the backend. A missing or unparsable
+label keeps the old path. Owner decision, 2026-10-18.
+**Verify**: a stub `docker` that answers the label query, on `run-fp4local` and `run`:
+- 0.7.2, 0.7.10 and 0.7.2.post1 with `MOE_BACKEND`/`MXFP8_BACKEND=b12x` and an empty `CACHE_DIR`:
+  rc 0, no mount, the backend flag still emitted.
+- 0.7.1 and 0.6.18 unfetched: rc 1 naming `fetch`.
+- 0.7.1 fetched, an empty label and garbage: mounted.
+- `B12X=1` on 0.7.2: mounted plus the warning.
+- `B12X=0` on 0.7.2 / 0.7.1: the note / the old warning.
+- Defaults: no label query at all.
+
+The real `docker image inspect` on the `…g4d9a8d6` and `:latest` images reads 0.7.1 / 0.6.18.post1,
+and both count as "does not ship". `shellcheck -x` clean. Then gate 1–5 + 7.
+**Commit**: `[P6][T5][b12x] skip the b12x mount on images that ship b12x`
+
 ### T3: Owner A/B on both Flash-Next checkpoints (gate step 6)
 
 **File**: none (tracker Evidence only)
@@ -192,6 +218,7 @@ written "within noise". A boot failure is a result too (record the error verbati
 | `container/patches/b12x/zz_b12x.pth`, `UPSTREAM` | new | P1 |
 | `README.md` | knob + backend table | P1 |
 | `common/_run-lib.sh` `nvfp4_backend_args` | `MXFP8_BACKEND` → `--kernel-config` per-quant override (T4) | P1 |
+| `common/_run-lib.sh` `b12x_args` / `_image_ships_b12x` | no mount when the image's flashinfer label is ≥ 0.7.2 (T5) | P1 |
 | `context/plans/RULES.md` | step 1 count 29 → 31 b (`lfm2.5/run` + `fetch`) | P1 |
 
 ---
@@ -223,6 +250,7 @@ written "within noise". A boot failure is a result too (record the error verbati
 - [x] T1: gate step 1 reads `31 b` / `25 p`, `env ok`; `shellcheck -x container/patches/b12x/fetch` prints nothing.
 - [x] T2: stub-docker run with `MOE_BACKEND=b12x` emits both b12x `-v` lines; defaults and `flashinfer_b12x` emit none; `B12X=1` with no fetch exits 1 naming `fetch`.
 - [x] T4: stub-docker `MXFP8_BACKEND=b12x` emits `--kernel-config {"linear_backend_per_quant":{"mxfp8":"b12x"}}` + the b12x mount; a bad name exits 1; vLLM's `EngineArgs` parses it.
+- [x] T5: stub label 0.7.2 / 0.7.10 / 0.7.2.post1 → no mount, no refusal; 0.7.1 / 0.6.18 / missing / garbage → the old mount-or-refuse path; `B12X=1` mounts with a warning; defaults make no label query; real images read 0.7.1 / 0.6.18.post1.
 - [ ] T3: boot log names a B12X MoE / B12x linear kernel; ≥3 bench runs per arm with mean + spread in Evidence.
 - [ ] Findings harvested into `context/distilled.md` / `pitfalls.md` (Rule D).
 - [ ] Plan + tracker moved to `completed/`, SERIES updated (Rule C).

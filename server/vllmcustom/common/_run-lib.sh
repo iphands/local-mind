@@ -302,27 +302,64 @@ docker_core_args() {
 # ------------------------------------------------------------ b12x (Plan 06)
 
 # b12x is vLLM's optional SM12x kernel library: --moe-backend b12x and
-# --linear-backend b12x (NVFP4_BACKEND here) need it, and the image does not ship
-# it. ./container/patches/b12x/fetch unpacks the pinned wheel into $CACHE_DIR;
-# this mounts that tree read-only plus a .pth that appends it to sys.path.
-# Appends, so a b12x the image itself ships wins and the overlay goes inert.
+# --linear-backend b12x (NVFP4_BACKEND here) need it. Images built on
+# flashinfer-python >= 0.7.2 ship it themselves: that wheel embeds b12x and installs
+# a top-level `b12x` compat package (flashinfer#5767). For those this mounts
+# nothing. For older images, ./container/patches/b12x/fetch unpacks the pinned wheel
+# into $CACHE_DIR, and this mounts that tree read-only plus a .pth that appends it
+# to sys.path. Appends, so a b12x the image ships always wins over the mount.
 #   B12X=auto (default)  mount iff MOE_BACKEND, NVFP4_BACKEND or MXFP8_BACKEND is exactly "b12x"
+#                        and the image does not ship b12x
 #                        ("flashinfer_b12x" is FlashInfer's own kernel: no mount)
-#   B12X=1               always mount (b12x attention, ENV_EXTRA-only b12x knobs)
-#   B12X=0               never; a backend still naming b12x then fails at engine init
+#   B12X=1               always mount (b12x attention, ENV_EXTRA-only b12x knobs), even on
+#                        an image that ships b12x, where it loses to the image's copy. That
+#                        is only useful if the label check below is wrong about an image.
+#   B12X=0               never mount; a backend naming b12x then works only on an image that
+#                        ships b12x
+# "Ships b12x" is read from the image's ai.vllmcustom.flashinfer.version label
+# (container/Dockerfile LABEL) with `image inspect`: metadata only, no container. It
+# is asked only when a mount is in question. A missing or unreadable label counts as
+# "does not ship", which is the old behaviour.
 # Called by env_extra_args BEFORE its ENV_EXTRA loop, so ENV_EXTRA stays the last
 # CONTAINER_ARGS mutation (rule 1 above) and every launcher gets this for free.
-# Reads MOE_BACKEND, NVFP4_BACKEND, MXFP8_BACKEND, CACHE_DIR, B12X, B12X_SITE.
+# Reads MOE_BACKEND, NVFP4_BACKEND, MXFP8_BACKEND, CACHE_DIR, CONTAINER, B12X, B12X_SITE.
+B12X_IMAGE_SINCE_FLASHINFER=0.7.2
+
+# Prints the image's flashinfer version and returns 0 iff it is >= the version that
+# started bundling b12x. Returns 1, printing whatever it read, for older or unknown.
+# A predicate: call it only as an `if` condition, so its status is never seen by set -e.
+_image_ships_b12x() {
+  local fiv
+  fiv=$("${DOCKER[@]}" image inspect --format \
+         '{{ index .Config.Labels "ai.vllmcustom.flashinfer.version" }}' "$CONTAINER" 2>/dev/null) || fiv=
+  printf '%s' "$fiv"
+  [[ $fiv =~ ^[0-9]+(\.[0-9]+)+ ]] || return 1
+  [[ $(printf '%s\n' "$B12X_IMAGE_SINCE_FLASHINFER" "$fiv" | sort -V | head -n1) == "$B12X_IMAGE_SINCE_FLASHINFER" ]]
+}
+
 b12x_args() {
-  local want=${B12X:-auto} asked=0 need=0
+  local want=${B12X:-auto} asked=0 need=0 fiv
   [[ ${MOE_BACKEND:-} == b12x || ${NVFP4_BACKEND:-} == b12x || ${MXFP8_BACKEND:-} == b12x ]] && asked=1
   case "$want" in
     auto) need=$asked ;;
     1)    need=1 ;;
-    0)    (( asked )) && echo "## WARNING: B12X=0 but a backend says b12x; vLLM will refuse it at engine init." >&2 ;;
+    0)    if (( asked )); then
+            if fiv=$(_image_ships_b12x); then
+              echo "## b12x: B12X=0, nothing mounted; the image ships its own (flashinfer $fiv), so the b12x backend still works."
+            else
+              echo "## WARNING: B12X=0 but a backend says b12x; vLLM will refuse it at engine init." >&2
+            fi
+          fi ;;
     *)    echo "B12X must be auto, 0 or 1 (got '$want')" >&2; return 1 ;;
   esac
   (( need )) || return 0
+  if fiv=$(_image_ships_b12x); then
+    if [[ $want == auto ]]; then
+      echo "## b12x: the image ships its own (flashinfer $fiv bundles it); nothing mounted (moe=${MOE_BACKEND:-auto} linear=${NVFP4_BACKEND:-auto} mxfp8=${MXFP8_BACKEND:-auto})"
+      return 0
+    fi
+    echo "## WARNING: B12X=1 mounts the fetched wheel, but this image ships b12x (flashinfer $fiv) and its copy wins on sys.path; the mount is inert." >&2
+  fi
   local dir; dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../container/patches/b12x" && pwd)"
   # shellcheck source=../container/patches/b12x/b12x.env
   source "$dir/b12x.env"

@@ -240,8 +240,14 @@ MOE_BACKEND=b12x MXFP8_BACKEND=b12x ./qwen3.8-flash-next/run-fp4local
 
 `B12X=auto` (default) mounts it whenever `MOE_BACKEND`, `NVFP4_BACKEND` or `MXFP8_BACKEND` is exactly `b12x`
 (`flashinfer_b12x` is FlashInfer's own kernel and needs nothing); `B12X=1` forces the mount, `B12X=0`
-refuses it. Not fetched → the launcher stops before docker and prints the `fetch` line. The `.pth`
-*appends* to `sys.path`, so if a later image ships b12x itself, that copy wins. b12x's own tuning
+refuses it. Not fetched → the launcher stops before docker and prints the `fetch` line.
+**Images built on flashinfer-python ≥ 0.7.2 ship b12x themselves** (that wheel bundles b12x 1.5.0 and
+installs a top-level `b12x`, flashinfer#5767). The main snapshot from `fe8f214` on is one. For those,
+`auto` mounts nothing and needs no `fetch`, and prints `## b12x: the image ships its own`. The launcher
+decides from the image's `ai.vllmcustom.flashinfer.version` label, via `docker image inspect` with no
+container, and only when a backend asks for b12x. A missing label counts as "does not ship". The `.pth`
+*appends* to `sys.path`, so a forced `B12X=1` mount on such an image loses to the image's copy, and the
+launcher warns that it is inert. b12x's own tuning
 knobs (`VLLM_B12X_MOE_FP4_FORCE_A16=1`, `B12X_*`) go through `ENV_EXTRA`. `auto` never picks the b12x
 MoE and ranks the b12x linears late, so having it mounted changes nothing unless asked for. Measured
 or not: `context/plans/06_b12x_kernels_tracker.md` (Plan 06).

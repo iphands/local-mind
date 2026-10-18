@@ -54,3 +54,12 @@
 # that ship b12x, or make the .pth prepend so the pinned wheel wins, is a Plan 06
 # decision. Neither is made here. NOT VERIFIED until the image is built: that our
 # flashinfer wheel actually carries the top-level b12x package.
+# Decided 2026-10-18 (Plan 06 T5, owner): DROP the mount on images that ship b12x.
+# b12x_args reads the image's ai.vllmcustom.flashinfer.version label (`image inspect
+# --format`, metadata only) and, at >= 0.7.2 (B12X_IMAGE_SINCE_FLASHINFER), mounts
+# nothing and skips the not-fetched refusal under B12X=auto. B12X=1 still mounts, with
+# an "inert" warning, as the escape hatch if the label ever lies about an image. A
+# missing or unparsable label keeps the old mount-and-refuse path. The label is a
+# proxy for "the wheel carries b12x". The first boot of a fe8f214 image settles it:
+# a b12x backend either selects (`Using 'B12X' NvFp4 MoE backend`) or fails at
+# engine init with vLLM's own unsupported message.
