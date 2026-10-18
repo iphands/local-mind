@@ -251,6 +251,6 @@ written "within noise". A boot failure is a result too (record the error verbati
 - [x] T2: stub-docker run with `MOE_BACKEND=b12x` emits both b12x `-v` lines; defaults and `flashinfer_b12x` emit none; `B12X=1` with no fetch exits 1 naming `fetch`.
 - [x] T4: stub-docker `MXFP8_BACKEND=b12x` emits `--kernel-config {"linear_backend_per_quant":{"mxfp8":"b12x"}}` + the b12x mount; a bad name exits 1; vLLM's `EngineArgs` parses it.
 - [x] T5: stub label 0.7.2 / 0.7.10 / 0.7.2.post1 → no mount, no refusal; 0.7.1 / 0.6.18 / missing / garbage → the old mount-or-refuse path; `B12X=1` mounts with a warning; defaults make no label query; real images read 0.7.1 / 0.6.18.post1.
-- [ ] T3: boot log names a B12X MoE / B12x linear kernel; ≥3 bench runs per arm with mean + spread in Evidence.
+- [x] T3: boot log names a B12X MoE / B12x linear kernel; ≥3 bench runs per arm with mean + spread in Evidence.
 - [ ] Findings harvested into `context/distilled.md` / `pitfalls.md` (Rule D).
 - [ ] Plan + tracker moved to `completed/`, SERIES updated (Rule C).
