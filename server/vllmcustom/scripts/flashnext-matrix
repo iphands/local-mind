@@ -1,0 +1,140 @@
+#!/usr/bin/env bash
+# Flash-Next MoE x MTP matrix: humming vs b12x, SPEC_TOKENS 3 vs 4, all with SM120_SKINNY=1.
+#
+#   ./scripts/flashnext-matrix                               # 4 configs x 4 runs, run-fp4local
+#   ONLY=b12x-k3,b12x-k4 RUNS=2 ./scripts/flashnext-matrix   # a subset, fewer runs
+#   LAUNCHER=qwen3.8-flash-next/run ./scripts/flashnext-matrix  # the NVFP4 checkpoint instead
+#   REPLACE=1 ./scripts/flashnext-matrix                     # stop a running `vllm` container first
+#
+# Per config: boot the launcher detached, wait for /health, run ./bench/bench once UNRECORDED
+# (the first requests pay CuTe-DSL JIT and graph warm-up), then RUNS recorded passes. A pass is
+# bench's three prompts -- short (256 tok), code (1024), long (~16k-token context, 1024) -- one
+# stream at a time, ignore_eos, so every run generates exactly the same token counts.
+#
+# Output, one directory per invocation: bench/bench-logs/flashnext-matrix-<UTC stamp>/
+#   results.tsv   one row per config x run x prompt (decode tok/s, TTFT ms, tokens)
+#   summary.md    per config x prompt: mean / min / max decode tok/s and mean TTFT
+#   <label>.log   launcher + container log      <label>.bench   raw bench output
+# Each config's row in summary.md also carries the MoE backend vLLM actually logged, so a
+# silent fallback (asked for b12x, got something else) shows up next to its numbers.
+#
+# It STOPS the server it benchmarks and leaves nothing running at the end; a `vllm` container
+# that is already up makes it refuse unless REPLACE=1 (it would be killed mid-conversation).
+set -uo pipefail   # NOT -e: one config failing to boot must not lose the others
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+NAME=vllm
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+READY_TIMEOUT=${READY_TIMEOUT:-2400}   # ~73 GiB of weights over NFS plus JIT; be patient
+RUNS=${RUNS:-4}
+LAUNCHER=${LAUNCHER:-qwen3.8-flash-next/run-fp4local}   # relative to the repo, or absolute
+[[ $LAUNCHER == /* ]] || LAUNCHER=$HERE/$LAUNCHER
+BENCH=${BENCH:-$HERE/bench/bench}
+OUT=${OUT:-$HERE/bench/bench-logs/flashnext-matrix-$(date -u +%Y%m%d-%H%M%S)}
+LOGS_PID=
+trap '[[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null' EXIT
+
+# label | env assignments passed to the launcher (SM120_SKINNY=1 is added to every one)
+CONFIGS=(
+  "humming-k3|MOE_BACKEND=humming|SPEC_TOKENS=3"
+  "humming-k4|MOE_BACKEND=humming|SPEC_TOKENS=4"
+  "b12x-k3|MOE_BACKEND=b12x|SPEC_TOKENS=3"
+  "b12x-k4|MOE_BACKEND=b12x|SPEC_TOKENS=4"
+)
+
+# shellcheck source-path=SCRIPTDIR source=../bench/_bench-lib.sh
+source "$HERE/bench/_bench-lib.sh"
+for tool in curl docker awk; do
+  command -v "$tool" >/dev/null || { echo "## need $tool"; exit 2; }
+done
+[[ -x $LAUNCHER ]] || { echo "## no launcher at $LAUNCHER"; exit 2; }
+[[ $RUNS =~ ^[1-9][0-9]*$ ]] || { echo "## RUNS must be a positive integer (got '$RUNS')"; exit 2; }
+if docker ps -q -f "name=^${NAME}$" | grep -q . && [[ ${REPLACE:-0} != 1 ]]; then
+  echo "## a '$NAME' container is running; this script stops it. Re-run with REPLACE=1 to allow that."
+  exit 2
+fi
+
+mkdir -p "$OUT"
+printf 'config\trun\tprompt\tdecode_tps\tttft_ms\ttokens\n' > "$OUT/results.tsv"
+declare -A BACKEND READY
+
+echo "## flashnext-matrix -> $OUT"
+echo "##   launcher $LAUNCHER, $RUNS recorded runs per config (+1 unrecorded warm-up), SM120_SKINNY=1"
+
+for entry in "${CONFIGS[@]}"; do
+  label=${entry%%|*}
+  envs=${entry#*|}; envs=${envs//|/ }
+  [[ -n "${ONLY:-}" && ",$ONLY," != *",$label,"* ]] && continue
+
+  log="$OUT/$label.log"; : > "$log"
+  [[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=
+  stop_server
+  echo "## [$label] booting  ($envs SM120_SKINNY=1)"
+  boot_t0=$(date +%s)
+  # shellcheck disable=SC2086  # $envs is a space-separated KEY=VALUE list on purpose
+  env $envs SM120_SKINNY=1 DETACH=1 PORT="$PORT" "$LAUNCHER" >> "$log" 2>&1
+  docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
+  if ! wait_ready; then
+    echo "## [$label] BOOT FAILED -- see $log"
+    BACKEND[$label]="boot failed"; READY[$label]=-
+    continue
+  fi
+  READY[$label]=$(( $(date +%s) - boot_t0 ))
+  BACKEND[$label]=$(grep -oE "Using '[A-Z0-9_]+' NvFp4 MoE backend" "$log" | head -1 | grep -oE "'[A-Z0-9_]+'" | tr -d "'")
+  echo "## [$label] ready in ${READY[$label]}s, MoE backend ${BACKEND[$label]:-<not logged>}"
+
+  { echo "### warm-up (not recorded)"
+    "$BENCH" "$label-warmup" --host "$HOST" --out "$OUT/bench-results.md" 2>&1; } > "$OUT/$label.bench"
+  for run in $(seq 1 "$RUNS"); do
+    "$BENCH" "$label-r$run" --host "$HOST" --out "$OUT/bench-results.md" > "$OUT/.run.txt" 2>&1
+    { echo "### run $run"; cat "$OUT/.run.txt"; } >> "$OUT/$label.bench"
+    sed -nE 's/^ +(short|code|long) +ttft= *([0-9.]+)ms +decode= *([0-9.]+) tok\/s +\(([0-9]+) tok\).*/\1 \2 \3 \4/p' "$OUT/.run.txt" |
+      while read -r prompt ttft tps tok; do
+        printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$label" "$run" "$prompt" "$tps" "$ttft" "$tok"
+      done >> "$OUT/results.tsv"
+    grep -E '^ +(short|code|long) +FAILED' "$OUT/.run.txt" | sed "s/^/## [$label] run $run: /"
+    echo "## [$label] run $run/$RUNS done"
+  done
+  rm -f -- "$OUT/.run.txt"
+done
+
+[[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=
+stop_server
+
+{
+  echo "# flashnext-matrix $(date -u '+%Y-%m-%d %H:%M UTC')"
+  echo
+  echo "Launcher \`$LAUNCHER\`, SM120_SKINNY=1, $RUNS recorded runs per config, single stream."
+  grep -h -m1 '^## Running' "$OUT"/*.log 2>/dev/null | sed 's/^## Running /Image: /; s/  (.*//' | sort -u
+  echo
+  echo "| config | MoE backend (logged) | boot (s) | prompt | runs | decode tok/s mean | min | max | spread % | TTFT ms mean |"
+  echo "|---|---|---|---|---|---|---|---|---|---|"
+  awk -F'\t' -v order="short code long" '
+    NR == 1 { next }
+    { k = $1 SUBSEP $3; n[k]++; s[k] += $4; t[k] += $5
+      if (!(k in lo) || $4 < lo[k]) lo[k] = $4
+      if (!(k in hi) || $4 > hi[k]) hi[k] = $4
+      if (!($1 in seen)) { seen[$1] = 1; cfgs[++nc] = $1 } }
+    END {
+      np = split(order, p, " ")
+      for (i = 1; i <= nc; i++) for (j = 1; j <= np; j++) {
+        k = cfgs[i] SUBSEP p[j]; if (!(k in n)) continue
+        m = s[k] / n[k]
+        printf "%s\t%s\t%d\t%.2f\t%.2f\t%.2f\t%.1f\t%.1f\n", cfgs[i], p[j], n[k], m, lo[k], hi[k], (m > 0 ? 100 * (hi[k] - lo[k]) / m : 0), t[k] / n[k]
+      } }' "$OUT/results.tsv" |
+  while IFS=$'\t' read -r cfg prompt cnt mean lo hi spread ttft; do
+    echo "| $cfg | ${BACKEND[$cfg]:-?} | ${READY[$cfg]:-?} | $prompt | $cnt | $mean | $lo | $hi | $spread | $ttft |"
+  done
+  for entry in "${CONFIGS[@]}"; do
+    label=${entry%%|*}
+    [[ ${BACKEND[$label]:-} == "boot failed" ]] && echo "| $label | BOOT FAILED | - | - | 0 | | | | | |"
+  done
+  echo
+  echo "Spread is (max - min) / mean over the recorded runs. A difference between two configs smaller"
+  echo "than both of their spreads is noise, not a result."
+} > "$OUT/summary.md"
+
+cat "$OUT/summary.md"
+echo
+echo "## done -- $OUT (summary.md, results.tsv, per-config .log/.bench). Nothing is running now."
