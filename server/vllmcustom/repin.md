@@ -147,8 +147,9 @@ done
 ## 4. Overlays (hook by name, no-op on drift)
 
 Re-grep every name in the hook tables of `container/patches/boot-timing/UPSTREAM`,
-`container/patches/draft-load-filter/UPSTREAM`, `container/patches/spec-live/UPSTREAM` and
-`container/patches/sm120-gemm-plans/UPSTREAM` at `$NEW`,
+`container/patches/draft-load-filter/UPSTREAM`, `container/patches/spec-live/UPSTREAM`,
+`container/patches/sm120-gemm-plans/UPSTREAM` and `container/patches/csf-scale-decode/UPSTREAM`
+(`run-fp4local` mounts it over this same image) at `$NEW`,
 and say which hooked files changed (`git -C $V diff --stat $OLD $NEW -- <those files>`). For
 draft-load-filter, `_remap_mtp_weight_name` and the `"mtp.": None` mapper entry must be untouched.
 For spec-live (`SPEC_LIVE=1`, optional; not on the daily-driver path) check `Scheduler.dynamic_sd_lookup`
@@ -165,7 +166,13 @@ python3 container/patches/boot-timing/test_boot_timing.py
 python3 container/patches/draft-load-filter/test_draft_load_filter.py
 python3 container/patches/spec-live/test_spec_live.py
 python3 container/patches/sm120-gemm-plans/test_sm120_gemm_plans.py
+python3 container/patches/csf-scale-decode/test_csf_scale_decode.py
 ```
+
+For `container/patches/b12x` (a mounted package, no hooks): check `_B12X_SUBMODULES` in
+`vllm/utils/b12x.py` and the `"b12x"` extra pin in `setup.py` at `$NEW`, and whether the image's
+own dependencies now ship a top-level `b12x`. flashinfer-python ≥ 0.7.2 does, and then the mount
+is shadowed, because its `.pth` appends to `sys.path`.
 
 ## 4b. Dispositions (every artifact, at $NEW)
 
@@ -185,6 +192,8 @@ before step 6 and report the table as far as it goes.
 | `container/patches/draft-load-filter` | did a loader-side MTP-head skip ship that covers `Qwen4ExpMTP`? | `git -C $V log --format='%h %s' $OLD..$NEW -- vllm/model_executor/model_loader/ vllm/models/qwen4_exp/`; `git -C $V grep -n is_unused_checkpoint_weight $NEW -- vllm/models/qwen4_exp/`. vllm#60152's shard-level hook is the candidate and it is model-declared: the row is **merged** only when `Qwen4ExpMTP` declares it |
 | `container/patches/spec-live` (opt path) | did Dynamic SD gain a live-K API that subsumes the utility call? | `git -C $V log --format='%h %s' $OLD..$NEW -- vllm/v1/core/sched vllm/v1/engine/ vllm/config/speculative.py vllm/entrypoints/launchers/api_server` — a live-K knob would surface beside `num_speculative_tokens_per_batch_size` in `speculative.py` |
 | `container/patches/sm120-gemm-plans` (opt path) | does upstream ship a `(12,0)` GEMM table? | step 4's check. Yes ⇒ **merged → remove in this commit** |
+| `container/patches/csf-scale-decode` (`run-fp4local`) | did upstream learn to decode CSF-encoded NVFP4 scales? | `git -C $V grep -inE 'nvfp4_csf\|csf_exceptions\|byte-window4' $NEW -- vllm`; a hit ⇒ read it before calling it **merged** |
+| `container/patches/b12x` (opt path) | does the image now ship `b12x` itself? | step 4's b12x check. Shadowed ⇒ **retired-kept** for this image (the mount still serves older tags); dropping it or making it win is a Plan 06-style decision, not a repin edit |
 | ~~`qwen3.8-flash-next/patches/ple-ct-ignore`~~ | **DELETED at the `4d9a8d6` repin** — this row is history, not a task; the dir no longer exists, so do not go looking for it. It was retired upstream at `c32513b` (vllm#59431), an ancestor of every pin since, and a repin only moves forward, so it could never fire again | Keep the regression check, without the overlay: `git -C $V grep -n 'isinstance(quant_config, CompressedTensorsConfig)' $NEW -- vllm/models/qwen4_exp/common/ngram_embedding.py`. If that branch ever disappears, upstream regressed and there is no longer a local workaround — that is a stop-and-ask, not a re-derive |
 | launcher: `--hf-overrides` dtype fix | retires with a corrected checkpoint, not with a sha | step 3's cfgcheck shows whether the checkpoint still mislabels ⇒ **checkpoint-driven** |
 | launcher: `BLOCK_SIZE=auto`, `PINNED_ROUND_MB` | upstream's own fix retires them | the last two rows of step 3's table give the exact drop condition |
@@ -212,7 +221,7 @@ minor and update that comment (pattern: the 0.31.0 -> 0.32.0 move in `6a9bac4`).
 - `container/Dockerfile` header: the `pinned at <sha7>, <date>; was ...` line, plus a
   `<old7> -> <new7> (<date>, N commits): ...` paragraph above "Otherwise nothing in this file is
   snapshot-specific". It covers which layers rebuild, the runtime resolve and CMake.
-- `container/patches/{boot-timing,draft-load-filter,spec-live,sm120-gemm-plans}/UPSTREAM`: a
+- `container/patches/{boot-timing,draft-load-filter,spec-live,sm120-gemm-plans,csf-scale-decode,b12x}/UPSTREAM`: a
   "re-grepped at <sha7>" note carrying the row's 4b answer.
 - `qwen3.8-flash-next/run` header: `Last verified against main @ <sha7>`, append the old sha to the
   re-checked list, and update any workaround note that step 3 changed. Edit code only if an

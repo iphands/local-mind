@@ -29,6 +29,12 @@
 # and the log prints len(source)), the 17th shape is inherited for free and the patch
 # needed no change. test_sm120_gemm_plans.py passes. Still NOT repeated in-container
 # (this repin does not build the image); the GPU A/B below is still outstanding too.
+# Re-grepped at fe8f214 (2026-10-18, 137 commits): low_latency_gemm.py is
+# byte-identical since 4d9a8d6, and the capability dict still keys exactly (10, 3)
+# (10, 0) (9, 0) (12, 1) at :302-308. There is no (12, 0) key, so the overlay is still
+# required. Nearby but not hooked: vllm#61454 removes the custom-op wrappers around
+# the HC Triton kernels (nvidia/ops/hc.py), which changes what torch.compile traces
+# around those layers. test_sm120_gemm_plans.py passes.
 # Verified at vLLM 187a0eb (2026-10-10) and in a throwaway container of the b6d8e8a image
 # (no GPU): the capability key type is a tuple subclass (DeviceCapability(12, 0) == (12, 0),
 # equal hash), the existing keys are exactly (10, 0) (10, 3) (12, 1) (9, 0), the hook applies

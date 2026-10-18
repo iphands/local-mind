@@ -35,6 +35,17 @@
 # replaces moved shape, only position. test_spec_live.py passes. Still NOT repeated
 # in-container: this repin does not build the image (repin.md forbids it), so the
 # import-time check belongs to the first boot after ./container/build.
+# Re-grepped present at fe8f214 (2026-10-18, 137 commits). scheduler.py (+18/-10:
+# vllm#58668, vllm#58778), core.py and core_client.py changed since 4d9a8d6;
+# routers.py is byte-identical. Every seam survives: dynamic_sd_lookup is still
+# declared at scheduler.py:307 and built at :310, and num_spec_tokens_to_schedule
+# still comes from dynamic_sd_lookup[len(num_scheduled_tokens)] at :1565-1567. The
+# UTILITY dispatch is still getattr(self, method_name) feeding
+# _convert_msgspec_args (core.py:1727-1728, def :1788), and call_utility_async is
+# still defined (core_client.py:1296, :1801). No hooked line is on a +/- line. Still
+# needed: speculative.py's diff adds no live-K knob, so
+# num_speculative_tokens_per_batch_size (:495) is still the only Dynamic SD input.
+# test_spec_live.py passes. Still NOT repeated in-container.
 # Verified at vLLM 187a0eb (2026-10-10), by reading the source, by the host test
 # (test_spec_live.py: fakes shaped like these seams), and by importing the three
 # targets with the hook in a throwaway container of the b6d8e8a image (no GPU):

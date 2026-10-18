@@ -48,6 +48,14 @@
 # checkpoint", and our wrapper answers True for draft weights, so that probe would
 # read a draft checkpoint as EP-split and switch the loader to an exact-match
 # tensor_filter allowlist. test_draft_load_filter.py passes.
+# Re-grepped at fe8f214 (2026-10-18, 137 commits): weight_utils.py and
+# default_loader.py are byte-identical since 4d9a8d6. model.py (-8/+1) and mtp.py
+# (+1/-1) changed only to move is_hc_sequence_parallel_enabled into
+# common/hyperconnection.py (vllm#61454). _remap_mtp_weight_name (2 hits) and
+# {"mtp.": None} (2 hits) grep the same at both shas and are on no +/- line. Still
+# needed: `git grep is_unused_checkpoint_weight` under vllm/models/qwen4_exp/ at
+# fe8f214 returns nothing, so Qwen4ExpMTP still declares no loader-side skip.
+# test_draft_load_filter.py passes.
 #   vllm.model_executor.model_loader.weight_utils
 #       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
 #                               safetensors_weights_iterator resolves it as a

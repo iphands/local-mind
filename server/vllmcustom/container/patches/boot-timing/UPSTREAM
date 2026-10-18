@@ -48,6 +48,13 @@
 #   'startup_timing|boot_timing|profile_report'` over the whole tree at 4d9a8d6
 #   returns nothing, so upstream has shipped no startup waterfall to make this
 #   redundant. test_boot_timing.py passes.
+#   Re-grepped present at fe8f214 (2026-10-18, 137 commits). Of the hooked files,
+#   renderers/base.py, core.py, core_client.py (+276 lines churn), gpu_worker.py,
+#   gpu/model_runner.py and kernel_warmup.py changed since 4d9a8d6 (the last from
+#   vllm#55671, flashinfer autotune_v2). Every hooked def greps to the same count at
+#   both shas, and no hooked def line is on a +/- line, so only bodies moved. Still
+#   needed: the startup_timing|boot_timing|profile_report grep over the whole tree
+#   at fe8f214 returns nothing. test_boot_timing.py passes.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client

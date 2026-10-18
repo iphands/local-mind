@@ -105,6 +105,7 @@ section**, which always stays last. Keep it dense.
 - Auto-selection: `B12X` and `FLASHINFER_B12X` are both absent from the NVFP4 MoE `AVAILABLE_BACKENDS` (`fused_moe/oracle/nvfp4.py:199-213`), and b12x linears sit behind FlashInfer-CUTLASS + Marlin (MXFP8) and nine others (NVFP4) in `kernels/linear/__init__.py:556-596`. Installing it does not move an `auto` pick. [SOURCE]
 - b12x FP8 scaled-mm takes only static per-tensor or 128×128 block scales (`kernels/linear/scaled_mm/b12x.py:92,227-231`): `ONLINE_FP8=1`'s dynamic per-channel layers fall back to auto under `--linear-backend b12x`. [SOURCE]
 - `--gdn-decode-kernel b12x` (the FP4-Local card's recipe) is community-fork only: nothing matches `gdn.*b12x` in upstream `vllm/` at `4d9a8d6`. [SOURCE]
+- **From the `fe8f214` snapshot on, the image ships b12x itself.** flashinfer-python 0.7.2 (vllm#61913) embeds b12x 1.5.0 under `flashinfer.experimental.b12x` and installs a top-level `b12x` compat package (flashinfer#5767). Our `.pth` only appends to `sys.path`, so on that image `import b12x` gets flashinfer's copy and the mounted 1.5.1 goes inert. vLLM's extra still pins 1.5.1 (`setup.py:1732`). The six submodules vLLM imports all exist in the embedded tree. [SOURCE: flashinfer v0.7.2 pyproject.toml + tree; not yet seen in a built image]
 
 ---
 

@@ -35,3 +35,22 @@
 # --gpus device=0: all six submodules import; B12xMxfp8LinearKernel, B12xNvFp4LinearKernel,
 # B12xFp8BlockScaledMMKernel, B12xTensorFP8ScaledMMLinearKernel is_supported() == (True, None);
 # B12xExperts._supports_current_device() == True.
+#
+# fe8f214 repin (2026-10-18): THE IMAGE NOW SHIPS b12x ITSELF, and this overlay goes
+# inert there, as designed above. vllm#61913 takes flashinfer-python to 0.7.2. Its
+# wheel embeds b12x 1.5.0 under flashinfer.experimental.b12x and installs a top-level
+# compat package, `b12x` (flashinfer#5767; pyproject.toml package-dir
+# "b12x" = "flashinfer/experimental/b12x/_compat/b12x"). Our flashinfer-build builds
+# that same pyproject. The package sits in site-packages and our .pth only appends,
+# so `import b12x` resolves to flashinfer's embedded copy, not the mounted 1.5.1.
+# All six vLLM submodules above exist in the embedded tree at flashinfer v0.7.2.
+# vLLM's extra still pins b12x==1.5.1 (setup.py:1732). Flashinfer's copy
+# is 1.5.0 plus its own fixes, among them flashinfer#6294 (skip unrouted -1 routes
+# in the W4A16 top-k sum), #6317 (W4A16 E8M0 re-bias) and #6211 (SM12x direct-micro
+# input scale, static-kernel recompiles).
+# Disposition: retired-kept. It still does its job for IMAGE_TAG=<the g4d9a8d6 tag>.
+# On the fe8f214 image it mounts but cannot win, and b12x_args still prints
+# "1.5.1 mounted", which would then be false. Whether to drop the mount for images
+# that ship b12x, or make the .pth prepend so the pinned wheel wins, is a Plan 06
+# decision. Neither is made here. NOT VERIFIED until the image is built: that our
+# flashinfer wheel actually carries the top-level b12x package.

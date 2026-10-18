@@ -11,6 +11,10 @@
 #           -- generator of (name, tensor); yields from _get_weights_iterator(
 #              primary_weights) then the model's secondary_weights sources.
 #              Wrapped, not replaced: every non-CSF pair passes through.
+#   Re-grepped at fe8f214 (2026-10-18): default_loader.py is byte-identical since
+#   4d9a8d6 (get_all_weights still :367). Still needed: `git grep -iE
+#   'nvfp4_csf|csf_exceptions|byte-window4'` over vllm/ at fe8f214 returns nothing.
+#   test_csf_scale_decode.py passes.
 #
 # Format source (the format is NOT in vLLM; read these, do not guess):
 #   local-inference-lab/b12x  tests/quantization/test_nvfp4_csf.py  _fixture(codec=0)

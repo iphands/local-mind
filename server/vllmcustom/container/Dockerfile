@@ -35,13 +35,14 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at 4d9a8d6, 2026-10-15;
-#     was 698e79f, 2026-10-13, df6c7ad, 2026-10-13, 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#   - main snapshot (VLLM_REF=main in ./build, pinned at fe8f214, 2026-10-18;
+#     was 4d9a8d6, 2026-10-15, 698e79f, 2026-10-13, df6c7ad, 2026-10-13, 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
 #     and 1ee4be4, 2026-09-12):
 #     READ THIS BEFORE QUOTING A PIN: the "same torch 2.13.0 / torchvision 0.28.0" below
 #     describes that 1ee4be4..698e79f line, NOT the current one. 4d9a8d6 moved to
-#     torch 2.14.0 / torchvision 0.29.0 and flashinfer 0.7.1 -- see the
-#     "698e79f -> 4d9a8d6" paragraph further down, which is the current state.
+#     torch 2.14.0 / torchvision 0.29.0 and flashinfer 0.7.1, and fe8f214 to
+#     flashinfer 0.7.2 -- see the "698e79f -> 4d9a8d6" and "4d9a8d6 -> fe8f214"
+#     paragraphs further down; the last one is the current state.
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
 #     flashinfer.ai/whl), same requirements/build/cuda.txt, same
@@ -265,6 +266,43 @@
 #     ever dies inside a CUDA/nvrtc call, run
 #     `python -c "import importlib.metadata as m;print(m.requires('torch'))"` in
 #     the image BEFORE blaming the model. NOT VERIFIED either way.
+#     4d9a8d6 -> fe8f214 (2026-10-18, 137 commits): torch 2.14.0 / torchaudio
+#     2.11.0 / torchvision 0.29.0 are unchanged, so torch-build and
+#     torchaudio-build are reused. flashinfer-python 0.7.1 -> 0.7.2 (vllm#61913;
+#     cubin 0.7.2 published at flashinfer.ai/whl), so flashinfer-build recompiles
+#     (~35 min AOT), then vllm-build and vllm-openai. flashinfer 0.7.2's own
+#     build/runtime pins move only nvidia-cudnn-frontend >= 1.30.0 -> >= 1.31.0.
+#     It also packages a TOP-LEVEL `b12x` module (flashinfer#5767: b12x 1.5.0
+#     embedded under flashinfer.experimental.b12x, plus a compat package so
+#     `import b12x` keeps working). So this image ships b12x for the first time,
+#     with no extra installed. vllm/utils/b12x.py's find_spec("b12x") turns
+#     True on every boot. All six submodules it imports exist in the embedded copy.
+#     The b12x linears still rank behind FlashInfer, CUTLASS and Marlin in every
+#     auto list, and the MoE oracle never auto-picks B12X. That is the
+#     container/patches/b12x mount's problem, not this file's: see its UPSTREAM.
+#     Build-side: DeepGEMM 6ce1c5e -> a7a9277 (vllm#61744), BACK ON the stable
+#     ABI ("PyTorch 2.11 stable ABI and CPython 3.10 limited API"; the same PR
+#     drops deep_gemm/_C*.so from check-torch-abi's unstable allow-list). That
+#     reverses the 4d9a8d6 note above, and it still compiles for 12.0f here.
+#     FlashMLA 0eee43b -> 5dceadb (vllm#61371, a source-tree reshuffle under
+#     csrc/cuda_kernels/) supports only 9.0a/10.x, so it configures to an empty
+#     target for CUDA_ARCHS 12.0, as before. vllm#62132 adds three CUDA sources,
+#     each compiled for 12.0 with the rest of its extension:
+#     muse_spark_mul_tanh_soft_cap and fused_muse_spark_qknorm_rope_kv_insert
+#     (_C) and fused_qknorm_rope_cache (stable ext, CUDA only). Two changes are inert for
+#     CUDA 13.2 / 12.0. vllm#60896 adds a CUDA < 13 else-branch for the fused GDN
+#     decode archs. vllm#56549 (cmake/utils.cmake) keeps a plain arch when its
+#     a/f variant is also requested, which only matters for lists like
+#     "12.0;12.0f"; ours is the single plain 12.0. setup.py / pyproject.toml
+#     changes are ROCm wheel naming, TheRock device extras and a typos exclude.
+#     vllm_flash_attn.cmake is byte-for-byte unchanged (GIT_TAG still b273a02,
+#     GIT_PROGRESS TRUE once), so the sm120 hook below still lands.
+#     Runtime resolve (dry-run of the fe8f214 requirements/cuda.txt in the
+#     g4d9a8d6 image, in place and --upgrade-package on both changed lines):
+#     identical results. Only flashinfer-python 0.7.1 -> 0.7.2 (ours, built from
+#     source) and tokenspeed-mla 2.0.2 -> 2.0.3 (vllm#61689, MLA-only, off this
+#     path) move. torch, torchaudio, humming-kernels 0.1.17, nvidia-cutlass-dsl
+#     4.8.0 and transformers 5.19.0 stay put.
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,
