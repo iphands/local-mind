@@ -6,6 +6,7 @@ compares any vLLM build / backend / CUDA version currently serving on :8700.
 
     ./bench/bench <label>                        # e.g. ./bench/bench cu1303-flashinfer
     ./bench/bench cu1303-triton --host host:8700 --model cosmo-6000
+    ./bench/bench k3-code --only code             # one prompt (short / code / long)
 
 Measures, per prompt, TTFT (time to first token) and decode tok/s
 (completion_tokens / generation-time), then prints medians and appends a row
@@ -37,12 +38,23 @@ def main():
     ap.add_argument("--host", default="localhost:8700")
     ap.add_argument("--model", default="cosmo-6000")
     ap.add_argument("--out", default=None, help="results markdown (default: alongside this script)")
+    ap.add_argument("--only", default=None,
+                    help="comma-separated prompt names to run (default: all of " +
+                         ", ".join(n for n, _, _ in PROMPTS) + ")")
     args = ap.parse_args()
+    prompts = PROMPTS
+    if args.only:
+        want = [w.strip() for w in args.only.split(",") if w.strip()]
+        unknown = sorted(set(want) - {n for n, _, _ in PROMPTS})
+        if unknown:
+            ap.error(f"unknown prompt(s) {', '.join(unknown)}; "
+                     f"choose from {', '.join(n for n, _, _ in PROMPTS)}")
+        prompts = [p for p in PROMPTS if p[0] in want]
 
     out = args.out or str(Path(__file__).resolve().parent / "bench-results.md")
     tps_all, ttft_all = [], []
     print(f"# benchmarking {args.label} against {args.host} ({args.model})\n")
-    for name, prompt, max_tokens in PROMPTS:
+    for name, prompt, max_tokens in prompts:
         try:
             r = stream_chat(args.host, args.model,
                             [{"role": "user", "content": prompt}], max_tokens,

@@ -1,0 +1,183 @@
+#!/usr/bin/env bash
+# How much does the MTP drafter actually buy? FP4-Local, humming, SM120_SKINNY=1, SPEC_TOKENS 0..3.
+#
+#   ./scripts/flashnext-spec-sweep                 # K = 0,1,2,3, 4 runs, run-fp4local
+#   KS=0,3 RUNS=2 ./scripts/flashnext-spec-sweep   # a subset
+#   REPLACE=1 ./scripts/flashnext-spec-sweep       # stop a running `vllm` container first
+#
+# Everything except the draft depth is the fastest measured FP4-Local setup (Plan 06 T3):
+# MOE_BACKEND=humming SM120_SKINNY=1 on run-fp4local's defaults (probabilistic draft sampling,
+# fp8 KV). Launcher knobs set in the environment still pass through (summary.md lists them).
+#
+# Per K: boot detached, wait for /health, one unrecorded ./bench/bench pass (JIT / graph warm-up),
+# then RUNS recorded rounds. A round times each bench prompt ON ITS OWN (bench --only short|code|
+# long) and snapshots vLLM's /metrics counters around it. The deltas are exact for that one request:
+#   vllm:spec_decode_num_drafts / _num_draft_tokens / _num_accepted_tokens and
+#   _num_accepted_tokens_per_pos{position=i} (vllm/v1/spec_decode/metrics.py)
+# From those, per K x prompt, summary.md reports:
+#   speedup        decode tok/s / the K=0 decode tok/s for the same prompt
+#   accept len     1 + accepted / drafts = tokens committed per verify step (vLLM's own formula);
+#                  the ideal speedup if drafting and verifying K+1 tokens cost nothing
+#   accept %       accepted / draft tokens
+#   per-position   accepted at position i / drafts: how often the i-th drafted token survives
+#   step cost      accept len / speedup: how much longer one draft+verify step takes than a
+#                  plain K=0 decode step. Gain is accept len, cost is step cost, and the speedup is
+#                  their ratio, so a K that adds less acceptance than it adds step cost loses.
+#
+# SPEC_TOKENS=1 hung at boot on the old PR-branch image (run-fp4local warns). A hang here costs
+# READY_TIMEOUT (default 1500 s, ~2.5x a normal FP4-Local boot) and becomes a BOOT FAILED row.
+#
+# Output: bench/bench-logs/flashnext-spec-<UTC stamp>/
+#   summary.md   the breakdown        results.tsv   one row per K x run x prompt, raw counter deltas
+#   k<K>.log     launcher + container log        k<K>.bench   raw bench output
+# It STOPS the server it benchmarks and leaves nothing running; a running `vllm` container makes it
+# refuse unless REPLACE=1.
+set -uo pipefail   # NOT -e: one K failing to boot must not lose the others
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+NAME=vllm
+PORT=${PORT:-8700}
+HOST="localhost:${PORT}"
+READY_TIMEOUT=${READY_TIMEOUT:-1500}
+RUNS=${RUNS:-4}
+KS=${KS:-0,1,2,3}
+PROMPTS=(short code long)   # bench/bench's PROMPTS names
+LAUNCHER=${LAUNCHER:-qwen3.8-flash-next/run-fp4local}   # relative to the repo, or absolute
+[[ $LAUNCHER == /* ]] || LAUNCHER=$HERE/$LAUNCHER
+BENCH=${BENCH:-$HERE/bench/bench}
+OUT=${OUT:-$HERE/bench/bench-logs/flashnext-spec-$(date -u +%Y%m%d-%H%M%S)}
+LOGS_PID=
+trap '[[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null' EXIT
+
+# shellcheck source-path=SCRIPTDIR source=../bench/_bench-lib.sh
+source "$HERE/bench/_bench-lib.sh"
+for tool in curl docker awk; do
+  command -v "$tool" >/dev/null || { echo "## need $tool"; exit 2; }
+done
+[[ -x $LAUNCHER ]] || { echo "## no launcher at $LAUNCHER"; exit 2; }
+[[ $RUNS =~ ^[1-9][0-9]*$ ]] || { echo "## RUNS must be a positive integer (got '$RUNS')"; exit 2; }
+[[ $KS =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "## KS must be a comma list of draft depths like 0,1,2,3 (got '$KS')"; exit 2; }
+if docker ps -q -f "name=^${NAME}$" | grep -q . && [[ ${REPLACE:-0} != 1 ]]; then
+  echo "## a '$NAME' container is running; this script stops it. Re-run with REPLACE=1 to allow that."
+  exit 2
+fi
+
+# One line of counters: "drafts draft_tokens accepted pos0 pos1 ... pos7" (summed over engines).
+# Missing metrics (K=0 registers none) read as 0.
+snapshot() {
+  curl -sf "http://${HOST}/metrics" | awk '
+    BEGIN { d = t = a = 0; for (i = 0; i < 8; i++) p[i] = 0 }
+    /^vllm:spec_decode_num_drafts_total[{ ]/          { d += $NF }
+    /^vllm:spec_decode_num_draft_tokens_total[{ ]/    { t += $NF }
+    /^vllm:spec_decode_num_accepted_tokens_total[{ ]/ { a += $NF }
+    /^vllm:spec_decode_num_accepted_tokens_per_pos_total[{ ]/ {
+      if (match($0, /position="[0-9]+"/)) { i = substr($0, RSTART + 10, RLENGTH - 11) + 0; if (i < 8) p[i] += $NF } }
+    END { printf "%d %d %d", d, t, a; for (i = 0; i < 8; i++) printf " %d", p[i]; print "" }'
+}
+
+mkdir -p "$OUT"
+printf 'k\trun\tprompt\tdecode_tps\tttft_ms\ttokens\tdrafts\tdraft_tokens\taccepted\tpos0\tpos1\tpos2\tpos3\tpos4\tpos5\tpos6\tpos7\n' > "$OUT/results.tsv"
+declare -A BACKEND READY
+IFS=, read -r -a KLIST <<<"$KS"
+
+echo "## flashnext-spec-sweep -> $OUT"
+echo "##   launcher $LAUNCHER, K in {$KS}, $RUNS rounds per K (+1 unrecorded warm-up), humming + SM120_SKINNY=1"
+
+for k in "${KLIST[@]}"; do
+  log="$OUT/k$k.log"; : > "$log"
+  [[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=
+  stop_server
+  echo "## [k$k] booting  (MOE_BACKEND=humming SPEC_TOKENS=$k SM120_SKINNY=1)"
+  boot_t0=$(date +%s)
+  MOE_BACKEND=humming SPEC_TOKENS=$k SM120_SKINNY=1 DETACH=1 PORT="$PORT" "$LAUNCHER" >> "$log" 2>&1
+  docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
+  if ! wait_ready; then
+    echo "## [k$k] BOOT FAILED -- see $log"
+    BACKEND[$k]="boot failed"; READY[$k]=-
+    continue
+  fi
+  READY[$k]=$(( $(date +%s) - boot_t0 ))
+  BACKEND[$k]=$(grep -oE "Using '[A-Z0-9_]+' NvFp4 MoE backend" "$log" | head -1 | grep -oE "'[A-Z0-9_]+'" | tr -d "'")
+  echo "## [k$k] ready in ${READY[$k]}s, MoE backend ${BACKEND[$k]:-<not logged>}"
+
+  { echo "### warm-up (not recorded)"
+    "$BENCH" "k$k-warmup" --host "$HOST" --out "$OUT/bench-results.md" 2>&1; } > "$OUT/k$k.bench"
+  for run in $(seq 1 "$RUNS"); do
+    for prompt in "${PROMPTS[@]}"; do
+      read -r -a before <<<"$(snapshot)"
+      "$BENCH" "k$k-r$run-$prompt" --only "$prompt" --host "$HOST" --out "$OUT/bench-results.md" > "$OUT/.run.txt" 2>&1
+      sleep 1   # let the last step's stats reach the API server's counters
+      read -r -a after <<<"$(snapshot)"
+      { echo "### run $run $prompt"; cat "$OUT/.run.txt"; } >> "$OUT/k$k.bench"
+      line=$(sed -nE 's/^ +'"$prompt"' +ttft= *([0-9.]+)ms +decode= *([0-9.]+) tok\/s +\(([0-9]+) tok\).*/\1 \2 \3/p' "$OUT/.run.txt")
+      if [[ -z $line || ${#before[@]} -ne 11 || ${#after[@]} -ne 11 ]]; then
+        echo "## [k$k] run $run $prompt: no result$(grep -m1 -oE 'FAILED.*' "$OUT/.run.txt" | sed 's/^/ -- /')"
+        continue
+      fi
+      read -r ttft tps tok <<<"$line"
+      row="k$k"$'\t'"$run"$'\t'"$prompt"$'\t'"$tps"$'\t'"$ttft"$'\t'"$tok"
+      for i in $(seq 0 10); do row+=$'\t'"$(( after[i] - before[i] ))"; done
+      printf '%s\n' "$row" >> "$OUT/results.tsv"
+    done
+    echo "## [k$k] run $run/$RUNS done"
+  done
+  rm -f -- "$OUT/.run.txt"
+done
+
+[[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=
+stop_server
+
+{
+  echo "# flashnext-spec-sweep $(date -u '+%Y-%m-%d %H:%M UTC')"
+  echo
+  echo "Launcher \`$LAUNCHER\`, MOE_BACKEND=humming SM120_SKINNY=1, K in {$KS}, $RUNS rounds per K, single stream, one prompt per request."
+  for v in ONLINE_FP8 DRAFT_SAMPLE GPU_MEM_UTIL KV_FP8 MAX_NUM_SEQS MAX_BATCHED_TOKENS VISION EXTRA_ARGS ENV_EXTRA; do
+    [[ -v $v ]] && printf 'Set: %s=%s  \n' "$v" "${!v}"
+  done
+  grep -h -m1 '^## Running' "$OUT"/k*.log 2>/dev/null | sed 's/^## Running /Image: /; s/  (.*//' | sort -u
+  echo
+  for k in "${KLIST[@]}"; do
+    if [[ ${BACKEND[$k]:-} == "boot failed" ]]; then printf -- '- K=%s: **BOOT FAILED** (see k%s.log)\n' "$k" "$k"
+    else printf -- '- K=%s: MoE backend %s, boot %ss\n' "$k" "${BACKEND[$k]:-?}" "${READY[$k]:-?}"; fi
+  done
+  echo
+  echo "| prompt | K | runs | decode tok/s mean (min–max) | spread % | speedup vs K=0 | accept len | accept % | per-position accept % | step cost vs K=0 | TTFT ms |"
+  echo "|---|---|---|---|---|---|---|---|---|---|---|"
+  awk -F'\t' -v plist="${PROMPTS[*]}" -v klist="${KLIST[*]}" '
+    NR == 1 { next }
+    { kk = substr($1, 2) + 0; key = $3 SUBSEP kk
+      n[key]++; s[key] += $4; tt[key] += $5
+      if (!(key in lo) || $4 < lo[key]) lo[key] = $4
+      if (!(key in hi) || $4 > hi[key]) hi[key] = $4
+      D[key] += $7; T[key] += $8; A[key] += $9
+      for (i = 0; i < 8; i++) P[key, i] += $(10 + i) }
+    END {
+      np = split(plist, pr, " "); nk = split(klist, ks, " ")
+      for (j = 1; j <= np; j++) {
+        p = pr[j]; base = p SUBSEP 0; b = (base in n) ? s[base] / n[base] : 0
+        for (q = 1; q <= nk; q++) {
+          k = ks[q] + 0; key = p SUBSEP k
+          if (!(key in n)) { printf "| %s | %d | 0 | no data | | | | | | | |\n", p, k; continue }
+          m = s[key] / n[key]; sp = (m > 0 ? 100 * (hi[key] - lo[key]) / m : 0)
+          speed = (b > 0 ? sprintf("%.2fx", m / b) : "-")
+          if (k == 0 || D[key] == 0) { al = "1.00"; ap = "-"; pp = "-"; cost = (b > 0 ? "1.00x" : "-") }
+          else {
+            alen = 1 + A[key] / D[key]; al = sprintf("%.2f", alen)
+            ap = (T[key] > 0 ? sprintf("%.1f", 100 * A[key] / T[key]) : "-")
+            pp = ""; for (i = 0; i < k && i < 8; i++) pp = pp (i ? " / " : "") sprintf("%.0f", 100 * P[key, i] / D[key])
+            cost = (b > 0 && m > 0 ? sprintf("%.2fx", alen / (m / b)) : "-")
+          }
+          printf "| %s | %d | %d | %.1f (%.1f–%.1f) | %.1f | %s | %s | %s | %s | %s | %.0f |\n", p, k, n[key], m, lo[key], hi[key], sp, speed, al, ap, pp, cost, tt[key] / n[key]
+        }
+      } }' "$OUT/results.tsv"
+  echo
+  echo "accept len = 1 + accepted / drafts (tokens committed per verify step). step cost = accept len / speedup:"
+  echo "how much longer one draft+verify step takes than a plain K=0 decode step. per-position = how often"
+  echo "the i-th drafted token is accepted. Spread is (max - min) / mean; a speedup difference smaller than"
+  echo "both configs' spreads is noise. The short prompt (256 tokens) has run-to-run spreads of 30-100% in"
+  echo "earlier matrices: read code and long."
+} > "$OUT/summary.md"
+
+cat "$OUT/summary.md"
+echo
+echo "## done -- $OUT (summary.md, results.tsv, per-K .log/.bench). Nothing is running now."
