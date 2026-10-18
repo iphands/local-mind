@@ -6,6 +6,21 @@
 #   LAUNCHER=qwen3.8-flash-next/run ./scripts/flashnext-matrix  # the NVFP4 checkpoint instead
 #   REPLACE=1 ./scripts/flashnext-matrix                     # stop a running `vllm` container first
 #
+#   # NVFP4 daily driver, all four configs in one go:
+#   REPLACE=1 LAUNCHER=qwen3.8-flash-next/run ONLINE_FP8=1 DRAFT_MOE_BACKEND=humming ./scripts/flashnext-matrix
+#
+# Launcher knobs in the environment (ONLINE_FP8, DRAFT_SAMPLE, GPU_MEM_UTIL, EXTRA_ARGS, ...) pass
+# straight through to every config; summary.md lists the ones that were set.
+#
+# DRAFT_MOE_BACKEND=<name> gives the MTP drafter its own MoE backend. The launcher's
+# --moe-backend applies to the drafter too, and on Qwen3.8-Flash-Next-NVFP4 the drafter's experts
+# are FP8, which b12x cannot run ("moe_backend='b12x' is not supported for FP8 MoE"). FP4-Local's
+# drafter experts are W4A16 NVFP4 and need nothing. When it is set, each config gets
+# EXTRA_ARGS += --speculative-config {"method":"mtp","num_speculative_tokens":K,
+# ["draft_sample_method":...,]"moe_backend":"<name>"}, with K from the config and the draft
+# sampling the launcher itself would use. The later flag wins in vLLM's parser, so this
+# replaces the launcher's own. It refuses SPEC_LIVE=1, whose dynamic schedule it cannot rebuild.
+#
 # Per config: boot the launcher detached, wait for /health, run ./bench/bench once UNRECORDED
 # (the first requests pay CuTe-DSL JIT and graph warm-up), then RUNS recorded passes. A pass is
 # bench's three prompts -- short (256 tok), code (1024), long (~16k-token context, 1024) -- one
@@ -32,6 +47,7 @@ LAUNCHER=${LAUNCHER:-qwen3.8-flash-next/run-fp4local}   # relative to the repo, 
 [[ $LAUNCHER == /* ]] || LAUNCHER=$HERE/$LAUNCHER
 BENCH=${BENCH:-$HERE/bench/bench}
 OUT=${OUT:-$HERE/bench/bench-logs/flashnext-matrix-$(date -u +%Y%m%d-%H%M%S)}
+DRAFT_MOE_BACKEND=${DRAFT_MOE_BACKEND:-}
 LOGS_PID=
 trap '[[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null' EXIT
 
@@ -50,6 +66,15 @@ for tool in curl docker awk; do
 done
 [[ -x $LAUNCHER ]] || { echo "## no launcher at $LAUNCHER"; exit 2; }
 [[ $RUNS =~ ^[1-9][0-9]*$ ]] || { echo "## RUNS must be a positive integer (got '$RUNS')"; exit 2; }
+if [[ -n $DRAFT_MOE_BACKEND ]]; then
+  [[ $DRAFT_MOE_BACKEND =~ ^[a-z0-9_]+$ ]] || { echo "## DRAFT_MOE_BACKEND must be a vLLM MoE backend name (got '$DRAFT_MOE_BACKEND')"; exit 2; }
+  [[ ${SPEC_LIVE:-0} == 0 ]] || { echo "## DRAFT_MOE_BACKEND cannot be combined with SPEC_LIVE=1 (its schedule would be dropped)"; exit 2; }
+  # The draft sampling the launcher would pick: DRAFT_SAMPLE if set (even empty), else the
+  # launcher's own default -- run-fp4local's is probabilistic, run's is vLLM's (greedy).
+  if [[ -v DRAFT_SAMPLE ]]; then DRAFT_SAMPLE_EFF=$DRAFT_SAMPLE
+  else DRAFT_SAMPLE_EFF=$(sed -nE 's/^DRAFT_SAMPLE=\$\{DRAFT_SAMPLE:?-([a-z]*)\}.*/\1/p' "$LAUNCHER" | head -1)
+  fi
+fi
 if docker ps -q -f "name=^${NAME}$" | grep -q . && [[ ${REPLACE:-0} != 1 ]]; then
   echo "## a '$NAME' container is running; this script stops it. Re-run with REPLACE=1 to allow that."
   exit 2
@@ -72,8 +97,17 @@ for entry in "${CONFIGS[@]}"; do
   stop_server
   echo "## [$label] booting  ($envs SM120_SKINNY=1)"
   boot_t0=$(date +%s)
+  extra=${EXTRA_ARGS:-}
+  if [[ -n $DRAFT_MOE_BACKEND ]]; then
+    k=$(grep -oE 'SPEC_TOKENS=[0-9]+' <<<"$envs"); k=${k#SPEC_TOKENS=}
+    spec='{"method":"mtp","num_speculative_tokens":'"$k"
+    [[ -n $DRAFT_SAMPLE_EFF ]] && spec+=',"draft_sample_method":"'"$DRAFT_SAMPLE_EFF"'"'
+    spec+=',"moe_backend":"'"$DRAFT_MOE_BACKEND"'"}'
+    extra="${extra:+$extra }--speculative-config $spec"
+    echo "## [$label] drafter MoE backend: $DRAFT_MOE_BACKEND  (--speculative-config $spec)"
+  fi
   # shellcheck disable=SC2086  # $envs is a space-separated KEY=VALUE list on purpose
-  env $envs SM120_SKINNY=1 DETACH=1 PORT="$PORT" "$LAUNCHER" >> "$log" 2>&1
+  EXTRA_ARGS=$extra env $envs SM120_SKINNY=1 DETACH=1 PORT="$PORT" "$LAUNCHER" >> "$log" 2>&1
   docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
   if ! wait_ready; then
     echo "## [$label] BOOT FAILED -- see $log"
@@ -106,6 +140,9 @@ stop_server
   echo "# flashnext-matrix $(date -u '+%Y-%m-%d %H:%M UTC')"
   echo
   echo "Launcher \`$LAUNCHER\`, SM120_SKINNY=1, $RUNS recorded runs per config, single stream."
+  for v in ONLINE_FP8 DRAFT_SAMPLE DRAFT_MOE_BACKEND GPU_MEM_UTIL KV_FP8 MAX_NUM_SEQS MAX_BATCHED_TOKENS VISION EXTRA_ARGS ENV_EXTRA; do
+    [[ -v $v ]] && printf 'Set: %s=%s  \n' "$v" "${!v}"
+  done
   grep -h -m1 '^## Running' "$OUT"/*.log 2>/dev/null | sed 's/^## Running /Image: /; s/  (.*//' | sort -u
   echo
   echo "| config | MoE backend (logged) | boot (s) | prompt | runs | decode tok/s mean | min | max | spread % | TTFT ms mean |"
