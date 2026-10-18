@@ -42,9 +42,21 @@
 # lm_head plan, the CuTe-DSL package is installed (shape_dynamic_skinny_gemm.is_available()
 # is True), and enable_qwen4_exp_low_latency_gemm() runs on an empty module afterwards.
 # Host test: python3 container/patches/sm120-gemm-plans/test_sm120_gemm_plans.py
-# NOT verified: anything on the GPU -- that the CuTe-DSL kernels compile for sm_120, that
-# the GB10-tuned tiles help (or at least do not hurt) on a 1.8 TB/s card, and the effect on
+# NOT verified at the time: anything on the GPU -- that the CuTe-DSL kernels compile for sm_120,
+# that the GB10-tuned tiles help (or at least do not hurt) on a 1.8 TB/s card, and the effect on
 # decode tok/s. A/B it: SM120_SKINNY=1 vs 0 on identical settings.
+# A/B'd 2026-10-18 on FP4-Local (scripts/flashnext-skinny-ab, image ...gfe8f214, run-fp4local
+# defaults + SPEC_TOKENS=3, 4 runs each; bench/bench-logs/flashnext-skinny-ab-20261018-214023):
+# the kernels compile and run on sm_120 and the overlay applies (its "plans on" line in the on arm,
+# absent in the off arm). They do NOT measurably change decode. Code: on 198.4 (186.5-204.4) vs off
+# 199.0 (192.0-204.4) tok/s. Long: 168.1 (134.5-185.3) vs 176.0 (161.4-182.6), within noise; the
+# on arm's low is one poor-acceptance run. MTP acceptance length was 2.66 vs 2.69. The only
+# measured cost is boot: the CuTe-DSL warmup has 44 compile units vs 6, i.e. warmup 1m01s vs 39s and
+# profiling 1m16s vs 58s, about 40 s per boot. On FP4-Local the path only sees the BF16 layers
+# (lm_head, hyper-connection, router), and cuBLAS F.linear is evidently already as fast there at
+# decode M. Not measured: NVFP4 WITHOUT ONLINE_FP8, where every dense projection is BF16 and
+# would take this path. That is the only setup where it could still matter, and it is not how
+# that checkpoint is run. Both Flash-Next launchers therefore default SM120_SKINNY=0.
 #
 # Hook table (module -> attr):
 #   vllm.models.qwen4_exp.nvidia.low_latency_gemm

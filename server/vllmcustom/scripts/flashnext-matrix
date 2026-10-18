@@ -48,6 +48,11 @@ LAUNCHER=${LAUNCHER:-qwen3.8-flash-next/run-fp4local}   # relative to the repo, 
 [[ $LAUNCHER == /* ]] || LAUNCHER=$HERE/$LAUNCHER
 BENCH=${BENCH:-$HERE/bench/bench}
 OUT=${OUT:-$HERE/bench/bench-logs/flashnext-matrix-$(date -u +%Y%m%d-%H%M%S)}
+# Knobs the caller actually set, captured before this script defaults any of them (summary.md lists these).
+CALLER_SET=()
+for v in ONLINE_FP8 DRAFT_SAMPLE DRAFT_MOE_BACKEND GPU_MEM_UTIL KV_FP8 MAX_NUM_SEQS MAX_BATCHED_TOKENS VISION EXTRA_ARGS ENV_EXTRA; do
+  [[ -v $v ]] && CALLER_SET+=("$v")
+done
 DRAFT_MOE_BACKEND=${DRAFT_MOE_BACKEND:-}
 LOGS_PID=
 trap '[[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null' EXIT
@@ -155,9 +160,7 @@ stop_server
   echo "# flashnext-matrix $(date -u '+%Y-%m-%d %H:%M UTC')"
   echo
   echo "Launcher \`$LAUNCHER\`, $RUNS recorded runs per config, single stream. SM120_SKINNY=1 unless a config sets it."
-  for v in ONLINE_FP8 DRAFT_SAMPLE DRAFT_MOE_BACKEND GPU_MEM_UTIL KV_FP8 MAX_NUM_SEQS MAX_BATCHED_TOKENS VISION EXTRA_ARGS ENV_EXTRA; do
-    [[ -v $v ]] && printf 'Set: %s=%s  \n' "$v" "${!v}"
-  done
+  for v in "${CALLER_SET[@]}"; do printf 'Set: %s=%s  \n' "$v" "${!v}"; done
   grep -h -m1 '^## Running' "$OUT"/*.log 2>/dev/null | sed 's/^## Running /Image: /; s/  (.*//' | sort -u
   echo
   echo

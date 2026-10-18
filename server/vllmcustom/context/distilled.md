@@ -109,6 +109,17 @@ section**, which always stays last. Keep it dense.
 - **On FP4-Local, b12x MoE is slower at decode than humming and faster at long-prompt prefill.** On `…gfe8f214` with `SM120_SKINNY=1`, single stream, 4 runs per config, decode tok/s mean (min–max): code humming 195.5 (188.5–210.6) vs b12x 177.6 (170.2–186.6) at K=3, and 181.3 (168.9–192.3) vs 165.0 (162.7–167.3) at K=4. Long (~16k ctx) humming 190.7 (184.4–197.4) vs b12x 166.7 (148.7–184.7) at K=3, and 181.3 vs 156.8 at K=4. Long-prompt TTFT is humming ~425 ms vs b12x ~382 ms, ranges not overlapping. MTP K=4 accepts more (≈3.0 vs ≈2.7 mean length) but is not faster than K=3 on either backend. Keep `MOE_BACKEND=humming SPEC_TOKENS=3`. [LIVE 2026-10-18: `scripts/flashnext-matrix`, Plan 06 tracker Evidence]
 - **On Flash-Next-NVFP4 too, b12x MoE loses to humming at decode, and it cannot boot with MTP unless the drafter gets its own backend.** The drafter's experts are FP8, b12x has no FP8 MoE, and `--moe-backend` is global. `--speculative-config '{…,"moe_backend":"humming"}'` (`SpeculativeConfig.moe_backend`, `vllm/config/speculative.py:417`) fixes the boot. With `ONLINE_FP8=1 SM120_SKINNY=1`, 4 runs, decode code / long mean (min–max): humming-k3 184.1 (177.2–189.7) / 175.9 (169.9–179.1); b12x-k3 167.2 (162.9–171.0) / 167.5 (157.2–172.9); humming-k4 171.1 / 170.8; b12x-k4 158.4 / 148.5. Acceptance is equal across backends (2.51, 2.76), so the gap is the kernel. K=3 beats K=4 on code (no overlap). `ONLINE_FP8=1` is worth ~+10% decode on this checkpoint (humming-k3 code 166.9 → 184.1, separate session). [LIVE 2026-10-18: `scripts/flashnext-matrix`, Plan 06 tracker Evidence]
 
+## SM120_SKINNY (sm120-gemm-plans overlay) is a measured no-op on FP4-Local [LIVE 2026-10-18]
+
+- FP4-Local, `run-fp4local` defaults + `SPEC_TOKENS=3`, image `…gfe8f214`, 4 single-stream runs each
+  (`scripts/flashnext-skinny-ab`). Decode code: on 198.4 (186.5–204.4) vs off 199.0 (192.0–204.4) tok/s.
+  Long: 168.1 (134.5–185.3) vs 176.0 (161.4–182.6). Both within noise, and acceptance is equal (2.66 / 2.69).
+  The overlay did apply (its boot line is present in the on arm only). [LIVE 2026-10-18]
+- Cost: about 40 s more boot (CuTe-DSL warmup 44 vs 6 compile units, warmup 1m01s vs 39s, profiling 1m16s vs 58s). [LIVE 2026-10-18]
+- Why it does nothing here: on FP4-Local the path only sees the BF16 layers (lm_head 248320×2560, HC, router);
+  everything else is MXFP8/NVFP4 and never takes it (`sm120-gemm-plans/UPSTREAM` "Interplay"). Untested and the only
+  case it could matter: NVFP4 without `ONLINE_FP8`. Both Flash-Next launchers default `SM120_SKINNY=0` (`run` since this A/B). [REPO]
+
 ---
 
 ## Open Questions
