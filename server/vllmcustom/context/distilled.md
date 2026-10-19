@@ -120,9 +120,46 @@ section**, which always stays last. Keep it dense.
   everything else is MXFP8/NVFP4 and never takes it (`sm120-gemm-plans/UPSTREAM` "Interplay"). Untested and the only
   case it could matter: NVFP4 without `ONLINE_FP8`. Both Flash-Next launchers default `SM120_SKINNY=0` (`run` since this A/B). [REPO]
 
+## MTP depth on FP4-Local: K=3 is the best depth from 1 to 4 concurrent streams [LIVE 2026-10-18]
+
+- **Single stream** (`scripts/flashnext-spec-sweep`, humming, `SM120_SKINNY=1`, image `…gfe8f214`, 4 runs per K,
+  `bench/bench-logs/flashnext-spec-20261018-205442/`). Decode code tok/s mean (min–max): K=0 117.6 (117.5–117.9),
+  K=1 163.8 (161.7–165.9) 1.39x, K=2 190.0 (188.6–191.8) 1.62x, K=3 192.8 (184.6–201.1) 1.64x. Long (~16k ctx):
+  K=0 114.5, K=1 1.40x, K=2 185.1 (172.3–191.3) 1.62x, K=3 178.7 (153.7–192.8) 1.56x. So on one stream K=2 and K=3
+  are within noise. Accept len (1 + accepted/drafts), code: 1.77 / 2.35 / 2.75. Per-position acceptance at K=3 is
+  76 / 56 / 43 %. Step cost (accept len ÷ speedup, i.e. how much longer one draft+verify step is than a K=0 step):
+  1.27 / 1.45 / 1.68. [LIVE 2026-10-18]
+- **Concurrent** (`scripts/flashnext-conc-sweep`, `run-fp4local` defaults + `SPEC_TOKENS=K`, `SM120_SKINNY=0`, code
+  prompt, unique prefix per stream so the prefix-cache hit rate was 0%, 3 rounds per cell,
+  `bench/bench-logs/flashnext-conc-20261019-042515/`). Per-stream tok/s mean (min–max):
+  - 1 stream: K=0 122.4 (122.3–122.4), K=1 170.5, K=2 185.6 (181.9–189.4), K=3 **198.0** (192.0–207.9), 1.62x.
+  - 2 streams: K=0 107.1, K=2 163.2 (162.4–164.1), K=3 **169.2** (163.7–172.3), 1.58x.
+  - 4 streams: K=0 91.4 (91.2–91.7), K=1 121.2, K=2 133.2 (131.6–135.6), K=3 **137.9** (136.2–139.3), 1.51x.
+
+  Aggregate (all tokens ÷ wall time from the first first-token) at 4 streams: K=0 365.4, K=2 522.8 (517.9–529.2),
+  K=3 532.7 (527.8–539.6), 1.46x. At 2 streams K=3 gives 335.1 vs K=0 214.1. [LIVE 2026-10-18]
+- What it means:
+  - Acceptance does not move with load (K=3 accept len 2.76 / 2.76 / 2.74 at 1 / 2 / 4 streams). The MTP gain that
+    is lost as streams are added (1.62x → 1.51x per stream) is verify cost, not prediction: step cost goes from
+    1.70 to 1.81.
+  - K=3 leads K=2 by +6.7% / +3.7% / +3.5% per stream at 1 / 2 / 4 streams. At 4 streams the aggregate ranges
+    overlap, so the two are tied there.
+  - K=0 is never better. Four streams at K=3 (137.9 each) beat one stream at K=0 (122.4).
+  - Keep `SPEC_TOKENS=3` (`run-fp4local`'s default). [LIVE 2026-10-18]
+- The two runs' single-stream numbers agree (K=3 code 1.64x vs 1.62x; K=0 117.6 vs 122.4, different boots).
+  [LIVE 2026-10-18]
+
 ---
 
 ## Open Questions
+
+- **Why does FP4-Local's TTFT on the ~1k-token code prompt drop from ~145 ms to ~40 ms on some boots?** On the
+  conc sweep it is low only at K=3, in all of that boot's rounds: 40 vs ~145 ms at 1 stream, 77 vs ~290 at 2,
+  190 vs ~290 at 4. On the spec sweep it was low at K=2 and K=3 (39 ms) and not at K=0 or K=1 (153–159 ms); the
+  long prompt stayed ~415 ms at every K≥1 there. The prefix-cache hit rate was 0% throughout the conc sweep, and
+  its boot args differ only in `num_speculative_tokens`. So it is not caching and not a flag. Decode rates are
+  unaffected, since both benches exclude TTFT. (2026-10-18; `flashnext-conc-20261019-042515/results.jsonl`,
+  `flashnext-spec-20261018-205442/summary.md`)
 
 - `./container/archs` has not been run against the current `df6c7ad` snapshot image (nor against
   `187a0eb`, its predecessor) — the arch
