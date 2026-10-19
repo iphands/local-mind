@@ -112,7 +112,7 @@ MAX_MODEL_LEN=${MAX_MODEL_LEN:-262144}           # native; the PR image needed <
 MAX_NUM_SEQS=${MAX_NUM_SEQS:-16}                 # card value for this model
 MAX_BATCHED_TOKENS=${MAX_BATCHED_TOKENS:-6019}   # card value for this model
 CUDAGRAPH_MODE=${CUDAGRAPH_MODE-FULL_AND_PIECEWISE} # card value for this model
-FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-}     # 1 = FlashInfer autotuning during warmup (A/B)
+FLASHINFER_AUTOTUNE=${FLASHINFER_AUTOTUNE:-}     # 1 = --enable-flashinfer-autotune; a no-op on main images: vLLM's default -O2 already turns it on
 KV_FP8=${KV_FP8-1}                               # 1 = --kv-cache-dtype fp8; 0 or EMPTY = BF16
 KV_NVFP4=${KV_NVFP4:-}                           # 1 = --kv-cache-dtype nvfp4; 4over6 = nvfp4_4over6; overrides KV_FP8 (see the KV_NVFP4 note below)
 KV_SKIP_MTP=${KV_SKIP_MTP:-1}                    # 1 = MTP layer(s) skip fp8 KV (--kv-cache-dtype-skip-layers)
@@ -263,7 +263,8 @@ if [[ "$SPEC_TOKENS" == "1" ]]; then
   echo "## WARNING: SPEC_TOKENS=1 hung the PR-branch image at boot (engine blocked in shm_broadcast). Watch for a silent stall."
 fi
 
-# Draft-acceptance knobs (KV_SKIP_MTP defaults on, DRAFT_SAMPLE off; A/B them).
+# Draft-acceptance knobs (KV_SKIP_MTP defaults on, DRAFT_SAMPLE probabilistic; A/B them with
+# scripts/flashnext-draft-ab).
 # KV_SKIP_MTP: --kv-cache-dtype fp8 also quantizes the MTP layer's own QSA KV.
 # vllm#60023 (4ff028d, 2026-10-05) made QSA honor --kv-cache-dtype-skip-layers
 # and measured the drafter's fp8 KV costing acceptance at depth (GB10, NVFP4,

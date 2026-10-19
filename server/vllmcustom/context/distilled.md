@@ -149,6 +149,16 @@ section**, which always stays last. Keep it dense.
 - The two runs' single-stream numbers agree (K=3 code 1.64x vs 1.62x; K=0 117.6 vs 122.4, different boots).
   [LIVE 2026-10-18]
 
+## `FLASHINFER_AUTOTUNE=1` is a no-op on main images: FlashInfer autotune is already on [SOURCE][LIVE 2026-10-18]
+
+- `KernelConfig.enable_flashinfer_autotune` defaults to `None` and is filled from the optimization level.
+  `-O0` sets `False` and `-O1` and up set `True` (`vllm/config/vllm.py:266,287` @ `fe8f214`). The default level is
+  `-O2` (`vllm/config/vllm.py:428`), and no launcher here passes `-O`. So the knob's `--enable-flashinfer-autotune`
+  changes nothing. [SOURCE]
+- Every FP4-Local boot already logs `[Autotuner]: Autotuning process starts` in kernel warmup, followed by
+  `Preloaded 105/105 managed cache entries`. [LIVE 2026-10-18: `flashnext-conc-20261019-042515/k3.log`]
+- `qwen/run`'s knob is untouched: its default image may predate this default. [REPO]
+
 ---
 
 ## Open Questions

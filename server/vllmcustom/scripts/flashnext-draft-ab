@@ -1,0 +1,29 @@
+#!/usr/bin/env bash
+# Draft-acceptance knobs on FP4-Local: probabilistic vs greedy draft sampling, and the drafter's own KV
+# cache in BF16 (KV_SKIP_MTP=1, the default) vs fp8. Launcher defaults otherwise, SPEC_TOKENS=3.
+#
+#   REPLACE=1 ./scripts/flashnext-draft-ab          # 3 configs x streams {1,4} x code + long, 4 rounds
+#   ROUNDS=6 CONC=1 ./scripts/flashnext-draft-ab    # single stream only, tighter ranges
+#
+# Configs (prob is the baseline, and it is run-fp4local's own default):
+#   prob        DRAFT_SAMPLE=probabilistic
+#   greedy      DRAFT_SAMPLE=greedy (vLLM's default, and what every NVFP4 matrix ran)
+#   mtp-kv-fp8  DRAFT_SAMPLE=probabilistic KV_SKIP_MTP=0: the MTP layer's KV is fp8 like the
+#               target's. vllm#60023 measured BF16 drafter KV raising accept length 3.215 -> 3.473
+#               (GB10, NVFP4, K=6, greedy); never measured here, at K=3.
+# Both knobs act through acceptance, so the run reports exact accept length (/metrics deltas), not
+# just tok/s. The bench sends temperature 0.6 (bench/lib/benchclient.py), so the two sampling
+# methods really do differ here. At temperature 0 they would not.
+#
+# This is scripts/flashnext-conc-sweep with CONC_CONFIGS set. Same flow (boot, warm-up, recorded
+# rounds) and same output: summary.md, results.jsonl, per-config logs.
+# Output: bench/bench-logs/flashnext-draft-ab-<UTC stamp>/
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+export CONC_CONFIGS="prob|SPEC_TOKENS=3|DRAFT_SAMPLE=probabilistic;greedy|SPEC_TOKENS=3|DRAFT_SAMPLE=greedy;mtp-kv-fp8|SPEC_TOKENS=3|DRAFT_SAMPLE=probabilistic|KV_SKIP_MTP=0"
+export CONC=${CONC:-1,4}
+export PROMPTS=${PROMPTS:-code,long}
+export ROUNDS=${ROUNDS:-4}
+export OUT=${OUT:-$HERE/bench/bench-logs/flashnext-draft-ab-$(date -u +%Y%m%d-%H%M%S)}
+exec "$HERE/scripts/flashnext-conc-sweep" "$@"

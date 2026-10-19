@@ -1,0 +1,33 @@
+#!/usr/bin/env bash
+# MAX_BATCHED_TOKENS on FP4-Local: 6019 (run-fp4local's default) vs 12288 vs 16384, with long prompts
+# arriving while other conversations decode. Launcher defaults otherwise, SPEC_TOKENS=3.
+#
+#   REPLACE=1 ./scripts/flashnext-batched-ab        # 3 configs x streams {1,4} x long, stagger 2 s, 3 rounds
+#   STAGGER=1 ROUNDS=5 ./scripts/flashnext-batched-ab
+#
+# --max-num-batched-tokens caps the tokens in one engine step, so it sets how big a chunk of a ~16k
+# prefill rides along with the other streams' decode steps: 3 chunks at 6019, 2 at 12288 or 16384
+# (the README suggests 16384-32768 for long-context prefill). Bigger chunks mean fewer, longer
+# stalls for whoever is decoding, a faster prefill, and a little less KV (more activation memory
+# at profiling). With MTP on, vLLM warns at boot that the draft slots come
+# out of the same budget ("max_num_scheduled_tokens is set to 6019 based on the speculative
+# decoding settings").
+#
+# Single-stream benches cannot see any of this. So the 4-stream rounds are STAGGERed: stream i starts
+# 2*i s after stream 0, and every later prefill lands while the earlier streams decode (a long
+# stream decodes ~1024 tokens in ~7 s, so all four overlap). Read per-stream tok/s (the stalls show
+# there), aggregate tok/s and TTFT together. The 1-stream rows are the no-contention reference.
+#
+# This is scripts/flashnext-conc-sweep with CONC_CONFIGS set. A config whose budget does not fit
+# fails at boot and becomes a BOOT FAILED line; the others still run.
+# Output: bench/bench-logs/flashnext-batched-ab-<UTC stamp>/
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+export CONC_CONFIGS="mbt-6019|SPEC_TOKENS=3|MAX_BATCHED_TOKENS=6019;mbt-12288|SPEC_TOKENS=3|MAX_BATCHED_TOKENS=12288;mbt-16384|SPEC_TOKENS=3|MAX_BATCHED_TOKENS=16384"
+export CONC=${CONC:-1,4}
+export PROMPTS=${PROMPTS:-long}
+export STAGGER=${STAGGER:-2}
+export ROUNDS=${ROUNDS:-3}
+export OUT=${OUT:-$HERE/bench/bench-logs/flashnext-batched-ab-$(date -u +%Y%m%d-%H%M%S)}
+exec "$HERE/scripts/flashnext-conc-sweep" "$@"

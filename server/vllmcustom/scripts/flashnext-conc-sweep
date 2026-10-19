@@ -1,35 +1,44 @@
 #!/usr/bin/env bash
 # Does MTP still pay with several conversations at once? FP4-Local, launcher defaults, K x streams.
+# CONC_CONFIGS replaces the K list with any launcher-knob configs (flashnext-draft-ab and
+# flashnext-batched-ab are two such callers).
 #
 #   REPLACE=1 ./scripts/flashnext-conc-sweep                # K = 0,1,2,3 x streams 1,2,4, code prompt
 #   KS=0,2,3 CONC=1,4 ROUNDS=4 ./scripts/flashnext-conc-sweep
 #   PROMPTS=code,long ./scripts/flashnext-conc-sweep        # add the ~16k-context prompt (slower)
+#   STAGGER=2 PROMPTS=long ./scripts/flashnext-conc-sweep   # stream i starts 2*i s late (prefill during decode)
+#   CONC_CONFIGS="greedy|DRAFT_SAMPLE=greedy;prob|DRAFT_SAMPLE=probabilistic" ./scripts/flashnext-conc-sweep
 #
 # Every number before this was single-stream, but the daily driver serves several conversations at
 # once. With N streams each verify step already carries N tokens of real work, so a draft that pays
 # for itself at batch 1 can be wasted at batch 4. This measures that trade on run-fp4local's own
-# defaults (humming, probabilistic draft sampling, fp8 KV, util 0.975, MAX_NUM_SEQS 16). Only
-# SPEC_TOKENS varies, plus SM120_SKINNY=0 (a measured no-op on FP4-Local that costs ~40 s of boot).
+# defaults (humming, probabilistic draft sampling, fp8 KV, util 0.975, MAX_NUM_SEQS 16). By default
+# only SPEC_TOKENS varies, plus SM120_SKINNY=0 (a measured no-op on FP4-Local that costs ~40 s of boot).
 #
-# Per K: boot detached, wait for /health, one unrecorded round at the largest stream count (JIT and
-# graph warm-up for that batch size), then for each stream count in CONC and each prompt, ROUNDS
-# recorded rounds of ./bench/conc. A round starts N streams together. Each has a unique prefix,
-# so no stream rides another's prefix cache. ignore_eos is set, so each generates exactly the
-# prompt's max_tokens.
+# CONC_CONFIGS="label|KEY=VALUE|...;label|KEY=VALUE" sets the configs instead of KS (labels are
+# [a-z0-9-], values have no spaces). Each config's assignments go to the launcher after
+# SM120_SKINNY=0, so a config that sets SM120_SKINNY wins. A config without SPEC_TOKENS gets the
+# launcher's default (3). The FIRST config is the baseline the "vs" columns divide by.
 #
-# summary.md, per prompt x streams x K:
+# Per config: boot detached, wait for /health, one unrecorded round at the largest stream count (JIT
+# and graph warm-up for that batch size), then for each prompt in PROMPTS and each stream count in
+# CONC, ROUNDS recorded rounds of ./bench/conc. A round starts N streams together (or STAGGER
+# seconds apart). Each has a unique prefix, so no stream rides another's prefix cache. ignore_eos is
+# set, so each generates exactly the prompt's max_tokens.
+#
+# summary.md, per prompt x streams x config:
 #   per-stream tok/s   what one user sees: mean over rounds of the round's mean stream rate (min-max)
 #   aggregate tok/s    what the box delivers: all tokens / (last end - first first-token) (min-max)
-#   vs K=0             both ratios against K=0 at the same stream count and prompt
+#   vs <first>         both ratios against the first config at the same stream count and prompt
 #   accept len         1 + accepted / drafts over the rounds (vLLM's formula), from /metrics deltas
 #   TTFT ms            mean over every stream (N concurrent cold prefills, so it rises with N)
 #
 # Output: bench/bench-logs/flashnext-conc-<UTC stamp>/
-#   summary.md  results.jsonl (one ./bench/conc record per round)  k<K>.log (launcher + container)
+#   summary.md  results.jsonl (one ./bench/conc record per round)  <label>.log (launcher + container)
 # It STOPS the server it benchmarks and leaves nothing running; a running `vllm` container makes it
 # refuse unless REPLACE=1. SPEC_TOKENS=1 hung at boot on the old PR-branch image; a hang costs
 # READY_TIMEOUT (1500 s) and becomes a BOOT FAILED line.
-set -uo pipefail   # NOT -e: one K failing to boot must not lose the others
+set -uo pipefail   # NOT -e: one config failing to boot must not lose the others
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
 NAME=vllm
@@ -40,6 +49,7 @@ ROUNDS=${ROUNDS:-3}
 KS=${KS:-0,1,2,3}
 CONC=${CONC:-1,2,4}
 PROMPTS=${PROMPTS:-code}
+STAGGER=${STAGGER:-0}
 LAUNCHER=${LAUNCHER:-qwen3.8-flash-next/run-fp4local}   # relative to the repo, or absolute
 [[ $LAUNCHER == /* ]] || LAUNCHER=$HERE/$LAUNCHER
 CONC_TOOL=${CONC_TOOL:-$HERE/bench/conc}
@@ -49,7 +59,7 @@ trap '[[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null' EXIT
 
 # Knobs the caller set, captured before anything here could set them (summary.md lists these).
 CALLER_SET=()
-for v in DRAFT_SAMPLE GPU_MEM_UTIL KV_FP8 KV_NVFP4 MAX_NUM_SEQS MAX_BATCHED_TOKENS MOE_BACKEND VISION EXTRA_ARGS ENV_EXTRA; do
+for v in DRAFT_SAMPLE GPU_MEM_UTIL KV_FP8 KV_NVFP4 KV_SKIP_MTP MAX_NUM_SEQS MAX_BATCHED_TOKENS MOE_BACKEND VISION EXTRA_ARGS ENV_EXTRA; do
   [[ -v $v ]] && CALLER_SET+=("$v")
 done
 
@@ -60,17 +70,39 @@ for tool in curl docker awk python3; do
 done
 [[ -x $LAUNCHER ]] || { echo "## no launcher at $LAUNCHER"; exit 2; }
 [[ $ROUNDS =~ ^[1-9][0-9]*$ ]] || { echo "## ROUNDS must be a positive integer (got '$ROUNDS')"; exit 2; }
-[[ $KS =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "## KS must be a comma list like 0,1,2,3 (got '$KS')"; exit 2; }
 [[ $CONC =~ ^[1-9][0-9]*(,[1-9][0-9]*)*$ ]] || { echo "## CONC must be a comma list of stream counts like 1,2,4 (got '$CONC')"; exit 2; }
 [[ $PROMPTS =~ ^(short|code|long)(,(short|code|long))*$ ]] || { echo "## PROMPTS must be a comma list of short,code,long (got '$PROMPTS')"; exit 2; }
-IFS=, read -r -a KLIST <<<"$KS"
+[[ $STAGGER =~ ^[0-9]+(\.[0-9]+)?$ ]] || { echo "## STAGGER must be seconds, like 0 or 1.5 (got '$STAGGER')"; exit 2; }
+if [[ -n ${CONC_CONFIGS:-} ]]; then
+  IFS=';' read -r -a CONFIGS <<<"$CONC_CONFIGS"
+  for entry in "${CONFIGS[@]}"; do
+    [[ $entry =~ ^[a-z0-9-]+(\|[A-Z][A-Z0-9_]*=[^|[:space:]]*)+$ ]] || {
+      echo "## bad CONC_CONFIGS entry '$entry' (want label|KEY=VALUE|...)"; exit 2; }
+  done
+  [[ $KS != 0,1,2,3 ]] && echo "## note: CONC_CONFIGS is set, so KS=$KS is ignored"
+else
+  [[ $KS =~ ^[0-9]+(,[0-9]+)*$ ]] || { echo "## KS must be a comma list like 0,1,2,3 (got '$KS')"; exit 2; }
+  IFS=, read -r -a KLIST <<<"$KS"
+  CONFIGS=()
+  for k in "${KLIST[@]}"; do CONFIGS+=("k$k|SPEC_TOKENS=$k"); done
+fi
+LABELS=()
+for entry in "${CONFIGS[@]}"; do
+  label=${entry%%|*}
+  [[ " ${LABELS[*]} " == *" $label "* ]] && { echo "## duplicate config label '$label'"; exit 2; }
+  LABELS+=("$label")
+done
 IFS=, read -r -a CLIST <<<"$CONC"
 IFS=, read -r -a PLIST <<<"$PROMPTS"
 MAXC=$(printf '%s\n' "${CLIST[@]}" | sort -n | tail -1)
-if [[ -n ${MAX_NUM_SEQS:-} ]] && (( MAX_NUM_SEQS < MAXC )); then
-  echo "## MAX_NUM_SEQS=$MAX_NUM_SEQS is below the largest stream count $MAXC: the extra streams would queue, not run"
-  exit 2
-fi
+for entry in "${CONFIGS[@]}"; do   # a config's own MAX_NUM_SEQS wins over the environment's
+  seqs=$(grep -oE 'MAX_NUM_SEQS=[^|]*' <<<"$entry" | tail -1)
+  if [[ -n $seqs ]]; then seqs=${seqs#MAX_NUM_SEQS=}; else seqs=${MAX_NUM_SEQS:-}; fi
+  if [[ -n $seqs ]] && { [[ ! $seqs =~ ^[0-9]+$ ]] || (( seqs < MAXC )); }; then
+    echo "## MAX_NUM_SEQS=$seqs (${entry%%|*}) is below the largest stream count $MAXC: the extra streams would queue, not run"
+    exit 2
+  fi
+done
 if docker ps -q -f "name=^${NAME}$" | grep -q . && [[ ${REPLACE:-0} != 1 ]]; then
   echo "## a '$NAME' container is running; this script stops it. Re-run with REPLACE=1 to allow that."
   exit 2
@@ -81,38 +113,41 @@ mkdir -p "$OUT"
 declare -A BACKEND READY
 
 echo "## flashnext-conc-sweep -> $OUT"
-echo "##   launcher $LAUNCHER, K in {$KS} x streams {$CONC} x prompts {$PROMPTS}, $ROUNDS rounds each"
+echo "##   launcher $LAUNCHER, configs {${LABELS[*]}} x streams {$CONC} x prompts {$PROMPTS}, $ROUNDS rounds each, stagger ${STAGGER}s"
 
-for k in "${KLIST[@]}"; do
-  log="$OUT/k$k.log"; : > "$log"
+for entry in "${CONFIGS[@]}"; do
+  label=${entry%%|*}
+  envs=${entry#*|}; envs=${envs//|/ }
+  log="$OUT/$label.log"; : > "$log"
   [[ -n "${LOGS_PID:-}" ]] && kill "$LOGS_PID" 2>/dev/null; LOGS_PID=
   stop_server
-  echo "## [k$k] booting  (SPEC_TOKENS=$k SM120_SKINNY=0, launcher defaults otherwise)"
+  echo "## [$label] booting  (SM120_SKINNY=0 $envs, launcher defaults otherwise)"
   boot_t0=$(date +%s)
-  SPEC_TOKENS=$k SM120_SKINNY=0 DETACH=1 PORT="$PORT" "$LAUNCHER" >> "$log" 2>&1
+  # shellcheck disable=SC2086  # $envs is a space-separated KEY=VALUE list on purpose
+  env SM120_SKINNY=0 $envs DETACH=1 PORT="$PORT" "$LAUNCHER" >> "$log" 2>&1
   docker logs -f "$NAME" >> "$log" 2>&1 & LOGS_PID=$!
   if ! wait_ready; then
-    echo "## [k$k] BOOT FAILED -- see $log"
-    BACKEND[$k]="boot failed"; READY[$k]=-
+    echo "## [$label] BOOT FAILED -- see $log"
+    BACKEND[$label]="boot failed"; READY[$label]=-
     continue
   fi
-  READY[$k]=$(( $(date +%s) - boot_t0 ))
-  BACKEND[$k]=$(grep -oE "Using '[A-Z0-9_]+' NvFp4 MoE backend" "$log" | head -1 | grep -oE "'[A-Z0-9_]+'" | tr -d "'")
-  echo "## [k$k] ready in ${READY[$k]}s, MoE backend ${BACKEND[$k]:-<not logged>}"
+  READY[$label]=$(( $(date +%s) - boot_t0 ))
+  BACKEND[$label]=$(grep -oE "Using '[A-Z0-9_]+' NvFp4 MoE backend" "$log" | head -1 | grep -oE "'[A-Z0-9_]+'" | tr -d "'")
+  echo "## [$label] ready in ${READY[$label]}s, MoE backend ${BACKEND[$label]:-<not logged>}"
 
   # Warm-up at the largest batch, every prompt: compiles and graph sizes are paid here, not measured.
   for prompt in "${PLIST[@]}"; do
-    PYTHONDONTWRITEBYTECODE=1 "$CONC_TOOL" "k$k-warmup" --streams "$MAXC" --prompt "$prompt" --host "$HOST" \
-      >> "$OUT/k$k.warmup" 2>&1 || echo "## [k$k] warm-up ($prompt) reported a failure -- see k$k.warmup"
+    PYTHONDONTWRITEBYTECODE=1 "$CONC_TOOL" "$label-warmup" --streams "$MAXC" --prompt "$prompt" --stagger "$STAGGER" --host "$HOST" \
+      >> "$OUT/$label.warmup" 2>&1 || echo "## [$label] warm-up ($prompt) reported a failure -- see $label.warmup"
   done
   for prompt in "${PLIST[@]}"; do
     for c in "${CLIST[@]}"; do
-      if PYTHONDONTWRITEBYTECODE=1 "$CONC_TOOL" "k$k" --streams "$c" --prompt "$prompt" --rounds "$ROUNDS" --host "$HOST" \
+      if PYTHONDONTWRITEBYTECODE=1 "$CONC_TOOL" "$label" --streams "$c" --prompt "$prompt" --rounds "$ROUNDS" --stagger "$STAGGER" --host "$HOST" \
            > "$OUT/.round.jsonl" 2> "$OUT/.round.err"; then :; else
-        echo "## [k$k] $prompt x$c: $(tail -1 "$OUT/.round.err")"
+        echo "## [$label] $prompt x$c: $(tail -1 "$OUT/.round.err")"
       fi
       cat "$OUT/.round.jsonl" >> "$OUT/results.jsonl"
-      echo "## [k$k] $prompt x$c done ($(wc -l < "$OUT/.round.jsonl") rounds)"
+      echo "## [$label] $prompt x$c done ($(wc -l < "$OUT/.round.jsonl") rounds)"
     done
   done
   rm -f -- "$OUT/.round.jsonl" "$OUT/.round.err"
@@ -122,11 +157,11 @@ done
 stop_server
 
 summarize() {
-  python3 -I - "$OUT/results.jsonl" "$KS" "$CONC" "$PROMPTS" <<'PY'
+  python3 -I - "$OUT/results.jsonl" "$(IFS=,; echo "${LABELS[*]}")" "$CONC" "$PROMPTS" <<'PY'
 import json, sys
 from collections import defaultdict
-path, ks, cs, ps = sys.argv[1], *[a.split(",") for a in sys.argv[2:5]]
-ks, cs = [int(k) for k in ks], [int(c) for c in cs]
+path, labels, cs, ps = sys.argv[1], *[a.split(",") for a in sys.argv[2:5]]
+cs = [int(c) for c in cs]
 rows = defaultdict(list)
 for line in open(path):
     line = line.strip()
@@ -135,22 +170,23 @@ for line in open(path):
     r = json.loads(line)
     if "mean_stream_tps" not in r:
         continue
-    rows[(r["prompt"], r["streams"], int(r["label"][1:]))].append(r)
+    rows[(r["prompt"], r["streams"], r["label"])].append(r)
 
 def stat(xs):
     return sum(xs) / len(xs), min(xs), max(xs)
 
-print("| prompt | streams | K | rounds | per-stream tok/s mean (min–max) | vs K=0 | aggregate tok/s mean (min–max) | vs K=0 | accept len | TTFT ms |")
+b = labels[0]
+print(f"| prompt | streams | config | rounds | per-stream tok/s mean (min–max) | vs {b} | aggregate tok/s mean (min–max) | vs {b} | accept len | TTFT ms |")
 print("|---|---|---|---|---|---|---|---|---|---|")
 for p in ps:
     for c in cs:
-        base = rows.get((p, c, 0))
+        base = rows.get((p, c, b))
         b_s = stat([r["mean_stream_tps"] for r in base])[0] if base else None
         b_a = stat([r["agg_tps"] for r in base])[0] if base else None
-        for k in ks:
-            rs = rows.get((p, c, k))
+        for lab in labels:
+            rs = rows.get((p, c, lab))
             if not rs:
-                print(f"| {p} | {c} | {k} | 0 | no data | | | | | |")
+                print(f"| {p} | {c} | {lab} | 0 | no data | | | | | |")
                 continue
             s_m, s_lo, s_hi = stat([r["mean_stream_tps"] for r in rs])
             a_m, a_lo, a_hi = stat([r["agg_tps"] for r in rs])
@@ -159,7 +195,7 @@ for p in ps:
             tt = [t for r in rs for t in r["ttft_ms"]]
             vs_s = f"{s_m / b_s:.2f}x" if b_s else "-"
             vs_a = f"{a_m / b_a:.2f}x" if b_a else "-"
-            print(f"| {p} | {c} | {k} | {len(rs)} | {s_m:.1f} ({s_lo:.1f}–{s_hi:.1f}) | {vs_s} | "
+            print(f"| {p} | {c} | {lab} | {len(rs)} | {s_m:.1f} ({s_lo:.1f}–{s_hi:.1f}) | {vs_s} | "
                   f"{a_m:.1f} ({a_lo:.1f}–{a_hi:.1f}) | {vs_a} | {al} | {sum(tt) / len(tt):.0f} |")
 PY
 }
@@ -167,22 +203,24 @@ PY
 {
   echo "# flashnext-conc-sweep $(date -u '+%Y-%m-%d %H:%M UTC')"
   echo
-  echo "Launcher \`$LAUNCHER\`, launcher defaults + SPEC_TOKENS=K, SM120_SKINNY=0. K in {$KS}, streams {$CONC}, prompts {$PROMPTS}, $ROUNDS rounds each."
+  echo "Launcher \`$LAUNCHER\`, launcher defaults + SM120_SKINNY=0 + each config's assignments. Streams {$CONC}, prompts {$PROMPTS}, $ROUNDS rounds each, stagger ${STAGGER}s."
   for v in "${CALLER_SET[@]}"; do printf 'Set: %s=%s  \n' "$v" "${!v}"; done
-  grep -h -m1 '^## Running' "$OUT"/k*.log 2>/dev/null | sed 's/^## Running /Image: /; s/  (.*//' | sort -u
+  grep -h -m1 '^## Running' "$OUT"/*.log 2>/dev/null | sed 's/^## Running /Image: /; s/  (.*//' | sort -u
   echo
-  for k in "${KLIST[@]}"; do
-    if [[ ${BACKEND[$k]:-} == "boot failed" ]]; then printf -- '- K=%s: **BOOT FAILED** (see k%s.log)\n' "$k" "$k"
-    else printf -- '- K=%s: MoE backend %s, boot %ss\n' "$k" "${BACKEND[$k]:-?}" "${READY[$k]:-?}"; fi
+  for entry in "${CONFIGS[@]}"; do
+    label=${entry%%|*}; cfg_env=${entry#*|}
+    # shellcheck disable=SC2016  # the backticks are literal markdown, not a command substitution
+    if [[ ${BACKEND[$label]:-} == "boot failed" ]]; then printf -- '- `%s` (%s): **BOOT FAILED** (see %s.log)\n' "$label" "${cfg_env//|/ }" "$label"
+    else printf -- '- `%s` (%s): MoE backend %s, boot %ss\n' "$label" "${cfg_env//|/ }" "${BACKEND[$label]:-?}" "${READY[$label]:-?}"; fi
   done
   echo
   summarize
   echo
   echo "per-stream = what one conversation sees; aggregate = all streams' tokens / wall time, what the GPU"
-  echo "delivers. vs K=0 compares at the same stream count. Ranges are over rounds; a ratio whose ranges"
-  echo "overlap K=0's is noise."
+  echo "delivers. vs ${LABELS[0]} compares at the same stream count. Ranges are over rounds; a ratio whose ranges"
+  echo "overlap the baseline's is noise."
 } > "$OUT/summary.md"
 
 cat "$OUT/summary.md"
 echo
-echo "## done -- $OUT (summary.md, results.jsonl, per-K .log). Nothing is running now."
+echo "## done -- $OUT (summary.md, results.jsonl, per-config .log). Nothing is running now."

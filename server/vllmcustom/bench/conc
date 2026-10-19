@@ -3,11 +3,15 @@
 
     ./bench/conc k3-c4 --streams 4 --prompt code          # one round, one JSON line on stdout
     ./bench/conc k3-c4 --streams 4 --prompt long --rounds 3
+    ./bench/conc k3-c4 --streams 4 --prompt long --stagger 2   # stream i starts 2*i s late
 
 Each round starts N threads behind a barrier. Every stream sends one of ./bench/bench's prompts,
 with a unique tag at the FRONT so no stream shares a prefix-cache hit with another or with an
 earlier round (vLLM caches by prefix, so a suffix tag would still hit). ignore_eos makes every
-stream generate exactly max_tokens. Per round it prints one JSON object:
+stream generate exactly max_tokens. With --stagger S, stream i waits i*S seconds after the barrier,
+so later prefills land while earlier streams are decoding (the chunked-prefill case that
+--max-num-batched-tokens governs). Each stream's TTFT and rate count from its own start, and an
+early stream's rate absorbs the stalls from the later prefills. Per round it prints one JSON object:
 
   stream_tps   completion_tokens / (total - ttft) per stream: what one user sees
   agg_tps      all completion tokens / (last stream end - first first-token): what the box delivers
@@ -68,6 +72,8 @@ def one_round(args, rnd):
     def worker(i):
         tag = f"[{args.label} round {rnd} stream {i} {time.time_ns()}]\n\n"
         barrier.wait()
+        if args.stagger:
+            time.sleep(i * args.stagger)
         t0 = time.perf_counter()
         try:
             r = stream_chat(args.host, args.model, [{"role": "user", "content": tag + text}],
@@ -86,7 +92,7 @@ def one_round(args, rnd):
     after = spec_counters(args.host)
 
     ok = [r for r in results if r and "error" not in r]
-    rec = {"label": args.label, "streams": n, "prompt": args.prompt, "round": rnd,
+    rec = {"label": args.label, "streams": n, "prompt": args.prompt, "round": rnd, "stagger": args.stagger,
            "errors": [r["error"] for r in results if r and "error" in r]}
     if ok:
         stream_tps = [r["completion_tokens"] / max(r["total"] - r["ttft"], 1e-6) for r in ok]
@@ -118,9 +124,12 @@ def main():
     ap.add_argument("--host", default="localhost:8700")
     ap.add_argument("--model", default="cosmo-6000")
     ap.add_argument("--timeout", type=int, default=900)
+    ap.add_argument("--stagger", type=float, default=0.0, help="seconds between stream starts (default 0: all at once)")
     args = ap.parse_args()
     if args.streams < 1 or args.rounds < 1:
         ap.error("--streams and --rounds must be >= 1")
+    if args.stagger < 0:
+        ap.error("--stagger must be >= 0")
     for rnd in range(1, args.rounds + 1):
         rec = one_round(args, rnd)
         print(json.dumps(rec), flush=True)

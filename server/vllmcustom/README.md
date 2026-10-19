@@ -379,7 +379,10 @@ have one card).
   for `probability tensor contains inf/nan` → back off to `flashinfer-cudnn` or MTP=2.
 - `CUDAGRAPH_MODE=FULL_AND_PIECEWISE` — full CUDA graphs for small-batch decode
   (exactly this workload) instead of piecewise-only.
-- `FLASHINFER_AUTOTUNE=1` — FlashInfer kernel autotuning during warmup.
+- `FLASHINFER_AUTOTUNE=1` — FlashInfer kernel autotuning during warmup. On the main snapshot
+  (`fe8f214`) this is already on: `-O1` and up set `enable_flashinfer_autotune=True`
+  (`vllm/config/vllm.py:287`), the default is `-O2`, and every boot logs `Autotuning process starts`.
+  So the knob changes nothing there.
 - `MAX_BATCHED_TOKENS` — 16384/32768 speeds long-context prefill/TTFT (decode
   unaffected; default 8192).
 
