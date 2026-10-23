@@ -46,6 +46,19 @@
 # needed: speculative.py's diff adds no live-K knob, so
 # num_speculative_tokens_per_batch_size (:495) is still the only Dynamic SD input.
 # test_spec_live.py passes. Still NOT repeated in-container.
+# Re-grepped present at be03d19 (2026-10-23, 409 commits). scheduler.py (+102/-25),
+# core.py (+115/-24) and core_client.py (+5) changed since fe8f214; routers.py is
+# byte-identical. Every seam survives. dynamic_sd_lookup is declared at scheduler.py:314
+# and built at :317, and num_spec_tokens_to_schedule still comes from
+# dynamic_sd_lookup[len(num_scheduled_tokens)] at :1636-1639. The UTILITY dispatch
+# getattr(self, method_name) -> _convert_msgspec_args is at core.py:1759-1760 (def
+# :1842). call_utility_async is at core_client.py:1296 and :1806, and
+# register_api_routers at routers.py:12. No seam line is on a +/- line. Still
+# needed: speculative.py gains XPress (vllm#54448), FLy (vllm#53987) and a draft
+# kv_cache_dtype (vllm#52670), but no live-K knob. num_speculative_tokens_per_batch_size
+# (:518) is still the only Dynamic SD input. Nearby, not hooked: vllm#62784 (MRV2)
+# skips drafting in steps where no request can use the drafts.
+# test_spec_live.py passes. Still NOT repeated in-container.
 # Verified at vLLM 187a0eb (2026-10-10), by reading the source, by the host test
 # (test_spec_live.py: fakes shaped like these seams), and by importing the three
 # targets with the hook in a throwaway container of the b6d8e8a image (no GPU):

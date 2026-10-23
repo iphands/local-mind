@@ -160,9 +160,17 @@ PY
 for m in nvidia/Qwen3.8-Flash-Next-FP4-Local nvidia/Qwen3.8-Flash-Next-NVFP4 primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8; do
   docker run --rm --entrypoint bash -v <scratchpad>/cfgcheck.py:/c.py:ro \
     -v "$(readlink -f models/vllm)/$m":/model:ro "$OLD_IMG" \
-    -c "uv pip install -q transformers==<resolved version> 2>/dev/null; python /c.py 2>&1 | grep -vi warn"
+    -c "uv pip install -q --no-deps --target /tmp/tx transformers==<resolved version> >/tmp/log 2>&1 || cat /tmp/log
+        PYTHONPATH=/tmp/tx python /c.py 2>&1 | grep -vi warn"
 done
 ```
+
+Read the `transformers` line it prints back before trusting anything else. The image runs as a
+non-root user, so a plain `uv pip install` into `/opt/venv` fails with "Permission denied". The
+command used to be `uv pip install -q … 2>/dev/null; python /c.py`, which hid that failure: at
+`be03d19` it printed `transformers 5.19.0`, the old version, and the check passed having tested
+nothing. `--target` plus `PYTHONPATH` puts the resolved version first, and `--no-deps` keeps the
+image's own torch and hub packages.
 
 FP4-Local reads differently. Its `ple_embedding_dtype` must print `'nvfp4'` (the table shards are
 U8-packed NVFP4), and `run-fp4local` applies **no** override (`PLE_DTYPE` is empty by design; see its

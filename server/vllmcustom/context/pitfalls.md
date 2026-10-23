@@ -613,3 +613,24 @@ or use their container.
 ## Sources
 - `models/vllm/nvidia/Qwen3.8-Flash-Next-FP4-Local/README.md:20`; `docker run … grep -rIl csf_exceptions`
   over `/opt/venv/lib/python3.12/site-packages/vllm` printed nothing.
+
+---
+
+# A version-pinned check in the image that silently tests the image's own version
+
+## Problem
+repin.md step 3 loaded the checkpoints' configs after `uv pip install -q transformers==<new> 2>/dev/null;
+python /c.py`. The vllmcustom images run as a non-root user, so the install into `/opt/venv` fails with
+`Permission denied (os error 13)`. `2>/dev/null` hid the error, and `;` ran the check anyway under the
+image's own transformers. At the `be03d19` repin the first run printed `transformers 5.19.0` while the
+resolve had picked 5.20.2: a green check that tested the old version. [OBSERVED 2026-10-23]
+
+## How to avoid
+Never discard an install's stderr in front of a check that depends on it. Install to a side directory
+(`uv pip install --no-deps --target /tmp/tx …`) and run with `PYTHONPATH=/tmp/tx`. Then read the version
+the check prints back before trusting the rest of its output. repin.md step 3 now does both.
+
+## Sources
+- `docker run --rm --entrypoint bash …gfe8f214 -c "uv pip install transformers==5.20.2"` → `error: failed
+  to remove file …/bin/transformers: Permission denied (os error 13)`; the `--target` rerun printed
+  `transformers 5.20.2`.

@@ -56,6 +56,18 @@
 # needed: `git grep is_unused_checkpoint_weight` under vllm/models/qwen4_exp/ at
 # fe8f214 returns nothing, so Qwen4ExpMTP still declares no loader-side skip.
 # test_draft_load_filter.py passes.
+# Re-grepped at be03d19 (2026-10-23, 409 commits). mtp.py is byte-identical since
+# fe8f214, and model.py (+3/-1) changed only the PP deepstack guard. _remap_mtp_weight_name
+# (mtp.py:97, :473) and {"mtp.": None} (model.py:918, :1123) are on no +/- line.
+# weight_utils.py is +112/-63: vllm#61415 / #61836 rework the page-cache release
+# helper, and vllm#62692 rewrites instanttensor_weights_iterator to keep Engram tables
+# on CPU. should_skip_weight is still 6 sites. The 3 on the default safetensors path
+# (1211, 1228, 1246) are the same 3, shifted +32. The 2 changed ones (1434, 1442) are
+# inside instanttensor, which only --load-format instanttensor reaches, and no
+# launcher passes it. default_loader.py (+6/-1) only threads load_engram_on_cpu into
+# that same instanttensor branch. load_weights(self, model, model_config) is untouched
+# (:490). Still needed: `git grep is_unused_checkpoint_weight` under
+# vllm/models/qwen4_exp/ at be03d19 returns nothing. test_draft_load_filter.py passes.
 #   vllm.model_executor.model_loader.weight_utils
 #       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
 #                               safetensors_weights_iterator resolves it as a

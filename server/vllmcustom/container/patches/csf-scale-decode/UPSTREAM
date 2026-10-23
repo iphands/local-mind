@@ -15,6 +15,11 @@
 #   4d9a8d6 (get_all_weights still :367). Still needed: `git grep -iE
 #   'nvfp4_csf|csf_exceptions|byte-window4'` over vllm/ at fe8f214 returns nothing.
 #   test_csf_scale_decode.py passes.
+#   Re-grepped at be03d19 (2026-10-23): default_loader.py is +6/-1 since fe8f214,
+#   all of it vllm#62692 threading load_engram_on_cpu into the instanttensor branch.
+#   get_all_weights (now :372) is on no +/- line. Still needed: the
+#   'nvfp4_csf|csf_exceptions|byte-window4' grep over vllm/ at be03d19 returns
+#   nothing. test_csf_scale_decode.py passes.
 #
 # Format source (the format is NOT in vLLM; read these, do not guess):
 #   local-inference-lab/b12x  tests/quantization/test_nvfp4_csf.py  _fixture(codec=0)

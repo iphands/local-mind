@@ -105,7 +105,7 @@ section**, which always stays last. Keep it dense.
 - Auto-selection: `B12X` and `FLASHINFER_B12X` are both absent from the NVFP4 MoE `AVAILABLE_BACKENDS` (`fused_moe/oracle/nvfp4.py:199-213`), and b12x linears sit behind FlashInfer-CUTLASS + Marlin (MXFP8) and nine others (NVFP4) in `kernels/linear/__init__.py:556-596`. Installing it does not move an `auto` pick. [SOURCE]
 - b12x FP8 scaled-mm takes only static per-tensor or 128×128 block scales (`kernels/linear/scaled_mm/b12x.py:92,227-231`): `ONLINE_FP8=1`'s dynamic per-channel layers fall back to auto under `--linear-backend b12x`. [SOURCE]
 - `--gdn-decode-kernel b12x` (the FP4-Local card's recipe) is community-fork only: nothing matches `gdn.*b12x` in upstream `vllm/` at `4d9a8d6`. [SOURCE]
-- **From the `fe8f214` snapshot on, the image ships b12x itself.** flashinfer-python 0.7.2 (vllm#61913) embeds b12x 1.5.0 under `flashinfer.experimental.b12x` and installs a top-level `b12x` compat package (flashinfer#5767). Our `.pth` only appends to `sys.path`, so on that image `import b12x` gets flashinfer's copy and the mounted 1.5.1 goes inert. vLLM's extra still pins 1.5.1 (`setup.py:1732`). The six submodules vLLM imports all exist in the embedded tree. [SOURCE: flashinfer v0.7.2 pyproject.toml + tree; not yet seen in a built image] Since Plan 06 T5 (2026-10-18), `b12x_args` mounts nothing on an image whose `ai.vllmcustom.flashinfer.version` label is ≥ 0.7.2. The label reads `0.7.1` on `…g4d9a8d6` and `0.6.18.post1` on `:latest`, so both keep the mount. [REPO][LIVE 2026-10-18: `docker image inspect --format` on both]
+- **From the `fe8f214` snapshot on, the image ships b12x itself.** flashinfer-python 0.7.2 (vllm#61913) embeds b12x 1.5.0 under `flashinfer.experimental.b12x` and installs a top-level `b12x` compat package (flashinfer#5767). Our `.pth` only appends to `sys.path`, so on that image `import b12x` gets flashinfer's copy and the mounted 1.5.1 goes inert. vLLM's extra still pins 1.5.1 (`setup.py:1732`). The six submodules vLLM imports all exist in the embedded tree. [SOURCE: flashinfer v0.7.2 pyproject.toml + tree] The built `…gfe8f214` image does carry it: `find_spec('b12x')` resolves to `/opt/venv/lib/python3.12/site-packages/b12x/__init__.py`. That is find_spec only, with no b12x backend boot. [LIVE 2026-10-23: throwaway `docker run` during the `be03d19` repin] Since Plan 06 T5 (2026-10-18), `b12x_args` mounts nothing on an image whose `ai.vllmcustom.flashinfer.version` label is ≥ 0.7.2. The label reads `0.7.1` on `…g4d9a8d6` and `0.6.18.post1` on `:latest`, so both keep the mount. [REPO][LIVE 2026-10-18: `docker image inspect --format` on both]
 - **On FP4-Local, b12x MoE is slower at decode than humming and faster at long-prompt prefill.** On `…gfe8f214` with `SM120_SKINNY=1`, single stream, 4 runs per config, decode tok/s mean (min–max): code humming 195.5 (188.5–210.6) vs b12x 177.6 (170.2–186.6) at K=3, and 181.3 (168.9–192.3) vs 165.0 (162.7–167.3) at K=4. Long (~16k ctx) humming 190.7 (184.4–197.4) vs b12x 166.7 (148.7–184.7) at K=3, and 181.3 vs 156.8 at K=4. Long-prompt TTFT is humming ~425 ms vs b12x ~382 ms, ranges not overlapping. MTP K=4 accepts more (≈3.0 vs ≈2.7 mean length) but is not faster than K=3 on either backend. Keep `MOE_BACKEND=humming SPEC_TOKENS=3`. [LIVE 2026-10-18: `scripts/flashnext-matrix`, Plan 06 tracker Evidence]
 - **On Flash-Next-NVFP4 too, b12x MoE loses to humming at decode, and it cannot boot with MTP unless the drafter gets its own backend.** The drafter's experts are FP8, b12x has no FP8 MoE, and `--moe-backend` is global. `--speculative-config '{…,"moe_backend":"humming"}'` (`SpeculativeConfig.moe_backend`, `vllm/config/speculative.py:417`) fixes the boot. With `ONLINE_FP8=1 SM120_SKINNY=1`, 4 runs, decode code / long mean (min–max): humming-k3 184.1 (177.2–189.7) / 175.9 (169.9–179.1); b12x-k3 167.2 (162.9–171.0) / 167.5 (157.2–172.9); humming-k4 171.1 / 170.8; b12x-k4 158.4 / 148.5. Acceptance is equal across backends (2.51, 2.76), so the gap is the kernel. K=3 beats K=4 on code (no overlap). `ONLINE_FP8=1` is worth ~+10% decode on this checkpoint (humming-k3 code 166.9 → 184.1, separate session). [LIVE 2026-10-18: `scripts/flashnext-matrix`, Plan 06 tracker Evidence]
 
@@ -180,6 +180,23 @@ section**, which always stays last. Keep it dense.
 - Every FP4-Local boot already logs `[Autotuner]: Autotuning process starts` in kernel warmup, followed by
   `Preloaded 105/105 managed cache entries`. [LIVE 2026-10-18: `flashnext-conc-20261019-042515/k3.log`]
 - `qwen/run`'s knob is untouched: its default image may predate this default. [REPO]
+- Still true at `be03d19`: `-O1`..`-O3` set `True` (`vllm/config/vllm.py:294,315,336`), and the default is `-O2`
+  (`:435`). [SOURCE 2026-10-23]
+
+## From `be03d19`, Flash-Next takes internal Mamba prefill checkpoints under prefix caching [SOURCE 2026-10-23]
+
+- Every launcher passes `--enable-prefix-caching` (`common/_run-lib.sh:430`). For hybrid models that makes
+  `MambaModelConfig` set `mamba_cache_mode="align"` (`vllm/model_executor/models/config.py:765`). [REPO][SOURCE]
+- The scheduler exports internal prefill checkpoints only when **every** `MambaBase` layer declares a
+  `get_prefill_checkpoint_alignment()` (`vllm/model_executor/layers/mamba/abstract.py:98-113`). Qwen4Exp's GDN
+  (`QwenGatedDeltaNetAttention`) already did. The PLE short conv returned `None` until vllm#61601 (`bc01c06922`)
+  made it return 1 in align mode (`vllm/models/qwen4_exp/nvidia/ple_layer.py:202`). So on images from `be03d19` on,
+  both run-fp4local and run should export them. [SOURCE]
+- New boot-time assert: `grid >= conv_state_len`. Here conv_state_len = (ple_conv_kernel_size 4 − 1) × ngram_size 3
+  = 9, and the grid is `mamba_block_size`, at least 16, so the assert holds for both nvidia checkpoints.
+  [SOURCE + both config.json]
+- NOT measured: the effect on prefill time, TTFT, or prefix-cache hit granularity. The repin's post-build bench
+  measures decode only.
 
 ---
 

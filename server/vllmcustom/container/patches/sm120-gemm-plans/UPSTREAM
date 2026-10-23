@@ -35,6 +35,11 @@
 # required. Nearby but not hooked: vllm#61454 removes the custom-op wrappers around
 # the HC Triton kernels (nvidia/ops/hc.py), which changes what torch.compile traces
 # around those layers. test_sm120_gemm_plans.py passes.
+# Re-grepped at be03d19 (2026-10-23, 409 commits): low_latency_gemm.py is
+# byte-identical since fe8f214, and the capability dict still keys exactly (10, 3)
+# (10, 0) (9, 0) (12, 1) at :302-309. There is no (12, 0), so the overlay still has
+# something to do. It stays opt-in (SM120_SKINNY=0 default, per the A/B below).
+# test_sm120_gemm_plans.py passes.
 # Verified at vLLM 187a0eb (2026-10-10) and in a throwaway container of the b6d8e8a image
 # (no GPU): the capability key type is a tuple subclass (DeviceCapability(12, 0) == (12, 0),
 # equal hash), the existing keys are exactly (10, 0) (10, 3) (12, 1) (9, 0), the hook applies

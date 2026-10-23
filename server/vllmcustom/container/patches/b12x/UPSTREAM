@@ -63,3 +63,12 @@
 # proxy for "the wheel carries b12x". The first boot of a fe8f214 image settles it:
 # a b12x backend either selects (`Using 'B12X' NvFp4 MoE backend`) or fails at
 # engine init with vLLM's own unsupported message.
+# be03d19 repin (2026-10-23): retired-kept, unchanged. flashinfer-python stays 0.7.2,
+# so the image keeps shipping b12x and b12x_args keeps mounting nothing on it. The
+# fe8f214 image settles the open question above: a throwaway run of
+# …gfe8f214 finds `b12x` at /opt/venv/lib/python3.12/site-packages/b12x/__init__.py,
+# and its label reads ai.vllmcustom.flashinfer.version=0.7.2. So our flashinfer wheel
+# does carry the top-level package (find_spec only; no backend boot). At be03d19,
+# vllm/utils/b12x.py and setup.py are byte-identical since fe8f214. The six
+# _B12X_SUBMODULES are unchanged and the extra is still b12x==1.5.1 (setup.py:1732).
+# flashinfer v0.7.2's pyproject still maps "b12x" = "flashinfer/experimental/b12x/_compat/b12x" (:72).

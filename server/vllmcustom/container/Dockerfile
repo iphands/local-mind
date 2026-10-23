@@ -35,14 +35,15 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at fe8f214, 2026-10-18;
-#     was 4d9a8d6, 2026-10-15, 698e79f, 2026-10-13, df6c7ad, 2026-10-13, 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#   - main snapshot (VLLM_REF=main in ./build, pinned at be03d19, 2026-10-23;
+#     was fe8f214, 2026-10-18, 4d9a8d6, 2026-10-15, 698e79f, 2026-10-13, df6c7ad, 2026-10-13, 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
 #     and 1ee4be4, 2026-09-12):
 #     READ THIS BEFORE QUOTING A PIN: the "same torch 2.13.0 / torchvision 0.28.0" below
 #     describes that 1ee4be4..698e79f line, NOT the current one. 4d9a8d6 moved to
 #     torch 2.14.0 / torchvision 0.29.0 and flashinfer 0.7.1, and fe8f214 to
-#     flashinfer 0.7.2 -- see the "698e79f -> 4d9a8d6" and "4d9a8d6 -> fe8f214"
-#     paragraphs further down; the last one is the current state.
+#     flashinfer 0.7.2 (be03d19 keeps both) -- see the "698e79f -> 4d9a8d6",
+#     "4d9a8d6 -> fe8f214" and "fe8f214 -> be03d19" paragraphs further down; the
+#     last one is the current state.
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
 #     flashinfer.ai/whl), same requirements/build/cuda.txt, same
@@ -303,6 +304,31 @@
 #     source) and tokenspeed-mla 2.0.2 -> 2.0.3 (vllm#61689, MLA-only, off this
 #     path) move. torch, torchaudio, humming-kernels 0.1.17, nvidia-cutlass-dsl
 #     4.8.0 and transformers 5.19.0 stay put.
+#     fe8f214 -> be03d19 (2026-10-23, 409 commits): torch 2.14.0 / torchaudio
+#     2.11.0 / torchvision 0.29.0 and flashinfer-python 0.7.2 are all unchanged,
+#     so torch-build, torchaudio-build and flashinfer-build are reused; only
+#     vllm-build and vllm-openai rebuild. Build-side: DeepGEMM a7a9277 -> 727f847
+#     (vllm#60118, F8_128x4 SFs for the FP8 einsum output) still compiles for
+#     12.0f. FlashMLA 5dceadb -> e2afa5f (vllm#61615, SM90 small-head sparse
+#     prefill) still supports only 9.0a/10.x, so it stays empty here. vllm#62366
+#     adds Beam's allreduce_norm.cu for 9.0a;10.0f;10.3f, which loose-intersects to
+#     nothing for a plain 12.0: the family fallback needs the same major, and the
+#     SASS fallback needs the same major unless +PTX. The rest is ROCm (paged
+#     attention split + --offload-compress, vllm#63105), CPU (fp8_quant.cpp,
+#     vllm#62016), TPU torch 2.14.0+cpu, and a pyproject typos list.
+#     vllm_flash_attn.cmake is byte-for-byte unchanged (GIT_TAG b273a02,
+#     GIT_PROGRESS TRUE once). Upstream docker/ moves only ROCm and versions.json.
+#     Runtime resolve (dry-run of the be03d19 requirements/cuda.txt in the
+#     gfe8f214 image). In place: certifi 2026.10.18 -> 2026.10.23 (new floor,
+#     vllm#62868), humming-kernels 0.1.17 -> 0.1.18 (vllm#62816), and orjson
+#     3.13.0 newly direct (vllm#58660). With --upgrade-package on every changed
+#     line, transformers 5.19.0 -> 5.20.2 is added (ceiling < 5.20.0 -> < 5.21.0,
+#     vllm#61983). Under it all three Flash-Next checkpoints still load with 12
+#     indexed_attention layers. humming is the Flash-Next MoE backend, and 0.1.18
+#     carries the DeviceInfo fix vLLM had patched around (vllm/utils/humming.py
+#     _patch_humming, removed in the same PR). nvidia-cudnn-frontend's floor goes to
+#     >= 1.31.0 (vllm#61465), which the image already meets. torch, torchaudio,
+#     flashinfer and nvidia-cutlass-dsl 4.8.0 stay put.
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,

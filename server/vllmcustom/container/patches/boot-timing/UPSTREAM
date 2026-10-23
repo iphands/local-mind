@@ -55,6 +55,18 @@
 #   both shas, and no hooked def line is on a +/- line, so only bodies moved. Still
 #   needed: the startup_timing|boot_timing|profile_report grep over the whole tree
 #   at fe8f214 returns nothing. test_boot_timing.py passes.
+#   Re-grepped present at be03d19 (2026-10-23, 409 commits). Every hooked file changed
+#   since fe8f214 (entry.py, app_state.py, renderers/base.py, core.py +115/-24, core_client.py,
+#   gpu_worker.py, gpu/model_runner.py, kernel_warmup.py). Every hooked def greps to the
+#   same count at both shas (entry 2, app_state 1, warmup_mm 1, make_client 1,
+#   run_engine_core 1, gpu_worker 7 incl. other classes' __init__, capture_model 1,
+#   kernel_warmup+flashinfer_autotune 2), and no hooked def line is on a +/- line.
+#   Still needed: the startup_timing|boot_timing|profile_report grep over the whole
+#   tree at be03d19 returns nothing. Of the 74 commits under the 4b paths, the
+#   startup-flavoured ones are vllm#62390 (moves startup *utils* into
+#   entrypoints/common/ and adds no report), vllm#62583/#62576/#62888 (Fast Start
+#   weight-cache and MRV2 Triton warmup fixes). None is a waterfall.
+#   test_boot_timing.py passes.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client
