@@ -2,8 +2,10 @@
 
 A runbook for Claude. To run it, say: **"follow ./repin.md"** (newest `main`) or
 **"follow ./repin.md to <sha>"**. It moves `VLLM_MAIN_SHA` in `container/versions.env`, re-checks
-everything the image and `./qwen3.8-flash-next/run` depend on, dispositions every customization
-(4b), makes **one commit**, and reports.
+everything the image and both main-snapshot launchers depend on, dispositions every customization
+(4b), makes **one commit**, and reports. The two launchers are `./qwen3.8-flash-next/run-fp4local`
+(FP4-Local, **the daily driver** since 2026-10-18) and `./qwen3.8-flash-next/run` (NVFP4). Both
+look the image up by `VLLM_MAIN_SHA`, so a repin moves both.
 It never builds and never pushes — neither `git push` nor `./container/push`; both are the owner's.
 The owner runs the build. (This is the hands-on, local
 counterpart of `qwen3.8-flash-next/upstream-watch-prompt.md`, which is a remote read-only watcher.)
@@ -15,8 +17,9 @@ it. That boundary is a default, not a guard: `muse/run` mounts `muse/patches/` u
 `IMAGE_TAG` overrides the image with no compatibility check, so `IMAGE_TAG=<main tag> ./muse/run`
 runs those shims over a snapshot and only the boot finds out.
 
-Templates for the result: `git show 6a9bac4` (flashinfer moved) and `git show ddc82f5` (nothing
-build-side moved, but the Qwen4Exp config did).
+Templates for the result: `git show 2f7fe38` (the newest: `fe8f214`, flashinfer 0.7.2, which began
+bundling b12x), `git show 6a9bac4` (flashinfer moved) and `git show ddc82f5` (nothing build-side
+moved, but the Qwen4Exp config did).
 
 ## Rules
 
@@ -66,6 +69,15 @@ Attribute each pin change to its commit/PR. Then:
   Skim the flashinfer commits between the two refs for anything sm120 or AOT-build related
   (`git -C <build>/src/flashinfer log --oneline vOLD..vNEW` after fetching). flashinfer-build will
   recompile (~35 min).
+  **Then confirm the new flashinfer still bundles b12x.** Run
+  `git -C <build>/src/flashinfer show vNEW:pyproject.toml | grep -n '"b12x" = '`. It must print the
+  `[tool.setuptools.package-dir]` line that installs flashinfer's copy as a top-level `b12x`
+  (`"b12x" = "flashinfer/experimental/b12x/_compat/b12x"` at v0.7.2).
+  This matters because the launchers decide "the image ships b12x, mount nothing" from the image's
+  `ai.vllmcustom.flashinfer.version` label alone (`_image_ships_b12x` in `common/_run-lib.sh`,
+  ≥ `B12X_IMAGE_SINCE_FLASHINFER`). If that line is gone, a b12x backend request would get neither
+  the bundled copy nor the mount, so the boot would fail or fall back instead of using the wheel. That
+  is a **stop and ask**.
 - **cmake/external_projects/vllm_flash_attn.cmake** changed: `GIT_PROGRESS TRUE` must still appear
   exactly once in the git branch of the FetchContent declaration (the Dockerfile `sed` hooks it). If
   `GIT_TAG` moved, fetch the new flash-attention `CMakeLists.txt` and confirm both anchors in
@@ -101,7 +113,10 @@ git -C $V log --format='%h %cs %s' $OLD..$NEW -- vllm/models/qwen4_exp vllm/conf
   vllm/model_executor/models/registry.py vllm/envs.py vllm/platforms/interface.py
 ```
 
-Re-verify every assumption in the `qwen3.8-flash-next/run` header at `$NEW` (`git -C $V grep ... $NEW -- <path>`):
+Re-verify every assumption in the `qwen3.8-flash-next/run` and `run-fp4local` headers at `$NEW`
+(`git -C $V grep ... $NEW -- <path>`). The last five rows are what `run-fp4local`'s defaults and the
+2026-10-18 measurements (`context/distilled.md`) rest on. If one of them goes missing, the launcher
+either dies at boot or, worse, boots and is slower:
 
 | Assumption | Where |
 |---|---|
@@ -111,10 +126,15 @@ Re-verify every assumption in the `qwen3.8-flash-next/run` header at `$NEW` (`gi
 | `getattr(config, "ple_embedding_dtype", ...)` is what picks the PLE method | `nvidia/ngram_embedding.py` |
 | `Qwen4ExpForConditionalGeneration`, `Qwen4ExpMTP` registered | `vllm/model_executor/models/registry.py` |
 | `VLLM_GDN_DECODE_KERNEL` env | `vllm/envs.py` |
-| `"qwen3"` reasoning parser, `"qwen3_coder"` tool parser | `vllm/reasoning/__init__.py`, `vllm/tool_parsers/__init__.py` |
+| `"qwen3"` reasoning parser; `"qwen3_coder"` (`run`) and `"qwen3_xml"` (`run-fp4local`) tool parsers | `vllm/reasoning/__init__.py`, `vllm/tool_parsers/__init__.py` |
 | `_update_nested` / `_apply_dict_overrides` still merge nested `--hf-overrides` | `vllm/config/model.py` |
 | QSA ring assert still not folded into the block-size LCM (if it is now, the `BLOCK_SIZE=auto` workaround can go) | `common/qsa_cache.py`, `vllm/platforms/interface.py` `_align_hybrid_block_size` |
 | PLE table still one `torch.empty(..., pin_memory=True)` (if chunked / registered, `PINNED_ROUND_MB` can go) | `common/ngram_embedding.py` `allocate_embedding_weight` |
+| `DraftSampleMethod` still offers `"probabilistic"` (`run-fp4local`'s `DRAFT_SAMPLE` default; +8–15% on code over greedy at temperature 0.6) | `vllm/config/speculative.py` |
+| QSA still honours `kv_cache_dtype_skip_layers` (`KV_SKIP_MTP=1`, the drafter's BF16 KV; +5–8% on code). The check: `cache_config.kv_cache_dtype_skip_layers` is still read in QSA. Without it the flag is accepted and does nothing | `vllm/models/qwen4_exp/nvidia/qsa.py` |
+| `VLLM_GDN_DECODE_KERNEL` still offers `triton` (`run-fp4local`'s `GDN_KERNEL` default; upstream's default is `cuda`, `env_with_choices` at `fe8f214`) | `vllm/envs.py` |
+| `-O1` and up still set `enable_flashinfer_autotune=True`, and `-O2` is still the default. The README and both launchers call `FLASHINFER_AUTOTUNE=1` a no-op because of it | `vllm/config/vllm.py` |
+| `SpeculativeConfig.moe_backend` still exists (only `scripts/flashnext-matrix`'s `DRAFT_MOE_BACKEND` uses it; b12x on NVFP4 needs it) | `vllm/config/speculative.py` |
 
 If `requirements/common.txt`'s `transformers` line changed, or anything touched the Qwen4Exp
 config / layer types, load **both** checkpoints' configs with the transformers version the dry-run
@@ -137,12 +157,17 @@ for k in ["ple_embedding_dtype", "indexer_compress_ratio", "indexer_n_heads", "m
 setattr(c.text_config, "ple_embedding_dtype", "float8_e4m3fn")   # what the launcher's --hf-overrides does
 print("override lands:", c.get_text_config().ple_embedding_dtype)
 PY
-for m in nvidia/Qwen3.8-Flash-Next-NVFP4 primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8; do
+for m in nvidia/Qwen3.8-Flash-Next-FP4-Local nvidia/Qwen3.8-Flash-Next-NVFP4 primitive-ai/Qwen3.8-Flash-Next-mixed-NVFP4-FP8; do
   docker run --rm --entrypoint bash -v <scratchpad>/cfgcheck.py:/c.py:ro \
     -v "$(readlink -f models/vllm)/$m":/model:ro "$OLD_IMG" \
     -c "uv pip install -q transformers==<resolved version> 2>/dev/null; python /c.py 2>&1 | grep -vi warn"
 done
 ```
+
+FP4-Local reads differently. Its `ple_embedding_dtype` must print `'nvfp4'` (the table shards are
+U8-packed NVFP4), and `run-fp4local` applies **no** override (`PLE_DTYPE` is empty by design; see its
+header). So its `override lands:` line only proves the setattr works and says nothing about the
+launcher.
 
 ## 4. Overlays (hook by name, no-op on drift)
 
@@ -171,8 +196,9 @@ python3 container/patches/csf-scale-decode/test_csf_scale_decode.py
 
 For `container/patches/b12x` (a mounted package, no hooks): check `_B12X_SUBMODULES` in
 `vllm/utils/b12x.py` and the `"b12x"` extra pin in `setup.py` at `$NEW`, and whether the image's
-own dependencies now ship a top-level `b12x`. flashinfer-python ≥ 0.7.2 does, and then the mount
-is shadowed, because its `.pth` appends to `sys.path`.
+own dependencies now ship a top-level `b12x`. flashinfer-python ≥ 0.7.2 does. A mount would be
+shadowed there (its `.pth` appends to `sys.path`), so since Plan 06 T5 the launchers mount nothing on
+such an image. If flashinfer moved in step 1, its bundle check is part of this row.
 
 ## 4b. Dispositions (every artifact, at $NEW)
 
@@ -193,7 +219,7 @@ before step 6 and report the table as far as it goes.
 | `container/patches/spec-live` (opt path) | did Dynamic SD gain a live-K API that subsumes the utility call? | `git -C $V log --format='%h %s' $OLD..$NEW -- vllm/v1/core/sched vllm/v1/engine/ vllm/config/speculative.py vllm/entrypoints/launchers/api_server` — a live-K knob would surface beside `num_speculative_tokens_per_batch_size` in `speculative.py` |
 | `container/patches/sm120-gemm-plans` (opt path) | does upstream ship a `(12,0)` GEMM table? | step 4's check. Yes ⇒ **merged → remove in this commit** |
 | `container/patches/csf-scale-decode` (`run-fp4local`) | did upstream learn to decode CSF-encoded NVFP4 scales? | `git -C $V grep -inE 'nvfp4_csf\|csf_exceptions\|byte-window4' $NEW -- vllm`; a hit ⇒ read it before calling it **merged** |
-| `container/patches/b12x` (opt path) | does the image now ship `b12x` itself? | step 4's b12x check. Shadowed ⇒ **retired-kept** for this image (the mount still serves older tags); dropping it or making it win is a Plan 06-style decision, not a repin edit |
+| `container/patches/b12x` (opt path) | does the image still ship `b12x` itself? | step 4's b12x check, plus step 1's bundle check when flashinfer moved. Still bundled ⇒ **retired-kept** for this image (the launcher mounts nothing, Plan 06 T5; the mount still serves older tags). Bundle gone ⇒ **STOP** (step 1). Dropping the mount entirely is a Plan 06-style decision, not a repin edit |
 | ~~`qwen3.8-flash-next/patches/ple-ct-ignore`~~ | **DELETED at the `4d9a8d6` repin** — this row is history, not a task; the dir no longer exists, so do not go looking for it. It was retired upstream at `c32513b` (vllm#59431), an ancestor of every pin since, and a repin only moves forward, so it could never fire again | Keep the regression check, without the overlay: `git -C $V grep -n 'isinstance(quant_config, CompressedTensorsConfig)' $NEW -- vllm/models/qwen4_exp/common/ngram_embedding.py`. If that branch ever disappears, upstream regressed and there is no longer a local workaround — that is a stop-and-ask, not a re-derive |
 | launcher: `--hf-overrides` dtype fix | retires with a corrected checkpoint, not with a sha | step 3's cfgcheck shows whether the checkpoint still mislabels ⇒ **checkpoint-driven** |
 | launcher: `BLOCK_SIZE=auto`, `PINNED_ROUND_MB` | upstream's own fix retires them | the last two rows of step 3's table give the exact drop condition |
@@ -226,6 +252,7 @@ minor and update that comment (pattern: the 0.31.0 -> 0.32.0 move in `6a9bac4`).
 - `qwen3.8-flash-next/run` header: `Last verified against main @ <sha7>`, append the old sha to the
   re-checked list, and update any workaround note that step 3 changed. Edit code only if an
   assumption broke.
+- `qwen3.8-flash-next/run-fp4local` header: the same `Last verified against main @ <sha7>` line.
 - Any 4b row answered **merged → remove in this commit**: enumerate the artifact's touchpoints with
   `git grep -l <name>` and remove every one in this commit — a half-removal is worse than no
   removal. Worked example, the `ple-ct-ignore` removal at `4d9a8d6`: the dir, the `PATCH_PLE` knob
@@ -246,7 +273,7 @@ minor and update that comment (pattern: the 0.31.0 -> 0.32.0 move in `6a9bac4`).
 
 ```bash
 PREFLIGHT_ONLY=1 VLLM_REF=main ./container/build      # syncs src trees to $NEW, checks pins + cubin + torchvision wheel
-bash -n qwen3.8-flash-next/run && shellcheck -x qwen3.8-flash-next/run
+for l in run run-fp4local; do bash -n qwen3.8-flash-next/$l && shellcheck -x qwen3.8-flash-next/$l; done
 ```
 
 Launcher args, with the final launch stubbed out (the new image isn't built yet, so point
@@ -294,6 +321,27 @@ and caught it. It said MTP 4 until 2026-10-18, when the default moved to K=3; sk
 default-on that day, then reverted after its A/B. So read them off `qwen3.8-flash-next/run` rather
 than trusting this file.
 
+Then do the same for the daily driver, with the same stub:
+
+```bash
+DOCKER=docker PATH=<scratchpad>/stub:$PATH IMAGE_TAG=${OLD_IMG#*:} ./qwen3.8-flash-next/run-fp4local 2>&1 \
+  | grep -E '^## |^docker '
+```
+
+Expect on the `docker ` line:
+- model and parser: `/models/nvidia/Qwen3.8-Flash-Next-FP4-Local`, `--tool-call-parser qwen3_xml`;
+- `--speculative-config {"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}`;
+- `--kv-cache-dtype fp8 --kv-cache-dtype-skip-layers 48`, `--moe-backend humming`;
+- `--gpu-memory-utilization 0.975`, `--block-size 64`, `--max-num-seqs 16`, `--max-num-batched-tokens 6019`;
+- `-e VLLM_GDN_DECODE_KERNEL=triton`, and the two csf-scale-decode `-v` mounts (the dir and `zz_csf_scale_decode.pth`);
+- no `--hf-overrides` PLE dtype (`PLE_DTYPE` is empty by design);
+- no b12x mount (`MOE_BACKEND` is not b12x) and no `sm120_gemm_plans.pth` mount.
+
+The `## Running` line summarises the same as `mtp=3/probabilistic kv-bf16-layers=48 block=64 … csf-decode=on`.
+These are `run-fp4local`'s own defaults (`SPEC_TOKENS:-3`, `DRAFT_SAMPLE-probabilistic`,
+`GPU_MEM_UTIL:-0.975`, `GDN_KERNEL:-triton`, …), so as above, read them off the launcher. This
+paragraph matched a stub run on `…gfe8f214` on 2026-10-23.
+
 ## 8. Commit
 
 One commit, `container: pin main snapshot at <sha7>`. Body as in the templates: what moved and
@@ -316,7 +364,16 @@ No co-author trailer. Never `git push` — the owner does; report the hash and s
        (bare, archs inspects `:latest` — the *release* image, a check that passes having checked
        nothing), then `./container/push`. The `_vllm_fa2_C` line out of archs is the evidence the
        4b FA row could not get pre-build; paste it back and the next repin cites it.
-    2. `./qwen3.8-flash-next/run` (a bare launch is the daily driver).
+    2. `./qwen3.8-flash-next/run-fp4local` (a bare launch is the daily driver;
+       `./qwen3.8-flash-next/run` is the NVFP4 checkpoint).
+    3. A post-build regression bench, one boot, about 8 min:
+       `REPLACE=1 KS=3 CONC=1,4 ROUNDS=3 ./scripts/flashnext-conc-sweep`. Compare its code rows with
+       the 2026-10-18 baseline in `context/distilled.md` § *MTP depth on FP4-Local* (K=3: 198.0 tok/s
+       at 1 stream; 137.9 per stream / 532.7 aggregate at 4 streams; accept len 2.76).
+       - If a range sits below the baseline's range, or accept len drops, the repin shipped a
+         regression, even though the boot looked fine.
+       - Accept len catches a drafting regression, e.g. `draft_sample_method` or the QSA KV skip
+         quietly changing. A slower step at equal accept len points to the kernels.
 
-  Until the new image exists, the launcher refuses, because it looks the image up by
-  `VLLM_MAIN_SHA`. To run the previous image meanwhile, use `IMAGE_TAG=<old tag> ./qwen3.8-flash-next/run`.
+  Until the new image exists, both launchers refuse, because they look the image up by
+  `VLLM_MAIN_SHA`. To run the previous image meanwhile, use `IMAGE_TAG=<old tag> ./qwen3.8-flash-next/run-fp4local`.

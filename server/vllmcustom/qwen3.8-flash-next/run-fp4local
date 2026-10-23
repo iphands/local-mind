@@ -4,7 +4,7 @@
 # sm120 image built from a vLLM main snapshot.
 #
 #   VLLM_REF=main ./container/build                # build the snapshot first (the VLLM_MAIN_SHA pinned in container/versions.env)
-#   ./qwen3.8-flash-next/run-fp4local              # nvidia/Qwen3.8-Flash-Next-FP4-Local (MTP 3, qwen3_xml parser, fp8 KV, util 0.975)
+#   ./qwen3.8-flash-next/run-fp4local              # nvidia/Qwen3.8-Flash-Next-FP4-Local (MTP 3 probabilistic, qwen3_xml parser, fp8 KV, util 0.975)
 #   ./qwen3.8-flash-next/run-fp4local <path>       # another Flash-Next checkpoint under models/vllm
 #   FAMILY=flashnext|qwen ...                      # override the config.json family detection
 #
@@ -19,7 +19,9 @@
 #     the U8-packed table shards. Trust config.json instead.
 #   * --tool-call-parser qwen3_xml (run hardcodes qwen3_coder, which is for
 #     Qwen3-Coder; this model's chat template is qwen3 XML-style tool calls).
-#   * SPEC_TOKENS=3 (run: 4), DRAFT_SAMPLE=probabilistic (run: greedy).
+#   * DRAFT_SAMPLE=probabilistic (run: greedy, vLLM's default). Measured here: greedy is
+#     8-15% slower on code at temperature 0.6 (scripts/flashnext-draft-ab, 2026-10-18).
+#     SPEC_TOKENS is 3 in both launchers.
 #   * GPU_MEM_UTIL=0.975 (run: 0.95) — the card's measured value for this model;
 #     verify "Available KV cache memory" at boot so the pinned PLE table + KV cache
 #     fit on one card.
@@ -31,6 +33,9 @@
 # Everything else (pinned image lookup by ai.vllmcustom.vllm.ref label,
 # --engram-config cpu_offload, HF_HUB_OFFLINE=1, --user 1000:1000, --gpus device=0,
 # the call order with env_extra_args/vllm_extra_args LAST) is identical to ./run.
+#
+# Last verified against main @ fe8f214 (2026-10-18: booted and benched on the …gfe8f214 image,
+# VLLM_MAIN_SHA in container/versions.env at the time). ./repin.md updates this line.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)

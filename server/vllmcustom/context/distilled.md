@@ -149,6 +149,28 @@ section**, which always stays last. Keep it dense.
 - The two runs' single-stream numbers agree (K=3 code 1.64x vs 1.62x; K=0 117.6 vs 122.4, different boots).
   [LIVE 2026-10-18]
 
+## FP4-Local draft knobs: probabilistic drafting and a BF16 drafter KV both pay [LIVE 2026-10-18]
+
+- `scripts/flashnext-draft-ab`, `run-fp4local` defaults + `SPEC_TOKENS=3`, image `…gfe8f214`, 4 rounds per
+  cell, unique-prefix prompts, temperature 0.6, `bench/bench-logs/flashnext-draft-ab-20261019-051831/`.
+  Code, per-stream tok/s mean (min–max) at 1 stream, then aggregate at 4 streams:
+  - `prob`: **197.4** (192.9–205.1), then **534.9** (526.3–553.1); accept len 2.76 / 2.73.
+  - `greedy` (`DRAFT_SAMPLE=greedy`): 168.6 (162.3–172.3), −15%; then 489.8 (478.5–504.3), −8%;
+    accept len 2.38 / 2.54.
+  - `mtp-kv-fp8` (`KV_SKIP_MTP=0`): 182.9 (176.8–188.8), −7%; then 507.6 (500.2–521.6), −5%; accept len 2.56 / 2.60.
+
+  None of these ranges overlap `prob`'s. Long prompt (~16k ctx): all three within noise. [LIVE 2026-10-18]
+- Why greedy loses: with greedy drafting the verify step treats the draft as one-hot, so at temperature
+  > 0 it accepts less. At temperature 0 the two would match. Keep `DRAFT_SAMPLE=probabilistic`.
+  `qwen3.8-flash-next/run` (NVFP4) still takes vLLM's greedy default; that is untested there. [SOURCE:
+  `vllm/config/speculative.py:604`][LIVE 2026-10-18]
+- `KV_SKIP_MTP=1` costs 7% of the KV pool (962,043 vs 1,030,760 tokens at util 0.975) and buys the
+  5–8% above. Keep it. [LIVE 2026-10-18]
+- Side finding: `bench/bench`'s long-prompt TTFT (~415 ms) is a **warm prefix-cache** number. It re-sends
+  the identical prompt every run, so later runs hit the cache. A cold ~16k prefill is ~875 ms
+  (`bench/conc`, unique prefix, 1 stream). Four long prompts arriving together get their first token
+  at ~1.06 / 2.0 / 2.9 / 3.7 s: the prefills queue behind each other in 6019-token chunks. [LIVE 2026-10-18]
+
 ## `FLASHINFER_AUTOTUNE=1` is a no-op on main images: FlashInfer autotune is already on [SOURCE][LIVE 2026-10-18]
 
 - `KernelConfig.enable_flashinfer_autotune` defaults to `None` and is filled from the optimization level.
