@@ -116,10 +116,11 @@ struct Args {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
-    /// Hold model files in memory with TUI
-    Hold(HoldArgs),
+    /// Keep model files mmap'd and pinned in RAM until you quit (interactive TUI)
+    #[command(alias = "hold")]
+    Tui(HoldArgs),
 
-    /// Hold model files in memory and exit immediately after loading and locking
+    /// Prewarm the page cache and exit — the pin does not outlive the process
     Oneshot(HoldArgs),
 
     /// Check mmap status of model-holder and llama-server processes
@@ -1409,18 +1410,26 @@ fn truncate_string(s: &str, max_len: usize) -> String {
 
 /// Main entry point
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // `hold` is a hidden alias of `tui`, so it works without appearing in --help.
+    // Announce the move instead of letting an undocumented verb live forever.
+    // args_os, not args: args() panics on non-UTF-8 argv, and Args::parse() below uses
+    // args_os(), so a non-UTF-8 argument must still reach clap's own error path.
+    if std::env::args_os().nth(1).as_deref() == Some(std::ffi::OsStr::new("hold")) {
+        eprintln!("note: 'hold' is now 'tui' — same command, 'hold' keeps working");
+    }
+
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
 
     let args = Args::parse();
 
     let result = match args.command {
-        Commands::Hold(hold_args) => hold_models_with_tui(
-            hold_args.model_paths,
-            hold_args.no_warmup,
-            hold_args.page_size,
-            hold_args.no_mlock,
-            hold_args.lock_threads,
+        Commands::Tui(tui_args) => hold_models_with_tui(
+            tui_args.model_paths,
+            tui_args.no_warmup,
+            tui_args.page_size,
+            tui_args.no_mlock,
+            tui_args.lock_threads,
         )
         .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) }),
         Commands::Oneshot(oneshot_args) => hold_models_oneshot(
@@ -1447,6 +1456,31 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The verb set is the CLI contract; nothing else here pins it down.
+    #[test]
+    fn verbs_parse() {
+        assert!(matches!(
+            Args::try_parse_from(["model-holder", "tui", "a.gguf"])
+                .unwrap()
+                .command,
+            Commands::Tui(_)
+        ));
+        assert!(matches!(
+            Args::try_parse_from(["model-holder", "oneshot", "a.gguf"])
+                .unwrap()
+                .command,
+            Commands::Oneshot(_)
+        ));
+        // Hidden alias — delete this assertion together with `#[command(alias = "hold")]`.
+        assert!(matches!(
+            Args::try_parse_from(["model-holder", "hold", "a.gguf"])
+                .unwrap()
+                .command,
+            Commands::Tui(_)
+        ));
+        assert!(Args::try_parse_from(["model-holder", "pin", "a.gguf"]).is_err());
+    }
 
     fn make_region(path: &str, dev: &str, inode: u64, start: u64, end: u64) -> MappedRegion {
         MappedRegion {
