@@ -94,8 +94,13 @@ struct HoldArgs {
     #[arg(long, default_value_t = false)]
     no_mlock: bool,
 
-    /// Number of files to mlock in parallel
-    #[arg(long, default_value_t = 4)]
+    /// Number of files to mlock concurrently
+    ///
+    /// One at a time is the default: concurrent mlock() across large mappings
+    /// saturates a NAS. For models on local NVMe, `--lock-threads 8` locks the
+    /// whole set faster. Only the mlock phase is parallelized; warmup is
+    /// always sequential.
+    #[arg(long, default_value_t = 1)]
     lock_threads: usize,
 }
 
