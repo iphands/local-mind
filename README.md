@@ -78,10 +78,11 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 │   │           ├── neckbeard.md
 │   │           └── hoodie.md
 │   ├── helpers/
-│   │   ├── model-holder/       # Rust: mmap model files to prevent cache thrashing
 │   │   └── model-switcher/     # Rust: TUI for switching models per agent
 │   ├── vendor/                 # Read-only reference: OpenCode & oh-my-opencode source
 │   └── plans/                  # Planning documents
+│
+├── model-holder/               # Rust: mmap + mlock model files to prevent cache thrashing
 │
 └── server/
     ├── proxy -> ../llama-proxy  # Symlink to llama-proxy
