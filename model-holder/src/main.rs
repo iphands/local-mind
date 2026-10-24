@@ -4,7 +4,7 @@ use log::{debug, error, warn};
 use memmap2::Mmap;
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
-use std::io::{self, BufRead, Write};
+use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -731,10 +731,10 @@ fn hold_models_oneshot(
         let mut failed = failed_files.into_inner().unwrap();
         failed.sort();
         if failed.is_empty() {
-            println!(" locked {} in RAM", format_size_bytes(locked));
+            println!(" locked {} for the run", format_size_bytes(locked));
         } else {
             println!(
-                " locked {} in RAM, {} file(s) failed to lock (check ulimit -l and permissions)",
+                " locked {} for the run, {} file(s) failed to lock (check ulimit -l and permissions)",
                 format_size_bytes(locked),
                 failed.len()
             );
@@ -744,6 +744,33 @@ fn hold_models_oneshot(
         }
     } else {
         println!(" skipping mlock (--no-mlock)");
+    }
+
+    // mlock is per-address-space state: the instant these mappings go away the pages are
+    // unpinned again. Drop first, then report, so the "locked N for the run" line above is
+    // never read as a lasting state — same discipline as the TUI path's exit summary.
+    let held = mapped_files.len();
+    let bytes: u64 = mapped_files.iter().map(|mf| mf.size).sum();
+    drop(mapped_files);
+    // Each branch states only what this run actually did: --no-warmup never touched a
+    // page, and --no-mlock has no pin to release.
+    let state = if no_warmup {
+        "pages were never touched (--no-warmup), nothing is pinned"
+    } else if no_mlock {
+        "page cache stays warm"
+    } else {
+        "page cache stays warm, nothing is pinned"
+    };
+    println!(
+        " released {} mapping{} ({}) — {}",
+        held,
+        if held == 1 { "" } else { "s" },
+        format_size_bytes(bytes),
+        state,
+    );
+    // Advice, not state — only useful to someone who can act on it, not to a journal.
+    if !no_mlock && io::stdout().is_terminal() {
+        println!(" need the pages pinned until llama.cpp restarts? use: model-holder tui <paths>");
     }
 
     Ok(())

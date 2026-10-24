@@ -193,8 +193,16 @@ cargo run --release all       # Switch all agents at once
 Locks model files into memory via mmap to prevent cache thrashing during inference:
 
 ```bash
-bin/model-holder --glob "/path/to/models/*.gguf"
+bin/model-holder tui "/path/to/models/*.gguf"
 ```
+
+Files are pinned one at a time by default — the right choice for a NAS, where
+concurrent `mlock()` calls compete for the same link. For models on local NVMe,
+`--lock-threads 8` pins the set faster. `oneshot` runs the same load-and-lock
+pass but then exits, which drops the pin: use it to prewarm the page cache from
+a boot or pre-start script, and `tui` when the pages have to survive until
+llama.cpp restarts. `check` is a read-only diff of which model files the holder
+and the llama.cpp processes each have mapped.
 
 ## Review Workflow
 
