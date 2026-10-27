@@ -31,10 +31,10 @@
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Last verified against main @ be03d19 (2026-10-23, VLLM_MAIN_SHA in
+# Last verified against main @ 40fe396 (2026-10-27, VLLM_MAIN_SHA in
 # container/versions.env at the time; first verified at 1ee4be4, 2026-09-12, re-checked at
 # 468663a, 826e300, 36f94d5, a44d7b5, 2b9b55c, 47de9d4, 84bcbc6, bdd31c3, b6d8e8a, 187a0eb,
-# df6c7ad, 698e79f, 4d9a8d6, fe8f214 and on each bump): vllm/config/engram.py with
+# df6c7ad, 698e79f, 4d9a8d6, fe8f214, be03d19 and on each bump): vllm/config/engram.py with
 # cpu_offload, Qwen4ExpPLEPinnedHostEmbedding (in qwen4_exp/common/ since
 # vllm#57497) selected when it is set, Qwen4ExpForConditionalGeneration +
 # Qwen4ExpMTP in the registry, VLLM_GDN_DECODE_KERNEL still an env, the qwen3
@@ -59,15 +59,24 @@
 # Under it, AutoConfig on all three checkpoints (nvidia, primitive-ai, FP4-Local)
 # still gives indexed_attention x12 + linear_attention x36, the same
 # ple_embedding_dtype (missing / float8_e4m3fn / nvfp4), and the setattr override
-# still lands.
+# still lands. At 40fe396 transformers stays 5.20.2 and the same check gives the
+# same three answers.
 # primitive-ai does NOT boot from vLLM 042ab03 on (vllm#59533, 2026-10-05):
 # qkv_proj now also packs indexer.index_qk_proj, and that checkpoint stores
 # q/k/v_proj in FP8 but ignores the indexer ('re:.*indexer.*', BF16), so
 # compressed-tensors refuses at model init: "Found different quantization
 # schemes for the shards of ...qkv_proj". The nvidia checkpoint (the default)
-# has all four BF16, in the MTP layer too, and is unaffected. No upstream fix
-# yet; serve primitive-ai from an older image, e.g.
-# IMAGE_TAG=cu1321-sm120-main-vllm0.32.0.dev20261004-gbdd31c3.
+# has all four BF16, in the MTP layer too, and is unaffected. Fixed upstream at
+# 40fe396 by vllm#62318 (a91a1d06b7, issue vllm#62308, which reports this same
+# layout): packed_modules_mapping["qkv_proj"] is back to q/k/v only, and QSA fuses
+# the indexer into qkv_proj only when both have the same quant method. So
+# primitive-ai should load at 40fe396, with its BF16 indexer as a separate GEMM.
+# NOT booted yet. Until a 40fe396 boot confirms it, the known-good fallback stays
+# an older image, e.g. IMAGE_TAG=cu1321-sm120-main-vllm0.32.0.dev20261004-gbdd31c3.
+# Both nvidia checkpoints are ModelOpt MIXED_PRECISION, and both keep the fused GEMM
+# because the two sides resolve to the same method. FP4-Local quantizes q/k/v and
+# the indexer as MXFP8. NVFP4 ignores self_attn* and lists no attention layer in
+# quantized_layers, so both sides are UnquantizedLinearMethod.
 #
 # FIRST BOOT (2026-09-13): weights loaded (417 s), then the engine died in
 # ngram_embedding.py process_weights_after_loading with

@@ -34,8 +34,9 @@
 # --engram-config cpu_offload, HF_HUB_OFFLINE=1, --user 1000:1000, --gpus device=0,
 # the call order with env_extra_args/vllm_extra_args LAST) is identical to ./run.
 #
-# Last verified against main @ be03d19 (2026-10-23: source re-checked by ./repin.md, NOT yet
-# booted; last booted and benched on the …gfe8f214 image, 2026-10-18). ./repin.md updates this line.
+# Last verified against main @ 40fe396 (2026-10-27: source re-checked by ./repin.md, NOT yet
+# booted; last booted and benched on the …gfe8f214 image, 2026-10-18 -- the …gbe03d19 image is
+# built, but no boot or bench of it is recorded here). ./repin.md updates this line.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)

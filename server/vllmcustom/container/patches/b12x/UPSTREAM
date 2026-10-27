@@ -72,3 +72,12 @@
 # vllm/utils/b12x.py and setup.py are byte-identical since fe8f214. The six
 # _B12X_SUBMODULES are unchanged and the extra is still b12x==1.5.1 (setup.py:1732).
 # flashinfer v0.7.2's pyproject still maps "b12x" = "flashinfer/experimental/b12x/_compat/b12x" (:72).
+# 40fe396 repin (2026-10-27): retired-kept. flashinfer-python moves 0.7.2 -> 0.7.2.post1
+# (vllm#63466). v0.7.2.post1's pyproject still maps "b12x" =
+# "flashinfer/experimental/b12x/_compat/b12x" (:77), and flashinfer/experimental/ is
+# unchanged over v0.7.2..v0.7.2.post1, so the bundled copy is the same one. The new
+# label value 0.7.2.post1 passes _image_ships_b12x: the ^[0-9]+(\.[0-9]+)+ regex
+# matches, and sort -V puts 0.7.2 first, so b12x_args keeps mounting nothing.
+# vllm/utils/b12x.py and setup.py's extra (still b12x==1.5.1, :1732) are unchanged
+# since be03d19. Not verified: find_spec('b12x') in the 40fe396 image, which is not
+# built yet.

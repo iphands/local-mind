@@ -99,7 +99,9 @@ The in-place dry-run only shows what *must* change. A package whose range just g
 raised ceiling) stays at the image's version, but the real build re-resolves the vllm-openai layer
 fresh and takes the newest allowed version. So re-run with `--upgrade-package <name>` for every
 package whose requirement line changed in step 1 (the bdd31c3 case: "no changes" in place, but
-transformers 5.17.0 -> 5.18.0 in the build).
+transformers 5.17.0 -> 5.18.0 in the build). The exception is what the `base` stage installs
+(`"numpy<2.3"` among them): those keep their base version, so a full `--upgrade` dry-run overstates
+them (the 40fe396 numpy case, `context/distilled.md`).
 
 List every `-`/`+` pair. torch, torchaudio and flashinfer must stay put unless step 1 moved
 flashinfer. For each moved package, say whether it is on the Flash-Next path (e.g. nvidia-cutlass-dsl

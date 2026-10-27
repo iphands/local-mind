@@ -67,6 +67,19 @@
 #   entrypoints/common/ and adds no report), vllm#62583/#62576/#62888 (Fast Start
 #   weight-cache and MRV2 Triton warmup fixes). None is a waterfall.
 #   test_boot_timing.py passes.
+#   Re-grepped present at 40fe396 (2026-10-27, 229 commits). Of the hooked files,
+#   app_state.py (+2), core.py (+135), core_client.py (+43), gpu_worker.py (+22),
+#   gpu/model_runner.py (+77) and kernel_warmup.py (47 lines churn) changed since
+#   be03d19. entry.py and renderers/base.py are byte-identical. Every hooked def
+#   greps to the same count at both shas (entry 2, app_state 1, warmup_mm 1,
+#   make_client 1, run_engine_core 1, EngineCore 1, gpu_worker 7, capture_model 1,
+#   kernel_warmup+flashinfer_autotune 2), and no hooked def line is on a +/- line.
+#   Still needed: the startup_timing|boot_timing|profile_report grep over the whole
+#   tree at 40fe396 returns nothing. Of the 32 commits under the 4b paths, the
+#   startup-flavoured ones are vllm#63088 (Fast Start warmup-cache seeding), vllm#51974
+#   (a profile_prefix for the on-demand /start_profile) and four MRV2
+#   memory-profiling fixes (vllm#63154, #63431, #61509, #57926). None is a waterfall.
+#   test_boot_timing.py passes.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client

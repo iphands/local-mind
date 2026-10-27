@@ -68,6 +68,17 @@
 # that same instanttensor branch. load_weights(self, model, model_config) is untouched
 # (:490). Still needed: `git grep is_unused_checkpoint_weight` under
 # vllm/models/qwen4_exp/ at be03d19 returns nothing. test_draft_load_filter.py passes.
+# Re-grepped at 40fe396 (2026-10-27, 229 commits). weight_utils.py and
+# default_loader.py are byte-identical since be03d19, so the should_skip_weight( call
+# lines (the safetensors 3 at 1211/1228/1246, the instanttensor 2 at 1434/1442) and
+# load_weights (:490) have not moved. model.py and mtp.py (+24/-20 together) changed
+# only through vllm#62318 (the indexer leaves qkv_proj's packed mapping) and vllm#60234
+# (PP for PLE models: PPMissingLayer for embed_tokens/lm_head off the first/last rank,
+# and the drafter branches on intermediate_tensors instead of is_first_rank).
+# _remap_mtp_weight_name (mtp.py:97, :475) and {"mtp.": None} (model.py:926, :1125)
+# grep the same at both shas and are on no +/- line. Still needed: `git grep
+# is_unused_checkpoint_weight` under vllm/models/qwen4_exp/ at 40fe396 returns nothing.
+# test_draft_load_filter.py passes.
 #   vllm.model_executor.model_loader.weight_utils
 #       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
 #                               safetensors_weights_iterator resolves it as a

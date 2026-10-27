@@ -59,6 +59,18 @@
 # (:518) is still the only Dynamic SD input. Nearby, not hooked: vllm#62784 (MRV2)
 # skips drafting in steps where no request can use the drafts.
 # test_spec_live.py passes. Still NOT repeated in-container.
+# Re-grepped present at 40fe396 (2026-10-27, 229 commits). scheduler.py (+138),
+# core.py (+135), core_client.py (+43) and routers.py (+7) changed since be03d19, and
+# every seam survives. dynamic_sd_lookup is declared at scheduler.py:315 and built at
+# :318, and num_spec_tokens_to_schedule still comes from
+# dynamic_sd_lookup[len(num_scheduled_tokens)] at :1684-1688. The UTILITY dispatch
+# getattr(self, method_name) -> _convert_msgspec_args is at core.py:1820-1821 (def
+# :1903). call_utility_async is at core_client.py:1312 and :1834, and
+# register_api_routers at routers.py:12. Its +7 attaches a sleep-mode checkpoint
+# router inside the body we wrap. No seam line is on a +/- line. Still needed:
+# speculative.py adds only disable_lookahead_block_hashes (vllm#61589), not a live-K
+# knob, so num_speculative_tokens_per_batch_size (:524) is still the only Dynamic SD
+# input. test_spec_live.py passes. Still NOT repeated in-container.
 # Verified at vLLM 187a0eb (2026-10-10), by reading the source, by the host test
 # (test_spec_live.py: fakes shaped like these seams), and by importing the three
 # targets with the hook in a throwaway container of the b6d8e8a image (no GPU):

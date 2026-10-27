@@ -20,6 +20,10 @@
 #   get_all_weights (now :372) is on no +/- line. Still needed: the
 #   'nvfp4_csf|csf_exceptions|byte-window4' grep over vllm/ at be03d19 returns
 #   nothing. test_csf_scale_decode.py passes.
+#   Re-grepped at 40fe396 (2026-10-27): default_loader.py is byte-identical since
+#   be03d19 (get_all_weights still :372). Still needed: the
+#   'nvfp4_csf|csf_exceptions|byte-window4' grep over vllm/ at 40fe396 returns
+#   nothing. test_csf_scale_decode.py passes.
 #
 # Format source (the format is NOT in vLLM; read these, do not guess):
 #   local-inference-lab/b12x  tests/quantization/test_nvfp4_csf.py  _fixture(codec=0)

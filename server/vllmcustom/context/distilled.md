@@ -198,6 +198,49 @@ section**, which always stays last. Keep it dense.
 - NOT measured: the effect on prefill time, TTFT, or prefix-cache hit granularity. The repin's post-build bench
   measures decode only.
 
+## From `40fe396`, the KV pool shrinks ~513 MiB, MTP prefix hits keep their last block, and primitive-ai loads again [SOURCE 2026-10-27]
+
+- vllm#60490 (`90309f6b74`): during the profiling dummy run, each QSA layer now allocates the indexer's peak
+  scratch so the memory profiler counts it (`vllm/models/qwen4_exp/nvidia/qsa.py`, the `not isinstance(metadata,
+  dict)` branch). That peak is `max(VLLM_SPARSE_INDEXER_MAX_LOGITS_MB (512), decode_tokens × columns × 4 B) +
+  _TOPK_WORKSPACE_BYTES (1 MiB)`. At run-fp4local's defaults (16 seqs × (K 3 + 1) = 64 decode tokens; 262144 ctx /
+  block 64 × 16 = 65536 columns) the second term is 16 MiB, so the reservation is 513 MiB. Before, the scratch was
+  allocated on demand outside the profiled budget. Expect "Available KV cache memory" about 0.5 GiB lower than on
+  a `be03d19` image at the same `--gpu-memory-utilization`; the 0.975 margin should be safer. No launcher sets
+  `VLLM_SPARSE_INDEXER_MAX_LOGITS_MB`. [SOURCE; NOT measured]
+- vllm#61589 (`2fb320d830`): with MTP (`use_eagle()` covers `"mtp"`) and prefix caching on, block hashes now
+  cover the drafter's lookahead token (`VllmConfig.num_hash_lookahead_tokens`), replacing the old "drop the
+  trailing cached block" rule. Opt out with `speculative_config.disable_lookahead_block_hashes`. Expect prefix-cache
+  hits one block longer on multi-turn prompts. [SOURCE; NOT measured]
+- vllm#62318 (`a91a1d06b7`, issue vllm#62308): `packed_modules_mapping["qkv_proj"]` is q/k/v only again, and QSA
+  fuses `indexer.index_qk_proj` into `qkv_proj` only when both resolve to the same quant method. That unblocks
+  primitive-ai (CT FP8 q/k/v, `re:.*indexer.*` ignored), which has refused at model init since vllm#59533
+  (`042ab03`). Both nvidia checkpoints still fuse: they are ModelOpt `MIXED_PRECISION`, with FP4-Local MXFP8 on
+  both sides and NVFP4 unquantized on both. [SOURCE + all three config.json; primitive-ai NOT booted]
+
+## A full `--upgrade` dry-run overstates the runtime resolve: base-stage packages keep their version [REPO][LIVE 2026-10-27]
+
+- The `base` stage installs setuptools, wheel, cmake, ninja, pybind11, `"numpy<2.3"`, pyyaml and typing_extensions
+  (`container/Dockerfile:407-409`). `vllm-openai` is `FROM base`, and its layers run `uv pip install` without
+  `--upgrade`, so those keep their base versions. Packages that layer 1 (torch/flashinfer wheels) or layer 2 (the
+  vLLM wheel) brings in fresh take the newest allowed version when that layer rebuilds. [REPO]
+- At the `40fe396` repin, `uv pip install --dry-run -r cuda.txt --upgrade` in the `…gbe03d19` image showed
+  numpy 2.2.6 → 2.3.5, which the build will not do. The image's numpy is 2.2.6, and of its installed requirers only
+  mistral_common (`<2.4` on py3.12) and numba (`<2.5`) cap it, so the cap comes from the base stage.
+  Before claiming a package moves, check whether `base` installs it. Almost recorded the wrong claim; caught before
+  commit. [LIVE 2026-10-27]
+
+## `libtorch_cuda.so` in the main images carries non-120 SASS that no doc lists as tolerated [LIVE 2026-10-27]
+
+- `./container/archs` on `…gbe03d19`: `torch/lib/libtorch_cuda.so 296M sm_100 x10 sm_120 x446 sm_120a x1
+  sm_121a x1`. torch-build has been reused since `4d9a8d6` (torch 2.14.0 unchanged), so this is the same binary
+  in every main image since then. [LIVE 2026-10-27]
+- RULES.md gate step 5 tolerates only the documented Marlin PTX fallbacks (README § *sm120-only*: "single
+  sm_80/89/90 entries") and the empty `_vllm_fa3_C` stub. `sm_100 x10` is neither. The `be03d19` repin's step 5
+  passed on the `_vllm_fa2_C` check alone without mentioning it. Which torch sources emit sm_100 despite
+  `TORCH_CUDA_ARCH_LIST=12.0` is not investigated. It is an owner call: document it as tolerated, or chase it in
+  torch-build (Plan 05 territory).
+
 ---
 
 ## Open Questions

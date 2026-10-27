@@ -35,14 +35,15 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at be03d19, 2026-10-23;
-#     was fe8f214, 2026-10-18, 4d9a8d6, 2026-10-15, 698e79f, 2026-10-13, df6c7ad, 2026-10-13, 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#   - main snapshot (VLLM_REF=main in ./build, pinned at 40fe396, 2026-10-27;
+#     was be03d19, 2026-10-23, fe8f214, 2026-10-18, 4d9a8d6, 2026-10-15, 698e79f, 2026-10-13, df6c7ad, 2026-10-13, 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
 #     and 1ee4be4, 2026-09-12):
 #     READ THIS BEFORE QUOTING A PIN: the "same torch 2.13.0 / torchvision 0.28.0" below
 #     describes that 1ee4be4..698e79f line, NOT the current one. 4d9a8d6 moved to
-#     torch 2.14.0 / torchvision 0.29.0 and flashinfer 0.7.1, and fe8f214 to
-#     flashinfer 0.7.2 (be03d19 keeps both) -- see the "698e79f -> 4d9a8d6",
-#     "4d9a8d6 -> fe8f214" and "fe8f214 -> be03d19" paragraphs further down; the
+#     torch 2.14.0 / torchvision 0.29.0 and flashinfer 0.7.1, fe8f214 to
+#     flashinfer 0.7.2 (be03d19 keeps both), and 40fe396 to flashinfer
+#     0.7.2.post1 -- see the "698e79f -> 4d9a8d6", "4d9a8d6 -> fe8f214",
+#     "fe8f214 -> be03d19" and "be03d19 -> 40fe396" paragraphs further down; the
 #     last one is the current state.
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
@@ -329,6 +330,40 @@
 #     _patch_humming, removed in the same PR). nvidia-cudnn-frontend's floor goes to
 #     >= 1.31.0 (vllm#61465), which the image already meets. torch, torchaudio,
 #     flashinfer and nvidia-cutlass-dsl 4.8.0 stay put.
+#     be03d19 -> 40fe396 (2026-10-27, 229 commits): torch 2.14.0 / torchaudio
+#     2.11.0 / torchvision 0.29.0 are unchanged, so torch-build and
+#     torchaudio-build are reused. flashinfer-python 0.7.2 -> 0.7.2.post1
+#     (vllm#63466), so flashinfer-build recompiles (~35 min AOT), then vllm-build
+#     and vllm-openai. The 56 flashinfer commits are almost all SM107 (Rubin), MoE
+#     and MNNVL comm. Every AOT module they add or move is gated on
+#     sm100a/sm103a/sm107/sm110, so the sm120 AOT set is unchanged. The GDN
+#     prefill/decode edits only change SM107's launch config. requirements.txt and
+#     flashinfer/experimental/ are unchanged, and pyproject.toml still maps
+#     "b12x" = "flashinfer/experimental/b12x/_compat/b12x" (:77), so the image keeps
+#     shipping b12x. Build-side: DeepGEMM 727f847 -> 0820030 (vllm#63253, Muse Spark
+#     Open fp4 MegaMoE + MX alignment fix) keeps its arch table, 12.0f on CUDA >= 13.0.
+#     QuTLASS stays at e74319e, but vllm#61844 (re-landed as 4e3d49dda2) moves it to
+#     the stable ABI (TORCH_TARGET_VERSION 2.13, pybind off). It also adds a
+#     FATAL_ERROR if qutlass/csrc/include/registration.h is missing; that file is
+#     present at e74319e. It still selects 12.0f / TARGET_CUDA_ARCH 120. setup.py
+#     (vllm#45188) now parses MAX_JOBS only if it is numeric; ours always is (the
+#     buildjobs secret or :=8). The rest is ROCm (Octave KV vllm#59774, an RDNA3
+#     MXFP4 GEMV vllm#60413, hipify source maps vllm#59100). vllm_flash_attn.cmake
+#     is byte-for-byte unchanged (GIT_TAG b273a02, GIT_PROGRESS TRUE once).
+#     Upstream docker/ adds an EFA target and NCCL 2.31.2 for DeepEPv2; neither
+#     applies here.
+#     Runtime resolve (dry-run of the 40fe396 requirements/cuda.txt in the
+#     gbe03d19 image). In place, only flashinfer-python 0.7.2 -> 0.7.2.post1 moves
+#     (ours, built from source). With --upgrade-package on every changed line
+#     (vllm#62835 raises the aiohttp/pillow/mcp floors, all already met, and makes
+#     multidict direct), multidict 7.1.0 -> 7.2.1 is added. A full --upgrade also
+#     shows index drift since the gbe03d19 build: cuda-tile 1.6.0 -> 1.7.0 and
+#     nvidia-cudnn-frontend 1.31.0 -> 1.32.0, both flashinfer deps that the rebuilt
+#     layer 1 resolves fresh, plus eight API/infra packages including starlette,
+#     openai and anthropic. Its numpy 2.2.6 -> 2.3.5 will NOT happen: the base stage
+#     installs "numpy<2.3", and the vllm-openai layers install without --upgrade,
+#     so they keep it. torch, torchaudio, transformers 5.20.2, humming-kernels
+#     0.1.18 and nvidia-cutlass-dsl 4.8.0 stay put.
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,
