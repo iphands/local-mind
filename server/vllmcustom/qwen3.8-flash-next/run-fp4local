@@ -35,8 +35,9 @@
 # the call order with env_extra_args/vllm_extra_args LAST) is identical to ./run.
 #
 # Last verified against main @ 40fe396 (2026-10-27: source re-checked by ./repin.md, NOT yet
-# booted; last booted and benched on the …gfe8f214 image, 2026-10-18 -- the …gbe03d19 image is
-# built, but no boot or bench of it is recorded here). ./repin.md updates this line.
+# booted; last booted and benched on the …gfe8f214 image, 2026-10-18 -- the …gbe03d19 and
+# …g40fe396 images are built, but no boot or bench of either is recorded here). ./repin.md
+# updates this line.
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)

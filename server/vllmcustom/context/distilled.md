@@ -229,11 +229,27 @@ section**, which always stays last. Keep it dense.
   mistral_common (`<2.4` on py3.12) and numba (`<2.5`) cap it, so the cap comes from the base stage.
   Before claiming a package moves, check whether `base` installs it. Almost recorded the wrong claim; caught before
   commit. [LIVE 2026-10-27]
+- The built `…g40fe396` image confirms it (`importlib.metadata` in a throwaway `--rm`, no GPU): numpy 2.2.6, while
+  the packages that rebuilt layers resolve fresh did move: multidict 7.2.1, cuda-tile 1.7.0,
+  nvidia-cudnn-frontend 1.32.0. [LIVE 2026-10-27]
+
+## `./container/archs` on the main images: FA2 is sm_120-native, same table at `be03d19` and `40fe396` [LIVE 2026-10-27]
+
+- `…gbe03d19` (run at the `40fe396` repin) and `…g40fe396` (owner's run after its build) print identical tables.
+  - `_vllm_fa2_C` sm_120 x76, no sm_80: the FA fetch patch applies, and FA2 runs native, not by driver PTX JIT.
+  - `_C_stable_libtorch` has sm_120 x74, plus sm_80 x4 / sm_89 x1 / sm_90 x1 SASS, each arch with its PTX.
+  - `_moe_C_stable_libtorch` has sm_120 x27, plus sm_80 x1 with its PTX.
+  - These match README's "a few Marlin +PTX fallbacks". The README says "single" entries, though, and sm_80 is x4
+    here. They are not attributed to kernels here.
+  - `_flashkda_C` sm_120 x1, `_qutlass_C` sm_120 x6, flashinfer_jit_cache (566 modules) sm_120 x2339 + sm_120a x3.
+  - `libtorch_cuda.so`: see the next section.
+- This answers two Open Questions, removed 2026-10-27: "archs not run on the `df6c7ad`/`187a0eb` images" (those
+  images are superseded and still unmeasured) and "is FA2 still sm_120-native on main" (yes, as of both images).
 
 ## `libtorch_cuda.so` in the main images carries non-120 SASS that no doc lists as tolerated [LIVE 2026-10-27]
 
-- `./container/archs` on `…gbe03d19`: `torch/lib/libtorch_cuda.so 296M sm_100 x10 sm_120 x446 sm_120a x1
-  sm_121a x1`. torch-build has been reused since `4d9a8d6` (torch 2.14.0 unchanged), so this is the same binary
+- `./container/archs` on `…gbe03d19`, and identically on `…g40fe396`: `torch/lib/libtorch_cuda.so 296M sm_100 x10
+  sm_120 x446 sm_120a x1 sm_121a x1`. torch-build has been reused since `4d9a8d6` (torch 2.14.0 unchanged), so this is the same binary
   in every main image since then. [LIVE 2026-10-27]
 - RULES.md gate step 5 tolerates only the documented Marlin PTX fallbacks (README § *sm120-only*: "single
   sm_80/89/90 entries") and the empty `_vllm_fa3_C` stub. `sm_100 x10` is neither. The `be03d19` repin's step 5
@@ -252,9 +268,3 @@ section**, which always stays last. Keep it dense.
   its boot args differ only in `num_speculative_tokens`. So it is not caching and not a flag. Decode rates are
   unaffected, since both benches exclude TTFT. (2026-10-18; `flashnext-conc-20261019-042515/results.jsonl`,
   `flashnext-spec-20261018-205442/summary.md`)
-
-- `./container/archs` has not been run against the current `df6c7ad` snapshot image (nor against
-  `187a0eb`, its predecessor) — the arch
-  table is asserted by the build's own patch script, not re-measured. Confirm before trusting it.
-- Whether the FA2 `_vllm_fa2_C` extension is still sm_120-native on the main snapshot (the README
-  verified the *patch anchors* on 2026-09-22, not the emitted SASS).

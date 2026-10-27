@@ -363,7 +363,11 @@
 #     openai and anthropic. Its numpy 2.2.6 -> 2.3.5 will NOT happen: the base stage
 #     installs "numpy<2.3", and the vllm-openai layers install without --upgrade,
 #     so they keep it. torch, torchaudio, transformers 5.20.2, humming-kernels
-#     0.1.18 and nvidia-cutlass-dsl 4.8.0 stay put.
+#     0.1.18 and nvidia-cutlass-dsl 4.8.0 stay put. The built …g40fe396 image
+#     (2026-10-27) confirms all of it: numpy 2.2.6, multidict 7.2.1, cuda-tile
+#     1.7.0, nvidia-cudnn-frontend 1.32.0. ./container/archs on it prints the same
+#     table as …gbe03d19, with _vllm_fa2_C at sm_120 x76 and no sm_80, so the FA
+#     hook below still lands.
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,

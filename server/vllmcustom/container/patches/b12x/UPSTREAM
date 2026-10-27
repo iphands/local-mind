@@ -79,5 +79,8 @@
 # label value 0.7.2.post1 passes _image_ships_b12x: the ^[0-9]+(\.[0-9]+)+ regex
 # matches, and sort -V puts 0.7.2 first, so b12x_args keeps mounting nothing.
 # vllm/utils/b12x.py and setup.py's extra (still b12x==1.5.1, :1732) are unchanged
-# since be03d19. Not verified: find_spec('b12x') in the 40fe396 image, which is not
-# built yet.
+# since be03d19. Built image checked 2026-10-27 (…g40fe396, throwaway --rm, no GPU,
+# file-level, nothing imported): its label reads 0.7.2.post1, and find_spec('b12x') gives
+# site-packages/b12x/__init__.py. That compat __init__ re-execs itself from
+# flashinfer/experimental/b12x/_api.py with that directory as its search path, and all
+# six _B12X_SUBMODULES exist there. No backend boot.
