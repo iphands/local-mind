@@ -62,6 +62,21 @@ following it, and it interacts with the rest of the stack. The failure modes we 
   "subagent returned empty" symptom. Fixed in `llama-proxy/src/proxy/reprompt.rs`:
   `skip_read_only_requests` skips agents that expose no mutating tools, and follow-up turns are
   now merged into the stopped turn instead of replacing it.
+- **Completion wakes double-fire.** Once every task is `completed`, the plugin's final wake is coded
+  to demand a reply, and a late second completion can merge into it and clear the suppression marker
+  — so the wake lands again *after* `local-mind` has already joined its reviewers and reported. The
+  agent reads the wake's own "call `background_output` for each task ID" instruction as new work and
+  re-posts the whole review. Unlike the two above this has no code fix on our side — the wake text is
+  generated upstream — so the mitigation is prompt-only: `local-mind.md` "Stale completion wake" makes
+  the decision hinge on the Task IDs rather than the instruction, and pins the reply to one sentinel
+  line. Observed on this install: the turn after a duplicate wake makes **no** tool call and spawns
+  **no** child session — it is inert. It is *not* eliminated: the plugin injects the wake as a
+  user-role message, so one turn is the ceiling for any prompt-only fix. Upstream candidates for the
+  double-fire, read from the vendored snapshot and **not reproduced** — `isRedundantParentWake()` in
+  `opencode/vendor/oh-my-opencode/packages/omo-opencode/src/features/background-agent/parent-wake-dedupe.ts`
+  suppresses a wake only when prompt context, reply mode **and** notification coverage all hold, so
+  any one failing lets it through. Do not verify with `bin/count-subagent-calls`: it greps a JSON
+  export format this install abandoned in Feb 2026.
 
 ## Adding a reviewer
 
@@ -82,6 +97,40 @@ that the `task` tool is available to the primary.
 
 **Reviewer returns empty** — see "Enforcement is prompt-based" above. Check the proxy log for
 `Reprompt triggered`; a reviewer request should log `Reprompt skipped` instead.
+
+**Agent re-posts a full review after already reporting** — stale completion wake; see the third
+failure mode above. Verify against the live SQLite store, not `bin/count-subagent-calls` (dead since
+Feb 2026 — it greps a JSON export format this install no longer writes). Needs the `sqlite` CLI, which
+`.dnf-deps` does not list (only `sqlite-devel`), so `dnf install -y sqlite` in the container first.
+
+Find the session id:
+
+```bash
+sqlite3 -readonly ~/.local/share/opencode/opencode.db \
+  "select id, datetime(time_created/1000,'unixepoch','localtime') from session
+   order by time_created desc limit 5;"
+```
+
+Then the post-wake turns:
+
+```bash
+sqlite3 -readonly ~/.local/share/opencode/opencode.db <<'SQL'
+select m.id,
+  (select group_concat(json_extract(q.data,'$.tool'),',') from part q
+     where q.message_id=m.id and json_extract(q.data,'$.type')='tool') as tools,
+  (select coalesce(sum(length(json_extract(q.data,'$.text'))),0) from part q
+     where q.message_id=m.id and json_extract(q.data,'$.type')='text') as chars
+from message m
+where m.session_id='<ses_id>' and json_extract(m.data,'$.role')='assistant'
+order by m.time_created desc limit 8;
+SQL
+```
+
+The turn after the wake must show `tools` empty and `chars` under ~70 — the pinned `STALE-WAKE:` line
+is 57 characters. `tools` containing `task` or `background_output` means it re-ran or re-joined
+reviewers, so it is still firing; `chars` in the thousands means it re-posted the report. If the
+database won't open, query it after the session goes idle — a read-only open of a WAL database still
+needs a readable `-shm`.
 
 **Reviews are slow** — send snippets rather than whole files, and cap the reviewers' tool budget
 (both prompts currently suggest ~5 calls).
