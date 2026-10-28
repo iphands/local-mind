@@ -26,7 +26,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
 - **Plan 01** — NInfer Flash-Next container serving: in progress, 5/12 tasks done; Wave 1 done. **Blocked on the owner**: T6 (`./build`); T7 (BF16 download + `./scripts/convert`) next.
-- **Plan 02** — `./run` profile for Qwen3.8-27B NVFP4: in progress, 1/2 tasks done; next T2 (owner boots `MODEL=27b ./run` — needs Plan 01 T6's image).
+- **Plan 02** — `./run` profile for Qwen3.8-27B NVFP4: in progress, 1/2 tasks done. **Blocked**: T2 (owner boots `MODEL=27b ./run`) needs Plan 01 T6's image.
 
 ## Plans <!-- hp:plans -->
 

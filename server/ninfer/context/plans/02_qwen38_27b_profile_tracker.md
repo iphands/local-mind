@@ -26,7 +26,7 @@
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 1 | T1: `MODEL` profiles, `SPEC`/`LM_HEAD_DRAFT`, manifest-aware identity check | `run`, `RULES.md` gate 6, `README.md` | done | Real artifact: `MODEL=27b` dry-run rc 0 with `--spec mtp --draft-tokens 3 --lm-head-draft`, no host notes; `SPEC=dflash2` → 7; Flash-Next profile refuses it by architecture; default Flash-Next command byte-identical to `c863e39`'s; SHA-256 OK. Gate 1–6 pass (gate 6 +9 cases). **Not booted** (T2). |
-| 2 | T2: Owner boots `MODEL=27b ./run`; record it | Evidence | pending | needs Plan 01 T6's image |
+| 2 | T2: Owner boots `MODEL=27b ./run`; record it | Evidence | blocked | **Needs Plan 01 T6's image** (`./build`). Then owner: `docker stop vllm`, `MODEL=27b LOG_LEVEL=debug ./run`, paste the startup log; then `curl -s localhost:8700/v1/models` and one chat with `"model":"cosmo-6000"`. |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
 the last three always carry a reason in the row's Notes cell.
