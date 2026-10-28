@@ -2,8 +2,8 @@
 
 ## Overview
 
-- Status: 0% complete (0/2 tasks)
-- Start date: — (set when T1 starts)
+- Status: 50% complete (1/2 tasks)
+- Start date: 2026-10-27
 - Plan: `context/plans/02_qwen38_27b_profile.md`
 - Evidence: dry-run output and the artifact's `sha256sum` (T1); the owner's pasted boot log and
   curl output (T2). Test environment per row: image tag + `ai.ninfer.ref`, the artifact path, the
@@ -25,7 +25,7 @@
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
-| 1 | T1: `MODEL` profiles, `SPEC`/`LM_HEAD_DRAFT`, manifest-aware identity check | `run`, `RULES.md` gate 6, `README.md` | pending | |
+| 1 | T1: `MODEL` profiles, `SPEC`/`LM_HEAD_DRAFT`, manifest-aware identity check | `run`, `RULES.md` gate 6, `README.md` | done | Real artifact: `MODEL=27b` dry-run rc 0 with `--spec mtp --draft-tokens 3 --lm-head-draft`, no host notes; `SPEC=dflash2` → 7; Flash-Next profile refuses it by architecture; default Flash-Next command byte-identical to `c863e39`'s; SHA-256 OK. Gate 1–6 pass (gate 6 +9 cases). **Not booted** (T2). |
 | 2 | T2: Owner boots `MODEL=27b ./run`; record it | Evidence | pending | needs Plan 01 T6's image |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
@@ -37,12 +37,24 @@ the last three always carry a reason in the row's Notes cell.
 
 | Date | What ran (command / build / input) | Result | Runs | Spread / notes |
 |------|------------------------------------|--------|------|----------------|
+| 2026-10-27 | T1: `sha256sum -c SHA256SUMS` in `models/vllm/neroued/Qwen3.8-27B-nvfp4-NInfer/` (NFS) | `qwen3_8_27b_nvfp4.ninfer: OK` (`74d2c571…`) | 1 | 16.8 s wall for 23.7 GB |
+| 2026-10-27 | T1: `DRY_RUN=1 ./run <fake Flash-Next entry>` (stub docker) before (`c863e39`) and after | `diff` of the two launch lines: identical | 1 | proves the default profile did not move |
+| 2026-10-27 | T1: `DRY_RUN=1 MODEL=27b ./run` on the real download (stub docker) | `== artifact ok … (1 files; artifact-manifest.json: Qwen3_5ForCausalLM, text,vision,mtp,dflash2)`; launch line ends `--spec mtp --draft-tokens 3 --lm-head-draft --vision --preserve-thinking --request-log-jsonl /storage/requests.jsonl` | 1 | |
 
 ## Notes / Deviations
 
 - 2026-10-27 (planning): requested by the owner mid-Plan 01 ("wire the ./run script up to use
   these"), while downloading `neroued/Qwen3.8-27B-nvfp4-NInfer`. A launcher change needs a plan
   (RULES § When Does a Change Need a Plan?), hence this one.
+- 2026-10-27 (T1): the identity check replaced the `.conversion.json`-only part check: it reads our
+  converter's report (files by basename, `components.text.config.architectures`, component names)
+  or the publisher's `artifact-manifest.json` (exact bytes, container v3, architecture,
+  components). An unknown architecture or component list is a printed note, not a refusal. The
+  default Flash-Next profile kept its exact launch line (Evidence); gate 6's Flash-Next fixture
+  gained a `components` block so it exercises the new architecture/component checks too.
+- 2026-10-27 (T1): the 27B keeps Flash-Next's context/capacity/concurrency defaults (262144 /
+  `auto` / 4) rather than upstream's 5090 profile (240000 / 240000 / 2): the 96 GB card has the room,
+  and nothing is measured yet — a Follow-up, not a claim.
 
 ## Follow-ups
 

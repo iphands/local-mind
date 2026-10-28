@@ -26,6 +26,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
 - **Plan 01** — NInfer Flash-Next container serving: in progress, 5/12 tasks done; Wave 1 done. **Blocked on the owner**: T6 (`./build`); T7 (BF16 download + `./scripts/convert`) next.
+- **Plan 02** — `./run` profile for Qwen3.8-27B NVFP4: in progress, 1/2 tasks done; next T2 (owner boots `MODEL=27b ./run` — needs Plan 01 T6's image).
 
 ## Plans <!-- hp:plans -->
 
@@ -34,7 +35,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
 | 01 | NInfer Flash-Next: pinned sm_120a image, containerized conversion, `./run`, measured | — | in-progress | Wave 1 scripts (agent); then owner builds, downloads BF16 base, converts, boots; A/B vs vLLM FP4-Local picks the defaults. |
-| 02 | `./run` profile for Qwen3.8-27B NVFP4 (neroued's published artifact) | 01 T5 (boot: 01 T6) | pending | `MODEL=27b` profile + manifest-aware identity check; owner boots once Plan 01's image exists. |
+| 02 | `./run` profile for Qwen3.8-27B NVFP4 (neroued's published artifact) | 01 T5 (boot: 01 T6) | in-progress | `MODEL=27b` profile + manifest-aware identity check; owner boots once Plan 01's image exists. |
 
 <!-- Add these sections when they earn their place:
 

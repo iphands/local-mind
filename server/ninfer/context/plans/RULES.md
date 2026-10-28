@@ -278,10 +278,13 @@ rm -rf "$g5"
 one part, a `.conversion.json` naming both by container path) in `mktemp -d /tmp/ninfer-gate6.*`,
 with a stub `docker` on `PATH` (answers `version`, `images` with one tagged image unless
 `STUB_NOIMG`, and `ps` from `STUB_PS`). Pass: the last line is `launcher dry-run ok` — the default
-command carries every wanted flag; `DRAFT_TOKENS=0` drops `--spec`; `EXTRA_ARGS` lands last;
-both sudo arms, a running `vllm`, a missing part, no image, and an out-of-range knob each exit 1.
-The `--draft-tokens` the default command must carry follows `run`'s `DRAFT_TOKENS` default. The
-tree is removed.
+(Flash-Next) command carries every wanted flag; `DRAFT_TOKENS=0` drops `--spec`; `EXTRA_ARGS`
+lands last; both sudo arms, a running `vllm`, a missing part, no image, and an out-of-range knob
+each exit 1. Plan 02 T1 added the `MODEL=27b` profile against a fake published
+`artifact-manifest.json` (no report): MTP with `--lm-head-draft`, `SPEC=dflash2` → 7 drafts, no
+Flash-Next host notes, and refusals for the wrong profile, a missing component, a size mismatch
+and an unknown `MODEL`. The `--draft-tokens` the default command must carry follows `run`'s
+defaults. The tree is removed.
 
 ```bash
 g6=$(mktemp -d /tmp/ninfer-gate6.XXXXXX); mkdir -p "$g6/stub" "$g6/model"
@@ -290,8 +293,10 @@ printf '%s\n' '#!/bin/bash' 'case $1 in version|image) exit 0 ;;' \
   '  ps) [[ -n ${STUB_PS:-} ]] && echo "$STUB_PS"; exit 0 ;; esac' \
   'echo "stub docker: unexpected: $*" >&2; exit 99' >"$g6/stub/docker"; chmod +x "$g6/stub/docker"
 : >"$g6/model/x.ninfer"; : >"$g6/model/x.ninfer.part-0001"
-printf '{"files": [{"path": "/out/x.ninfer"}, {"path": "/out/x.ninfer.part-0001"}]}\n' >"$g6/model/x.ninfer.conversion.json"
-g6run() { env PATH="$g6/stub:$PATH" DRY_RUN=1 "$@" ./run "$g6/model/x.ninfer" 2>&1; }
+printf '%s\n' '{"components": {"text": {"config": {"architectures": ["Qwen4ExpForCausalLM"]}}, "vision": {}, "mtp": {}},' \
+  ' "files": [{"path": "/out/x.ninfer"}, {"path": "/out/x.ninfer.part-0001"}]}' >"$g6/model/x.ninfer.conversion.json"
+g6art=$g6/model/x.ninfer
+g6run() { env PATH="$g6/stub:$PATH" DRY_RUN=1 "$@" ./run "$g6art" 2>&1; }
 g6ok=1
 g6check() {  # g6check <label> <ERE> <output> — the ERE must match
   if grep -qE -- "$2" <<<"$3"; then echo "PASS($1)"; else echo "FAIL($1)"; g6ok=0; fi
@@ -320,6 +325,26 @@ g6ref 'sudo path' "DOCKER names 'sudo'" DOCKER=/usr/bin/sudo
 g6ref 'vllm running' 'busy: running container(s) vllm' STUB_PS=vllm
 g6ref 'no image' 'run ./build first' STUB_NOIMG=1
 g6ref 'bad knob' 'DRAFT_TOKENS must be' DRAFT_TOKENS=6
+g6ref 'flash-next dflash2' 'is not available for MODEL=flash-next' SPEC=dflash2
+g6ref 'bad MODEL' 'MODEL must be flash-next or 27b' MODEL=bogus
+# Plan 02 T1 — the 27B profile against a published manifest (an empty entry; bytes 0 match it)
+mkdir "$g6/m27"; : >"$g6/m27/y.ninfer"; g6art=$g6/m27/y.ninfer
+g6man() { printf '{"artifact": {"filename": "y.ninfer", "bytes": %s, "container_version": 3, %s}}\n' "$1" \
+            "\"architecture\": \"Qwen3_5ForCausalLM\", \"components\": [$2]" >"$g6/m27/artifact-manifest.json"; }
+g6man 0 '"text", "vision", "mtp", "dflash2"'
+g6out=$(g6run MODEL=27b); g6rc=$?
+[[ $g6rc == 0 ]] || { echo "FAIL(27b rc $g6rc)"; g6ok=0; }
+g6check '27b: mtp 3 + lm-head' '--spec mtp --draft-tokens 3 --lm-head-draft --vision' "$g6out"
+g6check '27b: its artifact' '-v [^ ]*/m27:/models:ro .* /models/y\.ninfer --host' "$g6out"
+if [[ $g6out == *'63.3 GiB'* || $g6out == *'PLE rows'* ]]; then echo 'FAIL(27b got Flash-Next host notes)'; g6ok=0
+else echo 'PASS(27b: no Flash-Next host notes)'; fi   # bites when MemAvailable < 80 GiB
+g6check '27b: dflash2 7' '--spec dflash2 --draft-tokens 7 --lm-head-draft' "$(g6run MODEL=27b SPEC=dflash2)"
+g6ref 'flash-next profile on a 27B entry' 'is the wrong profile. Use MODEL=27b'
+g6man 0 '"text", "mtp"'
+g6ref '27b without vision' 'has no vision component' MODEL=27b
+g6man 5 '"text", "vision", "mtp", "dflash2"'
+g6ref '27b size mismatch' 'an incomplete or different download' MODEL=27b
+g6art=$g6/model/x.ninfer
 rm "$g6/model/x.ninfer.part-0001"
 g6ref 'missing part' 'is missing 1 of 2 files'
 rm -rf "$g6"

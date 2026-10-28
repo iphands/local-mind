@@ -1,6 +1,6 @@
 # Plan 02 — `./run` profile for Qwen3.8-27B NVFP4 (neroued's published artifact)
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-10-27
 > **Depends on**: Plan 01 T5 (`run` exists); the boot (T2) also needs Plan 01 T6's image
 > **Goal**: `MODEL=27b ./run` serves neroued's published `qwen3_8_27b_nvfp4.ninfer` on `:8700` as `cosmo-6000`, with flags right for a resident dense model, while `./run` with no `MODEL` keeps Plan 01's Flash-Next behavior byte for byte.
@@ -165,7 +165,7 @@ mode), then `curl -s localhost:8700/v1/models` and one chat request with `"model
 
 ## Verification Checklist
 
-- [ ] T1: `MODEL=27b` dry-run emits `--lm-head-draft` and `--spec mtp --draft-tokens 3`, no Flash-Next host notes; `SPEC=dflash2` → `--draft-tokens 7`; Flash-Next profile refuses the 27B artifact by architecture; the default command is unchanged; the file's SHA-256 matches `SHA256SUMS`; gate 1–6 pass
+- [x] T1: `MODEL=27b` dry-run emits `--lm-head-draft` and `--spec mtp --draft-tokens 3`, no Flash-Next host notes; `SPEC=dflash2` → `--draft-tokens 7`; Flash-Next profile refuses the 27B artifact by architecture; the default command is unchanged; the file's SHA-256 matches `SHA256SUMS`; gate 1–6 pass
 - [ ] T2: owner boot answers `/v1/models` (`cosmo-6000`, 262144) and a chat with reasoning + content
 - [ ] All: the project gate (Rule A) passes on the final commit, every applicable step `pass`
 - [ ] All: the runtime tier ran (owner), **or** the tracker says the behavior went unverified at runtime

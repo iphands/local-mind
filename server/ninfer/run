@@ -1,17 +1,30 @@
 #!/usr/bin/env bash
-# Serve Qwen3.8-Flash-Next through NInfer on :8700: ./run [artifact entry]
+# Serve a NInfer artifact on :8700: ./run [artifact entry]
 #
-#   DRY_RUN=1 ./run   every preflight, then print the docker command; writes nothing
+#   ./run                 Qwen3.8-Flash-Next (MODEL=flash-next, the default)
+#   MODEL=27b ./run       Qwen3.8-27B NVFP4, neroued's published artifact (Plan 02)
+#   DRY_RUN=1 ./run       every preflight, then print the docker command; writes nothing
+#
+# MODEL picks the defaults marked [profile]; every knob below still overrides them.
+#                    flash-next                                   27b
+#   ARTIFACT / $1    models/ninfer/qwen3.8-flash-next/            models/vllm/neroued/Qwen3.8-27B-nvfp4-NInfer/
+#                      qwen3_8_flash_next.ninfer                    qwen3_8_27b_nvfp4.ninfer
+#   SPEC             mtp (only mtp)                               mtp | dflash2
+#   DRAFT_TOKENS     3 (MTP 1..5)                                 3; 7 with SPEC=dflash2 (1..15)
+#   LM_HEAD_DRAFT    0 (unsupported)                              1 (the optimized proposal head)
+#   host notes       ~63 GiB expert-RAM warning, NFS PLE note     none (resident, dense)
 #
 # Knobs (env)        default                      ninfer-serve flag
-#   ARTIFACT / $1    models/ninfer/qwen3.8-flash-next/qwen3_8_flash_next.ninfer  (dir mounted :ro at /models)
+#   ARTIFACT / $1    [profile]                    positional (its directory mounted :ro at /models)
 #   PORT             8700                         -p 0.0.0.0:$PORT:8080
 #   MODEL_ID         cosmo-6000                   --model-id   (llama-proxy's name for :8700)
 #   MAX_CONTEXT      262144                       --max-context
 #   KV_CAPACITY      auto                         --kv-capacity
 #   MAX_CONCURRENCY  4                            --max-concurrency   (1..8)
 #   KV_DTYPE         fp8                          --kv-dtype
-#   DRAFT_TOKENS     3   (0 = no speculation)     --spec mtp --draft-tokens   (1..5)
+#   SPEC             [profile]  mtp|dflash2|off   --spec
+#   DRAFT_TOKENS     [profile]  (0 = off, too)    --draft-tokens
+#   LM_HEAD_DRAFT    [profile]  0|1               --lm-head-draft   (only with a SPEC)
 #   PREFILL_CHUNK    empty = NInfer's default     --prefill-chunk   (multiple of 128)
 #   VISION           1                            --vision
 #   PRESERVE_THINKING 1                           --preserve-thinking   (vLLM's chat-template kwargs)
@@ -22,8 +35,8 @@
 #   EXTRA_ARGS       empty                        appended LAST to the serve flags (last wins)
 #   ENV_EXTRA        empty                        KEY=VAL ... appended LAST as -e (last wins)
 #
-# These are Plan 01's starting defaults, not measured winners: the measured ones are set by
-# Plan 01 T10-T12, with the Evidence row behind each in README.md.
+# These are starting defaults, not measured winners: Flash-Next's are set by Plan 01 T10-T12, with
+# the Evidence row behind each in README.md; the 27B's are unmeasured (a Plan 02 Follow-up).
 set -euo pipefail
 
 HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -31,14 +44,38 @@ HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 source "$HERE/lib/common.sh"
 load_pins
 
-ARTIFACT=${1:-${ARTIFACT:-$HERE/models/ninfer/qwen3.8-flash-next/qwen3_8_flash_next.ninfer}}
+# ------------------------------------------------------------- the profile
+
+MODEL=${MODEL:-flash-next}
+case $MODEL in
+  flash-next)
+    def_artifact=$HERE/models/ninfer/qwen3.8-flash-next/qwen3_8_flash_next.ninfer
+    want_arch=Qwen4Exp            # prefix: the report says Qwen4ExpForCausalLM
+    specs=mtp                     # native MTP with the full shared head only (docs/cli.md)
+    def_lm_head=0
+    host_backed=1                 # main experts in registered host RAM, PLE read from disk
+    ;;
+  27b)
+    def_artifact=$HERE/models/vllm/neroued/Qwen3.8-27B-nvfp4-NInfer/qwen3_8_27b_nvfp4.ninfer
+    want_arch=Qwen3_5ForCausalLM
+    specs='mtp dflash2'
+    def_lm_head=1                 # upstream's published MTP profile uses it (model card)
+    host_backed=0                 # dense and resident: all weights on the GPU
+    ;;
+  *) die "MODEL must be flash-next or 27b, got '$MODEL'." ;;
+esac
+
+ARTIFACT=${1:-${ARTIFACT:-$def_artifact}}
 PORT=${PORT:-8700}
 MODEL_ID=${MODEL_ID:-cosmo-6000}
 MAX_CONTEXT=${MAX_CONTEXT:-262144}
 KV_CAPACITY=${KV_CAPACITY:-auto}
 MAX_CONCURRENCY=${MAX_CONCURRENCY:-4}
 KV_DTYPE=${KV_DTYPE:-fp8}
-DRAFT_TOKENS=${DRAFT_TOKENS:-3}
+SPEC=${SPEC:-mtp}
+case $SPEC in mtp) def_draft=3 ;; dflash2) def_draft=7 ;; *) def_draft=0 ;; esac
+DRAFT_TOKENS=${DRAFT_TOKENS:-$def_draft}
+LM_HEAD_DRAFT=${LM_HEAD_DRAFT:-$def_lm_head}
 PREFILL_CHUNK=${PREFILL_CHUNK:-}
 VISION=${VISION:-1}
 PRESERVE_THINKING=${PRESERVE_THINKING:-1}
@@ -65,7 +102,18 @@ uint DRAFT_TOKENS "$DRAFT_TOKENS"
 uint STATS_MS "$STATS_MS"
 [[ $KV_CAPACITY == auto ]] || uint KV_CAPACITY "$KV_CAPACITY"
 (( MAX_CONCURRENCY >= 1 && MAX_CONCURRENCY <= 8 )) || die "MAX_CONCURRENCY must be 1..8, got $MAX_CONCURRENCY."
-(( DRAFT_TOKENS <= 5 )) || die "DRAFT_TOKENS must be 0 (off) or 1..5 for Flash-Next MTP, got $DRAFT_TOKENS."
+case $SPEC in
+  off) ;;
+  mtp|dflash2) [[ " $specs " == *" $SPEC "* ]] || die "SPEC=$SPEC is not available for MODEL=$MODEL (it takes: $specs, off)." ;;
+  *) die "SPEC must be mtp|dflash2|off, got '$SPEC'." ;;
+esac
+if (( DRAFT_TOKENS == 0 )); then
+  SPEC=off                      # DRAFT_TOKENS=0 has meant "no speculation" since Plan 01
+fi
+case $SPEC in
+  mtp)     (( DRAFT_TOKENS <= 5 ))  || die "DRAFT_TOKENS must be 0 (off) or 1..5 for MTP, got $DRAFT_TOKENS." ;;
+  dflash2) (( DRAFT_TOKENS <= 15 )) || die "DRAFT_TOKENS must be 0 (off) or 1..15 for DFlash2, got $DRAFT_TOKENS." ;;
+esac
 if [[ -n $PREFILL_CHUNK ]]; then
   uint PREFILL_CHUNK "$PREFILL_CHUNK"
   (( PREFILL_CHUNK > 0 && PREFILL_CHUNK % 128 == 0 )) || die "PREFILL_CHUNK must be a positive multiple of 128."
@@ -73,9 +121,12 @@ fi
 case $KV_DTYPE in bf16|int8|fp8|nvfp4|k8v4) ;; *) die "KV_DTYPE must be bf16|int8|fp8|nvfp4|k8v4, got '$KV_DTYPE'." ;; esac
 case $LOG_LEVEL in trace|debug|info|warning|error|critical|off) ;; *) die "LOG_LEVEL '$LOG_LEVEL' is not one ninfer-serve takes." ;; esac
 case $CUDA_SYNC in spin|blocking|yield|auto) ;; *) die "CUDA_SYNC must be spin|blocking|yield|auto, got '$CUDA_SYNC'." ;; esac
-for v in VISION PRESERVE_THINKING REQUEST_LOG; do
+for v in VISION PRESERVE_THINKING REQUEST_LOG LM_HEAD_DRAFT; do
   [[ ${!v} == [01] ]] || die "$v must be 0 or 1, got '${!v}'."
 done
+if (( LM_HEAD_DRAFT && ! def_lm_head )); then
+  die "LM_HEAD_DRAFT=1 is not available for MODEL=$MODEL (Flash-Next drafts with its full shared head)."
+fi
 read -r -a extra_args <<<"$EXTRA_ARGS"
 read -r -a env_extra <<<"$ENV_EXTRA"
 for kv in "${env_extra[@]}"; do
@@ -93,31 +144,98 @@ TAG=$(image_for_pin)
 [[ -f $ARTIFACT ]] || die "no artifact at $ARTIFACT — ./scripts/convert writes it."
 art_dir=$(realpath -e -- "$(dirname -- "$ARTIFACT")")
 entry=$(basename -- "$ARTIFACT")
-report=$art_dir/$entry.conversion.json
-[[ -f $report ]] || die "no $entry.conversion.json beside the artifact; cannot check its parts."
-# The report's paths are the converter's container paths (/out/…): match by basename.
-mapfile -t parts < <(python3 -I -c '
-import json, os, sys
-for f in json.load(open(sys.argv[1]))["files"]:
-    print(os.path.basename(f["path"]))' "$report")
-(( ${#parts[@]} > 0 )) || die "$report lists no files (or is unreadable)."
-missing=()
-for p in "${parts[@]}"; do
-  [[ -f $art_dir/$p ]] || missing+=("$p")
-done
-(( ${#missing[@]} == 0 )) || die "$entry is missing ${#missing[@]} of ${#parts[@]} files: ${missing[*]:0:4}" \
-                                 "  keep the entry, its .part-NNNN files and its report together."
-echo "== artifact ok: $art_dir/$entry (${#parts[@]} files)"
 
-fstype=$(stat -f -c %T -- "$art_dir")
-if [[ $fstype == nfs* ]]; then
-  echo "## note: the artifact is on $fstype — NInfer reads PLE rows O_DIRECT from it on every decode" >&2
-  echo "##   step (Plan 01 T11 measures NFS against a local NVMe copy)." >&2
+# What the artifact says it is: our converter's <entry>.conversion.json (Plan 01), else the
+# publisher's artifact-manifest.json naming this entry (neroued's downloads ship no report).
+# Report paths are the converter's container paths (/out/…), so files match by basename.
+mapfile -t ident < <(python3 -I - "$art_dir" "$entry" <<'PY'
+import json, os, sys
+d, entry = sys.argv[1], sys.argv[2]
+report, manifest = os.path.join(d, entry + ".conversion.json"), os.path.join(d, "artifact-manifest.json")
+try:
+    if os.path.isfile(report):
+        r = json.load(open(report))
+        comps = r.get("components")
+        text = (comps or {}).get("text") or {}
+        archs = (text.get("config") or {}).get("architectures") or [""]
+        print("source " + os.path.basename(report))
+        print("arch " + archs[0])
+        print("components " + (",".join(sorted(comps)) if comps else "-"))
+        for f in r.get("files") or []:
+            print("file %s -" % os.path.basename(f["path"]))
+    elif os.path.isfile(manifest):
+        a = json.load(open(manifest)).get("artifact") or {}
+        if a.get("filename") != entry:
+            print("error artifact-manifest.json describes %s, not %s." % (a.get("filename"), entry))
+            sys.exit()
+        if a.get("container_version") != 3:
+            print("error %s is container v%s; the pinned engine reads v3 only." % (entry, a.get("container_version")))
+            sys.exit()
+        print("source artifact-manifest.json")
+        print("arch " + (a.get("architecture") or ""))
+        print("components " + (",".join(a.get("components") or []) or "-"))
+        print("file %s %s" % (entry, a.get("bytes", "-")))
+    else:
+        print("error no %s.conversion.json or artifact-manifest.json beside the artifact; cannot check it." % entry)
+except (OSError, ValueError, KeyError, TypeError) as e:
+    print("error cannot read the artifact's identity: %s" % e)
+PY
+)
+src='' arch='' components='-'
+files=() sizes=()
+for line in "${ident[@]}"; do
+  case $line in
+    error\ *)      die "${line#error }" ;;
+    source\ *)     src=${line#source } ;;
+    arch\ *)       arch=${line#arch } ;;
+    components\ *) components=${line#components } ;;
+    file\ *)       line=${line#file }; files+=("${line% *}"); sizes+=("${line##* }") ;;
+  esac
+done
+[[ -n $src ]] || die "cannot read the artifact's identity (no output from the check)."
+(( ${#files[@]} > 0 )) || die "$src lists no files."
+
+missing=()
+for i in "${!files[@]}"; do
+  f=$art_dir/${files[i]}
+  if [[ ! -f $f ]]; then
+    missing+=("${files[i]}")
+  elif [[ ${sizes[i]} != - && $(stat -c %s -- "$f") != "${sizes[i]}" ]]; then
+    die "${files[i]} is $(stat -c %s -- "$f") bytes; $src says ${sizes[i]} — an incomplete or different download."
+  fi
+done
+(( ${#missing[@]} == 0 )) || die "$entry is missing ${#missing[@]} of ${#files[@]} files: ${missing[*]:0:4}" \
+                                 "  keep the entry, its .part-NNNN files and its report together."
+
+if [[ -z $arch ]]; then
+  echo "## note: $src names no architecture; MODEL=$MODEL is unchecked." >&2
+elif [[ $arch != "$want_arch"* ]]; then
+  case $arch in Qwen4Exp*) hint=flash-next ;; Qwen3_5ForCausalLM*) hint=27b ;; *) hint='' ;; esac
+  die "$entry is $arch, not $want_arch* — MODEL=$MODEL is the wrong profile.${hint:+ Use MODEL=$hint.}"
 fi
-avail_kib=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
-if (( avail_kib < 80 * 1024 * 1024 )); then
-  echo "## warning: MemAvailable is $(( avail_kib / 1048576 )) GiB; NInfer registers ~63.3 GiB of expert" >&2
-  echo "##   backing in host RAM at boot, on top of the runtime and the system." >&2
+if [[ $components == - ]]; then
+  echo "## note: $src lists no components; the VISION/SPEC components are unchecked." >&2
+else
+  if (( VISION )) && [[ ,$components, != *,vision,* ]]; then
+    die "$entry has no vision component ($components); set VISION=0."
+  fi
+  if [[ $SPEC != off && ,$components, != *,"$SPEC",* ]]; then
+    die "$entry has no $SPEC component ($components); choose another SPEC, or SPEC=off."
+  fi
+fi
+echo "== artifact ok: $art_dir/$entry (${#files[@]} files; $src: ${arch:-?}, $components)"
+
+if (( host_backed )); then
+  fstype=$(stat -f -c %T -- "$art_dir")
+  if [[ $fstype == nfs* ]]; then
+    echo "## note: the artifact is on $fstype — NInfer reads PLE rows O_DIRECT from it on every decode" >&2
+    echo "##   step (Plan 01 T11 measures NFS against a local NVMe copy)." >&2
+  fi
+  avail_kib=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+  if (( avail_kib < 80 * 1024 * 1024 )); then
+    echo "## warning: MemAvailable is $(( avail_kib / 1048576 )) GiB; NInfer registers ~63.3 GiB of expert" >&2
+    echo "##   backing in host RAM at boot, on top of the runtime and the system." >&2
+  fi
 fi
 
 # One server at a time: vLLM and NInfer both need the GPU and the port.
@@ -147,8 +265,11 @@ CMD+=("$TAG" "/models/$entry" --host 0.0.0.0 --port 8080
       --model-id "$MODEL_ID" --max-context "$MAX_CONTEXT" --kv-capacity "$KV_CAPACITY"
       --max-concurrency "$MAX_CONCURRENCY" --kv-dtype "$KV_DTYPE"
       --log-level "$LOG_LEVEL" --log-stats-interval-ms "$STATS_MS")
-if (( DRAFT_TOKENS > 0 )); then
-  CMD+=(--spec mtp --draft-tokens "$DRAFT_TOKENS")
+if [[ $SPEC != off ]]; then
+  CMD+=(--spec "$SPEC" --draft-tokens "$DRAFT_TOKENS")
+  if (( LM_HEAD_DRAFT )); then
+    CMD+=(--lm-head-draft)
+  fi
 fi
 if [[ -n $PREFILL_CHUNK ]]; then
   CMD+=(--prefill-chunk "$PREFILL_CHUNK")

@@ -91,6 +91,22 @@ section**, which always stays last. Keep it dense.
 - liburing sits exactly at the 2.5 floor: an upstream bump to `liburing>=2.6` cannot build on
   24.04 without a PPA or a source build.
 
+## Qwen3.8-27B NVFP4: neroued's published v3 artifact runs on our pin, no conversion [DOC][LIVE 2026-10-27]
+
+- `neroued/Qwen3.8-27B-nvfp4-NInfer` @ HF `a107ba1b`: one file `qwen3_8_27b_nvfp4.ninfer`,
+  23,719,715,844 B, SHA-256 `74d2c571…` (`sha256sum -c SHA256SUMS` → OK, 16.8 s over NFS,
+  2026-10-27); `artifact-manifest.json` (schema 2): container v3, `Qwen3_5ForCausalLM`, components
+  text/vision/mtp/dflash2, runtime `minimum_revision` `98dada0e` — an ancestor of our pin
+  (`git merge-base --is-ancestor`). The manifest is identical to the pinned tree's
+  `model-cards/Qwen3.8-27B-nvfp4-NInfer/` copy. No `.conversion.json` ships.
+- Upstream's serve profile (pinned card, `c772812b`, RTX 5090): `--max-context 240000
+  --kv-capacity 240000 --max-concurrency 2 --kv-dtype fp8 --device-state-slots 2 --spec mtp
+  --draft-tokens 3 --lm-head-draft --preserve-thinking`. DFlash2: 1..15 drafts, 7 recommended.
+- The **HF** README is newer than the pin and adds `--host-state-slots`/`--host-kv-mib`, which
+  `src/serve/serve_options.cpp` @ `64d10fbf` does not have (`grep -c` → 0). Use the pinned card.
+- Dense and resident: `--kv-capacity auto` maximizes KV on the device (`docs/cli.md`); no expert
+  host backing, no PLE. Boot on this card: unconfirmed (Plan 02 T2).
+
 ## `ninfer-serve` defaults and the request contract [DOC]
 
 - Defaults (`docs/serving.md` § Server options @ `64d10fbf`): `--host 127.0.0.1 --port 8080

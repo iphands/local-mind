@@ -59,6 +59,28 @@ finish from.
      These are starting defaults, **not measured winners** — Plan 01 T9–T12 settle them.
    - `DRY_RUN=1 ./run` prints the exact `docker run` without starting anything.
 
+## Other models: Qwen3.8-27B NVFP4
+
+`MODEL=27b ./run` serves neroued's published, ready-made artifact — no conversion:
+
+```bash
+# once (22.1 GiB): hf from the converter image, as in step 2, or any hf client
+hf download neroued/Qwen3.8-27B-nvfp4-NInfer --local-dir models/vllm/neroued/Qwen3.8-27B-nvfp4-NInfer
+MODEL=27b ./run
+```
+
+- Same `:8700`, same `cosmo-6000` name, same image, seccomp profile and knobs. The profile changes
+  the defaults: MTP 3 **with** `--lm-head-draft` (the optimized proposal head), and no Flash-Next
+  host notes — the 27B is dense and fully resident on the GPU.
+- `SPEC=dflash2` uses the artifact's DFlash2 companion (7 draft tokens by default, 1..15);
+  `SPEC=off` or `DRAFT_TOKENS=0` turns speculation off.
+- Before starting, `./run` checks the entry against the publisher's `artifact-manifest.json`:
+  exact size, container v3, architecture `Qwen3_5ForCausalLM` (so `MODEL=flash-next` refuses it),
+  and that the vision / speculation components you asked for are in it.
+- Upstream's model card serves it on a 32 GB RTX 5090 with `--max-context 240000 --kv-capacity
+  240000 --max-concurrency 2`; here the Flash-Next defaults stay (`262144`, `auto`, `4`) — the 96 GB
+  card has the room. Unmeasured (Plan 02 Follow-up).
+
 ## Layout
 
 | Path | What |
