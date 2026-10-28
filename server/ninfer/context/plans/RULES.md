@@ -131,8 +131,8 @@ where an applicable step was skipped.
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and the launchers have no extension. Pass: no `FAIL` line, the
 counts below match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env`
-exists). **Expected counts: `3 b`, `1 j`** (Plan 01 T1: `lib/common.sh`; T2:
-`scripts/seccomp-profile`, `seccomp/ninfer.json`; T3: `build`). Bump the expected
+exists). **Expected counts: `4 b`, `1 j`** (Plan 01 T1: `lib/common.sh`; T2:
+`scripts/seccomp-profile`, `seccomp/ninfer.json`; T3: `build`; T4: `scripts/convert`). Bump the expected
 numbers in this paragraph when a file is added or removed on purpose — a count that silently drops
 is the failure this step exists for.
 
@@ -215,13 +215,71 @@ grep -E '^== (vendor/ninfer at|base resolves)|^Check complete|^##' <<<"$g4"
   && echo 'build preflight ok' || echo 'FAIL(build preflight)'
 ```
 
-**5–7. Behavioral steps — added by the Plan 01 task that creates what they check** (Rule A.5).
+**5. convert dry-run** (Plan 01 T4). `DRY_RUN=1 ./scripts/convert` against fake checkpoints —
+crafted safetensors headers (no tensor data) and a 294,912-key NVIDIA index — in a
+`mktemp -d /tmp/ninfer-gate5.*` tree, with a stub `docker` on `PATH` (answers `version`,
+`image inspect`, and `ps` from `STUB_PS`). Needs `vendor/ninfer` clean at the pin (step 4). Pass: the
+last line is `convert dry-run ok` — the happy path exits 0, prints a command with every wanted flag
+and creates no directory; each of the six refusals exits 1 with its message. The tree is removed.
+
+```bash
+g5=$(mktemp -d /tmp/ninfer-gate5.XXXXXX); mkdir -p "$g5/stub" "$g5/base" "$g5/bad" "$g5/nvidia"
+printf '%s\n' '#!/bin/bash' 'case $1 in version|image) exit 0 ;; ps) [[ -n ${STUB_PS:-} ]] && echo "$STUB_PS"; exit 0 ;; esac' \
+  'echo "stub docker: unexpected: $*" >&2; exit 99' >"$g5/stub/docker"; chmod +x "$g5/stub/docker"
+python3 -I - "$g5" <<'PY'
+import json, struct, sys
+g = sys.argv[1]
+GU = "model.language_model.layers.0.mlp.experts.gate_up_proj"
+PLE = "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight"
+def tree(d, t):  # config + index + one header-only shard
+    h = json.dumps({k: {"dtype": a, "shape": s, "data_offsets": [0, 0]} for k, (a, s) in t.items()}).encode()
+    open(f"{d}/m.safetensors", "wb").write(struct.pack("<Q", len(h)) + h)
+    json.dump({"architectures": ["Qwen4ExpForConditionalGeneration"]}, open(f"{d}/config.json", "w"))
+    json.dump({"weight_map": {k: "m.safetensors" for k in t}}, open(f"{d}/model.safetensors.index.json", "w"))
+tree(f"{g}/base", {GU: ("BF16", [512, 1280, 2560]), PLE: ("BF16", [2500012, 160])})
+tree(f"{g}/bad", {PLE: ("F8_E4M3", [2500012, 160])})            # the NVFP4 checkpoint's shape of wrong
+n = f"{g}/nvidia"
+json.dump({"quantization": {"quantized_layers": {f"model.language_model.layers.{i}.mlp.experts":
+           {"quant_algo": "NVFP4"} for i in range(48)}}}, open(f"{n}/hf_quant_config.json", "w"))
+json.dump({"weight_map": {f"model.language_model.layers.{l}.mlp.experts.{e}.{p}_proj.{t}": "m.safetensors"
+           for l in range(48) for e in range(512) for p in ("gate", "up", "down")
+           for t in ("weight", "weight_scale", "weight_scale_2", "input_scale")}},
+          open(f"{n}/model.safetensors.index.json", "w"))
+open(f"{n}/m.safetensors", "wb").close()
+PY
+g5run() { env PATH="$g5/stub:$PATH" DRY_RUN=1 BASE="$g5/base" NVIDIA="$g5/nvidia" OUT="$g5/out/x.ninfer" \
+            CACHE_DIR="$g5/cache" MIN_FREE_GB=0 "$@" ./scripts/convert 2>&1; }
+g5ok=1
+g5out=$(g5run); g5rc=$?
+for want in '--user 1000:1000' '--gpus device=0' '--network none' '--recipe qwen3_8_flash_next' \
+            '--source nvidia=/in/nvidia' '--out /out/x.ninfer' '-v '"$g5"'/out:/out'; do
+  if [[ $g5out == *"$want"* ]]; then echo "PASS(cmd $want)"; else echo "FAIL(cmd $want)"; g5ok=0; fi
+done
+if [[ $g5rc == 0 && ! -e $g5/out && ! -e $g5/cache ]]; then echo 'PASS(happy rc 0, nothing created)'
+else echo "FAIL(happy rc $g5rc or created a dir)"; g5ok=0; fi
+g5ref() {  # g5ref <label> <message substring> <env…>
+  local label=$1 want=$2 out rc; shift 2
+  out=$(g5run "$@"); rc=$?
+  if [[ $rc == 1 && $out == *"$want"* ]]; then echo "PASS(refuse $label)"
+  else echo "FAIL(refuse $label: rc $rc)"; g5ok=0; fi
+}
+g5ref 'missing base' 'download Qwen/Qwen3.8-Flash-Next --revision' BASE="$g5/nope"
+g5ref 'non-BF16 base' 'is F8_E4M3 [2500012, 160], not BF16' BASE="$g5/bad"
+mkdir "$g5/out"; : >"$g5/out/x.ninfer.part-0001"
+g5ref 'OUT exists' 'already exists' ; rm -r "$g5/out"
+g5ref 'vllm running' 'busy: running container(s) vllm' STUB_PS=vllm
+g5ref 'no space' 'the artifact needs >=' MIN_FREE_GB=999999999
+g5ref 'sudo' "DOCKER names 'sudo'" DOCKER='sudo docker'
+rm -rf "$g5"
+(( g5ok )) && echo 'convert dry-run ok' || echo 'FAIL(convert dry-run)'
+```
+
+**6–7. Behavioral steps — added by the Plan 01 task that creates what they check** (Rule A.5).
 Each lands with its exact commands and pass condition in that task's commit; until then it does
 not exist, and nothing may claim it passed.
 
 | Step | Added by | Checks | Pass condition (to be made exact by that task) |
 |---|---|---|---|
-| 5 convert dry-run | Plan 01 T4 | `DRY_RUN=1 ./scripts/convert` on fake inputs | every refusal fires with its message; the printed `docker run` carries `--user 1000:1000` |
 | 6 launcher dry-run | Plan 01 T5 | `./run` against a stub `docker` | the emitted command carries `--user 1000:1000`, the seccomp profile, `--ulimit memlock=-1`, `-p …:8700`, the MTP flags; `DOCKER` naming sudo is refused (both arms) |
 | 7 image identity | Plan 01 T6 | the built image | label `ai.ninfer.ref` == `NINFER_SHA`, exactly one image ID, `USER 1000:1000`, `ldd` reports nothing `not found`, cuobjdump shows `sm_120a` only |
 

@@ -50,6 +50,17 @@ section**, which always stays last. Keep it dense.
   360.0 GB, not gated (HF API, 2026-10-27).
 - PLE is quantized BF16 → NF4 by a JIT CUDA extension (`tools/convert/quantization/stored_scale.py:22-33`,
   `-gencode=arch=compute_120,code=sm_120`): the converter needs nvcc, a C++ compiler and ninja.
+- [LIVE 2026-10-27] Real BF16 base headers (HF range reads, rev `de4b8e4d`):
+  `…layers.0.mlp.experts.gate_up_proj` BF16 `[512, 1280, 2560]` (shard 00002);
+  `…layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight` BF16 `[2500012, 160]` (shard 00005).
+  The NVFP4 checkpoint has no `gate_up_proj` and its PLE shard is `F8_E4M3` of the same shape.
+- The NVFP4 checkpoint's `hf_quant_config.json` is `quant_algo: MIXED_PRECISION` at the top; the
+  per-module `quantized_layers` has the 48 main-expert layers at `NVFP4` (plus one `FP8`, one
+  `FP8_BLOCK_SCALES`). Its index has 294,912 main-expert keys (48 × 512 × {gate,up,down} ×
+  {weight, weight_scale, weight_scale_2, input_scale}). The converter reads tensors, not this file.
+- [LIVE 2026-10-27] Every `tools.convert`/`tools.artifact` module imports in the `../vllmcustom`
+  image (Python 3.12.3, torch 2.14.0/CUDA 13.2, NumPy 2.2.6), 1 run; the image also carries `hf`
+  (`/opt/venv/bin/hf`) — the host has none. A real conversion under 3.12 is unconfirmed (T7).
 - Output: ~100.67 GiB payload; an entry plus `.part-NNNN` files at 32,000,000,000 B each, and
   `<entry>.conversion.json`; existing outputs are never overwritten (`docs/weight-conversion.md:427-436`).
 

@@ -25,7 +25,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 01** — NInfer Flash-Next container serving: in progress, 3/12 tasks done; next T4 (`scripts/convert`).
+- **Plan 01** — NInfer Flash-Next container serving: in progress, 4/12 tasks done; next T5 (`./run` launcher).
 
 ## Plans <!-- hp:plans -->
 

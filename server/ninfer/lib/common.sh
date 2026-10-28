@@ -101,6 +101,26 @@ owned_dir() {
   return 0
 }
 
+# refuse_busy <port> <name>... — one server at a time (SERIES Standing Constraints): refuse while a
+# running container has one of the given names, or anything publishes <port> on the host. vLLM
+# (container `vllm`) and NInfer both need the GPU, and NInfer pins ~63 GiB of host RAM besides.
+refuse_busy() {
+  local port=${1:?refuse_busy needs a port} n
+  shift
+  local -a hits
+  mapfile -t hits < <(
+    {
+      "${DOCKER[@]}" ps --format '{{.Names}}' --filter "publish=$port"
+      for n in "$@"; do "${DOCKER[@]}" ps --format '{{.Names}}' --filter "name=^${n}\$"; done
+    } | sort -u
+  )
+  if (( ${#hits[@]} > 0 )); then
+    die "busy: running container(s) ${hits[*]} hold the GPU or :$port — one server at a time." \
+        "  stop it first:  docker stop ${hits[*]}"
+  fi
+  return 0
+}
+
 # Print the newest $IMAGE tag whose ai.ninfer.ref label is NINFER_SHA; print nothing if none.
 # `docker images` lists newest first. mapfile, not `| head -1`: head closing the pipe would make
 # docker exit on SIGPIPE, which pipefail turns into a failure.

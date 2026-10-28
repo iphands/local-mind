@@ -651,7 +651,7 @@ Priority values: `P0` = blocking, `P1` = important, `P2` = nice-to-have.
 - [x] T1: `DOCKER='sudo -n docker'` and `DOCKER=/usr/bin/sudo` each → refusal, rc 1; both CUDA digests resolve; gate step 1 prints `1 b` and `env ok`
 - [x] T2: gate step 3 → default `uring Operation not permitted`, `ninfer.json` `uring ok` with `keyctl` still blocked, unconfined differs on `keyctl`; regeneration is byte-identical
 - [x] T3: `PREFLIGHT_ONLY=1 ./build` exit 0 on a clean checkout at `64d10fbf`, refusal on a dirty one, no image built
-- [ ] T4: today's `DRY_RUN=1 ./scripts/convert` refuses with the `hf download` command; NVFP4-as-base refuses naming the non-BF16 tensor; `tools.convert --help` exits 0 in the converter image; gate step 5 passes
+- [x] T4: today's `DRY_RUN=1 ./scripts/convert` refuses with the `hf download` command; NVFP4-as-base refuses naming the non-BF16 tensor; `tools.convert --help` exits 0 in the converter image; gate step 5 passes
 - [ ] T5: gate step 6 → every `PASS`, both sudo arms and the running-`vllm` case refused
 - [ ] T6: gate step 7 → one image ID, `1000:1000`, no missing libraries, usage text, `sm_120a`-only cubins
 - [ ] T7: inspect lists text/vision/mtp and every part; size within ±2% of 100.67 GiB payload

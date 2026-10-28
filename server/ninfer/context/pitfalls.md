@@ -113,3 +113,20 @@ global `ARG` reaches only `FROM` lines — redeclare it (no default) inside a st
 
 ## Sources
 - ninfer: `Dockerfile` (header), `build` (`PREFLIGHT_ONLY`)
+
+# A ModelOpt `hf_quant_config.json` can say `MIXED_PRECISION` for an NVFP4 checkpoint
+
+## Problem
+[OBSERVED 2026-10-27] Plan 01 T4 was written to check that the NVIDIA checkpoint's
+`hf_quant_config.json` "says NVFP4". It does not: `quantization.quant_algo` is
+`MIXED_PRECISION` (modelopt 0.46), because MTP experts are `FP8_BLOCK_SCALES` and one module is
+`FP8`. The NVFP4 fact lives one level down, per module, in `quantization.quantized_layers`
+(`model.language_model.layers.N.mlp.experts` → `{"quant_algo": "NVFP4", "group_size": 16}`).
+A top-level check would have refused the right checkpoint.
+
+## How to avoid
+Check per-module entries (`scripts/convert` requires all 48 main-expert layers at `NVFP4`) or,
+better, the tensors themselves. NInfer's converter ignores this file and reads tensors.
+
+## Sources
+- ninfer: `scripts/convert` (`check_headers`, nvidia branch)

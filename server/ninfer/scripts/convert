@@ -1,0 +1,273 @@
+#!/usr/bin/env bash
+# Convert Qwen3.8-Flash-Next into a NInfer v3 artifact, in a container: ./scripts/convert
+#
+#   DRY_RUN=1 ./scripts/convert   every preflight, then print the docker command; writes nothing
+#   INSPECT=1 ./scripts/convert   inspect the finished artifact (tools.artifact.inspect, no GPU)
+#
+# Knobs (env): BASE, NVIDIA, OUT, COMPONENTS, ROWS_PER_CHUNK, NAME, CONVERT_IMAGE, CACHE_DIR,
+# MIN_FREE_GB, INSPECT_ARGS. The recipe is upstream's (docs/weight-conversion.md @ NINFER_SHA):
+#   tools.convert --model <BF16 base> --recipe qwen3_8_flash_next --source nvidia=<NVIDIA NVFP4>
+# Our NVFP4 checkpoint is the `nvidia` source, never the base (context/pitfalls.md). The runtime is
+# ../vllmcustom's image (Python 3.12, torch 2.14, nvcc + ninja for the JIT PLE encoder;
+# context/high_level.md § Converter runtime). The conversion is the owner's to run: it needs the
+# GPU (vLLM must be down) and rewrites ~100 GiB.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# shellcheck source-path=SCRIPTDIR source=../lib/common.sh
+source "$HERE/lib/common.sh"
+load_pins
+
+BASE=${BASE:-$HERE/models/vllm/Qwen/Qwen3.8-Flash-Next}
+NVIDIA=${NVIDIA:-$HERE/models/vllm/nvidia/Qwen3.8-Flash-Next-NVFP4}
+OUT=${OUT:-$HERE/models/ninfer/qwen3.8-flash-next/qwen3_8_flash_next.ninfer}
+COMPONENTS=${COMPONENTS:-text,vision,mtp}
+ROWS_PER_CHUNK=${ROWS_PER_CHUNK:-16384}
+NAME=${NAME:-qwen3.8-flash-next}
+CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/ninfer/cache}
+MIN_FREE_GB=${MIN_FREE_GB:-110}   # ~100.67 GiB payload (108 GB) + framing and report
+DRY_RUN=${DRY_RUN:-0}
+INSPECT=${INSPECT:-0}
+VENDOR=$HERE/vendor/ninfer
+
+# ------------------------------------------------------- source tree + runtime image
+
+[[ -d $VENDOR/.git ]] || die "vendor/ninfer is missing — run: PREFLIGHT_ONLY=1 ./build"
+[[ $(git -C "$VENDOR" rev-parse HEAD) == "$NINFER_SHA" && -z $(git -C "$VENDOR" status --porcelain) ]] \
+  || die "vendor/ninfer is not clean at NINFER_SHA — run: PREFLIGHT_ONLY=1 ./build (it says why)"
+
+# Read, not sourced: the sibling's file is data to us, and sourcing it would clobber IMAGE.
+if [[ -z ${CONVERT_IMAGE:-} ]]; then
+  last=$HERE/../vllmcustom/container/.last-build
+  [[ -f $last ]] || die "no CONVERT_IMAGE given and no $last to default from."
+  CONVERT_IMAGE="$(sed -n 's/^IMAGE=//p' "$last"):$(sed -n 's/^VTAG=//p' "$last")"
+  [[ $CONVERT_IMAGE != :* && $CONVERT_IMAGE != *: ]] || die "cannot read IMAGE/VTAG from $last."
+fi
+"${DOCKER[@]}" image inspect "$CONVERT_IMAGE" >/dev/null 2>&1 \
+  || die "converter image $CONVERT_IMAGE is not local (it is ../vllmcustom's build, not pulled)."
+
+[[ $OUT == *.ninfer ]] || die "OUT must name the artifact entry, *.ninfer (got $OUT)."
+entry=$(basename -- "$OUT")
+out_dir=$(realpath -m -- "$(dirname -- "$OUT")")
+OUT=$out_dir/$entry
+
+# --------------------------------------------------------------------- inspect
+
+if [[ $INSPECT == 1 ]]; then
+  [[ -f $OUT ]] || die "no artifact at $OUT — convert first."
+  read -r -a inspect_args <<<"${INSPECT_ARGS:---json}"
+  cmd=("${DOCKER[@]}" run --rm --network none --user "$RUN_UID:$RUN_GID" -e PYTHONDONTWRITEBYTECODE=1
+       -v "$VENDOR:/ninfer:ro" -v "$out_dir:/out:ro" -w /ninfer --entrypoint python3 "$CONVERT_IMAGE"
+       -m tools.artifact.inspect "/out/$entry" "${inspect_args[@]}")
+  echo "== $(printf '%q ' "${cmd[@]}")" >&2
+  exec "${cmd[@]}"
+fi
+
+# ------------------------------------------------------------- input headers
+
+# Headers only (8-byte length + JSON), no torch: catches a wrong or partial checkpoint in seconds
+# instead of an hour into the conversion. Expected shapes/dtypes are the real BF16 base's
+# (HF range reads of rev HF_BASE_REV, 2026-10-27) and the NVFP4 checkpoint's own index.
+check_headers() {
+  python3 -I - "$1" "$2" <<'PY'
+import json, os, re, struct, sys
+mode, root = sys.argv[1], sys.argv[2]
+errs = []
+
+def load(name):
+    p = os.path.join(root, name)
+    if not os.path.isfile(p):
+        errs.append(f"{name} is missing")
+        return None
+    try:
+        with open(p) as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        errs.append(f"{name} is unreadable: {e}")
+        return None
+
+def weight_map(index):
+    wm = index.get("weight_map", {})
+    files = sorted(set(wm.values()))
+    missing = [s for s in files if not os.path.isfile(os.path.join(root, s))]
+    if missing:
+        errs.append(f"{len(missing)} of {len(files)} shards in the index are missing (first: {missing[0]})")
+    return wm
+
+def tensor(wm, key, dtype, shape):
+    shard = wm.get(key)
+    if shard is None:
+        errs.append(f"{key} is not in the index")
+        return
+    path = os.path.join(root, shard)
+    if not os.path.isfile(path):
+        return  # counted with the missing shards
+    try:
+        with open(path, "rb") as f:
+            (n,) = struct.unpack("<Q", f.read(8))
+            info = json.loads(f.read(n)).get(key)
+    except (OSError, ValueError, struct.error) as e:
+        errs.append(f"{shard}: unreadable safetensors header: {e}")
+        return
+    if info is None:
+        errs.append(f"{key} is not in {shard}'s header")
+    elif info.get("dtype") != dtype or info.get("shape") != shape:
+        errs.append(f"{key} is {info.get('dtype')} {info.get('shape')}, not {dtype} {shape}")
+
+if mode == "base":
+    cfg = load("config.json")
+    if cfg is not None:
+        arch = cfg.get("architectures") or []
+        if not any(a.startswith("Qwen4Exp") for a in arch):
+            errs.append(f"config.json architectures are {arch}, not Qwen4Exp*")
+    index = load("model.safetensors.index.json")
+    if index is not None:
+        wm = weight_map(index)
+        # the fused BF16 expert bank (a quantized checkpoint has per-expert tensors instead)
+        tensor(wm, "model.language_model.layers.0.mlp.experts.gate_up_proj", "BF16", [512, 1280, 2560])
+        # PLE is NF4-quantized from this table, so it must be BF16, not FP8
+        tensor(wm, "model.language_model.layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight",
+               "BF16", [2500012, 160])
+else:
+    quant = load("hf_quant_config.json")
+    if quant is not None:
+        layers = quant.get("quantization", {}).get("quantized_layers", {})
+        main = {k: v.get("quant_algo") for k, v in layers.items()
+                if re.fullmatch(r"model\.language_model\.layers\.\d+\.mlp\.experts", k)}
+        off = sum(1 for a in main.values() if a != "NVFP4")
+        if len(main) != 48 or off:
+            errs.append(f"hf_quant_config.json lists {len(main)} main-expert layers ({off} not NVFP4), not 48 NVFP4")
+    index = load("model.safetensors.index.json")
+    if index is not None:
+        wm = weight_map(index)
+        key = re.compile(r"model\.language_model\.layers\.\d+\.mlp\.experts\.\d+\."
+                         r"(gate|up|down)_proj\.(weight|weight_scale|weight_scale_2|input_scale)")
+        n = sum(1 for k in wm if key.fullmatch(k))
+        if n != 294912:
+            errs.append(f"{n} main-expert keys, not 294912 (48 layers x 512 experts x 3 projections x 4 tensors)")
+
+for e in errs:
+    print(f"##   {e}")
+sys.exit(1 if errs else 0)
+PY
+}
+
+# Always the default location: a BASE override may point at something else entirely (even the
+# NVFP4 checkpoint). `hf` runs from the converter image — the host has none (2026-10-27).
+download_hint() {
+  local qwen
+  qwen=$(realpath -m -- "$HERE/models/vllm/Qwen")
+  echo "##   the base is the BF16 checkpoint ($HF_BASE_REPO, 360 GB, not gated). Download it, then re-run:"
+  echo "##     docker run --rm -it --user $RUN_UID:$RUN_GID -e HOME=/tmp -v $qwen:/dl --entrypoint hf \\"
+  echo "##       $CONVERT_IMAGE \\"
+  echo "##       download $HF_BASE_REPO --revision $HF_BASE_REV --local-dir /dl/Qwen3.8-Flash-Next"
+}
+
+if [[ ! -d $BASE ]]; then
+  { echo "## BASE $BASE does not exist."; download_hint; } >&2
+  exit 1
+fi
+BASE=$(realpath -e -- "$BASE")
+if ! problems=$(check_headers base "$BASE"); then
+  { echo "## BASE $BASE is not the BF16 Flash-Next base:"; echo "$problems"; download_hint; } >&2
+  exit 1
+fi
+echo "== BASE ok: $BASE"
+
+[[ -d $NVIDIA ]] || die "NVIDIA $NVIDIA does not exist (the NVIDIA NVFP4 checkpoint, the recipe's nvidia source)."
+NVIDIA=$(realpath -e -- "$NVIDIA")
+if ! problems=$(check_headers nvidia "$NVIDIA"); then
+  { echo "## NVIDIA $NVIDIA is not the NVIDIA NVFP4 Flash-Next checkpoint:"; echo "$problems"; } >&2
+  exit 1
+fi
+echo "== NVIDIA ok: $NVIDIA"
+
+# ---------------------------------------------------------- output + cache dirs
+
+nearest_existing() {
+  local d=$1
+  while [[ ! -e $d ]]; do d=$(dirname -- "$d"); done
+  printf '%s\n' "$d"
+  return 0
+}
+
+# DRY_RUN creates nothing: check the directory if it exists, else that its nearest existing
+# ancestor would let us create it. A real run creates it through owned_dir.
+check_dir() {
+  local d=$1 a owner
+  if [[ $DRY_RUN != 1 ]]; then
+    owned_dir "$d"
+  elif [[ -e $d ]]; then
+    [[ -d $d ]] || die "$d exists and is not a directory."
+    owner=$(stat -c '%u' -- "$d")
+    [[ $owner == "$RUN_UID" && -w $d ]] || die "$d is not a directory uid $RUN_UID can write (owner uid $owner)."
+  else
+    a=$(nearest_existing "$d")
+    [[ -d $a && -w $a ]] || die "cannot create $d: $a is not a writable directory."
+    echo "== (DRY_RUN) would create $d"
+  fi
+  return 0
+}
+
+if [[ -e $OUT || -e $OUT.conversion.json ]] || compgen -G "$OUT.part-*" >/dev/null; then
+  die "$OUT (or its .part-*/.conversion.json) already exists; the converter never overwrites." \
+      "  a failed run leaves partial outputs: inspect and remove them yourself, or choose another OUT."
+fi
+check_dir "$out_dir"
+avail=$(df -B1 --output=avail -- "$(nearest_existing "$out_dir")" | tail -n 1)
+(( avail >= MIN_FREE_GB * 1000000000 )) \
+  || die "$(( avail / 1000000000 )) GB free under $out_dir; the artifact needs >= $MIN_FREE_GB GB."
+echo "== OUT ok: $OUT ($(( avail / 1000000000 )) GB free)"
+
+check_dir "$CACHE_DIR"
+CACHE_DIR=$(realpath -m -- "$CACHE_DIR")
+
+# The conversion runs on the GPU; refuse while vLLM or another NInfer holds it.
+refuse_busy 8700 vllm ninfer ninfer-convert
+
+# ------------------------------------------------------------------ the run
+
+# tools.convert runs as a child so its peak RSS can be reported: /usr/bin/time on the host would
+# measure the docker client, not the converter.
+WRAP='import resource, subprocess, sys, time
+t = time.monotonic()
+rc = subprocess.call([sys.executable, "-m", "tools.convert", *sys.argv[1:]])
+r = resource.getrusage(resource.RUSAGE_CHILDREN)
+print(f"== converter exit {rc}, {time.monotonic() - t:.0f} s, peak RSS {r.ru_maxrss / 1048576:.2f} GiB",
+      file=sys.stderr, flush=True)
+sys.exit(rc)'
+
+tty=()
+[[ -t 0 ]] && tty=(-it)
+CMD=("${DOCKER[@]}" run --rm "${tty[@]}" --name ninfer-convert --gpus device=0
+     --user "$RUN_UID:$RUN_GID" --network none --ulimit memlock=-1
+     -e HOME=/home/ubuntu -e PYTHONDONTWRITEBYTECODE=1 -e OMP_NUM_THREADS=4 -e MKL_NUM_THREADS=4
+     -e TORCH_EXTENSIONS_DIR=/home/ubuntu/.cache/torch_extensions
+     -v "$VENDOR:/ninfer:ro" -v "$BASE:/in/base:ro" -v "$NVIDIA:/in/nvidia:ro"
+     -v "$out_dir:/out" -v "$CACHE_DIR:/home/ubuntu/.cache"
+     -w /ninfer --entrypoint python3 "$CONVERT_IMAGE" -c "$WRAP"
+     --model /in/base --recipe qwen3_8_flash_next --source nvidia=/in/nvidia
+     --components "$COMPONENTS" --rows-per-chunk "$ROWS_PER_CHUNK" --name "$NAME"
+     --out "/out/$entry")
+
+if [[ $DRY_RUN == 1 ]]; then
+  echo "== the conversion command (DRY_RUN=1, not run):"
+  printf '%q ' "${CMD[@]}"
+  echo
+  exit 0
+fi
+
+owned_dir "$HERE/captures"
+LOG=$HERE/captures/convert_$(date +%F)_$NAME.log
+echo "== $(date -Is) converting to $OUT; log: ${LOG#"$HERE/"} (appended)" | tee -a "$LOG"
+printf '%q ' "${CMD[@]}" | tee -a "$LOG"
+echo | tee -a "$LOG"
+SECONDS=0
+rc=0
+"${CMD[@]}" 2>&1 | tee -a "$LOG" || rc=$?
+echo "== wall $(( SECONDS / 60 ))m$(( SECONDS % 60 ))s, exit $rc" | tee -a "$LOG"
+if (( rc != 0 )); then
+  echo "## the conversion failed; partial outputs under $out_dir are left for you to inspect." >&2
+  exit "$rc"
+fi
+echo "== next: INSPECT=1 ./scripts/convert"

@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 25% complete (3/12 tasks)
+- Status: 33% complete (4/12 tasks)
 - Start date: 2026-10-27
 - Plan: `context/plans/01_flashnext_container.md`
 - Evidence: bench `--out` files and the conversion log under `captures/` (gitignored, P2); the
@@ -33,7 +33,9 @@
 ## Open Unknowns
 
 - Do all 48 × 512 main experts fit in the GPU cache on 96 GB with the T5 defaults? (T8)
-- Does the converter run under Python 3.12 / torch 2.14? (T4 import, T7 real run)
+- Does the converter run under Python 3.12 / torch 2.14? (T4 import, T7 real run) — **import: yes**
+  (T4: every `tools.convert` / `tools.artifact` module imports, torch 2.14.0 / CUDA 13.2, NumPy 2.2.6);
+  the real run is still T7.
 - Is `ignore_eos` ignored or honored by NInfer's chat endpoint? (T9) — docs say "Unknown top-level
   fields are ignored" (`docs/serving.md:210` @ `64d10fbf`, found in T1); T9 still checks it live.
 - How long does the conversion take, and what does it peak at? (T7)
@@ -47,7 +49,7 @@
 | 1 | T1: Pins, shared guards, README, `models`, knowledge seed | `versions.env`, `lib/common.sh`, `README.md`, `context/*` | done | Both sudo arms, blank and array `DOCKER`, and a missing binary → rc 1; both CUDA digests resolve; gate 1 `1 b` + `env ok`, gate 2 `shellcheck ok`. `MOBY_SECCOMP_REF` moved to T2 (see Notes). |
 | 2 | T2: seccomp profile — docker default + io_uring | `scripts/seccomp-profile`, `seccomp/ninfer.json` | done | Gate 3 `seccomp ok`: default blocks both, ours `uring ok` + `keyctl` blocked, unconfined `keyctl ok`. Regeneration byte-identical (sha256 ×3). Source path invalid as written (see Notes). |
 | 3 | T3: `Dockerfile` + `build` | `Dockerfile`, `build` | done | `PREFLIGHT_ONLY=1 ./build` rc 0 (clean at `64d10fbf`, both bases resolve, `--check` no warnings, tag `cu1343-sm120a-64d10fb`); `DIRTY` file → refusal rc 1; 0 images built. Gate 1–4 pass. **Runtime tier not run: the image has not been built** (T6). |
-| 4 | T4: `scripts/convert` — conversion in a container | `scripts/convert` | pending | |
+| 4 | T4: `scripts/convert` — conversion in a container | `scripts/convert` | done | Today's tree → BASE-missing refusal + download command, rc 1; NVFP4-as-base → names missing `gate_up_proj` and `F8_E4M3` PLE, rc 1; real NVFP4 passes the `nvidia` check; real `vllm` → busy refusal; `tools.convert --help` rc 0 in the vLLM image. Gate 1–5 pass. Two premises invalid as written (see Notes). **Conversion not run** (T7). |
 | 5 | T5: `run` — the launcher | `run` | pending | |
 | 6 | T6: Owner builds; image identity (gate 7) | `RULES.md` gate 7 | pending | owner runs `./build` |
 | 7 | T7: Owner downloads base + converts; inspect | artifact under `models/ninfer/` | pending | owner: 360 GB download, then `./scripts/convert` |
@@ -69,6 +71,10 @@ provenance and cannot be cited by a later plan.
 |------|------------------------------------|--------|------|----------------|
 | 2026-10-27 | io_uring probe: `docker run --rm --network none --entrypoint python3 iphands/vllm-blackwell:…g40fe396 -I -c '<syscall 425>'`, default profile vs `--security-opt seccomp=unconfined`, docker 29.8.0 | default `-1 Operation not permitted`; unconfined `3 ok` | 1 | planning probe (a fact, not a measurement) |
 | 2026-10-27 | T2 gate step 3 (`docker run --rm --network none … --entrypoint python3 <vllm …g40fe396> -I -c '<syscall 425, 250>'`), docker 29.8.0, profile `seccomp/ninfer.json` sha256 `0a369b29…` | default: uring + keyctl `Operation not permitted`; ninfer.json: `uring ok`, keyctl `Operation not permitted`; unconfined: `uring ok`, `keyctl ok` | 2 | a fact, not a measurement; identical on both gate runs |
+| 2026-10-27 | T4: `importlib.import_module` of `tools.convert.{pipeline,official_recipes,qwen4_exp,quantization.stored_scale,sources.modelopt_nvfp4,sources.fp8_block}` + `tools.artifact.inspect` in `…vllm…g40fe396`, `--user 1000:1000 --network none`, vendor `:ro` | all `ok`; Python 3.12.3, torch 2.14.0 (CUDA 13.2), NumPy 2.2.6; `qwen3_8_flash_next` recipe present; `tools.convert --help` rc 0 | 1 | import-level only; T7 is the real run |
+| 2026-10-27 | T4: HF range reads (`curl -r`) of `Qwen/Qwen3.8-Flash-Next@de4b8e4d` shard headers 00002 and 00005 | `…layers.0.mlp.experts.gate_up_proj` BF16 `[512, 1280, 2560]`; `…layers.1.ple.ple_embedding.ngram_embedding.shard_0.weight` BF16 `[2500012, 160]`; arch `Qwen4ExpForConditionalGeneration`, 1,658 keys, 131 shards | 1 | the shapes `scripts/convert` checks |
+| 2026-10-27 | T4: `DRY_RUN=1 BASE=<crafted BF16 headers> ./scripts/convert` against the real `models/vllm/nvidia/Qwen3.8-Flash-Next-NVFP4` | `== NVIDIA ok` (48 NVFP4 main-expert layers, 294,912 keys); then busy refusal on the real running `vllm` | 1 | 0.3 s for the header checks |
+| 2026-10-27 | T4: `hf download Qwen/Qwen3.8-Flash-Next --revision de4b8e4d… --local-dir /dl/… --dry-run` in the vLLM image | resolves the revision and lists the files; nothing but 8 KB of lock files written (scratch, removed) | 1 | proves the printed download command |
 | 2026-10-27 | header probe of `models/vllm/nvidia/Qwen3.8-Flash-Next-NVFP4` and `…-FP4-Local` (python, headers only) | NVFP4: per-expert U8/F8/F32 experts, F8 block MTP experts, F8_E4M3 PLE + 1 BF16 scale, rest BF16. FP4-Local: CSF expert scales, MXFP8 dense, U8 NVFP4 PLE | 1 | planning probe |
 
 ## Notes / Deviations
@@ -115,6 +121,26 @@ provenance and cannot be cited by a later plan.
 - 2026-10-27 (between T3 and T4): **owner directive** — every new commit title in this project
   starts with `[ninfer]` (e.g. `[ninfer][P1][T4][convert] …`). Written into RULES Rule B; the five
   earlier commits keep their old form (append-only history).
+- 2026-10-27 (T4): **premise wrong — "`hf_quant_config.json` says NVFP4" is invalid as written.**
+  Its top-level `quantization.quant_algo` is `MIXED_PRECISION`; the per-module
+  `quantized_layers` map has 48 `…layers.N.mlp.experts` entries at `NVFP4`, 1 `FP8`, 1
+  `FP8_BLOCK_SCALES`. The converter never reads this file (`grep` over `tools/convert/sources/`);
+  `scripts/convert` checks the 48 per-layer entries instead.
+- 2026-10-27 (T4): **premise wrong — the printed `hf download …` command is invalid as written:**
+  the host has no `hf` (`command -v hf huggingface-cli` → nothing). The converter image does
+  (`/opt/venv/bin/hf`), so the refusal prints a containerized `docker run … --entrypoint hf <image>
+  download … --local-dir /dl/Qwen3.8-Flash-Next` with `models/vllm/Qwen` mounted; `--dry-run` of it
+  resolved the pinned revision (Evidence).
+- 2026-10-27 (T4): deviation — no host `/usr/bin/time -v`: it would measure the docker client.
+  The container runs `tools.convert` as a child of a 6-line `python3 -c` wrapper that prints the
+  child's peak RSS (`RUSAGE_CHILDREN.ru_maxrss`) and wall time; the host adds its own wall time.
+  Both go to `captures/convert_<date>_<name>.log` (appended per attempt).
+- 2026-10-27 (T4): additions beyond the plan text, each small: `-it` only when stdin is a TTY (a
+  `nohup` run would otherwise die on "input device is not a TTY"); `DRY_RUN` creates no directory
+  (checks the nearest existing ancestor); `MIN_FREE_GB` knob (the gate's `/tmp` is a 66 GB tmpfs);
+  `INSPECT_ARGS` (default `--json`); `refuse_busy <port> <names…>` in `lib/common.sh` (refuses
+  `vllm`, `ninfer`, `ninfer-convert`, anything on `:8700`; T5 reuses it). The busy check runs
+  after the input checks, so a missing base is reported even while vLLM is up.
 
 ## Follow-ups
 
