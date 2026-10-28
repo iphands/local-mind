@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `01`.** <!-- hp:next-free -->
+**Next free plan number: `02`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-10-27):** serve Qwen3.8-Flash-Next — and the Qwen3.8-27B —
 > through [Ignis](https://github.com/gpillon/ignis) on the one RTX PRO 6000 (sm_120) at the
@@ -26,7 +26,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-None yet — start with `/hands-plan new <first piece of work>`.
+None in progress — next up: Plan 01 (`/hands-plan resume 01`).
 
 ## Plans <!-- hp:plans -->
 
@@ -34,6 +34,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
+| 01 | Ignis launchers for Flash-Next and the 27B on :8700 | — | pending | Pinned ghcr 0.8.0 image, `qwen38fn/run` + `qwen38-27b/run` as `cosmo-6000`, README download how-to; owner-run boots + same-session bench vs FP4-Local. |
 
 <!-- Add these sections when they earn their place:
 
