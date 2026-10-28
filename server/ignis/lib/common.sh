@@ -164,3 +164,65 @@ require_files() {
   fi
   return 0
 }
+
+# ----------------------------------------------------------- the launch
+
+# ignis_launch <artifact> [ignis-server args...] — the `docker run` every launcher ends in. Reads
+# the launcher's knobs: PORT SERVED GPU MODELS_DIR CACHE_DIR CONTEXT IDLE_UNLOAD SPEC_TOKENS LANES
+# DETACH PRINT_CONFIG EXTRA_ARGS. The caller has already run its refusals (refuse_busy, check_gpu,
+# require_files) unless PRINT_CONFIG is set.
+#
+# Every ignis-server flag here is a v0.8.0 field flag (docs/user/reference/configuration.md at
+# IGNIS_SRC_REF; context/distilled.md). An explicit flag beats the rtxpro6000 profile, a
+# per-model flag beats a general one in the same layer (crates/server/src/config/source.rs:431-476).
+# EXTRA_ARGS goes LAST: ignis-server takes the last duplicate, so anything appended after it would
+# silently win instead.
+#
+# PRINT_CONFIG=1 runs `ignis-server config print` with the same field flags instead of serving:
+# it resolves and prints the config, opens no artifact, needs no GPU with a named profile, and
+# refuses a flag it does not know (crates/server/src/config/cli.rs:177-196) — a check of every
+# spelling against the pinned binary, with nothing loaded and vLLM still up.
+ignis_launch() {
+  local artifact=${1:?ignis_launch needs an artifact file name}
+  shift
+  local -a ignis_args run_args extra=()
+  ignis_args=(
+    --profile rtxpro6000
+    --model-artifact "/models/$artifact"
+    --model-id "${SERVED:?}"
+    --download-enabled false
+    --switch-allow-implicit false
+    --model-idle-unload "${IDLE_UNLOAD:?}"
+    --model-max-context "${CONTEXT:?}"
+    --ngram-persist-path /cache/ngram
+    --kv-disk-path /cache/kv-disk
+  )
+  if [[ -n ${SPEC_TOKENS:-} ]]; then ignis_args+=(--spec-draft-tokens "$SPEC_TOKENS"); fi
+  if [[ -n ${LANES:-} ]]; then ignis_args+=(--spec-decode-lanes "$LANES"); fi
+  ignis_args+=("$@")
+  if [[ -n ${EXTRA_ARGS:-} ]]; then read -r -a extra <<<"$EXTRA_ARGS"; fi
+  ignis_args+=("${extra[@]}")
+
+  if [[ -n ${PRINT_CONFIG:-} ]]; then
+    run_args=(run --rm --network none --user "$RUN_UID:$RUN_GID" -e HOME=/tmp)
+    ignis_args=(config print --format yaml "${ignis_args[@]}")
+  else
+    run_args=(run)
+    if [[ -n ${DETACH:-} ]]; then run_args+=(-d)
+    elif [[ -t 0 && -t 1 ]]; then run_args+=(-it)
+    fi
+    run_args+=(
+      --rm --name ignis
+      --user "$RUN_UID:$RUN_GID"
+      -e HOME=/cache                                # every writable path is under /cache
+      --gpus "device=${GPU:?}"                      # RTX PRO 6000 only — never the 4060
+      -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+      -p "0.0.0.0:${PORT:?}:8000"                   # the image binds 0.0.0.0:8000 (IGNIS_SERVER_BIND)
+      -v "${MODELS_DIR:?}:/models:ro"
+      -v "${CACHE_DIR:?}:/cache"
+      --stop-timeout 60                             # it drains in-flight requests on SIGTERM
+    )
+  fi
+  printf '## %s\n' "$(printf '%q ' "${DOCKER[@]}" "${run_args[@]}" "$IGNIS_IMAGE" "${ignis_args[@]}")"
+  exec "${DOCKER[@]}" "${run_args[@]}" "$IGNIS_IMAGE" "${ignis_args[@]}"
+}

@@ -103,10 +103,39 @@ it is harmless.
 
 ## Serve
 
-*(The launchers land in Plan 01 T2 and T3.)*
+```bash
+docker stop vllm                       # one server on :8700 at a time
+PRINT_CONFIG=1 ./qwen38fn/run          # optional first: every flag checked by the pinned binary,
+                                       #   effective config printed — no GPU, no model, vLLM may stay up
+./qwen38fn/run                         # Flash-Next on :8700 as cosmo-6000 (foreground; Ctrl-C drains)
+DETACH=1 ./qwen38fn/run                # the same, in the background: docker logs -f ignis
+```
 
-- `./qwen38fn/run` — Flash-Next on `:8700`.
-- `./qwen38-27b/run` — the 27B on `:8700` (`ABLITERATED=1` for the abliterated weights).
+The first run pulls the pinned image if it is not local. The launcher refuses — before any
+`docker run` — while anything publishes `:8700` (or a `vllm`/`ignis` container runs), when
+`GPU` is not the RTX PRO 6000, and when an artifact or sidecar is missing (it prints the
+`hf download` command). It echoes the full `docker run` line first.
+
+| Knob | Default | What |
+|---|---|---|
+| `PORT` | `8700` | host port (the container listens on 8000) |
+| `SERVED` | `cosmo-6000` | the one model id served |
+| `GPU` | `0` | host index of the RTX PRO 6000 (`nvidia-smi -L`) |
+| `MODELS_DIR` | `models/ignis` | the flat artifact directory, mounted read-only |
+| `CACHE_DIR` | `storage/cache` | n-gram rows + KV-disk (local disk, not NFS) |
+| `CONTEXT` | `262144` | the native context: no YaRN. `1048576` is the profile's (YaRN x4 on every request) |
+| `IDLE_UNLOAD` | `0` | seconds idle before unloading; `0` never (Ignis's own default is 300) |
+| `SPEC_TOKENS` | profile (Flash-Next MTP 3) | draft tokens |
+| `LANES` | profile (8) | decode lanes |
+| `DETACH` | — | `1` = run in the background |
+| `PRINT_CONFIG` | — | `1` = `ignis-server config print` with the same flags, then exit |
+| `EXTRA_ARGS` | — | any `ignis-server` flags, appended last (last wins), e.g. `--model-loop-guard off` |
+
+- `./qwen38-27b/run` — the 27B on `:8700` (`ABLITERATED=1` for the abliterated weights)
+  *(Plan 01 T3)*.
+
+Check it is up: `curl -s localhost:8700/ready` (200 once the model is loaded) and
+`curl -s localhost:8700/v1/models`.
 
 **One model name.** Ignis 0.8.0 serves exactly one id, here `cosmo-6000`. The other names the
 vLLM driver also answers to (`cosmo-proxy`, `claude-heavy`, `claude-light`,

@@ -26,7 +26,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 01** — Ignis launchers for Flash-Next and the 27B on :8700: in progress, 1/6 tasks done; next T2 (`qwen38fn/run` + launcher dry-run).
+- **Plan 01** — Ignis launchers for Flash-Next and the 27B on :8700: in progress, 2/6 tasks done; next T3 (`qwen38-27b/run`).
 
 ## Plans <!-- hp:plans -->
 

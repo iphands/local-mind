@@ -1,0 +1,52 @@
+#!/bin/bash
+# Serve Qwen3.8-Flash-Next (125B MoE, 6B active; Ignis's trellis 2.5 bpw artifact + its MTP
+# companion) through the pinned Ignis 0.8.0 image on the ONE RTX PRO 6000, on :8700 as
+# cosmo-6000 — the port and name llama-proxy already sends to the vLLM daily driver.
+#
+#   ./qwen38fn/run                                   # foreground; Ctrl-C drains and stops it
+#   DETACH=1 ./qwen38fn/run                          # background: docker logs -f ignis
+#   PRINT_CONFIG=1 ./qwen38fn/run                    # print the effective config and exit (no GPU, no model, works with vLLM up)
+#   SPEC_TOKENS=4 ./qwen38fn/run                     # MTP draft tokens (empty = the profile's 3)
+#   EXTRA_ARGS='--model-loop-guard off' ./qwen38fn/run   # any ignis-server flag, appended last (last wins)
+#
+# Weights: README.md § Download the weights — never fetched here (--download-enabled false).
+#
+# The rtxpro6000 profile is named, not auto-detected (auto reads CUDA device 0 only), and gives
+# MTP with 3 draft tokens over 8 decode lanes with every expert in VRAM. Two deliberate overrides
+# (user decisions 2026-10-27):
+#   * CONTEXT=262144: the checkpoint's native context, so `auto` rope applies no YaRN — the
+#     profile's 1,048,576 would put YaRN x4 on every request. Same context as vLLM FP4-Local.
+#   * IDLE_UNLOAD=0: never unload. Ignis's default (300 s) frees the card, and the next request
+#     waits a 60-124 s reload of a 68 GiB artifact.
+# --switch-allow-implicit false: a request naming another model is a 404, never a reload.
+# Only cosmo-6000 is served; the vLLM driver's other four names 404 (context/distilled.md).
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=../lib/common.sh
+source "$HERE/../lib/common.sh"
+load_pins
+
+PORT=${PORT:-8700}
+SERVED=${SERVED:-cosmo-6000}
+GPU=${GPU:-0}                                       # host index of the RTX PRO 6000 (nvidia-smi -L)
+MODELS_DIR=${MODELS_DIR:-$IGNIS_ROOT/models/ignis}  # flat: the artifacts and their sidecars
+CACHE_DIR=${CACHE_DIR:-$IGNIS_ROOT/storage/cache}   # n-gram rows + KV-disk; local disk, not NFS
+CONTEXT=${CONTEXT:-262144}
+IDLE_UNLOAD=${IDLE_UNLOAD:-0}                       # seconds; 0 = never
+SPEC_TOKENS=${SPEC_TOKENS:-}                        # empty = the profile's MTP 3
+LANES=${LANES:-}                                    # empty = the profile's 8
+
+if [[ -z ${PRINT_CONFIG:-} ]]; then
+  refuse_busy "$PORT" vllm ignis
+  check_gpu "$GPU"
+  require_files "$MODELS_DIR" \
+    "$(hf_hint "$MODELS_DIR" "$FN_REPO" "$FN_REV" "$FN_ARTIFACT" "$FN_ARTIFACT.conversion.json" \
+                "$FN_MTP" "$FN_MTP.conversion.json")" \
+    "$FN_ARTIFACT" "$FN_ARTIFACT.conversion.json" "$FN_MTP" "$FN_MTP.conversion.json"
+  owned_dir "$CACHE_DIR/ngram"
+  owned_dir "$CACHE_DIR/kv-disk"
+fi
+
+echo "## Flash-Next ($FN_ARTIFACT @ ${FN_REV:0:8}) on :$PORT as $SERVED — ignis $IGNIS_VERSION, profile rtxpro6000"
+ignis_launch "$FN_ARTIFACT"

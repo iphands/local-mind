@@ -130,8 +130,8 @@ where an applicable step was skipped.
 
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and the launchers have no extension. Pass: no `FAIL` line and the
-counts below match the expected numbers. **Expected counts: `1 b`** (Plan 01 T1:
-`lib/common.sh`). Bump the expected numbers in this paragraph when a file is added
+counts below match the expected numbers. **Expected counts: `3 b`** (Plan 01 T1:
+`lib/common.sh`; T2: `qwen38fn/run`, `scripts/launcher-dryrun`). Bump the expected numbers in this paragraph when a file is added
 or removed on purpose — a count that silently drops is the failure this step exists for.
 
 ```bash
@@ -179,14 +179,25 @@ if [ -f versions.env ]; then
 else echo 'SKIP(3: no versions.env yet)'; fi
 ```
 
-**4. Launcher dry-run — added by the Plan 01 task that creates the first launcher** (Rule A.5).
-It runs each launcher against a **stub `docker`** on `PATH` that records its argv and starts
-nothing. It lands with its exact commands and pass condition in that task's commit; until then it
-does not exist, and nothing may claim it passed. The pass condition, to be made exact by that
-task: the emitted `docker run` publishes `8700` to Ignis's port, selects GPU 0 only, mounts the
-models tree, carries the launcher's model id, profile and flags and the served model names; a
-`DOCKER` that names `sudo` is refused; a missing artifact is refused with the README's download
-command.
+**4. Launcher dry-run** (Plan 01 T2). `scripts/launcher-dryrun` runs every launcher against a
+**stub `docker`** and a **stub `nvidia-smi`** in a `mktemp` sandbox (empty fake artifacts, a
+sandbox cache dir), asserts the `docker run` argv each one would execute, and removes the sandbox:
+no daemon call, no GPU, no image, nothing left in the tree. Pass: exit 0 and the last line is
+`dryrun ok`; any `FAIL` line fails the step. Per launcher it asserts the shared flags (`--rm --name
+ignis --user 1000:1000 -e HOME=/cache --gpus device=0 -p 0.0.0.0:8700:8000`, the `:ro` models
+mount, the pinned image by digest, `--profile rtxpro6000 --model-id cosmo-6000 --download-enabled
+false --switch-allow-implicit false --model-idle-unload 0 --model-max-context 262144`, the cache
+paths, no `--init`/`--memory`), the launcher's artifact, the knobs (`SPEC_TOKENS`, `LANES`,
+`CONTEXT`, `PORT`, `GPU`, `DETACH`, `EXTRA_ARGS` last), the refusals (`DOCKER` naming sudo as a
+word and as a path, a busy `:8700`, the RTX 4060, a missing artifact — with the `hf download`
+hint), and `PRINT_CONFIG=1` (`config print` with the same field flags, no port, no GPU, accepted
+while `:8700` is busy). Mutation-checked at Plan 01 T2 (2026-10-27): dropping
+`--switch-allow-implicit false`, the busy refusal or the GPU check, or moving `EXTRA_ARGS` off the
+end, each turns the run red.
+
+```bash
+./scripts/launcher-dryrun
+```
 
 **Runtime tier — NOT part of the per-commit gate.** Pulling the image, downloading weights,
 booting a model, a smoke request and a bench happen only when a plan task names them, and **the

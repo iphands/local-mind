@@ -82,6 +82,18 @@ the pinned image), read 2026-10-27.
 - Reads use `O_DIRECT`, falling back to buffered where refused; no io_uring
   (`crates/artifact/src/direct.rs:5-9`) — docker's default seccomp is fine, unlike NInfer.
 
+## `config print` checks flag spellings with nothing loaded [SOURCE]
+
+- `ignis-server config print [--format json|yaml] [field flags]` parses the flags, resolves the
+  layers and prints the effective document; it opens no artifact, and with a named profile reads
+  no card (`crates/server/src/config/cli.rs:177-196`). An unknown flag is a parse error.
+- Precedence: patch > flag > env > file, each layer trying the per-model (`--qwen38flashnext-…`,
+  `--qwen38-…`) value before the general one; the profile is consulted only when no explicit layer
+  set the field (`crates/server/src/config/source.rs:431-476`). So a general flag such as
+  `--model-max-context` overrides the profile's per-model value.
+- For us: `PRINT_CONFIG=1 ./qwen38fn/run` runs it in a `--network none` container with the
+  launcher's exact flags — the owner's pre-download check [REPO].
+
 ---
 
 ## Open Questions

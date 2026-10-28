@@ -1,0 +1,141 @@
+#!/bin/bash
+# Project gate step 4 (context/plans/RULES.md § Project gate): run the launchers against a stub
+# `docker` and a stub `nvidia-smi` in a throwaway sandbox, and assert the command line each one
+# would run. Nothing is pulled, started or loaded; no GPU is touched.
+#
+#   ./scripts/launcher-dryrun              # every launcher
+#   ./scripts/launcher-dryrun qwen38fn     # one launcher (its directory name)
+#
+# Pass: the last line is `dryrun ok`. Every assertion prints `ok …` or `FAIL …`; any FAIL exits 1.
+# The sandbox (stubs, fake artifacts, cache dir) lives in mktemp and is removed on exit, so the
+# run leaves nothing in the tree — not even storage/.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+# shellcheck source-path=SCRIPTDIR source=../versions.env
+source "$ROOT/versions.env"
+
+SANDBOX=$(mktemp -d)
+trap 'rm -rf "$SANDBOX"' EXIT
+mkdir -p "$SANDBOX/bin" "$SANDBOX/models" "$SANDBOX/cache"
+
+# The stub docker: `version` answers (the socket probe), `ps` prints a busy vLLM on demand, and
+# `run` writes its argv one per line to $STUB_RUN.
+cat >"$SANDBOX/bin/docker" <<'EOF'
+#!/bin/bash
+case ${1:-} in
+  version) exit 0 ;;
+  ps) if [[ -n ${STUB_BUSY:-} && $* == *publish=* ]]; then echo vllm; fi; exit 0 ;;
+  run) shift; printf '%s\n' "$@" >"$STUB_RUN"; exit 0 ;;
+esac
+exit 0
+EOF
+cat >"$SANDBOX/bin/nvidia-smi" <<'EOF'
+#!/bin/bash
+if [[ ${STUB_GPU:-} == 4060 ]]; then echo 'NVIDIA GeForce RTX 4060'
+else echo 'NVIDIA RTX PRO 6000 Blackwell Workstation Edition'; fi
+EOF
+chmod +x "$SANDBOX/bin/docker" "$SANDBOX/bin/nvidia-smi"
+
+# Every artifact and sidecar any launcher requires, as empty files.
+fake_artifacts() {
+  local f
+  for f in "$FN_ARTIFACT" "$FN_ARTIFACT.conversion.json" "$FN_MTP" "$FN_MTP.conversion.json" \
+           "$Q27_ARTIFACT" "$Q27_ARTIFACT.graft.json" "$Q27A_ARTIFACT" "$Q27A_ARTIFACT.graft.json"; do
+    : >"$SANDBOX/models/$f"
+  done
+}
+fake_artifacts
+
+FAILS=0
+ok()   { printf 'ok   %s\n' "$*"; }
+fail() { printf 'FAIL %s\n' "$*"; FAILS=$((FAILS + 1)); }
+
+OUT=$SANDBOX/out RC=0
+# launch <launcher> [VAR=value...] — run it with every knob reset, the stubs first on PATH, stdin
+# not a terminal. RC and OUT (stdout+stderr) and $SANDBOX/run (docker run argv) are the result.
+launch() {
+  local l=$1
+  shift
+  rm -f "$SANDBOX/run"
+  RC=0
+  env PATH="$SANDBOX/bin:$PATH" DOCKER=docker STUB_RUN="$SANDBOX/run" STUB_BUSY= STUB_GPU= \
+      MODELS_DIR="$SANDBOX/models" CACHE_DIR="$SANDBOX/cache" \
+      PORT= SERVED= GPU= CONTEXT= IDLE_UNLOAD= SPEC_TOKENS= LANES= DETACH= PRINT_CONFIG= \
+      EXTRA_ARGS= ABLITERATED= \
+      "$@" "$ROOT/$l/run" </dev/null >"$OUT" 2>&1 || RC=$?
+}
+
+# has <flag> [value] — the recorded argv holds <flag>, followed by <value> when given.
+has() {
+  [[ -f $SANDBOX/run ]] || return 1
+  if (( $# == 1 )); then grep -qxF -- "$1" "$SANDBOX/run"; return; fi
+  grep -xF -A1 -- "$1" "$SANDBOX/run" | grep -qxF -- "$2"
+}
+check()   { if has "$@"; then ok "$L: ${*}"; else fail "$L: missing ${*}"; fi; }
+lacks()   { if has "$@"; then fail "$L: unexpected ${*}"; else ok "$L: no ${*}"; fi; }
+refused() {   # refused <description> <message substring>
+  if (( RC == 1 )) && grep -qF -- "$2" "$OUT" && [[ ! -f $SANDBOX/run ]]; then ok "$L: refuses $1"
+  else fail "$L: $1 → rc $RC, no '$2' or docker run reached"; sed 's/^/     | /' "$OUT"; fi
+}
+
+# The flags every launcher shares (lib/common.sh ignis_launch), on a default run.
+common_checks() {
+  if (( RC == 0 )); then ok "$L: default run exits 0"; else fail "$L: default run rc $RC"; sed 's/^/     | /' "$OUT"; fi
+  check --rm; check --name ignis; check --user 1000:1000; check -e HOME=/cache
+  check --gpus device=0; check -e CUDA_DEVICE_ORDER=PCI_BUS_ID
+  check -p 0.0.0.0:8700:8000; check -v "$SANDBOX/models:/models:ro"; check -v "$SANDBOX/cache:/cache"
+  check --stop-timeout 60
+  check "$IGNIS_IMAGE"
+  check --profile rtxpro6000; check --model-id cosmo-6000; check --download-enabled false
+  check --switch-allow-implicit false; check --model-idle-unload 0; check --model-max-context 262144
+  check --ngram-persist-path /cache/ngram; check --kv-disk-path /cache/kv-disk
+  lacks --init; lacks --memory; lacks --spec-draft-tokens; lacks --spec-decode-lanes; lacks -it
+  if grep -qF '## docker run' "$OUT"; then ok "$L: echoes the docker run line"; else fail "$L: no '## docker run' echo"; fi
+}
+
+# The knobs and refusals every launcher shares.
+common_arms() {
+  local need=$1   # a file the launcher requires, removed for the missing-artifact arm
+  launch "$L" SPEC_TOKENS=4 LANES=4 CONTEXT=1048576 PORT=8701 GPU=1
+  check --spec-draft-tokens 4; check --spec-decode-lanes 4; check --model-max-context 1048576
+  check -p 0.0.0.0:8701:8000; check --gpus device=1
+
+  launch "$L" EXTRA_ARGS='--model-loop-guard off'
+  if [[ -f $SANDBOX/run && $(tail -2 "$SANDBOX/run" | tr '\n' ' ') == '--model-loop-guard off ' ]]; then
+    ok "$L: EXTRA_ARGS lands last"; else fail "$L: EXTRA_ARGS not last"; fi
+
+  launch "$L" DETACH=1;            check -d
+  launch "$L" DOCKER='sudo docker'; refused "DOCKER=sudo docker" "names 'sudo'"
+  launch "$L" DOCKER=/usr/bin/sudo; refused "DOCKER=/usr/bin/sudo" "names 'sudo'"
+  launch "$L" STUB_BUSY=1;          refused "a busy :8700" "busy:"
+  launch "$L" STUB_GPU=4060;        refused "the RTX 4060" "not an RTX PRO 6000"
+  rm -f "$SANDBOX/models/$need"
+  launch "$L";                      refused "a missing $need" "hf download"
+  fake_artifacts
+
+  # PRINT_CONFIG: config print with the same field flags, no port, no GPU, works while busy.
+  launch "$L" PRINT_CONFIG=1 STUB_BUSY=1
+  if (( RC == 0 )); then ok "$L: PRINT_CONFIG exits 0 with :8700 busy"; else fail "$L: PRINT_CONFIG rc $RC"; fi
+  check config; check print; check --format yaml; check --network none; check --profile rtxpro6000
+  check --model-id cosmo-6000
+  lacks --gpus; lacks -p; lacks --name ignis
+}
+
+dryrun_qwen38fn() {
+  L=qwen38fn
+  launch "$L"
+  common_checks
+  check --model-artifact "/models/$FN_ARTIFACT"
+  common_arms "$FN_MTP"
+}
+
+LAUNCHERS=("$@")
+(( ${#LAUNCHERS[@]} > 0 )) || LAUNCHERS=(qwen38fn)
+for L in "${LAUNCHERS[@]}"; do
+  if ! declare -F "dryrun_$L" >/dev/null; then fail "no dry-run for launcher '$L'"; continue; fi
+  "dryrun_$L"
+done
+
+if (( FAILS > 0 )); then echo "dryrun FAILED ($FAILS)"; exit 1; fi
+echo 'dryrun ok'
