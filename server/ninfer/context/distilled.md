@@ -106,6 +106,10 @@ section**, which always stays last. Keep it dense.
   silently dropped, and NInfer may stop at EOS where vLLM does not (Plan 01 T9 checks
   `completion_tokens`).
 - `--request-log-jsonl FILE`: the parent directory must already exist (`docs/serving.md:1009`).
+- [SOURCE] The artifact is `argv[1]` — `ninfer-serve <entry> [options]` (`src/serve/serve_options.cpp:188-189`);
+  flags are assigned in order, so a repeated flag's last value wins (e.g. `--kv-dtype`, line 291).
+- [SOURCE] `<entry>.conversion.json` `files[].path` are paths as the converter saw them (inside its
+  container), not host paths (`tools/convert/pipeline.py:117-123`): match parts by basename.
 - `NINFER_CUDA_SYNC` defaults to `spin` (lowest latency); `blocking`/`yield`/`auto` exist
   (`docs/cli.md` § CUDA synchronization). The Engine-ready log reports the mode.
 - Endpoints: `/health` (200 `{"status":"ok"}`, 503 after an engine-wide failure), `/metrics`

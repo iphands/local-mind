@@ -1,0 +1,175 @@
+#!/usr/bin/env bash
+# Serve Qwen3.8-Flash-Next through NInfer on :8700: ./run [artifact entry]
+#
+#   DRY_RUN=1 ./run   every preflight, then print the docker command; writes nothing
+#
+# Knobs (env)        default                      ninfer-serve flag
+#   ARTIFACT / $1    models/ninfer/qwen3.8-flash-next/qwen3_8_flash_next.ninfer  (dir mounted :ro at /models)
+#   PORT             8700                         -p 0.0.0.0:$PORT:8080
+#   MODEL_ID         cosmo-6000                   --model-id   (llama-proxy's name for :8700)
+#   MAX_CONTEXT      262144                       --max-context
+#   KV_CAPACITY      auto                         --kv-capacity
+#   MAX_CONCURRENCY  4                            --max-concurrency   (1..8)
+#   KV_DTYPE         fp8                          --kv-dtype
+#   DRAFT_TOKENS     3   (0 = no speculation)     --spec mtp --draft-tokens   (1..5)
+#   PREFILL_CHUNK    empty = NInfer's default     --prefill-chunk   (multiple of 128)
+#   VISION           1                            --vision
+#   PRESERVE_THINKING 1                           --preserve-thinking   (vLLM's chat-template kwargs)
+#   LOG_LEVEL        info                         --log-level
+#   STATS_MS         1000                         --log-stats-interval-ms
+#   REQUEST_LOG      1                            --request-log-jsonl /storage/requests.jsonl   (./storage)
+#   CUDA_SYNC        spin                         -e NINFER_CUDA_SYNC   (explicit, so the launch line records it)
+#   EXTRA_ARGS       empty                        appended LAST to the serve flags (last wins)
+#   ENV_EXTRA        empty                        KEY=VAL ... appended LAST as -e (last wins)
+#
+# These are Plan 01's starting defaults, not measured winners: the measured ones are set by
+# Plan 01 T10-T12, with the Evidence row behind each in README.md.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=lib/common.sh
+source "$HERE/lib/common.sh"
+load_pins
+
+ARTIFACT=${1:-${ARTIFACT:-$HERE/models/ninfer/qwen3.8-flash-next/qwen3_8_flash_next.ninfer}}
+PORT=${PORT:-8700}
+MODEL_ID=${MODEL_ID:-cosmo-6000}
+MAX_CONTEXT=${MAX_CONTEXT:-262144}
+KV_CAPACITY=${KV_CAPACITY:-auto}
+MAX_CONCURRENCY=${MAX_CONCURRENCY:-4}
+KV_DTYPE=${KV_DTYPE:-fp8}
+DRAFT_TOKENS=${DRAFT_TOKENS:-3}
+PREFILL_CHUNK=${PREFILL_CHUNK:-}
+VISION=${VISION:-1}
+PRESERVE_THINKING=${PRESERVE_THINKING:-1}
+LOG_LEVEL=${LOG_LEVEL:-info}
+STATS_MS=${STATS_MS:-1000}
+REQUEST_LOG=${REQUEST_LOG:-1}
+CUDA_SYNC=${CUDA_SYNC:-spin}
+EXTRA_ARGS=${EXTRA_ARGS:-}
+ENV_EXTRA=${ENV_EXTRA:-}
+DRY_RUN=${DRY_RUN:-0}
+
+# ------------------------------------------------------------- knob checks
+
+# A typo here is a server that boots with a different setting than the bench row says, or not at
+# all. Values are checked against ninfer-serve's own contract (src/serve/serve_options.cpp).
+uint() {
+  [[ $2 =~ ^(0|[1-9][0-9]*)$ ]] || die "$1 must be a non-negative integer, got '$2'."
+  return 0
+}
+uint PORT "$PORT"
+uint MAX_CONTEXT "$MAX_CONTEXT"
+uint MAX_CONCURRENCY "$MAX_CONCURRENCY"
+uint DRAFT_TOKENS "$DRAFT_TOKENS"
+uint STATS_MS "$STATS_MS"
+[[ $KV_CAPACITY == auto ]] || uint KV_CAPACITY "$KV_CAPACITY"
+(( MAX_CONCURRENCY >= 1 && MAX_CONCURRENCY <= 8 )) || die "MAX_CONCURRENCY must be 1..8, got $MAX_CONCURRENCY."
+(( DRAFT_TOKENS <= 5 )) || die "DRAFT_TOKENS must be 0 (off) or 1..5 for Flash-Next MTP, got $DRAFT_TOKENS."
+if [[ -n $PREFILL_CHUNK ]]; then
+  uint PREFILL_CHUNK "$PREFILL_CHUNK"
+  (( PREFILL_CHUNK > 0 && PREFILL_CHUNK % 128 == 0 )) || die "PREFILL_CHUNK must be a positive multiple of 128."
+fi
+case $KV_DTYPE in bf16|int8|fp8|nvfp4|k8v4) ;; *) die "KV_DTYPE must be bf16|int8|fp8|nvfp4|k8v4, got '$KV_DTYPE'." ;; esac
+case $LOG_LEVEL in trace|debug|info|warning|error|critical|off) ;; *) die "LOG_LEVEL '$LOG_LEVEL' is not one ninfer-serve takes." ;; esac
+case $CUDA_SYNC in spin|blocking|yield|auto) ;; *) die "CUDA_SYNC must be spin|blocking|yield|auto, got '$CUDA_SYNC'." ;; esac
+for v in VISION PRESERVE_THINKING REQUEST_LOG; do
+  [[ ${!v} == [01] ]] || die "$v must be 0 or 1, got '${!v}'."
+done
+read -r -a extra_args <<<"$EXTRA_ARGS"
+read -r -a env_extra <<<"$ENV_EXTRA"
+for kv in "${env_extra[@]}"; do
+  [[ $kv == [A-Za-z_]*=* ]] || die "ENV_EXTRA entries must be KEY=VAL, got '$kv'."
+done
+
+# ---------------------------------------------------------------- the image
+
+TAG=$(image_for_pin)
+[[ -n $TAG ]] || die "no $IMAGE image labelled ai.ninfer.ref=$NINFER_SHA — run ./build first."
+
+# ------------------------------------------------------------- the artifact
+
+[[ $ARTIFACT == *.ninfer ]] || die "the artifact is its entry file, *.ninfer (got $ARTIFACT)."
+[[ -f $ARTIFACT ]] || die "no artifact at $ARTIFACT — ./scripts/convert writes it."
+art_dir=$(realpath -e -- "$(dirname -- "$ARTIFACT")")
+entry=$(basename -- "$ARTIFACT")
+report=$art_dir/$entry.conversion.json
+[[ -f $report ]] || die "no $entry.conversion.json beside the artifact; cannot check its parts."
+# The report's paths are the converter's container paths (/out/…): match by basename.
+mapfile -t parts < <(python3 -I -c '
+import json, os, sys
+for f in json.load(open(sys.argv[1]))["files"]:
+    print(os.path.basename(f["path"]))' "$report")
+(( ${#parts[@]} > 0 )) || die "$report lists no files (or is unreadable)."
+missing=()
+for p in "${parts[@]}"; do
+  [[ -f $art_dir/$p ]] || missing+=("$p")
+done
+(( ${#missing[@]} == 0 )) || die "$entry is missing ${#missing[@]} of ${#parts[@]} files: ${missing[*]:0:4}" \
+                                 "  keep the entry, its .part-NNNN files and its report together."
+echo "== artifact ok: $art_dir/$entry (${#parts[@]} files)"
+
+fstype=$(stat -f -c %T -- "$art_dir")
+if [[ $fstype == nfs* ]]; then
+  echo "## note: the artifact is on $fstype — NInfer reads PLE rows O_DIRECT from it on every decode" >&2
+  echo "##   step (Plan 01 T11 measures NFS against a local NVMe copy)." >&2
+fi
+avail_kib=$(awk '/^MemAvailable:/ { print $2 }' /proc/meminfo)
+if (( avail_kib < 80 * 1024 * 1024 )); then
+  echo "## warning: MemAvailable is $(( avail_kib / 1048576 )) GiB; NInfer registers ~63.3 GiB of expert" >&2
+  echo "##   backing in host RAM at boot, on top of the runtime and the system." >&2
+fi
+
+# One server at a time: vLLM and NInfer both need the GPU and the port.
+refuse_busy "$PORT" vllm ninfer ninfer-convert
+
+if (( REQUEST_LOG )); then
+  ensure_dir "$HERE/storage"
+fi
+
+# ------------------------------------------------------------------- launch
+
+tty=()
+[[ -t 0 ]] && tty=(-it)
+CMD=("${DOCKER[@]}" run --rm "${tty[@]}" --name ninfer --gpus device=0
+     --user "$RUN_UID:$RUN_GID" -e HOME=/home/ubuntu -e "NINFER_CUDA_SYNC=$CUDA_SYNC"
+     --security-opt "seccomp=$HERE/seccomp/ninfer.json" --ulimit memlock=-1
+     -v "$art_dir:/models:ro" -p "0.0.0.0:$PORT:8080")
+if (( REQUEST_LOG )); then
+  CMD+=(-v "$HERE/storage:/storage")
+fi
+for kv in "${env_extra[@]}"; do
+  CMD+=(-e "$kv")
+done
+
+# ninfer-serve takes the artifact as argv[1] (serve_options.cpp:188-189), so it comes first.
+CMD+=("$TAG" "/models/$entry" --host 0.0.0.0 --port 8080
+      --model-id "$MODEL_ID" --max-context "$MAX_CONTEXT" --kv-capacity "$KV_CAPACITY"
+      --max-concurrency "$MAX_CONCURRENCY" --kv-dtype "$KV_DTYPE"
+      --log-level "$LOG_LEVEL" --log-stats-interval-ms "$STATS_MS")
+if (( DRAFT_TOKENS > 0 )); then
+  CMD+=(--spec mtp --draft-tokens "$DRAFT_TOKENS")
+fi
+if [[ -n $PREFILL_CHUNK ]]; then
+  CMD+=(--prefill-chunk "$PREFILL_CHUNK")
+fi
+if (( VISION )); then
+  CMD+=(--vision)
+fi
+if (( PRESERVE_THINKING )); then
+  CMD+=(--preserve-thinking)
+fi
+if (( REQUEST_LOG )); then
+  CMD+=(--request-log-jsonl /storage/requests.jsonl)
+fi
+CMD+=("${extra_args[@]}")   # last: ninfer-serve assigns flags in order, so these win
+
+if [[ $DRY_RUN == 1 ]]; then
+  echo "== the launch command (DRY_RUN=1, not run):"
+  printf '%q ' "${CMD[@]}"
+  echo
+  exit 0
+fi
+
+echo "== $(printf '%q ' "${CMD[@]}")"
+exec "${CMD[@]}"

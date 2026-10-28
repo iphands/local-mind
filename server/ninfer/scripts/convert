@@ -184,42 +184,17 @@ echo "== NVIDIA ok: $NVIDIA"
 
 # ---------------------------------------------------------- output + cache dirs
 
-nearest_existing() {
-  local d=$1
-  while [[ ! -e $d ]]; do d=$(dirname -- "$d"); done
-  printf '%s\n' "$d"
-  return 0
-}
-
-# DRY_RUN creates nothing: check the directory if it exists, else that its nearest existing
-# ancestor would let us create it. A real run creates it through owned_dir.
-check_dir() {
-  local d=$1 a owner
-  if [[ $DRY_RUN != 1 ]]; then
-    owned_dir "$d"
-  elif [[ -e $d ]]; then
-    [[ -d $d ]] || die "$d exists and is not a directory."
-    owner=$(stat -c '%u' -- "$d")
-    [[ $owner == "$RUN_UID" && -w $d ]] || die "$d is not a directory uid $RUN_UID can write (owner uid $owner)."
-  else
-    a=$(nearest_existing "$d")
-    [[ -d $a && -w $a ]] || die "cannot create $d: $a is not a writable directory."
-    echo "== (DRY_RUN) would create $d"
-  fi
-  return 0
-}
-
 if [[ -e $OUT || -e $OUT.conversion.json ]] || compgen -G "$OUT.part-*" >/dev/null; then
   die "$OUT (or its .part-*/.conversion.json) already exists; the converter never overwrites." \
       "  a failed run leaves partial outputs: inspect and remove them yourself, or choose another OUT."
 fi
-check_dir "$out_dir"
+ensure_dir "$out_dir"
 avail=$(df -B1 --output=avail -- "$(nearest_existing "$out_dir")" | tail -n 1)
 (( avail >= MIN_FREE_GB * 1000000000 )) \
   || die "$(( avail / 1000000000 )) GB free under $out_dir; the artifact needs >= $MIN_FREE_GB GB."
 echo "== OUT ok: $OUT ($(( avail / 1000000000 )) GB free)"
 
-check_dir "$CACHE_DIR"
+ensure_dir "$CACHE_DIR"
 CACHE_DIR=$(realpath -m -- "$CACHE_DIR")
 
 # The conversion runs on the GPU; refuse while vLLM or another NInfer holds it.

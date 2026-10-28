@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 33% complete (4/12 tasks)
+- Status: 42% complete (5/12 tasks)
 - Start date: 2026-10-27
 - Plan: `context/plans/01_flashnext_container.md`
 - Evidence: bench `--out` files and the conversion log under `captures/` (gitignored, P2); the
@@ -50,7 +50,7 @@
 | 2 | T2: seccomp profile — docker default + io_uring | `scripts/seccomp-profile`, `seccomp/ninfer.json` | done | Gate 3 `seccomp ok`: default blocks both, ours `uring ok` + `keyctl` blocked, unconfined `keyctl ok`. Regeneration byte-identical (sha256 ×3). Source path invalid as written (see Notes). |
 | 3 | T3: `Dockerfile` + `build` | `Dockerfile`, `build` | done | `PREFLIGHT_ONLY=1 ./build` rc 0 (clean at `64d10fbf`, both bases resolve, `--check` no warnings, tag `cu1343-sm120a-64d10fb`); `DIRTY` file → refusal rc 1; 0 images built. Gate 1–4 pass. **Runtime tier not run: the image has not been built** (T6). |
 | 4 | T4: `scripts/convert` — conversion in a container | `scripts/convert` | done | Today's tree → BASE-missing refusal + download command, rc 1; NVFP4-as-base → names missing `gate_up_proj` and `F8_E4M3` PLE, rc 1; real NVFP4 passes the `nvidia` check; real `vllm` → busy refusal; `tools.convert --help` rc 0 in the vLLM image. Gate 1–5 pass. Two premises invalid as written (see Notes). **Conversion not run** (T7). |
-| 5 | T5: `run` — the launcher | `run` | pending | |
+| 5 | T5: `run` — the launcher | `run` | done | Gate 6 `launcher dry-run ok`: 17 wanted flags, `DRAFT_TOKENS=0` → no `--spec`, `EXTRA_ARGS` last, both sudo arms / running `vllm` / no image / bad knob / missing part refused. Today's tree → "run ./build first", rc 1. Gate 1–6 pass. **Runtime tier not run: nothing has booted** (T8). |
 | 6 | T6: Owner builds; image identity (gate 7) | `RULES.md` gate 7 | pending | owner runs `./build` |
 | 7 | T7: Owner downloads base + converts; inspect | artifact under `models/ninfer/` | pending | owner: 360 GB download, then `./scripts/convert` |
 | 8 | T8: `scripts/smoke`; first boot; expert residency | `scripts/smoke` | pending | owner boots |
@@ -141,6 +141,19 @@ provenance and cannot be cited by a later plan.
   `INSPECT_ARGS` (default `--json`); `refuse_busy <port> <names…>` in `lib/common.sh` (refuses
   `vllm`, `ninfer`, `ninfer-convert`, anything on `:8700`; T5 reuses it). The busy check runs
   after the input checks, so a missing base is reported even while vLLM is up.
+- 2026-10-27 (T5): `ninfer-serve` takes the artifact as `argv[1]` (`src/serve/serve_options.cpp:188-189`
+  @ `64d10fbf`), so the launcher puts `/models/<entry>` straight after the image; every flag it
+  emits exists in that file's usage text, and duplicates are assigned in order (last wins), which
+  is what `EXTRA_ARGS` relies on. The `.conversion.json` `files[].path` are the converter's
+  container paths (`/out/…`, `tools/convert/pipeline.py:117-123`), so the part check matches by
+  basename.
+- 2026-10-27 (T5): additions beyond the plan text: every knob is validated against
+  `ninfer-serve`'s contract (ranges, enums, PREFILL_CHUNK % 128) before docker is called;
+  `refuse_busy` also refuses a running `ninfer`/`ninfer-convert` and anything on `$PORT`; `-it`
+  only with a TTY; `ENV_EXTRA` entries must be `KEY=VAL`. `ensure_dir` (DRY_RUN creates nothing)
+  moved from `scripts/convert` into `lib/common.sh` for both scripts; gate 5 re-passed after the
+  move. `DRY_RUN=1 ./run` refuses until an image exists (the plan's "refuse unless image_for_pin
+  finds an image" applies in both modes).
 
 ## Follow-ups
 

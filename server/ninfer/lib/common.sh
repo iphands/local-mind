@@ -101,6 +101,32 @@ owned_dir() {
   return 0
 }
 
+# Print the nearest existing path at or above $1.
+nearest_existing() {
+  local d=$1
+  while [[ ! -e $d ]]; do d=$(dirname -- "$d"); done
+  printf '%s\n' "$d"
+  return 0
+}
+
+# owned_dir, except that DRY_RUN=1 creates nothing: check the directory if it exists, else that
+# its nearest existing ancestor would let us create it.
+ensure_dir() {
+  local d=${1:?ensure_dir needs a path} a owner
+  if [[ ${DRY_RUN:-0} != 1 ]]; then
+    owned_dir "$d"
+  elif [[ -e $d ]]; then
+    [[ -d $d ]] || die "$d exists and is not a directory."
+    owner=$(stat -c '%u' -- "$d")
+    [[ $owner == "$RUN_UID" && -w $d ]] || die "$d is not a directory uid $RUN_UID can write (owner uid $owner)."
+  else
+    a=$(nearest_existing "$d")
+    [[ -d $a && -w $a ]] || die "cannot create $d: $a is not a writable directory."
+    echo "== (DRY_RUN) would create $d"
+  fi
+  return 0
+}
+
 # refuse_busy <port> <name>... — one server at a time (SERIES Standing Constraints): refuse while a
 # running container has one of the given names, or anything publishes <port> on the host. vLLM
 # (container `vllm`) and NInfer both need the GPU, and NInfer pins ~63 GiB of host RAM besides.

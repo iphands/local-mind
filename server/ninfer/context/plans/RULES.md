@@ -131,8 +131,8 @@ where an applicable step was skipped.
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and the launchers have no extension. Pass: no `FAIL` line, the
 counts below match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env`
-exists). **Expected counts: `4 b`, `1 j`** (Plan 01 T1: `lib/common.sh`; T2:
-`scripts/seccomp-profile`, `seccomp/ninfer.json`; T3: `build`; T4: `scripts/convert`). Bump the expected
+exists). **Expected counts: `5 b`, `1 j`** (Plan 01 T1: `lib/common.sh`; T2:
+`scripts/seccomp-profile`, `seccomp/ninfer.json`; T3: `build`; T4: `scripts/convert`; T5: `run`). Bump the expected
 numbers in this paragraph when a file is added or removed on purpose — a count that silently drops
 is the failure this step exists for.
 
@@ -274,13 +274,64 @@ rm -rf "$g5"
 (( g5ok )) && echo 'convert dry-run ok' || echo 'FAIL(convert dry-run)'
 ```
 
-**6–7. Behavioral steps — added by the Plan 01 task that creates what they check** (Rule A.5).
-Each lands with its exact commands and pass condition in that task's commit; until then it does
-not exist, and nothing may claim it passed.
+**6. launcher dry-run** (Plan 01 T5). `DRY_RUN=1 ./run` against a fake artifact (an empty entry,
+one part, a `.conversion.json` naming both by container path) in `mktemp -d /tmp/ninfer-gate6.*`,
+with a stub `docker` on `PATH` (answers `version`, `images` with one tagged image unless
+`STUB_NOIMG`, and `ps` from `STUB_PS`). Pass: the last line is `launcher dry-run ok` — the default
+command carries every wanted flag; `DRAFT_TOKENS=0` drops `--spec`; `EXTRA_ARGS` lands last;
+both sudo arms, a running `vllm`, a missing part, no image, and an out-of-range knob each exit 1.
+The `--draft-tokens` the default command must carry follows `run`'s `DRAFT_TOKENS` default. The
+tree is removed.
+
+```bash
+g6=$(mktemp -d /tmp/ninfer-gate6.XXXXXX); mkdir -p "$g6/stub" "$g6/model"
+printf '%s\n' '#!/bin/bash' 'case $1 in version|image) exit 0 ;;' \
+  '  images) [[ -z ${STUB_NOIMG:-} ]] && echo iphands/ninfer-blackwell:cu1343-sm120a-64d10fb; exit 0 ;;' \
+  '  ps) [[ -n ${STUB_PS:-} ]] && echo "$STUB_PS"; exit 0 ;; esac' \
+  'echo "stub docker: unexpected: $*" >&2; exit 99' >"$g6/stub/docker"; chmod +x "$g6/stub/docker"
+: >"$g6/model/x.ninfer"; : >"$g6/model/x.ninfer.part-0001"
+printf '{"files": [{"path": "/out/x.ninfer"}, {"path": "/out/x.ninfer.part-0001"}]}\n' >"$g6/model/x.ninfer.conversion.json"
+g6run() { env PATH="$g6/stub:$PATH" DRY_RUN=1 "$@" ./run "$g6/model/x.ninfer" 2>&1; }
+g6ok=1
+g6check() {  # g6check <label> <ERE> <output> — the ERE must match
+  if grep -qE -- "$2" <<<"$3"; then echo "PASS($1)"; else echo "FAIL($1)"; g6ok=0; fi
+}
+g6out=$(g6run); g6rc=$?
+[[ $g6rc == 0 ]] || { echo "FAIL(default rc $g6rc)"; g6ok=0; }
+for want in '--user 1000:1000' 'seccomp=[^ ]*/seccomp/ninfer\.json' '--ulimit memlock=-1' \
+            '-p 0\.0\.0\.0:8700:8080' '--spec mtp --draft-tokens 3' '--model-id cosmo-6000' \
+            '--kv-capacity auto' '--gpus device=0' 'NINFER_CUDA_SYNC=spin' '--kv-dtype fp8' \
+            '--max-context 262144' '--max-concurrency 4' ' --vision' ' --preserve-thinking' \
+            '-v [^ ]*/model:/models:ro' 'cu1343-sm120a-64d10fb /models/x\.ninfer --host 0\.0\.0\.0 --port 8080' \
+            '--request-log-jsonl /storage/requests\.jsonl'; do
+  g6check "$want" "$want" "$g6out"
+done
+g6out=$(g6run DRAFT_TOKENS=0)
+if [[ $g6out == *'--spec'* ]]; then echo 'FAIL(DRAFT_TOKENS=0 still has --spec)'; g6ok=0; else echo 'PASS(DRAFT_TOKENS=0: no --spec)'; fi
+g6check 'EXTRA_ARGS last' '--kv-dtype bf16 $' "$(g6run EXTRA_ARGS='--kv-dtype bf16')"
+g6ref() {  # g6ref <label> <message substring> <env…>
+  local label=$1 want=$2 out rc; shift 2
+  out=$(g6run "$@"); rc=$?
+  if [[ $rc == 1 && $out == *"$want"* ]]; then echo "PASS(refuse $label)"
+  else echo "FAIL(refuse $label: rc $rc)"; g6ok=0; fi
+}
+g6ref 'sudo word' "DOCKER names 'sudo'" DOCKER='sudo -n docker'
+g6ref 'sudo path' "DOCKER names 'sudo'" DOCKER=/usr/bin/sudo
+g6ref 'vllm running' 'busy: running container(s) vllm' STUB_PS=vllm
+g6ref 'no image' 'run ./build first' STUB_NOIMG=1
+g6ref 'bad knob' 'DRAFT_TOKENS must be' DRAFT_TOKENS=6
+rm "$g6/model/x.ninfer.part-0001"
+g6ref 'missing part' 'is missing 1 of 2 files'
+rm -rf "$g6"
+(( g6ok )) && echo 'launcher dry-run ok' || echo 'FAIL(launcher dry-run)'
+```
+
+**7. Behavioral step — added by the Plan 01 task that creates what it checks** (Rule A.5). It
+lands with its exact commands and pass condition in that task's commit; until then it does not
+exist, and nothing may claim it passed.
 
 | Step | Added by | Checks | Pass condition (to be made exact by that task) |
 |---|---|---|---|
-| 6 launcher dry-run | Plan 01 T5 | `./run` against a stub `docker` | the emitted command carries `--user 1000:1000`, the seccomp profile, `--ulimit memlock=-1`, `-p …:8700`, the MTP flags; `DOCKER` naming sudo is refused (both arms) |
 | 7 image identity | Plan 01 T6 | the built image | label `ai.ninfer.ref` == `NINFER_SHA`, exactly one image ID, `USER 1000:1000`, `ldd` reports nothing `not found`, cuobjdump shows `sm_120a` only |
 
 **Runtime tier — NOT part of the per-commit gate.** Booting a model, a smoke request and a bench
