@@ -1,0 +1,56 @@
+{
+  // OpenCode 2 schema: providers / package / settings (v1 used provider / npm / options)
+  // Ported from opencode/container_data/config/opencode/opencode.jsonc minus oh-my-openagent and its agents
+  "$schema": "https://opencode.ai/config.json",
+  "model": "cosmo-proxy/cosmo-proxy",
+  // local-mind (primary) + neckbeard/hoodie (subagents) live in agents/*.md
+  "default_agent": "local-mind",
+  // V2 ships the todo tool off; local-mind's paired work/review todo list needs it
+  "experimental": { "todo": true },
+  // Ordered: later rules win (v1's permission.bash block)
+  "permissions": [
+    { "action": "shell", "resource": "*", "effect": "allow" },
+    { "action": "shell", "resource": "git reset *", "effect": "ask" },
+    { "action": "shell", "resource": "git reset --hard *", "effect": "deny" },
+    { "action": "shell", "resource": "git clean *", "effect": "deny" },
+    { "action": "shell", "resource": "git push --force *", "effect": "deny" },
+    { "action": "shell", "resource": "git branch -D *", "effect": "deny" }
+  ],
+  "providers": {
+    "cosmo-proxy": {
+      "name": "cosmo-proxy",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://cosmo.lan:8799/v1",
+        "apiKey": "deadbeef1234"
+      },
+      "models": {
+        "cosmo-proxy": { "name": "cosmo-proxy", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 222822, "output": 262144 } },
+        "cosmo-heavy": { "name": "cosmo-heavy", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 222822, "output": 262144 } },
+        "cosmo-light": { "name": "cosmo-light", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 222822, "output": 262144 } }
+      }
+    },
+    "cosmo-00": {
+      "name": "cosmo-00",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://cosmo.lan:8700/v1",
+        "apiKey": "deadbeef1234"
+      },
+      "models": {
+        "cosmo-6000": { "name": "cosmo-6000", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 222822, "output": 262144 } }
+      }
+    },
+    "cosmo-01": {
+      "name": "cosmo-01",
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "http://cosmo.lan:8701/v1",
+        "apiKey": "deadbeef1234"
+      },
+      "models": {
+        "cosmo-4060": { "name": "cosmo-4060", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 222822, "output": 262144 } }
+      }
+    }
+  }
+}
