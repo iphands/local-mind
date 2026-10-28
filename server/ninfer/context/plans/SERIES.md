@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `01`.** <!-- hp:next-free -->
+**Next free plan number: `02`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-10-27):** the fastest single-stream decode of
 > Qwen3.8-Flash-Next on the one RTX PRO 6000 (sm_120) through NInfer — source-built and pinned in
@@ -25,7 +25,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-None yet — start with `/hands-plan new <first piece of work>`.
+None in progress — next up: Plan 01 (`/hands-plan resume 01`).
 
 ## Plans <!-- hp:plans -->
 
@@ -33,6 +33,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
+| 01 | NInfer Flash-Next: pinned sm_120a image, containerized conversion, `./run`, measured | — | pending | Wave 1 scripts (agent); then owner builds, downloads BF16 base, converts, boots; A/B vs vLLM FP4-Local picks the defaults. |
 
 <!-- Add these sections when they earn their place:
 
