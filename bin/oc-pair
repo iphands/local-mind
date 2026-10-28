@@ -1,0 +1,204 @@
+#!/bin/bash
+# local-mind/bin/oc-pair, inside the ocli2 container: mint a pairing link for the
+# `opencode serve` that ~/bin/opencode-serve runs.
+#
+# Lives here rather than in ~/bin because ~/bin is the container's writable layer: a
+# `podman run --rm` restart wipes it. This tree is git-tracked and bind-mounted into the
+# container rw (-v ${HOME}/prog:/home/iphands/prog), so this same path is visible from
+# inside the container, which is where it belongs: the pidfile holds a pid namespace value
+# and http://127.0.0.1:$PORT is the container's netns. The path resolves on both sides;
+# only the semantics are container-side.
+#
+# Callable as `oc-pair` via ~/dotfiles/bin/oc-pair, a symlink here -- dotfiles/init does
+# `ln -sf $PWD/$var ~/bin/` for every file in dotfiles/bin, so it survives rebuilds without
+# putting this directory on PATH. That matters: `opencode` and `opencode2` exist in both
+# ~/bin and here, and they are different programs, so this dir must not join PATH.
+#
+# The password itself lives in opencode2/container_data/.opencode-password on the host
+# (mode 600, read by local-mind/bin/opencode2 into the container's env), which is the
+# authoritative source if you need the value while the serve is down. This script never
+# prints it.
+#
+# `opencode pair` cannot do this job. It is a shared-background-service command, while the
+# server here is a standalone `opencode serve`, and its --url flag only rewrites the link
+# text: the code it prints is minted by the shared service and does not redeem against this
+# server. (Verified: the link pointed at :8080, redeeming it there gave 401, and the command
+# quietly started a shared service on 49374.) The serve exposes the same minting endpoint
+# itself -- POST /api/pair -> {"code":...,"expires_in":300} -- so we call that.
+#
+#   --port N / OPENCODE_SERVE_PORT     where the serve listens    (default 8080)
+#   --url  URL / OPENCODE_PUBLIC_URL   host to issue the link for (default https://code.noir.lan)
+#   PIDFILE  / OPENCODE_SERVE_PIDFILE  opencode-serve's pid file for that port
+#
+#   --qr / --no-qr    force/suppress the QR code (default: when stderr is a tty, if the
+#                     optional qrencode package is installed)
+#   -v / --verbose    say how the serve was found (stderr only)
+#
+# stdout carries exactly one artifact (the link) so it pipes into xclip or tee; every
+# other word goes to stderr. Exit codes: 0 ok, 1 runtime failure, 2 usage.
+#
+# Codes are single use and live 5 minutes: one per device, open it straight away, and never
+# `curl` the link to check it -- redeeming it is how it is consumed.
+set -euo pipefail
+
+PORT=${OPENCODE_SERVE_PORT:-8080}
+PUBLIC_URL=${OPENCODE_PUBLIC_URL:-https://code.noir.lan}
+DIR=${XDG_STATE_HOME:-$HOME/.local/state}/opencode/serve
+PIDFILE=${OPENCODE_SERVE_PIDFILE:-$DIR/serve-$PORT.pid}
+
+usage() {
+  cat >&2 <<'EOF'
+usage: oc-pair [--port N] [--url URL] [--qr|--no-qr] [-v]
+  Prints a single-use <url>/auth/connect/<code> link for the running `opencode serve`.
+  Open it in a browser to sign in; the QR scans into the mobile app.
+EOF
+  exit "${1:-2}"
+}
+
+qr=auto
+verbose=no
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --port)  [ $# -ge 2 ] || { echo "oc-pair: --port needs a value" >&2; usage 2; }; PORT=$2; shift 2 ;;
+    --port=*) PORT=${1#*=}; shift ;;
+    --url)   [ $# -ge 2 ] || { echo "oc-pair: --url needs a value" >&2; usage 2; }; PUBLIC_URL=$2; shift 2 ;;
+    --url=*) PUBLIC_URL=${1#*=}; shift ;;
+    --qr)    qr=yes; shift ;;
+    --no-qr) qr=no;  shift ;;
+    -v|--verbose)    verbose=yes; shift ;;
+    -h|--help)       usage 0 ;;
+    *) echo "oc-pair: unknown argument $1" >&2; usage 2 ;;
+  esac
+done
+
+PUBLIC_URL=${PUBLIC_URL%/}
+PORT=${PORT##*/}
+case $PORT in ''|*[!0-9]*) echo "oc-pair: --port must be a number, got '${PORT}'" >&2; exit 1 ;; esac
+[ "$PORT" -ge 1 ] && [ "$PORT" -le 65535 ] || { echo "oc-pair: --port out of range: $PORT" >&2; exit 1; }
+case $PUBLIC_URL in
+  https://*) ;;
+  # Only loopback may be plain HTTP; anywhere else the redeemed session token would cross
+  # the LAN in the clear, and a phone would eat the :80 -> :443 redirect with it.
+  http://127.0.0.1*|http://localhost*)
+    echo "oc-pair: plain http:// -- fine for loopback, wrong for a phone" >&2 ;;
+  *) echo "oc-pair: --url must be https (or http to 127.0.0.1/localhost): $PUBLIC_URL" >&2; exit 1 ;;
+esac
+
+# Fail before minting anything if a QR was demanded but the package is absent.
+if [ "$qr" = yes ] && ! command -v qrencode >/dev/null 2>&1; then
+  echo "oc-pair: qrencode is not installed (dnf install qrencode), or use --no-qr" >&2
+  exit 1
+fi
+
+# Is this pid the standalone serve we are looking for? Deliberately pipeline-free: under
+# `set -o pipefail` a `tr | grep -q` returns 141 when grep quits early, which would report
+# a matching process as "not our serve". Mirrors opencode-serve's own pids(): exact argv,
+# never the self-started `serve --service`.
+is_our_serve() {
+  local a
+  a=$(tr '\0' ' ' <"/proc/$1/cmdline" 2>/dev/null) || return 1
+  [ -n "$a" ] || return 1
+  [[ $a == *--service* ]] && return 1
+  [[ $a =~ (^|[/[:space:]])opencode([[:space:]]|$) ]] || return 1
+  [[ $a =~ (^|[[:space:]])serve([[:space:]]|$) ]]     || return 1
+  [[ $a =~ (^|[[:space:]])--port[[:space:]=]$PORT([^0-9]|$) ]]
+}
+
+pid=""
+found_via=""
+if [ -f "$PIDFILE" ]; then
+  cand=$(<"$PIDFILE")
+  cand=${cand//[!0-9]/}
+  if [ -n "$cand" ] && is_our_serve "$cand"; then
+    pid=$cand
+    found_via="pidfile $PIDFILE"
+  fi
+fi
+if [ -z "$pid" ]; then
+  # Coarse filter only -- is_our_serve() does the real matching, so the argv may be in any
+  # order (`serve --hostname X --port N` is what opencode-serve launches). [e] stops this
+  # script's own argv from matching its own pattern.
+  for p in $(pgrep -f "opencode serv[e]" 2>/dev/null || true); do
+    [ "$p" = "$$" ] && continue
+    if is_our_serve "$p"; then
+      pid=$p
+      found_via="pgrep"
+      break
+    fi
+  done
+fi
+if [ -z "$pid" ]; then
+  echo "oc-pair: no \`opencode serve\` on port $PORT" >&2
+  if [ -e "${HOME:-/home/iphands}/IM_A_CONTAINER" ]; then
+    echo "         start one: opencode-serve start" >&2
+  else
+    echo "         run this inside ocli2, or point --port/--url at the server" >&2
+  fi
+  exit 1
+fi
+
+# The serve owns its password; its environment is the only trustworthy source. tr|sed reads
+# the whole block, so there is no early-exit consumer to SIGPIPE, and a value with a newline
+# could never survive here anyway.
+pass=$(tr '\0' '\n' <"/proc/$pid/environ" 2>/dev/null | sed -n 's/^OPENCODE_PASSWORD=//p')
+pass=${pass%%$'\n'*}
+if [ -z "$pass" ]; then
+  echo "oc-pair: pid $pid has no OPENCODE_PASSWORD (started outside opencode-serve?)" >&2
+  exit 1
+fi
+[ "$verbose" = yes ] && echo "oc-pair: pid $pid ($found_via)" >&2
+
+# curl's config parser needs the value quoted, with backslash first so the quote escape is
+# not doubled. -q keeps ~/.curlrc from adding insecure/proxy to a password-carrying request.
+esc=${pass//\\/\\\\}
+esc=${esc//\"/\\\"}
+body=$(mktemp "${TMPDIR:-/tmp}/oc-pair.XXXXXX")
+trap 'rm -f "$body"' EXIT
+
+if ! status=$(curl -q -sS --max-time 8 -o "$body" -w '%{http_code}' --config - \
+                -X POST "http://127.0.0.1:$PORT/api/pair" <<<"user = \"opencode:$esc\""); then
+  echo "oc-pair: could not reach http://127.0.0.1:$PORT/api/pair -- try: opencode-serve status" >&2
+  exit 1
+fi
+case $status in
+  200) ;;
+  401|403)
+    echo "oc-pair: server refused the request (HTTP $status) -- stale OPENCODE_PASSWORD?" >&2
+    echo "         rotate it: OPENCODE_PASSWORD=<new> opencode-serve restart" >&2
+    exit 1 ;;
+  404) echo "oc-pair: no POST /api/pair (HTTP 404) -- opencode build too old?" >&2; exit 1 ;;
+  *)   echo "oc-pair: POST /api/pair returned HTTP $status: $(head -c 200 <"$body")" >&2; exit 1 ;;
+esac
+
+# No pipe: a SIGPIPE'd sed returns 141 and would abort this script having printed nothing.
+code=$(sed -n 's/.*"code"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' <"$body")
+code=${code%%$'\n'*}
+ttl=$(sed -n 's/.*"expires_in"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' <"$body")
+ttl=${ttl%%$'\n'*}
+if [ -z "$code" ]; then
+  # Loud, and never a plausible-looking link assembled out of an error body.
+  echo "oc-pair: no pairing code in the response: $(head -c 300 <"$body")" >&2
+  exit 1
+fi
+# Observed codes are 22 chars of base64url. Anything else means we misread the body, and a
+# stray / or ? would silently add a path segment and 404 at redeem time.
+case $code in ''|*[!A-Za-z0-9_-]*)
+  echo "oc-pair: unexpected characters in the pairing code, refusing to print it" >&2
+  exit 1 ;;
+esac
+[ "${#code}" -ge 16 ] || { echo "oc-pair: implausibly short pairing code, refusing" >&2; exit 1; }
+
+link="$PUBLIC_URL/auth/connect/$code"
+
+# QR and the warning first, so the link is the last thing above the prompt. stdout is
+# untouched by either, so `oc-pair | xclip -selection clipboard` still gets just the link.
+echo "oc-pair: single use, expires in ${ttl:-300}s -- open it now; re-run oc-pair for another" >&2
+if [ "$qr" = yes ] || { [ "$qr" = auto ] && [ -t 2 ]; }; then
+  if command -v qrencode >/dev/null 2>&1; then
+    qrencode -t ansiutf8 -m 1 "$link" >&2 || echo "oc-pair: qrencode failed, use the link below" >&2
+  else
+    [ "$verbose" = yes ] && echo "oc-pair: qrencode not installed, skipping the QR" >&2
+  fi
+fi
+
+printf '%s\n' "$link"
