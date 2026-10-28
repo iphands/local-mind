@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 33% complete (2/6 tasks)
+- Status: 50% complete (3/6 tasks)
 - Start date: 2026-10-27
 - Plan: `context/plans/01_flashnext_27b_launchers.md`
 - Evidence: `captures/` (gitignored: `bench_<date>_engine.md`, `conc_<date>_engine.jsonl`), the
@@ -44,7 +44,7 @@
 |---|------|---------------|--------|-------|
 | 1 | T1: Pins, shared guards, models link, README download how-to | `versions.env`, `lib/common.sh`, `README.md` | done | sudo refusal rc 1 (word and path); pins load; 4 `hf download` commands; `require_files` hint verified. `hf`/`huggingface-cli` not installed here — README says how. |
 | 2 | T2: `qwen38fn/run` + launcher dry-run (gate step 4) | `qwen38fn/run`, `scripts/launcher-dryrun` | done | 48 assertions `ok`, `dryrun ok`; 4 mutations each caught; `PRINT_CONFIG` = `config print` (opens no artifact, `cli.rs:177-196`). General flags used: explicit beats profile (`source.rs:431-476`). |
-| 3 | T3: `qwen38-27b/run` | `qwen38-27b/run` | pending | |
+| 3 | T3: `qwen38-27b/run` | `qwen38-27b/run` | done | `./scripts/launcher-dryrun` 102 `ok` over both launchers, `dryrun ok`; `ABLITERATED` and `.graft.json` mutations each caught. `--kv-disk-path` kept (Models: all; the 27B's tier is off by default), only `ngram/` created. |
 | 4 | T4: Flash-Next first boot and smoke (owner) | runtime | pending | |
 | 5 | T5: 27B first boot and smoke (owner) | runtime | pending | |
 | 6 | T6: Same-session bench, Ignis vs vLLM FP4-Local (owner) | runtime, `captures/` | pending | |

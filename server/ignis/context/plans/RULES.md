@@ -130,8 +130,8 @@ where an applicable step was skipped.
 
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and the launchers have no extension. Pass: no `FAIL` line and the
-counts below match the expected numbers. **Expected counts: `3 b`** (Plan 01 T1:
-`lib/common.sh`; T2: `qwen38fn/run`, `scripts/launcher-dryrun`). Bump the expected numbers in this paragraph when a file is added
+counts below match the expected numbers. **Expected counts: `4 b`** (Plan 01 T1:
+`lib/common.sh`; T2: `qwen38fn/run`, `scripts/launcher-dryrun`; T3: `qwen38-27b/run`). Bump the expected numbers in this paragraph when a file is added
 or removed on purpose — a count that silently drops is the failure this step exists for.
 
 ```bash
@@ -193,7 +193,8 @@ word and as a path, a busy `:8700`, the RTX 4060, a missing artifact — with th
 hint), and `PRINT_CONFIG=1` (`config print` with the same field flags, no port, no GPU, accepted
 while `:8700` is busy). Mutation-checked at Plan 01 T2 (2026-10-27): dropping
 `--switch-allow-implicit false`, the busy refusal or the GPU check, or moving `EXTRA_ARGS` off the
-end, each turns the run red.
+end, each turns the run red; at T3, ignoring `ABLITERATED` or dropping the 27B's `.graft.json`
+requirement does too. Both launchers: 102 assertions.
 
 ```bash
 ./scripts/launcher-dryrun

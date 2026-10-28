@@ -1,0 +1,56 @@
+#!/bin/bash
+# Serve the Qwen3.8-27B (NVFP4 + grafted DFlash2 drafter) through the pinned Ignis 0.8.0 image on
+# the ONE RTX PRO 6000, on :8700 as cosmo-6000 — the port and name llama-proxy already sends to
+# the vLLM daily driver.
+#
+#   ./qwen38-27b/run                                 # foreground; Ctrl-C drains and stops it
+#   ABLITERATED=1 ./qwen38-27b/run                   # the huihui-ai abliterated weights (it does not refuse)
+#   DETACH=1 ./qwen38-27b/run                        # background: docker logs -f ignis
+#   PRINT_CONFIG=1 ./qwen38-27b/run                  # print the effective config and exit (no GPU, no model, works with vLLM up)
+#   SPEC_TOKENS=4 ./qwen38-27b/run                   # DFlash2 draft tokens (empty = the profile's 7)
+#   EXTRA_ARGS='--model-loop-guard off' ./qwen38-27b/run   # any ignis-server flag, appended last (last wins)
+#
+# Weights: README.md § Download the weights — never fetched here (--download-enabled false).
+#
+# The rtxpro6000 profile is named, not auto-detected (auto reads CUDA device 0 only), and gives
+# DFlash2 with 7 draft tokens, 8 lanes, a 2,048-token prefill chunk and image input. The same two
+# overrides as ./qwen38fn/run (user decisions 2026-10-27): CONTEXT=262144 (no YaRN; the profile's
+# 1,048,576 is YaRN x4 on every request) and IDLE_UNLOAD=0 (never unload).
+# --switch-allow-implicit false: a request naming another model is a 404, never a reload.
+# Only cosmo-6000 is served; the vLLM driver's other four names 404 (context/distilled.md).
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=../lib/common.sh
+source "$HERE/../lib/common.sh"
+load_pins
+
+PORT=${PORT:-8700}
+SERVED=${SERVED:-cosmo-6000}
+GPU=${GPU:-0}                                       # host index of the RTX PRO 6000 (nvidia-smi -L)
+MODELS_DIR=${MODELS_DIR:-$IGNIS_ROOT/models/ignis}  # flat: the artifacts and their sidecars
+CACHE_DIR=${CACHE_DIR:-$IGNIS_ROOT/storage/cache}   # n-gram rows; local disk, not NFS
+CONTEXT=${CONTEXT:-262144}
+IDLE_UNLOAD=${IDLE_UNLOAD:-0}                       # seconds; 0 = never
+SPEC_TOKENS=${SPEC_TOKENS:-}                        # empty = the profile's DFlash2 7
+LANES=${LANES:-}                                    # empty = the profile's 8
+
+if [[ -n ${ABLITERATED:-} ]]; then
+  repo=$Q27A_REPO rev=$Q27A_REV artifact=$Q27A_ARTIFACT label='27B abliterated'
+else
+  repo=$Q27_REPO rev=$Q27_REV artifact=$Q27_ARTIFACT label=27B
+fi
+
+if [[ -z ${PRINT_CONFIG:-} ]]; then
+  refuse_busy "$PORT" vllm ignis
+  check_gpu "$GPU"
+  # The graft carries the DFlash2 drafter: the model card's own command fetches only the .ninfer,
+  # and the load is refused without it.
+  require_files "$MODELS_DIR" \
+    "$(hf_hint "$MODELS_DIR" "$repo" "$rev" "$artifact" "$artifact.graft.json")" \
+    "$artifact" "$artifact.graft.json"
+  owned_dir "$CACHE_DIR/ngram"   # KV-disk is off on the 27B by default: no kv-disk dir needed
+fi
+
+echo "## $label ($artifact @ ${rev:0:8}) on :$PORT as $SERVED — ignis $IGNIS_VERSION, profile rtxpro6000"
+ignis_launch "$artifact"

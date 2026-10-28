@@ -131,8 +131,9 @@ The first run pulls the pinned image if it is not local. The launcher refuses �
 | `PRINT_CONFIG` | — | `1` = `ignis-server config print` with the same flags, then exit |
 | `EXTRA_ARGS` | — | any `ignis-server` flags, appended last (last wins), e.g. `--model-loop-guard off` |
 
-- `./qwen38-27b/run` — the 27B on `:8700` (`ABLITERATED=1` for the abliterated weights)
-  *(Plan 01 T3)*.
+`./qwen38-27b/run` serves the 27B the same way, with the same knobs (`SPEC_TOKENS` is then
+DFlash2's, the profile's 7); `ABLITERATED=1 ./qwen38-27b/run` picks the abliterated weights, still
+served as `cosmo-6000`.
 
 Check it is up: `curl -s localhost:8700/ready` (200 once the model is loaded) and
 `curl -s localhost:8700/v1/models`.

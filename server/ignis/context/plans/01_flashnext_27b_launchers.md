@@ -448,7 +448,7 @@ file named in its row.
 
 - [x] T1: `DOCKER='sudo docker' bash -c 'source lib/common.sh'` → refusal, rc 1; `load_pins` prints the digest-pinned image; README has the three `hf download` commands; gate counts `1 b`, `env ok`
 - [x] T2: `./scripts/launcher-dryrun qwen38fn` → `dryrun ok` with every listed flag asserted and every refusal arm exiting 1; sandbox leaves nothing behind
-- [ ] T3: `./scripts/launcher-dryrun` → `dryrun ok` for both launchers, abliterated arm included
+- [x] T3: `./scripts/launcher-dryrun` → `dryrun ok` for both launchers, abliterated arm included
 - [ ] T4: pulled image digest == pin; both `PRINT_CONFIG=1` runs accepted; `/v1/models` → `['cosmo-6000']`; chat, tool call, include_usage, 404 for `claude-heavy`, proxy path all as stated — outputs pasted in Evidence
 - [ ] T5: 27B `/v1/models` → `['cosmo-6000']` and a chat reply; DFlash2 7 in the config
 - [ ] T6: Evidence holds ≥ 3 runs per cell for vLLM FP4-Local and Ignis, same session, with spread and capture names; the verdict uses "within noise" where it applies

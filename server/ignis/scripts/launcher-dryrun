@@ -4,7 +4,7 @@
 # would run. Nothing is pulled, started or loaded; no GPU is touched.
 #
 #   ./scripts/launcher-dryrun              # every launcher
-#   ./scripts/launcher-dryrun qwen38fn     # one launcher (its directory name)
+#   ./scripts/launcher-dryrun qwen38fn     # one launcher (its directory name: qwen38fn, qwen38-27b)
 #
 # Pass: the last line is `dryrun ok`. Every assertion prints `ok …` or `FAIL …`; any FAIL exits 1.
 # The sandbox (stubs, fake artifacts, cache dir) lives in mktemp and is removed on exit, so the
@@ -130,11 +130,29 @@ dryrun_qwen38fn() {
   common_arms "$FN_MTP"
 }
 
+dryrun_qwen38_27b() {
+  L=qwen38-27b
+  launch "$L"
+  common_checks
+  check --model-artifact "/models/$Q27_ARTIFACT"
+  common_arms "$Q27_ARTIFACT.graft.json"
+
+  # ABLITERATED=1: the other artifact, the same served id, its own download hint.
+  launch "$L" ABLITERATED=1
+  if (( RC == 0 )); then ok "$L: ABLITERATED=1 exits 0"; else fail "$L: ABLITERATED=1 rc $RC"; fi
+  check --model-artifact "/models/$Q27A_ARTIFACT"; check --model-id cosmo-6000
+  rm -f "$SANDBOX/models/$Q27A_ARTIFACT.graft.json"
+  launch "$L" ABLITERATED=1;        refused "a missing abliterated graft" "$Q27A_REPO"
+  fake_artifacts
+}
+
+# A launcher's directory name → its dryrun_ function (`-` is not portable in a function name).
 LAUNCHERS=("$@")
-(( ${#LAUNCHERS[@]} > 0 )) || LAUNCHERS=(qwen38fn)
+(( ${#LAUNCHERS[@]} > 0 )) || LAUNCHERS=(qwen38fn qwen38-27b)
 for L in "${LAUNCHERS[@]}"; do
-  if ! declare -F "dryrun_$L" >/dev/null; then fail "no dry-run for launcher '$L'"; continue; fi
-  "dryrun_$L"
+  fn=dryrun_${L//-/_}
+  if ! declare -F "$fn" >/dev/null; then fail "no dry-run for launcher '$L'"; continue; fi
+  "$fn"
 done
 
 if (( FAILS > 0 )); then echo "dryrun FAILED ($FAILS)"; exit 1; fi
