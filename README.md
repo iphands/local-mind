@@ -56,7 +56,10 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 .
 ├── bin/                        # Entry point scripts
 │   ├── opencode                # Launch the dev container
+│   ├── opencode2               # Launch the OpenCode 2 trial container (no omo/ocmonitor)
+│   ├── build-container-opencode-base  # Shared base image (ocli-base)
 │   ├── build-container-opencode
+│   ├── build-container-opencode2
 │   ├── model-holder            # Lock model files in memory
 │   ├── model-switcher          # Switch agent models
 │   ├── ocm                     # OpenCode model management
@@ -68,7 +71,8 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 │   └── README.md               # Full proxy documentation
 │
 ├── opencode/                   # Main dev environment
-│   ├── Dockerfile              # Fedora-based container
+│   ├── Dockerfile.base         # Fedora-based shared base (ocli-base)
+│   ├── Dockerfile              # OpenCode 1 + oh-my-opencode on ocli-base
 │   ├── container_data/
 │   │   └── config/opencode/
 │   │       ├── opencode.jsonc  # Provider & permission config
@@ -81,6 +85,9 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 │   │   └── model-switcher/     # Rust: TUI for switching models per agent
 │   ├── vendor/                 # Read-only reference: OpenCode & oh-my-opencode source
 │   └── plans/                  # Planning documents
+│
+├── opencode2/                  # OpenCode 2 trial: Dockerfile on ocli-base, own container_data
+│   └── bin/                    # In-container ~/bin: opencode joins the serve, opencode-serve runs it
 │
 ├── model-holder/               # Rust: mmap + mlock model files to prevent cache thrashing
 │

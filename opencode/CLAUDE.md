@@ -16,7 +16,8 @@ Containerized OpenCode development environment with multi-agent delegation using
 ├── prompts/               # Prompt templates
 ├── plans/                 # Planning documents
 ├── vendor/                # READ ONLY codebases you can use to understand opencode / oh-my-opencode (sorce code and docs!!)
-└── Dockerfile             # Fedora-based container with dev tools
+├── Dockerfile.base        # Fedora-based base with dev tools (ocli-base, shared with ../opencode2)
+└── Dockerfile             # OpenCode + oh-my-opencode + ocmonitor on ocli-base
 ```
 
 ## Understanding
