@@ -131,7 +131,8 @@ where an applicable step was skipped.
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and the launchers have no extension. Pass: no `FAIL` line, the
 counts below match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env`
-exists). **Expected counts: `1 b`** (Plan 01 T1: `lib/common.sh`). Bump the expected
+exists). **Expected counts: `2 b`, `1 j`** (Plan 01 T1: `lib/common.sh`; T2:
+`scripts/seccomp-profile`, `seccomp/ninfer.json`). Bump the expected
 numbers in this paragraph when a file is added or removed on purpose — a count that silently drops
 is the failure this step exists for.
 
@@ -175,13 +176,33 @@ git ls-files -z . | while IFS= read -r -d '' f; do
 done | xargs -0 -r shellcheck -x && echo 'shellcheck ok'
 ```
 
-**3–7. Behavioral steps — added by the Plan 01 task that creates what they check** (Rule A.5).
+**3. seccomp probe** (Plan 01 T2). Runs `io_uring_setup` (425) and `keyctl` (250) in a throwaway
+container under docker's default profile, `seccomp/ninfer.json`, and `unconfined`. `PROBE_IMAGE`
+defaults to the `../vllmcustom/container/.last-build` image (it has `python3`; the NInfer runtime
+image has none); `--network none`, nothing pulled. Pass: the last line is `seccomp ok` — default
+blocks both, ours allows io_uring and still blocks `keyctl`, and unconfined lets `keyctl` through
+(the negative control is live, not vacuous). Missing docker or probe image is **fail**.
+
+```bash
+PROBE_IMAGE=${PROBE_IMAGE:-$(. ../vllmcustom/container/.last-build && echo "$IMAGE:$VTAG")}
+P='import ctypes,os; L=ctypes.CDLL(None,use_errno=True); b=ctypes.create_string_buffer(120)
+r=L.syscall(425,8,b); print("uring", "ok" if r>=0 else os.strerror(ctypes.get_errno()))
+r=L.syscall(250,0,-3,0); print("keyctl", "ok" if r>=0 else os.strerror(ctypes.get_errno()))'
+g3() { docker run --rm --network none "$@" --entrypoint python3 "$PROBE_IMAGE" -I -c "$P" 2>&1 | tr '\n' ' '; }
+g3d=$(g3); g3n=$(g3 --security-opt "seccomp=$PWD/seccomp/ninfer.json"); g3u=$(g3 --security-opt seccomp=unconfined)
+printf '%-12s %s\n' default "$g3d" ninfer.json "$g3n" unconfined "$g3u"
+[[ $g3d == 'uring Operation not permitted keyctl Operation not permitted ' &&
+   $g3n == 'uring ok keyctl Operation not permitted ' &&
+   $g3u == 'uring ok keyctl '* && $g3u != *'keyctl Operation not permitted'* ]] \
+  && echo 'seccomp ok' || echo 'FAIL(seccomp)'
+```
+
+**4–7. Behavioral steps — added by the Plan 01 task that creates what they check** (Rule A.5).
 Each lands with its exact commands and pass condition in that task's commit; until then it does
 not exist, and nothing may claim it passed.
 
 | Step | Added by | Checks | Pass condition (to be made exact by that task) |
 |---|---|---|---|
-| 3 seccomp probe | Plan 01 T2 | `io_uring_setup` inside a container | `EPERM` under docker's default profile **and** success under `seccomp/ninfer.json`, and a syscall the default blocks stays blocked under ours |
 | 4 build preflight | Plan 01 T3 | `PREFLIGHT_ONLY=1 ./build` | pins resolve, `vendor/ninfer` is clean at `NINFER_SHA`, no build started |
 | 5 convert dry-run | Plan 01 T4 | `DRY_RUN=1 ./scripts/convert` on fake inputs | every refusal fires with its message; the printed `docker run` carries `--user 1000:1000` |
 | 6 launcher dry-run | Plan 01 T5 | `./run` against a stub `docker` | the emitted command carries `--user 1000:1000`, the seccomp profile, `--ulimit memlock=-1`, `-p …:8700`, the MTP flags; `DOCKER` naming sudo is refused (both arms) |

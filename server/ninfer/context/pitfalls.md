@@ -76,3 +76,23 @@ both issues on any pin bump.
 
 ## Sources
 - upstream: issues #399, #394; `docs/serving.md` § Endpoints, § Server options
+
+# moby's default seccomp profile is no longer at `profiles/seccomp/default.json`
+
+## Problem
+[OBSERVED 2026-10-27] Fetching
+`https://raw.githubusercontent.com/moby/moby/docker-v29.8.0/profiles/seccomp/default.json` (the
+path every older guide uses, and the one Plan 01 T2 was written against) returns **404**;
+`daemon/profiles/seccomp/default.json` too. Since docker v29 the profile lives in the separate
+`github.com/moby/profiles` module and is only *vendored* into moby, at
+`vendor/github.com/moby/profiles/seccomp/default.json`. Found with the GitHub trees API
+(`/repos/moby/moby/git/trees/<commit>?recursive=1`, filter on `seccomp`).
+
+## How to avoid
+`scripts/seccomp-profile` fetches the vendored path and fails loudly (`curl -f`) on a 404. On a
+docker upgrade, find the tag whose `^{}` commit equals `docker version --format
+'{{.Server.GitCommit}}'` (`git ls-remote --tags https://github.com/moby/moby | grep <ver>`), and
+if the download 404s again, search that commit's tree before guessing a path.
+
+## Sources
+- ninfer: `scripts/seccomp-profile` (`SRC_PATH`)

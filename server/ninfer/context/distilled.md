@@ -28,7 +28,11 @@ section**, which always stays last. Keep it dense.
   --entrypoint python3 <vllm image> -I -c '<libc.syscall(425, 8, buf)>'`, 1 run each, 2026-10-27.
   Host `kernel.io_uring_disabled` = `0`.
 - So every NInfer container runs under `seccomp/ninfer.json` (docker default + the three io_uring
-  syscalls, Plan 01 T2), never `unconfined`. io_uring registered buffers count against
+  syscalls, Plan 01 T2), never `unconfined`. [LIVE 2026-10-27] gate step 3 under ours:
+  `uring ok`, `keyctl` still `Operation not permitted` (unconfined: `keyctl ok`), 2 runs.
+- [REPO] docker 29.8.0 was cut from moby tag `docker-v29.8.0` (`^{}` = dockerd `GitCommit`
+  `3ce5872b`); at that tag the default profile is `vendor/github.com/moby/profiles/seccomp/default.json`
+  (sha256 `536529b6…`), **not** `profiles/seccomp/default.json` (404). io_uring registered buffers count against
   `RLIMIT_MEMLOCK` (`io_uring_register(2)` [DOC]), hence `--ulimit memlock=-1`.
 
 ## The converter's base must be the BF16 checkpoint; our NVFP4 one is its `nvidia` source [SOURCE][DOC]

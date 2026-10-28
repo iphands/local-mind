@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 8% complete (1/12 tasks)
+- Status: 17% complete (2/12 tasks)
 - Start date: 2026-10-27
 - Plan: `context/plans/01_flashnext_container.md`
 - Evidence: bench `--out` files and the conversion log under `captures/` (gitignored, P2); the
@@ -37,14 +37,15 @@
 - Is `ignore_eos` ignored or honored by NInfer's chat endpoint? (T9) — docs say "Unknown top-level
   fields are ignored" (`docs/serving.md:210` @ `64d10fbf`, found in T1); T9 still checks it live.
 - How long does the conversion take, and what does it peak at? (T7)
-- Which moby tag is docker 29.8.0's seccomp source? (T2)
+- ~~Which moby tag is docker 29.8.0's seccomp source? (T2)~~ RESOLVED (T2): `docker-v29.8.0`
+  (`docker-v29.8.0^{}` = `3ce5872b…` = the server's `GitCommit`).
 
 ## Progress
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 1 | T1: Pins, shared guards, README, `models`, knowledge seed | `versions.env`, `lib/common.sh`, `README.md`, `context/*` | done | Both sudo arms, blank and array `DOCKER`, and a missing binary → rc 1; both CUDA digests resolve; gate 1 `1 b` + `env ok`, gate 2 `shellcheck ok`. `MOBY_SECCOMP_REF` moved to T2 (see Notes). |
-| 2 | T2: seccomp profile — docker default + io_uring | `scripts/seccomp-profile`, `seccomp/ninfer.json` | pending | |
+| 2 | T2: seccomp profile — docker default + io_uring | `scripts/seccomp-profile`, `seccomp/ninfer.json` | done | Gate 3 `seccomp ok`: default blocks both, ours `uring ok` + `keyctl` blocked, unconfined `keyctl ok`. Regeneration byte-identical (sha256 ×3). Source path invalid as written (see Notes). |
 | 3 | T3: `Dockerfile` + `build` | `Dockerfile`, `build` | pending | |
 | 4 | T4: `scripts/convert` — conversion in a container | `scripts/convert` | pending | |
 | 5 | T5: `run` — the launcher | `run` | pending | |
@@ -67,6 +68,7 @@ provenance and cannot be cited by a later plan.
 | Date | What ran (command / build / input) | Result | Runs | Spread / notes |
 |------|------------------------------------|--------|------|----------------|
 | 2026-10-27 | io_uring probe: `docker run --rm --network none --entrypoint python3 iphands/vllm-blackwell:…g40fe396 -I -c '<syscall 425>'`, default profile vs `--security-opt seccomp=unconfined`, docker 29.8.0 | default `-1 Operation not permitted`; unconfined `3 ok` | 1 | planning probe (a fact, not a measurement) |
+| 2026-10-27 | T2 gate step 3 (`docker run --rm --network none … --entrypoint python3 <vllm …g40fe396> -I -c '<syscall 425, 250>'`), docker 29.8.0, profile `seccomp/ninfer.json` sha256 `0a369b29…` | default: uring + keyctl `Operation not permitted`; ninfer.json: `uring ok`, keyctl `Operation not permitted`; unconfined: `uring ok`, `keyctl ok` | 2 | a fact, not a measurement; identical on both gate runs |
 | 2026-10-27 | header probe of `models/vllm/nvidia/Qwen3.8-Flash-Next-NVFP4` and `…-FP4-Local` (python, headers only) | NVFP4: per-expert U8/F8/F32 experts, F8 block MTP experts, F8_E4M3 PLE + 1 BF16 scale, rest BF16. FP4-Local: CSF expert scales, MXFP8 dense, U8 NVFP4 PLE | 1 | planning probe |
 
 ## Notes / Deviations
@@ -83,6 +85,16 @@ provenance and cannot be cited by a later plan.
 - 2026-10-27 (T1): gate step 2 failed on the first run — SC2034 (`RUN_GID` unused: it is read by the
   scripts that source the lib) and SC1091 (a `source=` directive is cwd-relative without
   `source-path=SCRIPTDIR`). Both fixed in `lib/common.sh` before the commit.
+- 2026-10-27 (T2): **premise wrong — the plan's source path is invalid as written.**
+  `profiles/seccomp/default.json` is a 404 at `docker-v29.8.0` (`curl -w '%{http_code}'` → `404`,
+  and `daemon/profiles/seccomp/default.json` likewise); the tag's tree (GitHub trees API) has the
+  profile only at `vendor/github.com/moby/profiles/seccomp/default.json` — moby moved it to the
+  `github.com/moby/profiles` module. `scripts/seccomp-profile` uses the vendored path. Source
+  sha256 `536529b6…`, 13,470 B, one unconditional `SCMP_ACT_ALLOW` entry (361 names), `keyctl` in no
+  allow entry. The three names are appended (upstream's list is not in Python sort order).
+- 2026-10-27 (T2): gate step 2 failed once on SC2016 (Markdown backticks inside single quotes in the
+  README generator); fixed with a targeted directive. `MOBY_SECCOMP_REF` added to `versions.env`
+  and to `load_pins`' required list.
 
 ## Follow-ups
 

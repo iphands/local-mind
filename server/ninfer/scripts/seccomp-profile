@@ -1,0 +1,95 @@
+#!/usr/bin/env bash
+# Regenerate seccomp/ninfer.json + seccomp/README.md: docker's default seccomp profile at
+# MOBY_SECCOMP_REF (versions.env), plus the three io_uring syscalls NInfer's O_DIRECT reader needs
+# (src/core/io/read_queue.cpp:83 @ NINFER_SHA calls io_uring_queue_init, with no fallback).
+#
+# Deterministic: the same ref gives byte-identical output. Nothing else is widened.
+# After a docker upgrade, point MOBY_SECCOMP_REF at the tag the new dockerd was cut from (its
+# `docker version --format '{{.Server.GitCommit}}'` is that tag's commit) and re-run — a pin
+# change, so a plan (context/plans/RULES.md).
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+# Pins only: generating a profile needs no docker, so lib/common.sh (which probes it) is not sourced.
+# shellcheck source-path=SCRIPTDIR source=../versions.env
+source "$HERE/versions.env"
+: "${MOBY_SECCOMP_REF:?versions.env does not set MOBY_SECCOMP_REF}"
+if [[ $EUID == 0 ]]; then
+  echo "## run it as yourself; it writes into your checkout." >&2
+  exit 1
+fi
+
+# Since docker v29 the profile is vendored from github.com/moby/profiles; the old
+# profiles/seccomp/default.json path is a 404 at docker-v29.8.0.
+SRC_PATH=vendor/github.com/moby/profiles/seccomp/default.json
+URL="https://raw.githubusercontent.com/moby/moby/$MOBY_SECCOMP_REF/$SRC_PATH"
+ADD=(io_uring_setup io_uring_enter io_uring_register)
+
+tmp=$(mktemp -d)
+trap 'rm -rf "$tmp"' EXIT
+
+curl -fsSL --retry 2 -o "$tmp/default.json" "$URL" || {
+  echo "## download failed: $URL" >&2
+  exit 1
+}
+src_sha=$(sha256sum "$tmp/default.json")
+src_sha=${src_sha%% *}
+
+# Add ADD to the one unconditional SCMP_ACT_ALLOW entry (no args/includes/excludes). Refuse if any
+# of them already appears anywhere (upstream changed its mind — re-read before widening further),
+# or if there is not exactly one such entry (the profile's shape changed).
+python3 -I - "$tmp/default.json" "$tmp/ninfer.json" "${ADD[@]}" <<'PY'
+import json, sys
+src, dst, add = sys.argv[1], sys.argv[2], sys.argv[3:]
+prof = json.load(open(src))
+present = sorted({n for s in prof["syscalls"] for n in s["names"] if n in add})
+if present:
+    sys.exit(f"## refusing: {present} already appear in the source profile")
+uncond = [s for s in prof["syscalls"]
+          if s.get("action") == "SCMP_ACT_ALLOW"
+          and not s.get("args") and not s.get("includes") and not s.get("excludes")]
+if len(uncond) != 1:
+    sys.exit(f"## refusing: expected 1 unconditional SCMP_ACT_ALLOW entry, found {len(uncond)}")
+uncond[0]["names"].extend(add)
+with open(dst, "w") as f:
+    json.dump(prof, f, sort_keys=True, indent=2)
+    f.write("\n")
+PY
+
+out_sha=$(sha256sum "$tmp/ninfer.json")
+out_sha=${out_sha%% *}
+
+mkdir -p "$HERE/seccomp"
+# shellcheck disable=SC2016  # the backticks are Markdown, not an expansion
+added_md=$(printf -- '- `%s`\n' "${ADD[@]}")
+cat >"$tmp/README.md" <<EOF
+# seccomp/ — NInfer's syscall profile
+
+\`ninfer.json\` is **generated** by \`scripts/seccomp-profile\`; do not edit it by hand.
+
+It is docker's default seccomp profile plus exactly three syscalls, added to the profile's one
+unconditional \`SCMP_ACT_ALLOW\` entry:
+
+$added_md
+
+Why: NInfer reads model files \`O_DIRECT\` through io_uring (\`src/core/io/read_queue.cpp:83\`), with
+no fallback, and docker's default profile answers \`io_uring_setup\` with \`EPERM\`. The alternative,
+\`seccomp=unconfined\`, drops all filtering on a server bound to \`0.0.0.0\`.
+
+| | |
+|---|---|
+| Source | <$URL> |
+| Ref | \`$MOBY_SECCOMP_REF\` (\`MOBY_SECCOMP_REF\` in \`versions.env\`) |
+| Source sha256 | \`$src_sha\` |
+| \`ninfer.json\` sha256 | \`$out_sha\` |
+
+**Regenerate after a docker upgrade**: the profile is frozen at this ref while dockerd's built-in
+default moves with it. Set \`MOBY_SECCOMP_REF\` to the tag whose commit equals
+\`docker version --format '{{.Server.GitCommit}}'\` and run \`./scripts/seccomp-profile\`. Project gate
+step 3 (\`context/plans/RULES.md\`) proves the result: io_uring allowed, and a syscall the default
+blocks (\`keyctl\`) still blocked.
+EOF
+
+mv "$tmp/ninfer.json" "$HERE/seccomp/ninfer.json"
+mv "$tmp/README.md" "$HERE/seccomp/README.md"
+echo "seccomp/ninfer.json  $out_sha  (from $MOBY_SECCOMP_REF, source $src_sha)"

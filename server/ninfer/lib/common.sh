@@ -82,7 +82,8 @@ load_pins() {
   local k
   # shellcheck source-path=SCRIPTDIR source=../versions.env
   source "$NINFER_ROOT/versions.env"
-  for k in NINFER_REPO NINFER_SHA CUDA_DEVEL_IMAGE CUDA_RUNTIME_IMAGE IMAGE HF_BASE_REPO HF_BASE_REV; do
+  for k in NINFER_REPO NINFER_SHA CUDA_DEVEL_IMAGE CUDA_RUNTIME_IMAGE MOBY_SECCOMP_REF IMAGE \
+           HF_BASE_REPO HF_BASE_REV; do
     [[ -n ${!k:-} ]] || die "versions.env does not set $k."
   done
   return 0
