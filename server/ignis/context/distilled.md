@@ -71,6 +71,9 @@ the pinned image), read 2026-10-27.
   (`docs/user/guides/models.md:72`).
 - Each HF repo also ships a `<artifact>.sha256` in `sha256sum` binary format (`<hash> *<file>`)
   [LIVE 2026-10-27: fetched the 27B's].
+- For us: each HF repo in its own `models/vllm/<org>/<repo>/` (owner decision 2026-10-27); a
+  launcher mounts its model's directory at `/models:ro` and passes `--model-artifact /models/<file>`,
+  so the MTP companion / graft sits beside the artifact as the loader expects [REPO].
 
 ## The container and what it writes [SOURCE][DOC]
 

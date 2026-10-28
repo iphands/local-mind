@@ -194,7 +194,9 @@ hint), and `PRINT_CONFIG=1` (`config print` with the same field flags, no port, 
 while `:8700` is busy). Mutation-checked at Plan 01 T2 (2026-10-27): dropping
 `--switch-allow-implicit false`, the busy refusal or the GPU check, or moving `EXTRA_ARGS` off the
 end, each turns the run red; at T3, ignoring `ABLITERATED` or dropping the 27B's `.graft.json`
-requirement does too. Both launchers: 102 assertions.
+requirement does too. With `MODELS_DIR` unset each launcher must name its default
+`models/vllm/<org>/<repo>` (host-state independent: the echoed mount or the refusal); reverting
+that default turns it red. Both launchers: 105 assertions.
 
 ```bash
 ./scripts/launcher-dryrun

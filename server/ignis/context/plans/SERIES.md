@@ -83,7 +83,8 @@ doesn't know it failed.)*
   (`free -g`), GPU 0 = RTX PRO 6000 Blackwell Workstation, 97,887 MiB; GPU 1 = RTX 4060, 8,188 MiB,
   **never used here** — Ignis picks a profile from the card it sees, so the container sees GPU 0
   only. Driver 615.78.08 (`nvidia-smi`). Models tree `/mnt/noir/scratch/ai/llm/models` on NFS 4.2
-  (`findmnt`), holding `comfy/`, `gguf/`, `vllm/` and no Ignis artifacts yet.
+  (`findmnt`), holding `comfy/`, `gguf/`, `vllm/`. Ignis weights go in `models/vllm/<org>/<repo>/`
+  (owner decision 2026-10-27); Flash-Next is there since 2026-10-27.
 
 ---
 

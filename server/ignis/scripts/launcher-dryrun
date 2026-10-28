@@ -79,6 +79,18 @@ refused() {   # refused <description> <message substring>
   else fail "$L: $1 → rc $RC, no '$2' or docker run reached"; sed 's/^/     | /' "$OUT"; fi
 }
 
+# default_dir <dir> [VAR=value...] — with MODELS_DIR unset the launcher picks its own default,
+# models/vllm/<repo> (owner decision 2026-10-27). Host-state independent: whether or not the
+# owner's files are there, the output names the directory — the echoed `-v` mount when the run
+# reaches docker, the "missing in" line when it refuses.
+default_dir() {
+  local want=$1
+  shift
+  launch "$L" MODELS_DIR= "$@"
+  if grep -qF -- "$want" "$OUT"; then ok "$L: default MODELS_DIR ${want#"$ROOT"/}${*:+ ($*)}"
+  else fail "$L: default MODELS_DIR is not $want${*:+ ($*)}"; sed 's/^/     | /' "$OUT"; fi
+}
+
 # The flags every launcher shares (lib/common.sh ignis_launch), on a default run.
 common_checks() {
   if (( RC == 0 )); then ok "$L: default run exits 0"; else fail "$L: default run rc $RC"; sed 's/^/     | /' "$OUT"; fi
@@ -127,6 +139,7 @@ dryrun_qwen38fn() {
   launch "$L"
   common_checks
   check --model-artifact "/models/$FN_ARTIFACT"
+  default_dir "$ROOT/models/vllm/$FN_REPO"
   common_arms "$FN_MTP"
 }
 
@@ -135,6 +148,8 @@ dryrun_qwen38_27b() {
   launch "$L"
   common_checks
   check --model-artifact "/models/$Q27_ARTIFACT"
+  default_dir "$ROOT/models/vllm/$Q27_REPO"
+  default_dir "$ROOT/models/vllm/$Q27A_REPO" ABLITERATED=1
   common_arms "$Q27_ARTIFACT.graft.json"
 
   # ABLITERATED=1: the other artifact, the same served id, its own download hint.

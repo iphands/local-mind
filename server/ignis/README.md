@@ -22,8 +22,9 @@ on a Server Edition PRO 6000) are theirs, not ours.
   in RAM when ~37 GB is available (~9 GB is the minimum). The 27B pins its 1.35 GB token
   embedding, 3.72 GB of retained slots and the 2 GiB KV-RAM arena, and keeps a 4 GiB margin:
   ~12 GB available (arithmetic over upstream's `docs/user/configuration/host-ram.md`).
-- `models` → `/mnt/noir/scratch/ai/llm/models` (the siblings' model tree); the Ignis artifacts
-  live flat in `models/ignis/`.
+- `models` → `/mnt/noir/scratch/ai/llm/models` (the siblings' model tree). Each Ignis weights
+  repo lives in its own `models/vllm/<org>/<repo>/`, the layout `../vllmcustom` uses; each launcher
+  mounts its model's directory read-only.
 - **One server on `:8700` at a time**: stop vLLM first (`docker stop vllm`). Both want the whole
   card.
 
@@ -42,10 +43,12 @@ Hugging Face token is needed.
 Flash-Next's license asks for a separate Qwen license only for "Model-as-a-Service" / "AI Work
 Assistant" businesses; internal use is exempt.
 
-Create the directory as yourself first — `docker` would create a missing bind source as root:
+Create the directories as yourself first — `docker` would create a missing bind source as root:
 
 ```bash
-mkdir -p models/ignis
+mkdir -p models/vllm/gpillon/Qwen3.8-Flash-Next-trellis-a25-ignis \
+         models/vllm/gpillon/Qwen3.8-27B-nvfp4full-dflash2-NInfer \
+         models/vllm/gpillon/Qwen3.8-27B-nvfp4full-dflash2-abliterated-NInfer
 ```
 
 ### Form 1 — through the Ignis image (recommended: verifies every file)
@@ -56,12 +59,12 @@ no GPU.
 
 ```bash
 IMG=$(. ./versions.env && echo "$IGNIS_IMAGE")
-docker run --rm --user 1000:1000 -e HOME=/tmp -v "$PWD/models/ignis:/models" "$IMG" \
+docker run --rm --user 1000:1000 -e HOME=/tmp -v "$PWD/models/vllm/gpillon/Qwen3.8-Flash-Next-trellis-a25-ignis:/models" "$IMG" \
   model download qwen3.8-flash-next --out /models
-docker run --rm --user 1000:1000 -e HOME=/tmp -v "$PWD/models/ignis:/models" "$IMG" \
+docker run --rm --user 1000:1000 -e HOME=/tmp -v "$PWD/models/vllm/gpillon/Qwen3.8-27B-nvfp4full-dflash2-NInfer:/models" "$IMG" \
   model download qwen3.8-27b --out /models
 # optional:
-docker run --rm --user 1000:1000 -e HOME=/tmp -v "$PWD/models/ignis:/models" "$IMG" \
+docker run --rm --user 1000:1000 -e HOME=/tmp -v "$PWD/models/vllm/gpillon/Qwen3.8-27B-nvfp4full-dflash2-abliterated-NInfer:/models" "$IMG" \
   model download qwen3.8-27b-abliterated --out /models
 ```
 
@@ -75,7 +78,7 @@ does not depend on either tool's `--include` syntax; each repo ships a `.sha256`
 ```bash
 # Flash-Next (67.80 GiB)
 hf download gpillon/Qwen3.8-Flash-Next-trellis-a25-ignis \
-  --revision 8d94db83cd8e58d6be31e796723e5e35b960638c --local-dir models/ignis \
+  --revision 8d94db83cd8e58d6be31e796723e5e35b960638c --local-dir models/vllm/gpillon/Qwen3.8-Flash-Next-trellis-a25-ignis \
   qwen3_8_flash_next_trellis_a25-v2.ninfer qwen3_8_flash_next_trellis_a25-v2.ninfer.conversion.json \
   qwen3_8_flash_next_trellis_a25-v2.ninfer.sha256 \
   qwen3_8_flash_next_mtp_3p0-v2.ninfer qwen3_8_flash_next_mtp_3p0-v2.ninfer.conversion.json \
@@ -83,23 +86,24 @@ hf download gpillon/Qwen3.8-Flash-Next-trellis-a25-ignis \
 
 # 27B (18.07 GiB)
 hf download gpillon/Qwen3.8-27B-nvfp4full-dflash2-NInfer \
-  --revision e961b419b672e183aa55df8c4b975abc82006e8a --local-dir models/ignis \
+  --revision e961b419b672e183aa55df8c4b975abc82006e8a --local-dir models/vllm/gpillon/Qwen3.8-27B-nvfp4full-dflash2-NInfer \
   qwen3_8_27b_nvfp4full-v2.ninfer qwen3_8_27b_nvfp4full-v2.ninfer.graft.json \
   qwen3_8_27b_nvfp4full-v2.ninfer.sha256
 
 # 27B abliterated (optional, 18.07 GiB)
 hf download gpillon/Qwen3.8-27B-nvfp4full-dflash2-abliterated-NInfer \
-  --revision ef3216949e42c42fc713feffb2e05849d57f0f3b --local-dir models/ignis \
+  --revision ef3216949e42c42fc713feffb2e05849d57f0f3b --local-dir models/vllm/gpillon/Qwen3.8-27B-nvfp4full-dflash2-abliterated-NInfer \
   qwen3_8_27b_nvfp4full-v2-huihui-abliterated.ninfer \
   qwen3_8_27b_nvfp4full-v2-huihui-abliterated.ninfer.graft.json \
   qwen3_8_27b_nvfp4full-v2-huihui-abliterated.ninfer.sha256
 
-# verify (reads every byte — minutes on NFS)
-(cd models/ignis && sha256sum -c ./*.sha256)
+# verify (reads every byte — minutes on NFS), per directory:
+(cd models/vllm/gpillon/Qwen3.8-Flash-Next-trellis-a25-ignis && sha256sum -c ./*.sha256)
 ```
 
-`hf download --local-dir` also leaves a `.cache/huggingface/` directory inside `models/ignis/`;
-it is harmless.
+`hf download --local-dir` also leaves a `.cache/huggingface/` directory inside each `--local-dir`;
+it is harmless. Downloading the whole repo (its `LICENSE` and `README.md` too) is fine: the
+launchers only require the artifact files and their sidecars.
 
 ## Serve
 
@@ -121,7 +125,7 @@ The first run pulls the pinned image if it is not local. The launcher refuses �
 | `PORT` | `8700` | host port (the container listens on 8000) |
 | `SERVED` | `cosmo-6000` | the one model id served |
 | `GPU` | `0` | host index of the RTX PRO 6000 (`nvidia-smi -L`) |
-| `MODELS_DIR` | `models/ignis` | the flat artifact directory, mounted read-only |
+| `MODELS_DIR` | `models/vllm/<repo>` | the model's repo directory (artifacts + sidecars), mounted read-only |
 | `CACHE_DIR` | `storage/cache` | n-gram rows + KV-disk (local disk, not NFS) |
 | `CONTEXT` | `262144` | the native context: no YaRN. `1048576` is the profile's (YaRN x4 on every request) |
 | `IDLE_UNLOAD` | `0` | seconds idle before unloading; `0` never (Ignis's own default is 300) |
@@ -149,7 +153,7 @@ a request with no `model` is served by the loaded model.
 |---|---|
 | `versions.env` | every pin: the image by tag and digest, its source commit, the HF repos, revisions and artifact names |
 | `lib/common.sh` | shared guards (DOCKER/sudo/root/socket) and refusals (busy port, wrong GPU, missing files), sourced by every script |
-| `models` | symlink to the shared model tree; the artifacts go in `models/ignis/` |
+| `models` | symlink to the shared model tree; each weights repo in `models/vllm/<org>/<repo>/` |
 | `storage/` | the launchers' writable cache (n-gram rows, KV-disk) — gitignored |
 | `captures/` | bench output and logs — gitignored |
 | `context/` | the project's knowledge base and plans (`context/plans/RULES.md` governs work) |

@@ -45,7 +45,7 @@
 | 1 | T1: Pins, shared guards, models link, README download how-to | `versions.env`, `lib/common.sh`, `README.md` | done | sudo refusal rc 1 (word and path); pins load; 4 `hf download` commands; `require_files` hint verified. `hf`/`huggingface-cli` not installed here — README says how. |
 | 2 | T2: `qwen38fn/run` + launcher dry-run (gate step 4) | `qwen38fn/run`, `scripts/launcher-dryrun` | done | 48 assertions `ok`, `dryrun ok`; 4 mutations each caught; `PRINT_CONFIG` = `config print` (opens no artifact, `cli.rs:177-196`). General flags used: explicit beats profile (`source.rs:431-476`). |
 | 3 | T3: `qwen38-27b/run` | `qwen38-27b/run` | done | `./scripts/launcher-dryrun` 102 `ok` over both launchers, `dryrun ok`; `ABLITERATED` and `.graft.json` mutations each caught. `--kv-disk-path` kept (Models: all; the 27B's tier is off by default), only `ngram/` created. |
-| 4 | T4: Flash-Next first boot and smoke (owner) | runtime | pending | |
+| 4 | T4: Flash-Next first boot and smoke (owner) | runtime | pending | Weights downloaded by the owner 2026-10-27 into `models/vllm/gpillon/Qwen3.8-Flash-Next-trellis-a25-ignis/`, sizes == catalog (Evidence). Next: `PRINT_CONFIG=1`, `docker stop vllm`, boot, smoke. |
 | 5 | T5: 27B first boot and smoke (owner) | runtime | pending | |
 | 6 | T6: Same-session bench, Ignis vs vLLM FP4-Local (owner) | runtime, `captures/` | pending | |
 
@@ -59,12 +59,21 @@ provenance and cannot be cited by a later plan.
 
 | Date | What ran (command / build / input) | Result | Runs | Spread / notes |
 |------|------------------------------------|--------|------|----------------|
+| 2026-10-27 | owner's Flash-Next download; `stat -c '%s'` on the four files in `models/vllm/gpillon/Qwen3.8-Flash-Next-trellis-a25-ignis/` | trellis 71,760,711,680 · MTP 1,037,905,920 · conversion.json 1,183,942 / 179,029 B — all == `catalog.yaml:46-49` at v0.8.0; no `.part` files | 1 | a size check, not a hash: `sha256sum -c` not run (68 GiB over NFS) |
+| 2026-10-27 | `./qwen38fn/run` with stub `docker`/`nvidia-smi` on the real weights dir | passes `require_files`; would mount `…/models/vllm/gpillon/Qwen3.8-Flash-Next-trellis-a25-ignis:/models:ro` | 1 | no container started |
 
 ## Notes / Deviations
 
 <!-- Anything the plan asserted that turned out to be wrong, and what was done instead
      (Rule E). Negative and inconclusive results too. Be blunt — a wrong Key Fact
      recorded honestly is worth more than a clean-looking tracker. -->
+
+- **2026-10-27, after T3 — layout changed by the owner.** The plan (T1) put every artifact flat in
+  `models/ignis/`; the owner downloaded Flash-Next to `models/vllm/gpillon/Qwen3.8-Flash-Next-trellis-a25-ignis/`
+  (the whole repo: `LICENSE`, `README.md`, the artifacts, sidecars and `.sha256`) and directed one
+  directory per HF repo under `models/vllm/`, as `../vllmcustom` does. Both launchers now default
+  `MODELS_DIR` to `models/vllm/<repo>` (the 27B's follows `ABLITERATED`), the README's download
+  commands target those directories, and the dry-run asserts the default. Plan `Revised` line added.
 
 ## Follow-ups
 

@@ -2,6 +2,7 @@
 
 > **Status**: in-progress
 > **Created**: 2026-10-27
+> **Revised**: 2026-10-27 — weights live in `models/vllm/<org>/<repo>/`, one directory per HF repo (owner decision, after T3), not flat in `models/ignis/`; each launcher defaults `MODELS_DIR` to its model's repo directory.
 > **Depends on**: N/A
 > **Goal**: `./qwen38fn/run` serves Qwen3.8-Flash-Next and `./qwen38-27b/run` serves the Qwen3.8-27B through the pinned upstream Ignis 0.8.0 image on `:8700` as `cosmo-6000`, with the README saying how to download the weights, and a same-session bench against vLLM FP4-Local recorded.
 > **Agent**: implementation agent
@@ -180,15 +181,15 @@ the bench.
   README's exact download command for that model), `check_gpu` (`nvidia-smi -i "$GPU"
   --query-gpu=name` must contain `RTX PRO 6000`: the profile is pinned to that card),
   `ignis_launch` (below, filled in T2). Every function ends in `return 0`.
-- `models` → `/mnt/noir/scratch/ai/llm/models` (the siblings' tree). Artifacts live flat in
-  `models/ignis/` (created by the owner's download, T4).
+- `models` → `/mnt/noir/scratch/ai/llm/models` (the siblings' tree). Artifacts live in
+  `models/vllm/<org>/<repo>/`, one directory per HF repo (revised 2026-10-27; was flat `models/ignis/`).
 - `.gitignore`: add `/storage/` (the cache directory, T2).
 - `README.md`: what this is; prerequisites (docker as yourself, GPU 0 = PRO 6000, ~37 GB free RAM
   for Flash-Next's n-gram table, one server on `:8700`: `docker stop vllm` first); **Download the
   weights** — both forms, pinned revisions, all four files for Flash-Next and both files for the
   27B (`hf download <repo> --revision <rev> --include '*.ninfer' '*.json' --local-dir
-  models/ignis`, and the container form `docker run --rm --user 1000:1000 -v
-  "$PWD/models/ignis:/models" "$IGNIS_IMAGE" model download qwen3.8-flash-next --out /models`),
+  models/vllm/<repo>`, and the container form `docker run --rm --user 1000:1000 -v
+  "$PWD/models/vllm/<repo>:/models" "$IGNIS_IMAGE" model download qwen3.8-flash-next --out /models`),
   sizes, licenses (Qwen Community License 1.0 for Flash-Next; apache-2.0 for the 27B; the
   abliterated one does not refuse), and "agents never run these"; the run commands (T2/T3 fill);
   the one-served-name note (only `cosmo-6000`; the other vLLM names 404).
@@ -229,7 +230,7 @@ before marking done (Rule B), tracker row in the same commit.*
 **What to do**: `qwen38fn/run` sources `lib/common.sh`, loads pins, then:
 
 - Env knobs (defaults): `PORT=8700`, `SERVED=cosmo-6000`, `GPU=0`,
-  `MODELS_DIR=$ROOT/models/ignis`, `CACHE_DIR=$ROOT/storage/cache`, `CONTEXT=262144`,
+  `MODELS_DIR=$ROOT/models/vllm/$FN_REPO` (revised; was `models/ignis`), `CACHE_DIR=$ROOT/storage/cache`, `CONTEXT=262144`,
   `IDLE_UNLOAD=0`, `SPEC_TOKENS=` (empty = the profile's 3), `LANES=` (empty = the profile's 8),
   `DETACH=` (`-d` when set, `-it` otherwise, like vllmcustom), `PRINT_CONFIG=` (1 = run
   `config print --format yaml` with the same field flags instead of serving — no model load),

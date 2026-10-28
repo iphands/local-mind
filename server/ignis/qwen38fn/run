@@ -30,7 +30,7 @@ load_pins
 PORT=${PORT:-8700}
 SERVED=${SERVED:-cosmo-6000}
 GPU=${GPU:-0}                                       # host index of the RTX PRO 6000 (nvidia-smi -L)
-MODELS_DIR=${MODELS_DIR:-$IGNIS_ROOT/models/ignis}  # flat: the artifacts and their sidecars
+MODELS_DIR=${MODELS_DIR:-$IGNIS_ROOT/models/vllm/$FN_REPO}  # one dir per HF repo: the artifacts + sidecars
 CACHE_DIR=${CACHE_DIR:-$IGNIS_ROOT/storage/cache}   # n-gram rows + KV-disk; local disk, not NFS
 CONTEXT=${CONTEXT:-262144}
 IDLE_UNLOAD=${IDLE_UNLOAD:-0}                       # seconds; 0 = never
