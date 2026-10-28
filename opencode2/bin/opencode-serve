@@ -1,0 +1,122 @@
+#!/bin/bash
+# ~/bin/opencode-serve inside the ocli2 container: the `opencode serve` that ~/bin/opencode joins.
+#
+#   OPENCODE_SERVE_HOST / OPENCODE_SERVE_PORT   bind address and port (default 0.0.0.0 / 8080)
+#   OPENCODE_PASSWORD                           reused if set, else a random one is generated
+#
+# The password lands in the serve's own environment, which is what ~/bin/opencode reads back
+# from /proc, so clients need nothing exported.
+set -e
+
+BIN=/home/iphands/.opencode/bin/opencode
+HOST=${OPENCODE_SERVE_HOST:-0.0.0.0}
+PORT=${OPENCODE_SERVE_PORT:-8080}
+URL="http://127.0.0.1:$PORT"
+DIR=${XDG_STATE_HOME:-$HOME/.local/state}/opencode/serve
+PIDFILE=$DIR/serve-$PORT.pid
+LOG=$DIR/serve-$PORT.log
+
+mkdir -p "$DIR"
+
+# Our own serve processes: matched on the exact argv we launch, so the self-started
+# `serve --service` background service is never touched
+pids() {
+  pgrep -f "opencode serve --hostname $HOST --port $PORT" 2>/dev/null | while read -r p; do
+    [ "$p" = "$$" ] && continue
+    tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null | grep -q -- '--service' && continue
+    echo "$p"
+  done
+}
+
+up() { curl -s -m 2 -o /dev/null "$URL/api/info"; }
+
+# Pick up the password from a serve that is already running (its own environment wins over a
+# stale one in this shell); leaves OPENCODE_PASSWORD alone when nothing is running
+ensure_password() {
+  p=$(pids | head -1)
+  if [ -n "$p" ]; then
+    pw=$(tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | sed -n 's/^OPENCODE_PASSWORD=//p')
+    if [ -n "$pw" ]; then
+      export OPENCODE_PASSWORD="$pw"
+      return 0
+    fi
+  fi
+  return 0
+}
+
+case "${1:-status}" in
+  start)
+    running=$(pids | head -1)
+    if [ -n "$running" ] || up; then
+      echo "already serving on $URL (pid ${running:-started elsewhere}); use stop or restart"
+      exit 1
+    fi
+
+    ensure_password
+    [ -n "${OPENCODE_PASSWORD:-}" ] || OPENCODE_PASSWORD=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+    export OPENCODE_PASSWORD
+
+    nohup "$BIN" serve --hostname "$HOST" --port "$PORT" >"$LOG" 2>&1 &
+    pid=$!
+    echo "$pid" >"$PIDFILE"
+
+    for _ in $(seq 20); do
+      if up; then break; fi
+      sleep 0.5
+    done
+    if ! up; then
+      echo "failed to come up on $URL; last lines of $LOG:"
+      tail -20 "$LOG"
+      rm -f "$PIDFILE"
+      exit 1
+    fi
+
+    echo "serving $URL (pid $pid, bind $HOST:$PORT)"
+    echo "log: $LOG"
+    ;;
+
+  stop)
+    running=$(pids | head -1)
+    if [ -z "$running" ]; then
+      echo "not serving on $URL"
+      rm -f "$PIDFILE"
+      exit 0
+    fi
+    kill "$running" 2>/dev/null || true
+    for _ in $(seq 20); do
+      kill -0 "$running" 2>/dev/null || break
+      sleep 0.5
+    done
+    kill -0 "$running" 2>/dev/null && kill -9 "$running" 2>/dev/null || true
+    rm -f "$PIDFILE"
+    echo "stopped $running"
+    ;;
+
+  restart)
+    "$0" stop
+    "$0" start
+    ;;
+
+  logs)
+    [ -f "$LOG" ] && tail -n "${2:-50}" "$LOG" || echo "no log yet at $LOG"
+    ;;
+
+  status)
+    if running=$(pids | head -1) && [ -n "$running" ]; then
+      echo "serving $URL (pid $running, bind $HOST:$PORT)"
+      echo "log: $LOG"
+      ensure_password
+      "$BIN" --server "$URL" api get /api/info 2>&1 | head -c 400
+      echo
+    elif up; then
+      echo "something answers $URL but not as \`serve --hostname $HOST --port $PORT\` (not ours)"
+    else
+      echo "not serving on $URL"
+    fi
+    ;;
+
+  *)
+    echo "usage: ${0##*/} [start|stop|restart|status|logs [n]]"
+    exit 2
+    ;;
+esac

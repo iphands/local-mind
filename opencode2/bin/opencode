@@ -1,0 +1,42 @@
+#!/bin/bash
+# ~/bin/opencode inside the ocli2 container: join the container's `opencode serve` instead of
+# the shared background service (a bare `opencode` otherwise discovers
+# ~/.local/state/opencode/service.json, which is the self-started `serve --service`).
+#
+#   OPENCODE_SERVER_URL   where to connect   (default http://127.0.0.1:8080)
+#   OPENCODE_PASSWORD     taken from the running serve's env when unset
+#
+# Escape hatches: ~/bin/opencode2 is the raw binary, and --standalone/--server bypass this wrapper.
+set -e
+
+BIN=/home/iphands/.opencode/bin/opencode
+URL=${OPENCODE_SERVER_URL:-http://127.0.0.1:8080}
+
+# Leave alone what already picks its own server, or what runs one itself
+case " $* " in
+  *" --server "*|*" --server="*|*" --standalone "*) exec "$BIN" "$@" ;;
+esac
+case "${1:-}" in
+  serve|acp|service|upgrade|uninstall) exec "$BIN" "$@" ;;
+esac
+
+# Anything answering HTTP on $URL counts as up; /api/info answers 401 without a password
+if ! curl -fsS -m 2 -o /dev/null "$URL/api/info" 2>/dev/null &&
+   ! curl -s -m 2 -o /dev/null "$URL/api/info" 2>/dev/null; then
+  echo "opencode: nothing serving $URL, using the background service" >&2
+  exec "$BIN" "$@"
+fi
+
+# The serve answering $URL owns the password; its environment is the only trustworthy source
+# (a stale OPENCODE_PASSWORD in this shell would otherwise be "rejected")
+port=${URL##*:}
+for p in $(pgrep -f 'opencode serve' 2>/dev/null); do
+  case " $(tr '\0' ' ' <"/proc/$p/cmdline" 2>/dev/null) " in
+    *" --port $port "*)
+      pw=$(tr '\0' '\n' <"/proc/$p/environ" 2>/dev/null | sed -n 's/^OPENCODE_PASSWORD=//p')
+      [ -n "$pw" ] && export OPENCODE_PASSWORD="$pw"
+      break ;;
+  esac
+done
+
+exec "$BIN" --server "$URL" "$@"

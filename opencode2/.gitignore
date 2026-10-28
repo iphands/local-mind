@@ -1,0 +1,7 @@
+/container_data/local
+/container_data/cache
+/container_data/.bash_history
+# runtime service registration (holds the serve password)
+/container_data/config/opencode/service.json
+# serve / web UI password, written on first run
+/container_data/.opencode-password

@@ -1,0 +1,10 @@
+#!/bin/bash
+ROOT=`git rev-parse --show-toplevel`
+
+# Container runtime: docker if present, else podman (override with CONTAINER_RUNTIME)
+CRT=${CONTAINER_RUNTIME:-$(command -v docker >/dev/null 2>&1 && echo docker || echo podman)}
+
+${ROOT}/bin/build-container-opencode-base || exit 1
+
+cd "${ROOT}/opencode2" || exit 1
+${CRT} build -t ocli2 .

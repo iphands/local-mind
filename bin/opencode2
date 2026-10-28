@@ -1,0 +1,77 @@
+#!/bin/bash
+set -e
+ROOT=`git rev-parse --show-toplevel`
+
+# Container runtime: docker if present, else podman (override with CONTAINER_RUNTIME)
+CRT=${CONTAINER_RUNTIME:-$(command -v docker >/dev/null 2>&1 && echo docker || echo podman)}
+
+${ROOT}/bin/build-container-opencode2 || {
+  echo "BUILD FAILED"
+  exit 1
+}
+
+cd "${ROOT}/opencode2"
+
+# Own container_data: v2 reads ~/.config/opencode too, but its config schema differs from v1
+DATA=${ROOT}/opencode2/container_data
+# Precreate so docker doesn't make them root-owned (or .bash_history a dir)
+mkdir -p ${DATA}/config ${DATA}/cache ${DATA}/local
+touch ${DATA}/.bash_history
+
+# Server password for opencode serve and the web UI (username is fixed: opencode).
+# Never commit it: env OPENCODE_PASSWORD wins, else container_data/.opencode-password,
+# which is generated once on first run.
+PW_FILE=${DATA}/.opencode-password
+if [ -z "${OPENCODE_PASSWORD:-}" ]; then
+  if [ -s "$PW_FILE" ]; then
+    OPENCODE_PASSWORD=$(tr -d '\n\r' < "$PW_FILE")
+  else
+    OPENCODE_PASSWORD=$(head -c 24 /dev/urandom | base64 | tr -d '/+=')
+    (umask 077; printf '%s\n' "$OPENCODE_PASSWORD" > "$PW_FILE")
+    echo "generated server password, stored in $PW_FILE"
+  fi
+fi
+
+# Host port 8082 so it can run next to ./bin/opencode (8080)
+CONTAINER_ARGS=(
+  --name opencode2
+  --user 1000:1000
+  -e HOSTNAME=opencode2
+  -e OPENCODE_PASSWORD="$OPENCODE_PASSWORD"
+  -p 0.0.0.0:8082:8080
+  -v ${DATA}/config:/home/iphands/.config:rw
+  -v ${DATA}/cache:/home/iphands/.cache:rw
+  -v ${DATA}/local:/home/iphands/.local:rw
+  -v ${DATA}/.bash_history:/home/iphands/.bash_history:rw
+  -v ${HOME}/prog:/home/iphands/prog:rw
+  -v ${HOME}/.gitignore:/home/iphands/.gitignore:ro
+  -v ${HOME}/.claude/skills:/home/iphands/.claude/skills:ro
+
+  --device /dev/dri
+  -e DISPLAY=$DISPLAY
+  -e XDG_RUNTIME_DIR=$XDG_RUNTIME_DIR
+  -e WAYLAND_DISPLAY=$WAYLAND_DISPLAY
+  -v $XDG_RUNTIME_DIR/$WAYLAND_DISPLAY:$XDG_RUNTIME_DIR/$WAYLAND_DISPLAY
+)
+
+# Optional host mounts: only if the source exists (podman errors on missing paths)
+for m in \
+  /mnt/noir/scratch:/mnt/noir/scratch:ro \
+  /mnt/noir/scratch/ai:/ai:ro \
+  /mnt/noir/scratch/ai/data/scratch:/scratch:rw \
+  /mnt/noir/scratch/relocate:/mnt/noir/scratch/relocate:rw \
+  /mnt/noir/scratch/ai/vllm:/mnt/noir/scratch/ai/vllm:rw
+do
+  [ -e "${m%%:*}" ] && CONTAINER_ARGS+=(-v "$m")
+done
+
+if [ "$CRT" = docker ]; then
+  CONTAINER_ARGS+=(-v /run/docker.sock:/var/run/docker.sock:rw --gpus all)
+else
+  # rootless podman: keep host uid mapping, skip SELinux relabel issues
+  CONTAINER_ARGS+=(--userns=keep-id --security-opt label=disable)
+  PSOCK=${XDG_RUNTIME_DIR}/podman/podman.sock
+  [ -S "$PSOCK" ] && CONTAINER_ARGS+=(-v "$PSOCK:/var/run/docker.sock:rw")
+fi
+
+${CRT} run --rm -it "${CONTAINER_ARGS[@]}" ocli2
