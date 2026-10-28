@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `02`.** <!-- hp:next-free -->
+**Next free plan number: `03`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-10-27):** the fastest single-stream decode of
 > Qwen3.8-Flash-Next on the one RTX PRO 6000 (sm_120) through NInfer — source-built and pinned in
@@ -34,6 +34,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
 | 01 | NInfer Flash-Next: pinned sm_120a image, containerized conversion, `./run`, measured | — | in-progress | Wave 1 scripts (agent); then owner builds, downloads BF16 base, converts, boots; A/B vs vLLM FP4-Local picks the defaults. |
+| 02 | `./run` profile for Qwen3.8-27B NVFP4 (neroued's published artifact) | 01 T5 (boot: 01 T6) | pending | `MODEL=27b` profile + manifest-aware identity check; owner boots once Plan 01's image exists. |
 
 <!-- Add these sections when they earn their place:
 
