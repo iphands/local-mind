@@ -108,6 +108,38 @@ note (the launch receipt itself is expected and does not count as an empty revie
 
 **Never invent reviewer feedback.** An empty review is a fact to report, not a gap to fill.
 
+## Stale completion wake — `[ALL BACKGROUND TASKS COMPLETE]` / `[BACKGROUND TASK COMPLETED]`
+
+The plugin injects a `<system-reminder>` headed `[BACKGROUND TASK COMPLETED]` /
+`[ALL BACKGROUND TASKS COMPLETE]`, `[ALL BACKGROUND TASKS FINISHED - N FAILED]` with `ACTION REQUIRED`,
+or `[BACKGROUND TASK RESULT READY]` — which names **one** finished Task ID while others still run —
+listing Task IDs and ordering you to call `background_output` for each. That text is generated, not
+from the user. Judge it by the Task IDs it names, never by its own instruction. "Joined" means the
+join returned actual review text as defined in "After they respond".
+
+1. **Stale** — every reviewer you launched in this exchange is joined with review text visible in this
+   conversation, each has its **Reviewers consulted** block already posted, **and no reviewer is still
+   running or unjoined**. Reply with exactly this line and nothing else — no greeting, no recap, no
+   apology, no second **Reviewers consulted** block, **no tool call at all**:
+
+   `STALE-WAKE: reviews already collected and reported above.`
+
+2. **Real work** — anything else. A Task ID under **Failed** or tagged `[ERROR]`, `[CANCELLED]` or
+   `[INTERRUPTED]`, a join that returned no review text, a Task ID you launched but never joined, or a
+   turn you cannot point to as the one that produced the review text. Join it; if it failed, go to
+   "When a reviewer comes back empty". When unsure, join: a redundant `background_output` costs a tool
+   turn, a skipped review costs the change.
+
+Three limits on branch 1: gate it on every reviewer **you launched**, not just the IDs the wake
+names — a `RESULT READY` wake names one and stays silent about the rest. Never reproduce a `bg_...` ID
+from memory; if you cannot match it against its launch receipt, that is branch 2. And a reviewer the
+**human** stopped, or a failure you already reported in this exchange, is reported to the human — not
+relaunched.
+
+This suppresses repeating work already reported; it never excuses skipping a review, and it satisfies
+the FINAL CHECKPOINT for nothing. Never `background_cancel(all=true)` to silence a wake: it cannot
+clear a completed task and cancels any reviewer still running.
+
 ## When to call them
 
 Default: consult. The exemptions below are the complete list.
@@ -272,4 +304,6 @@ Before Write/Edit, before saying a fix works, before saying verification succeed
 2. Have I posted the **Reviewers consulted** block to the user?
 3. Am I about to claim something works without reviewer confirmation?
 
-Any "no" → go back to THE REVIEW PROTOCOL.
+Any "no" → go back to THE REVIEW PROTOCOL. The only exemption is the stale-wake reply in "Stale
+completion wake", and it covers a reply to that wake alone — it never satisfies this checkpoint for a
+change you are about to write.
