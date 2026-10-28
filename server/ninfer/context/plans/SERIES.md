@@ -25,7 +25,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-None in progress — next up: Plan 01 (`/hands-plan resume 01`).
+- **Plan 01** — NInfer Flash-Next container serving: in progress, 1/12 tasks done; next T2 (seccomp profile).
 
 ## Plans <!-- hp:plans -->
 
@@ -33,7 +33,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
-| 01 | NInfer Flash-Next: pinned sm_120a image, containerized conversion, `./run`, measured | — | pending | Wave 1 scripts (agent); then owner builds, downloads BF16 base, converts, boots; A/B vs vLLM FP4-Local picks the defaults. |
+| 01 | NInfer Flash-Next: pinned sm_120a image, containerized conversion, `./run`, measured | — | in-progress | Wave 1 scripts (agent); then owner builds, downloads BF16 base, converts, boots; A/B vs vLLM FP4-Local picks the defaults. |
 
 <!-- Add these sections when they earn their place:
 

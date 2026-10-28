@@ -2,8 +2,8 @@
 
 ## Overview
 
-- Status: 0% complete (0/12 tasks)
-- Start date: — (set when T1 starts)
+- Status: 8% complete (1/12 tasks)
+- Start date: 2026-10-27
 - Plan: `context/plans/01_flashnext_container.md`
 - Evidence: bench `--out` files and the conversion log under `captures/` (gitignored, P2); the
   launcher's echoed `docker run` line and boot logs pasted by the owner. Test environment per row:
@@ -34,7 +34,8 @@
 
 - Do all 48 × 512 main experts fit in the GPU cache on 96 GB with the T5 defaults? (T8)
 - Does the converter run under Python 3.12 / torch 2.14? (T4 import, T7 real run)
-- Is `ignore_eos` ignored or honored by NInfer's chat endpoint? (T9)
+- Is `ignore_eos` ignored or honored by NInfer's chat endpoint? (T9) — docs say "Unknown top-level
+  fields are ignored" (`docs/serving.md:210` @ `64d10fbf`, found in T1); T9 still checks it live.
 - How long does the conversion take, and what does it peak at? (T7)
 - Which moby tag is docker 29.8.0's seccomp source? (T2)
 
@@ -42,7 +43,7 @@
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
-| 1 | T1: Pins, shared guards, README, `models`, knowledge seed | `versions.env`, `lib/common.sh`, `README.md`, `context/*` | pending | |
+| 1 | T1: Pins, shared guards, README, `models`, knowledge seed | `versions.env`, `lib/common.sh`, `README.md`, `context/*` | done | Both sudo arms, blank and array `DOCKER`, and a missing binary → rc 1; both CUDA digests resolve; gate 1 `1 b` + `env ok`, gate 2 `shellcheck ok`. `MOBY_SECCOMP_REF` moved to T2 (see Notes). |
 | 2 | T2: seccomp profile — docker default + io_uring | `scripts/seccomp-profile`, `seccomp/ninfer.json` | pending | |
 | 3 | T3: `Dockerfile` + `build` | `Dockerfile`, `build` | pending | |
 | 4 | T4: `scripts/convert` — conversion in a container | `scripts/convert` | pending | |
@@ -75,6 +76,13 @@ provenance and cannot be cited by a later plan.
   in this plan; the NInfer README, two gists and upstream issues #394/#399 stand in.
 - 2026-10-27 (planning): the owner moved this work out of `../vllmcustom` into its own sub-project
   (`server/ninfer`) with its own plan system.
+- 2026-10-27 (T1): `MOBY_SECCOMP_REF` is **not** in `versions.env` yet. The plan lists it under T1 but
+  says it is "confirmed in T2"; writing an unconfirmed tag would be a pin without provenance, so T2
+  adds it. CUDA digests are the **manifest-list** digests (`…devel…@sha256:5626a7d0…`,
+  `…runtime…@sha256:f58bd7a0…`), so the pin holds for any platform docker resolves.
+- 2026-10-27 (T1): gate step 2 failed on the first run — SC2034 (`RUN_GID` unused: it is read by the
+  scripts that source the lib) and SC1091 (a `source=` directive is cwd-relative without
+  `source-path=SCRIPTDIR`). Both fixed in `lib/common.sh` before the commit.
 
 ## Follow-ups
 

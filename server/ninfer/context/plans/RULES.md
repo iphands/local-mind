@@ -131,7 +131,7 @@ where an applicable step was skipped.
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and the launchers have no extension. Pass: no `FAIL` line, the
 counts below match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env`
-exists). **Expected counts: none yet** (the tree has no scripts at init). Bump the expected
+exists). **Expected counts: `1 b`** (Plan 01 T1: `lib/common.sh`). Bump the expected
 numbers in this paragraph when a file is added or removed on purpose — a count that silently drops
 is the failure this step exists for.
 

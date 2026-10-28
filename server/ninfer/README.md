@@ -1,0 +1,43 @@
+# ninfer — NInfer for Qwen3.8-Flash-Next on the RTX PRO 6000
+
+[NInfer](https://github.com/Neroued/ninfer) (a from-scratch C++/CUDA engine that targets
+`sm_120a` only), built from a pinned commit in our own container, serving Qwen3.8-Flash-Next on
+`:8700` — the same port and model alias (`cosmo-6000`) as the vLLM daily driver in
+`../vllmcustom`, so `llama-proxy` needs no change. The goal is the fastest single-stream decode
+this card can do, measured against vLLM FP4-Local.
+
+**Status:** under construction (Plan 01, `context/plans/`). Nothing here has been built,
+converted or booted yet; every number this project cites will live in the plan tracker's
+Evidence table.
+
+## Prerequisites
+
+- Docker reachable **as yourself** — no `sudo` anywhere. Every script refuses a `DOCKER` that
+  names `sudo` and refuses to run as root. Containers run as uid/gid `1000:1000`.
+- The RTX PRO 6000 as CUDA device 0, driver with the CUDA 13.4 UMD (615.78.08 on 2026-10-27).
+- ~63.3 GiB of host RAM free for the registered expert backing, on top of the system.
+- `models` → `/mnt/noir/scratch/ai/llm/models` (the siblings' model tree).
+- **One server on `:8700` at a time**: stop vLLM (`docker stop vllm`) before converting or
+  booting NInfer. Both need the GPU.
+
+## The three steps
+
+The long and GPU steps are run by the owner; the scripts refuse to start in a state they cannot
+finish from.
+
+1. **Build the image** — `./build` *(added in Plan 01 T3)*.
+2. **Download the BF16 base and convert** — `hf download …` then `./scripts/convert`
+   *(added in Plan 01 T4)*. Our NVFP4 checkpoint is the converter's `nvidia` source, not its
+   base; the BF16 base (`Qwen/Qwen3.8-Flash-Next`, 360 GB) is required.
+3. **Serve** — `./run` on `:8700` *(added in Plan 01 T5)*.
+
+## Layout
+
+| Path | What |
+|---|---|
+| `versions.env` | every pin: NInfer SHA, CUDA base images by digest, image name, BF16 base revision |
+| `lib/common.sh` | shared guards (DOCKER/sudo/root/socket) and helpers, sourced by every script |
+| `models` | symlink to the shared model tree |
+| `vendor/ninfer` | the pinned NInfer checkout `./build` manages (gitignored, read-only) |
+| `captures/` | bench output and logs (gitignored) |
+| `context/` | the project's knowledge base and plans (`context/plans/RULES.md` governs work) |

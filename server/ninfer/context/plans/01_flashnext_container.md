@@ -1,6 +1,6 @@
 # Plan 01 — NInfer Flash-Next: pinned sm_120a image, containerized conversion, `./run`, measured
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-10-27
 > **Depends on**: N/A
 > **Goal**: Serve Qwen3.8-Flash-Next through NInfer from our own pinned sm_120a/CUDA 13.4 image, with the `.ninfer` artifact converted in a container, launched by `./run` on `:8700` — and measure it against the vLLM FP4-Local daily driver to pick the fastest defaults.
@@ -648,7 +648,7 @@ Priority values: `P0` = blocking, `P1` = important, `P2` = nice-to-have.
 
 ## Verification Checklist
 
-- [ ] T1: `DOCKER='sudo -n docker'` and `DOCKER=/usr/bin/sudo` each → refusal, rc 1; both CUDA digests resolve; gate step 1 prints `1 b` and `env ok`
+- [x] T1: `DOCKER='sudo -n docker'` and `DOCKER=/usr/bin/sudo` each → refusal, rc 1; both CUDA digests resolve; gate step 1 prints `1 b` and `env ok`
 - [ ] T2: gate step 3 → default `uring Operation not permitted`, `ninfer.json` `uring ok` with `keyctl` still blocked, unconfined differs on `keyctl`; regeneration is byte-identical
 - [ ] T3: `PREFLIGHT_ONLY=1 ./build` exit 0 on a clean checkout at `64d10fbf`, refusal on a dirty one, no image built
 - [ ] T4: today's `DRY_RUN=1 ./scripts/convert` refuses with the `hf download` command; NVFP4-as-base refuses naming the non-BF16 tensor; `tools.convert --help` exits 0 in the converter image; gate step 5 passes
