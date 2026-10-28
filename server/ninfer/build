@@ -1,0 +1,104 @@
+#!/usr/bin/env bash
+# Build the NInfer image from the pinned commit: ./build
+#
+#   PREFLIGHT_ONLY=1 ./build   checkout checks, both base digests resolve, `docker build --check`
+#                              (lint, no build), print the build command, exit 0. No image.
+#   JOBS=N ./build             compile parallelism (default: half the cores).
+#
+# vendor/ninfer is managed here: cloned if absent, refused if dirty, checked out detached at
+# NINFER_SHA — never --force, never reset or clean (context/plans/RULES.md § Rule B2 addendum).
+# The full build is the owner's to run (CUDA kernels for one arch, but still long); its log goes
+# to captures/build_<date>_<sha7>.log.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=lib/common.sh
+source "$HERE/lib/common.sh"
+load_pins
+
+VENDOR=$HERE/vendor/ninfer
+JOBS=${JOBS:-$(( $(nproc) / 2 ))}
+[[ $JOBS =~ ^[1-9][0-9]*$ ]] || die "JOBS must be a positive integer, got '$JOBS'."
+
+# ------------------------------------------------------------ the pinned checkout
+
+fresh=0
+if [[ ! -d $VENDOR/.git ]]; then
+  [[ -e $VENDOR ]] && die "$VENDOR exists but is not a git checkout; move it aside."
+  mkdir -p "$HERE/vendor"
+  echo "== cloning $NINFER_REPO into vendor/ninfer (blobs on demand)"
+  git clone --quiet --filter=blob:none --no-checkout "$NINFER_REPO" "$VENDOR"
+  fresh=1
+fi
+
+origin=$(git -C "$VENDOR" remote get-url origin)
+[[ $origin == "$NINFER_REPO" ]] || die "vendor/ninfer's origin is $origin, not NINFER_REPO ($NINFER_REPO)." \
+                                       "  it is not ours to rewrite: move it aside and re-run."
+
+# A fresh --no-checkout clone has an empty index, which status would report as every file
+# deleted; there is nothing in it to lose, so the dirty check applies to existing checkouts only.
+if (( ! fresh )); then
+  dirty=$(git -C "$VENDOR" status --porcelain)
+  if [[ -n $dirty ]]; then
+    {
+      echo "## vendor/ninfer is dirty — refusing to check out over it:"
+      head -n 10 <<<"$dirty" | sed 's/^/##   /'
+      echo "##   it is a read-only reference; whatever changed it is the thing to fix."
+      echo "##   inspect: git -C vendor/ninfer status"
+    } >&2
+    exit 1
+  fi
+fi
+
+if ! git -C "$VENDOR" cat-file -e "$NINFER_SHA^{commit}" 2>/dev/null; then
+  echo "== fetching origin (NINFER_SHA $NINFER_SHA is not local)"
+  git -C "$VENDOR" fetch --quiet origin
+fi
+git -C "$VENDOR" -c advice.detachedHead=false checkout --quiet --detach "$NINFER_SHA"
+
+head_sha=$(git -C "$VENDOR" rev-parse HEAD)
+[[ $head_sha == "$NINFER_SHA" ]] || die "vendor/ninfer HEAD is $head_sha after checkout, not $NINFER_SHA."
+[[ -z $(git -C "$VENDOR" status --porcelain) ]] || die "vendor/ninfer is dirty after checkout."
+echo "== vendor/ninfer at $head_sha, clean"
+
+# ------------------------------------------------------------------- the build
+
+# cu<digits> from the runtime image's tag: nvidia/cuda:13.4.3-runtime-…@sha256:… → 13.4.3 → cu1343
+cuda_ver=${CUDA_RUNTIME_IMAGE#*:}
+cuda_ver=${cuda_ver%%-*}
+[[ $cuda_ver =~ ^[0-9]+(\.[0-9]+)+$ ]] || die "cannot read a CUDA version from CUDA_RUNTIME_IMAGE ($CUDA_RUNTIME_IMAGE)."
+TAG="$IMAGE:cu${cuda_ver//./}-sm120a-${NINFER_SHA:0:7}"
+
+BUILD_ARGS=(
+  -f "$HERE/Dockerfile"
+  --build-arg "CUDA_DEVEL_IMAGE=$CUDA_DEVEL_IMAGE"
+  --build-arg "CUDA_RUNTIME_IMAGE=$CUDA_RUNTIME_IMAGE"
+  --build-arg "NINFER_REPO=$NINFER_REPO"
+  --build-arg "NINFER_SHA=$NINFER_SHA"
+  --build-arg "CUDA_VERSION_TAG=$cuda_ver"
+  --build-arg "JOBS=$JOBS"
+)
+
+if [[ ${PREFLIGHT_ONLY:-0} == 1 ]]; then
+  for img in "$CUDA_DEVEL_IMAGE" "$CUDA_RUNTIME_IMAGE"; do
+    "${DOCKER[@]}" buildx imagetools inspect "$img" >/dev/null || die "base image does not resolve: $img"
+    echo "== base resolves: $img"
+  done
+  echo "== docker build --check (lint only, nothing is built)"
+  "${DOCKER[@]}" build --check "${BUILD_ARGS[@]}" "$VENDOR"
+  echo "== the build command (PREFLIGHT_ONLY=1, not run):"
+  printf '%q ' "${DOCKER[@]}" build --progress=plain "${BUILD_ARGS[@]}" -t "$TAG" "$VENDOR"
+  echo
+  exit 0
+fi
+
+owned_dir "$HERE/captures"
+LOG="$HERE/captures/build_$(date +%F)_${NINFER_SHA:0:7}.log"
+echo "== building $TAG (JOBS=$JOBS), log: ${LOG#"$HERE/"}"
+SECONDS=0
+"${DOCKER[@]}" build --progress=plain "${BUILD_ARGS[@]}" -t "$TAG" "$VENDOR" 2>&1 | tee "$LOG"
+elapsed=$SECONDS
+
+echo "== built $TAG in $(( elapsed / 60 ))m$(( elapsed % 60 ))s"
+"${DOCKER[@]}" image inspect -f '{{.Id}}' "$TAG"
+"${DOCKER[@]}" image inspect -f '{{json .Config.Labels}}' "$TAG"

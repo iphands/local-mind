@@ -96,3 +96,20 @@ if the download 404s again, search that commit's tree before guessing a path.
 
 ## Sources
 - ninfer: `scripts/seccomp-profile` (`SRC_PATH`)
+
+# `docker build --check` exits 1 on empty-default `FROM` ARGs
+
+## Problem
+[OBSERVED 2026-10-27] `PREFLIGHT_ONLY=1 ./build` stopped with rc 1 after `docker build --check`
+reported `InvalidDefaultArgInFrom` twice ("Default value for ARG ${CUDA_DEVEL_IMAGE} results in
+empty or invalid base image name"). `--check` treats warnings as failure, and the empty defaults
+were deliberate — every pin comes from `versions.env` through `--build-arg`.
+
+## How to avoid
+Keep the defaults empty (a bare `docker build` must fail, not build something unpinned) and say so
+with `# check=skip=InvalidDefaultArgInFrom` directly under `# syntax=…` (parser directives must
+be the first lines). Do not "fix" it with a default image: that is a second copy of a pin. Also: a
+global `ARG` reaches only `FROM` lines — redeclare it (no default) inside a stage that reads it.
+
+## Sources
+- ninfer: `Dockerfile` (header), `build` (`PREFLIGHT_ONLY`)

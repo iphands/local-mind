@@ -131,8 +131,8 @@ where an applicable step was skipped.
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and the launchers have no extension. Pass: no `FAIL` line, the
 counts below match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env`
-exists). **Expected counts: `2 b`, `1 j`** (Plan 01 T1: `lib/common.sh`; T2:
-`scripts/seccomp-profile`, `seccomp/ninfer.json`). Bump the expected
+exists). **Expected counts: `3 b`, `1 j`** (Plan 01 T1: `lib/common.sh`; T2:
+`scripts/seccomp-profile`, `seccomp/ninfer.json`; T3: `build`). Bump the expected
 numbers in this paragraph when a file is added or removed on purpose — a count that silently drops
 is the failure this step exists for.
 
@@ -197,13 +197,30 @@ printf '%-12s %s\n' default "$g3d" ninfer.json "$g3n" unconfined "$g3u"
   && echo 'seccomp ok' || echo 'FAIL(seccomp)'
 ```
 
-**4–7. Behavioral steps — added by the Plan 01 task that creates what they check** (Rule A.5).
+**4. build preflight** (Plan 01 T3). `PREFLIGHT_ONLY=1 ./build`: manages `vendor/ninfer` (clones it
+on first run), resolves both CUDA base digests, lints the `Dockerfile` with `docker build --check`,
+prints the build command and builds nothing. Needs network (GitHub, Docker Hub metadata — no
+layers). Pass: the last line is `build preflight ok` — exit 0, checkout clean at `NINFER_SHA`, both
+bases resolve, `no warnings found`, and the count of images labelled with the pin is unchanged.
+
+```bash
+g4sha=$(sed -n 's/^NINFER_SHA=//p' versions.env)
+g4n0=$(docker images -q --filter "label=ai.ninfer.ref=$g4sha" | wc -l)
+g4=$(PREFLIGHT_ONLY=1 ./build 2>&1); g4rc=$?
+g4n1=$(docker images -q --filter "label=ai.ninfer.ref=$g4sha" | wc -l)
+grep -E '^== (vendor/ninfer at|base resolves)|^Check complete|^##' <<<"$g4"
+[[ $g4rc == 0 && $g4 == *"vendor/ninfer at $g4sha, clean"* && $g4 == *'Check complete, no warnings found.'* &&
+   $(grep -c '^== base resolves' <<<"$g4") == 2 && $g4n0 == "$g4n1" &&
+   -z $(git -C vendor/ninfer status --porcelain) ]] \
+  && echo 'build preflight ok' || echo 'FAIL(build preflight)'
+```
+
+**5–7. Behavioral steps — added by the Plan 01 task that creates what they check** (Rule A.5).
 Each lands with its exact commands and pass condition in that task's commit; until then it does
 not exist, and nothing may claim it passed.
 
 | Step | Added by | Checks | Pass condition (to be made exact by that task) |
 |---|---|---|---|
-| 4 build preflight | Plan 01 T3 | `PREFLIGHT_ONLY=1 ./build` | pins resolve, `vendor/ninfer` is clean at `NINFER_SHA`, no build started |
 | 5 convert dry-run | Plan 01 T4 | `DRY_RUN=1 ./scripts/convert` on fake inputs | every refusal fires with its message; the printed `docker run` carries `--user 1000:1000` |
 | 6 launcher dry-run | Plan 01 T5 | `./run` against a stub `docker` | the emitted command carries `--user 1000:1000`, the seccomp profile, `--ulimit memlock=-1`, `-p …:8700`, the MTP flags; `DOCKER` naming sudo is refused (both arms) |
 | 7 image identity | Plan 01 T6 | the built image | label `ai.ninfer.ref` == `NINFER_SHA`, exactly one image ID, `USER 1000:1000`, `ldd` reports nothing `not found`, cuobjdump shows `sm_120a` only |

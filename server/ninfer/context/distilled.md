@@ -68,6 +68,18 @@ section**, which always stays last. Keep it dense.
   (`src/ops/moe/routed_swiglu/cpu/nvfp4/shapes/h2560_i640_e512_k10/dispatch.cpp`).
 - Whether all 48 × 512 experts fit in the GPU cache on 96 GB is **unconfirmed** — see Open Questions.
 
+## Build deps at the pin are all in Ubuntu 24.04's archive, liburing exactly at the floor [SOURCE][LIVE 2026-10-27]
+
+- NInfer @ `64d10fbf` requires cmake ≥ 3.28, hwloc ≥ 2.5, liburing ≥ 2.5, libcurl ≥ 7.85, FFmpeg
+  (no floor), C++/CUDA 20, and targets `sm_120a` only (`cmake/Dependencies.cmake:4-23`,
+  `CMakeLists.txt:3-12`). It links `CUDA::cudart`, `CUDA::cuda_driver`, `CUDA::nvtx` — no cuBLAS.
+- Ubuntu 24.04.4 candidates (`apt-cache policy` in `nvidia/cuda:13.2.0-devel-ubuntu24.04`, as uid
+  1000 with private apt dirs, 1 run): cmake 3.28.3, liburing 2.5 (`liburing-dev`, runtime
+  `liburing2`), hwloc 2.10.0 (`libhwloc15`), libcurl 8.5.0 (`libcurl4t64`), FFmpeg 6.1.1
+  (`libavcodec60`, `libavformat60`, `libavutil58`, `libswscale7`), g++ 13.2.0.
+- liburing sits exactly at the 2.5 floor: an upstream bump to `liburing>=2.6` cannot build on
+  24.04 without a PPA or a source build.
+
 ## `ninfer-serve` defaults and the request contract [DOC]
 
 - Defaults (`docs/serving.md` § Server options @ `64d10fbf`): `--host 127.0.0.1 --port 8080

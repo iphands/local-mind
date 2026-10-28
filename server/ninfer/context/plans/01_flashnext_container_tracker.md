@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 17% complete (2/12 tasks)
+- Status: 25% complete (3/12 tasks)
 - Start date: 2026-10-27
 - Plan: `context/plans/01_flashnext_container.md`
 - Evidence: bench `--out` files and the conversion log under `captures/` (gitignored, P2); the
@@ -46,7 +46,7 @@
 |---|------|---------------|--------|-------|
 | 1 | T1: Pins, shared guards, README, `models`, knowledge seed | `versions.env`, `lib/common.sh`, `README.md`, `context/*` | done | Both sudo arms, blank and array `DOCKER`, and a missing binary → rc 1; both CUDA digests resolve; gate 1 `1 b` + `env ok`, gate 2 `shellcheck ok`. `MOBY_SECCOMP_REF` moved to T2 (see Notes). |
 | 2 | T2: seccomp profile — docker default + io_uring | `scripts/seccomp-profile`, `seccomp/ninfer.json` | done | Gate 3 `seccomp ok`: default blocks both, ours `uring ok` + `keyctl` blocked, unconfined `keyctl ok`. Regeneration byte-identical (sha256 ×3). Source path invalid as written (see Notes). |
-| 3 | T3: `Dockerfile` + `build` | `Dockerfile`, `build` | pending | |
+| 3 | T3: `Dockerfile` + `build` | `Dockerfile`, `build` | done | `PREFLIGHT_ONLY=1 ./build` rc 0 (clean at `64d10fbf`, both bases resolve, `--check` no warnings, tag `cu1343-sm120a-64d10fb`); `DIRTY` file → refusal rc 1; 0 images built. Gate 1–4 pass. **Runtime tier not run: the image has not been built** (T6). |
 | 4 | T4: `scripts/convert` — conversion in a container | `scripts/convert` | pending | |
 | 5 | T5: `run` — the launcher | `run` | pending | |
 | 6 | T6: Owner builds; image identity (gate 7) | `RULES.md` gate 7 | pending | owner runs `./build` |
@@ -95,6 +95,23 @@ provenance and cannot be cited by a later plan.
 - 2026-10-27 (T2): gate step 2 failed once on SC2016 (Markdown backticks inside single quotes in the
   README generator); fixed with a targeted directive. `MOBY_SECCOMP_REF` added to `versions.env`
   and to `load_pins`' required list.
+- 2026-10-27 (T3): Ubuntu package versions were read from the **local**
+  `nvidia/cuda:13.2.0-devel-ubuntu24.04` (`apt-get update` + `apt-cache policy` as uid 1000 with
+  private apt dirs), not the 13.4.3 devel image the plan names — same Ubuntu 24.04.4 archive, and
+  it avoided a ~7 GB pull for a lookup. The CUDA layer does not change these packages; T6's build
+  log is the real check. Candidates: cmake 3.28.3, ninja 1.11.1, pkg-config 1.8.1, g++ 13.2.0,
+  liburing-dev/liburing2 2.5, libhwloc-dev/libhwloc15 2.10.0, libcurl 8.5.0, FFmpeg 7:6.1.1
+  (libavcodec60/libavformat60/libavutil58/libswscale7) — every runtime package name in the
+  Dockerfile exists.
+- 2026-10-27 (T3): `docker build --check` failed (rc 1) on the first preflight with two
+  `InvalidDefaultArgInFrom` warnings — the empty `CUDA_*_IMAGE` defaults are deliberate (a bare
+  `docker build` must fail, not build unpinned). Fixed with `# check=skip=InvalidDefaultArgInFrom`
+  and a stated reason, rather than a default that would duplicate a `versions.env` pin.
+- 2026-10-27 (T3): the plan's Dockerfile sketch had no `ARG CUDA_RUNTIME_IMAGE` inside the final
+  stage; a global ARG reaches only `FROM` lines, so the `ai.ninfer.base` label would have been
+  empty. Redeclared in the stage. The `ai.ninfer.cuda` label comes from a `CUDA_VERSION_TAG`
+  build-arg (`13.4.3`, parsed from the runtime tag), named to avoid the base image's own
+  `CUDA_VERSION` env.
 
 ## Follow-ups
 
