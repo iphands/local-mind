@@ -255,13 +255,17 @@ finished.
 1. Commit at the end of **every** task. Smaller intermediate commits are welcome. **Never wait
    for the plan to finish.**
 2. One task per commit — do not batch tasks unless they are truly inseparable.
-3. Message format: `[P<n>][T<n>][<topic>] <imperative summary>` — plan number (not zero-padded),
-   task number, short area tag, then the summary. Keep the whole subject under 72 characters.
-   Outside a plan, keep the repo's habitual `scope: summary` with this project's scope:
-   `ninfer: <summary>`. Plan bookkeeping replaces the task tag: `[P<n>][plan] add <title>`,
-   `[P<n>][revise] …`, `[P<n>][close] <title>: <outcome>`. Examples:
-   - `[P1][T3][docker] add pinned sm_120a Dockerfile + build`
-   - `[P1][close] flash-next container serving: shipped, K=3 default`
+3. Message format: `[ninfer][P<n>][T<n>][<topic>] <imperative summary>` — the project prefix
+   `[ninfer]` **first, on every commit** (owner directive, 2026-10-27), then plan number (not
+   zero-padded), task number, short area tag, then the summary. Keep the whole subject under 72
+   characters. Outside a plan: `[ninfer] <summary>`. Plan bookkeeping replaces the task tag:
+   `[ninfer][P<n>][plan] add <title>`, `[ninfer][P<n>][revise] …`,
+   `[ninfer][P<n>][close] <title>: <outcome>`. Examples:
+   - `[ninfer][P1][T3][docker] add pinned sm_120a Dockerfile + build`
+   - `[ninfer][P1][close] flash-next container serving: shipped, K=3 default`
+
+   Commits before 2026-10-27's directive (`f7e52fa`, `0815f46`, `7d0885d`, `52f360f`, `6c708d2`)
+   carry the old forms; history is append-only (Rule B2), so they stay as they are.
 4. **Tracker row in the same commit.** The row update — and any `context/` update the task
    produced — lands with the work. Stage explicit paths: `git add <paths>`, never `git add -A`.
 5. The full project gate (Rule A) passes before every commit.
@@ -274,9 +278,8 @@ finished.
 - **Never offer to push either.** `git push` in every form — `--dry-run` included — is the
   owner's, and so is pushing an *image* to a registry. Report the commit, never the remote: say
   "I did not run `git push`". "Not pushed" is a claim about a remote you cannot see.
-- Plan numbers repeat across the monorepo's sub-projects (vllmcustom also has a Plan 01). A
-  commit's paths (`server/ninfer/…`) say which project it belongs to; mention `ninfer` in the
-  summary when the tags alone could be read as vllmcustom's.
+- Plan numbers repeat across the monorepo's sub-projects (vllmcustom also has a Plan 01). The
+  `[ninfer]` prefix is what tells this project's commits apart in a monorepo `git log`.
 
 ### Rule B2 — Git history is append-only <!-- hp:append-only -->
 

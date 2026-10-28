@@ -24,8 +24,8 @@
    needs T4 and the owner's BF16 download; T8 needs T5–T7; T9–T11 need T8, and each arm is one
    change from the T9 NInfer arm; T12 last. Waves 2–3 wait on the owner: when blocked on them, mark
    the row `blocked` with what is needed, and stop.
-4. Commit per task as `[P1][T<n>][<topic>] <summary>`, with **this tracker's row in the same
-   commit**. Never push; report the hash and that you did not run `git push`.
+4. Commit per task as `[ninfer][P1][T<n>][<topic>] <summary>` (the `[ninfer]` prefix on every
+   commit since 2026-10-27, RULES Rule B), with **this tracker's row in the same commit**. Never push; report the hash and that you did not run `git push`.
 5. Restore the system state after the session (P2.4): no leftover `ninfer`/`ninfer-convert`
    containers, the NVMe artifact copy deleted unless T11 made it the default, `/tmp/ninfer-gate*`
    removed.
@@ -112,6 +112,9 @@ provenance and cannot be cited by a later plan.
   empty. Redeclared in the stage. The `ai.ninfer.cuda` label comes from a `CUDA_VERSION_TAG`
   build-arg (`13.4.3`, parsed from the runtime tag), named to avoid the base image's own
   `CUDA_VERSION` env.
+- 2026-10-27 (between T3 and T4): **owner directive** — every new commit title in this project
+  starts with `[ninfer]` (e.g. `[ninfer][P1][T4][convert] …`). Written into RULES Rule B; the five
+  earlier commits keep their old form (append-only history).
 
 ## Follow-ups
 
