@@ -2,8 +2,8 @@
 
 ## Overview
 
-- Status: 0% complete (0/6 tasks)
-- Start date: — (set when T1 starts)
+- Status: 17% complete (1/6 tasks)
+- Start date: 2026-10-27
 - Plan: `context/plans/01_flashnext_27b_launchers.md`
 - Evidence: `captures/` (gitignored: `bench_<date>_engine.md`, `conc_<date>_engine.jsonl`), the
   launchers' echoed `## docker run …` lines, boot logs and `PRINT_CONFIG=1` output pasted by the
@@ -39,7 +39,7 @@
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
-| 1 | T1: Pins, shared guards, models link, README download how-to | `versions.env`, `lib/common.sh`, `README.md` | pending | |
+| 1 | T1: Pins, shared guards, models link, README download how-to | `versions.env`, `lib/common.sh`, `README.md` | done | sudo refusal rc 1 (word and path); pins load; 4 `hf download` commands; `require_files` hint verified. `hf`/`huggingface-cli` not installed here — README says how. |
 | 2 | T2: `qwen38fn/run` + launcher dry-run (gate step 4) | `qwen38fn/run`, `scripts/launcher-dryrun` | pending | |
 | 3 | T3: `qwen38-27b/run` | `qwen38-27b/run` | pending | |
 | 4 | T4: Flash-Next first boot and smoke (owner) | runtime | pending | |

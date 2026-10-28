@@ -26,7 +26,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-None in progress — next up: Plan 01 (`/hands-plan resume 01`).
+- **Plan 01** — Ignis launchers for Flash-Next and the 27B on :8700: in progress, 1/6 tasks done; next T2 (`qwen38fn/run` + launcher dry-run).
 
 ## Plans <!-- hp:plans -->
 
@@ -34,7 +34,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
-| 01 | Ignis launchers for Flash-Next and the 27B on :8700 | — | pending | Pinned ghcr 0.8.0 image, `qwen38fn/run` + `qwen38-27b/run` as `cosmo-6000`, README download how-to; owner-run boots + same-session bench vs FP4-Local. |
+| 01 | Ignis launchers for Flash-Next and the 27B on :8700 | — | in-progress | Pinned ghcr 0.8.0 image, `qwen38fn/run` + `qwen38-27b/run` as `cosmo-6000`, README download how-to; owner-run boots + same-session bench vs FP4-Local. |
 
 <!-- Add these sections when they earn their place:
 

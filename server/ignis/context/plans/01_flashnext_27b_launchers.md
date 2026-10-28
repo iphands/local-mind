@@ -1,6 +1,6 @@
 # Plan 01 — Ignis launchers for Flash-Next and the 27B on :8700
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-10-27
 > **Depends on**: N/A
 > **Goal**: `./qwen38fn/run` serves Qwen3.8-Flash-Next and `./qwen38-27b/run` serves the Qwen3.8-27B through the pinned upstream Ignis 0.8.0 image on `:8700` as `cosmo-6000`, with the README saying how to download the weights, and a same-session bench against vLLM FP4-Local recorded.
@@ -446,7 +446,7 @@ file named in its row.
 
 ## Verification Checklist
 
-- [ ] T1: `DOCKER='sudo docker' bash -c 'source lib/common.sh'` → refusal, rc 1; `load_pins` prints the digest-pinned image; README has the three `hf download` commands; gate counts `1 b`, `env ok`
+- [x] T1: `DOCKER='sudo docker' bash -c 'source lib/common.sh'` → refusal, rc 1; `load_pins` prints the digest-pinned image; README has the three `hf download` commands; gate counts `1 b`, `env ok`
 - [ ] T2: `./scripts/launcher-dryrun qwen38fn` → `dryrun ok` with every listed flag asserted and every refusal arm exiting 1; sandbox leaves nothing behind
 - [ ] T3: `./scripts/launcher-dryrun` → `dryrun ok` for both launchers, abliterated arm included
 - [ ] T4: pulled image digest == pin; both `PRINT_CONFIG=1` runs accepted; `/v1/models` → `['cosmo-6000']`; chat, tool call, include_usage, 404 for `claude-heavy`, proxy path all as stated — outputs pasted in Evidence
