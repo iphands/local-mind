@@ -383,6 +383,12 @@ have one card).
   So the knob changes nothing there.
 - `MAX_BATCHED_TOKENS` — 16384/32768 speeds long-context prefill/TTFT (decode
   unaffected; default 8192).
+- `MARLIN_ATOMIC_ADD` (Flash-Next launchers) → `VLLM_MARLIN_USE_ATOMIC_ADD`: Marlin GEMMs with
+  n < 2048 and k ≥ 2048 reduce split-K partials with atomicAdd. **On by default in `run-fp4local`
+  since 2026-11-04** (owner decision; `run` keeps 0, unmeasured there). The A/B
+  (`scripts/flashnext-marlin-atomic-ab`, 4 runs per arm) was within noise on code and long and
+  inconclusive on short; see `context/distilled.md`. Outputs are not bitwise reproducible with it on.
+  `MARLIN_ATOMIC_ADD=0` restores vLLM's default.
 
 `VLLM_LOG_STATS_INTERVAL=1` is on by default so each run prints live tok/s + MTP
 acceptance for comparison.

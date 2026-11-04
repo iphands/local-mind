@@ -14,12 +14,14 @@
 # layers are those projecting 2560 down to < 2048. Cost: the reduction order is no longer fixed,
 # so outputs are not bitwise reproducible run to run.
 #
-# Both arms pin SM120_SKINNY=0, the launchers' default. flashnext-matrix would otherwise turn it
-# on, and it is a second variable this A/B does not want.
+# Both arms set the launcher knob MARLIN_ATOMIC_ADD explicitly (0 / 1): run-fp4local defaults it
+# to 1 since 2026-11-04, so an arm that left it unset would not be an off arm. Both arms also pin
+# SM120_SKINNY=0, the launchers' default. flashnext-matrix would otherwise turn it on, and it is a
+# second variable this A/B does not want.
 #
 # Proof each arm got what it asked for: vLLM logs "Marlin kernel can achieve better performance
 # for small size_n with experimental use_atomic_add feature" only when a qualifying GEMM runs
-# with the env UNSET (maybe_warn_marlin_atomic_add_env). So the off arm should log it, and the on
+# with the env anything but "1" -- unset, or the off arm's 0 (maybe_warn_marlin_atomic_add_env). So the off arm should log it, and the on
 # arm should not. summary.md gets a line per arm saying which happened. An on arm that still
 # logs the hint never received the env, and its numbers are the off arm's.
 #
@@ -30,14 +32,16 @@
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")/.." && pwd)
-# The on arm sets ENV_EXTRA itself. A caller's ENV_EXTRA would reach only the off arm, so the arms
-# would differ by more than the knob under test. Refuse rather than measure that.
-if [[ -n ${ENV_EXTRA:-} ]]; then
-  echo "## ENV_EXTRA is set ('$ENV_EXTRA'): it would apply to the off arm only. Unset it for this A/B."
+# ENV_EXTRA is applied last (last -e wins), so one that names the env would override both arms.
+if [[ ${ENV_EXTRA:-} == *VLLM_MARLIN_USE_ATOMIC_ADD* ]]; then
+  echo "## ENV_EXTRA sets VLLM_MARLIN_USE_ATOMIC_ADD ('$ENV_EXTRA'): it would override both arms. Drop it for this A/B."
   exit 2
 fi
-export MATRIX_CONFIGS="atomic-off|SPEC_TOKENS=3|SM120_SKINNY=0;atomic-on|SPEC_TOKENS=3|SM120_SKINNY=0|ENV_EXTRA=VLLM_MARLIN_USE_ATOMIC_ADD=1"
+export MATRIX_CONFIGS="atomic-off|SPEC_TOKENS=3|SM120_SKINNY=0|MARLIN_ATOMIC_ADD=0;atomic-on|SPEC_TOKENS=3|SM120_SKINNY=0|MARLIN_ATOMIC_ADD=1"
 export LAUNCHER=${LAUNCHER:-qwen3.8-flash-next/run-fp4local}
+_l=$LAUNCHER; [[ $_l == /* ]] || _l=$HERE/$_l
+grep -q 'MARLIN_ATOMIC_ADD=' "$_l" || {
+  echo "## $LAUNCHER has no MARLIN_ATOMIC_ADD knob; this A/B needs it to set each arm."; exit 2; }
 export OUT=${OUT:-$HERE/bench/bench-logs/flashnext-marlin-atomic-ab-$(date -u +%Y%m%d-%H%M%S)}
 
 rc=0

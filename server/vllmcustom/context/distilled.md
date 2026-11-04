@@ -1,7 +1,35 @@
 # Distilled — confirmed facts for vllmcustom
 
 Compact, confirmed learnings: formats, protocols, tool/library behavior, measured limits. Read
-before new work; add an entry whenever something is confirmed — **above the `## Open Questions`
+before new work; add an entry whenever something is confirmed — **above the `## ae525e9 on FP4-Local: no decode regression; Marlin atomic-add within noise; 57 s weight load on 40 GbE [LIVE 2026-11-04]
+
+All on `…gae525e9`, `./qwen3.8-flash-next/run-fp4local` defaults (humming MoE, K=3, probabilistic drafts,
+`SM120_SKINNY=0`, `TRITON_DEFAULT_FP_FUSION=1`), code prompt unless stated.
+- **Concurrency sweep** (`KS=3 CONC=1,4 ROUNDS=3 ./scripts/flashnext-conc-sweep`, 3 rounds;
+  `bench/bench-logs/flashnext-conc-20261104-054804/summary.md`). Compared with `…gfe8f214`
+  (`flashnext-conc-20261019-042515`), every number is **within noise**:
+  - 1 stream 193.0 (188.3–201.8) vs 198.0 (192.0–207.9) tok/s;
+  - 4 streams 140.2 (138.1–142.0) vs 137.9 (136.2–139.3) per stream, 546.0 (538.6–554.0) vs 532.7 (527.8–539.6) aggregate;
+  - accept length 2.66 / 2.74 vs 2.76 / 2.74.
+
+  So triton 3.9, the extensible KV cache and upstream CSF decode cost nothing measurable. The baseline is
+  two repins old (`be03d19` and `40fe396` were never swept).
+- **`VLLM_MARLIN_USE_ATOMIC_ADD` A/B** (`scripts/flashnext-marlin-atomic-ab`, 4 runs per arm, single stream;
+  `bench/bench-logs/flashnext-marlin-atomic-ab-20261104-055228/`). The hint line proves each arm: off
+  logged it, on did not. Off vs on, tok/s:
+  - code 202.7 (198.6–211.7) vs 201.3 (199.9–202.5): no effect;
+  - long 194.2 (189.9–198.5) vs 210.9 (194.7–225.2): +8.6%, but **within noise** (three on runs above every off run, one inside);
+  - short 204.6 (116.0–252.6) vs 231.8 (219.2–257.9): inconclusive, because one off run collapsed to 116.
+
+  MTP acceptance varies per run at T=1.0, and atomic-add changes the numerics, so the arms don't generate
+  the same tokens. The owner turned it on by default in `run-fp4local` anyway (knob `MARLIN_ATOMIC_ADD`).
+  `RUNS=8` would settle long.
+- **Weight load with the 40 GbE link healthy** (one boot, 2026-11-04 05:16 UTC, `storage/vllm_boot_stats.jsonl`):
+  - "Loading weights took 56.76 seconds" for the target pass, upstream's "Decoded 73728 CSF scale tensors" included. That bounds upstream's decode at ≤ 57 s, against the overlay's 84–93 s alone;
+  - drafter pass 1.43 s; total boot 3m25s; report KV 16.9 GiB, outside-budget 1.4 GiB, hard floor 0.79.
+  - n = 1: an anecdote for timing.
+
+## Open Questions`
 section**, which always stays last. Keep it dense.
 
 **Provenance discipline:** every entry carries a tag — `[SOURCE]` (upstream code, cite
@@ -273,6 +301,10 @@ section**, which always stays last. Keep it dense.
     here. They are not attributed to kernels here.
   - `_flashkda_C` sm_120 x1, `_qutlass_C` sm_120 x6, flashinfer_jit_cache (566 modules) sm_120 x2339 + sm_120a x3.
   - `libtorch_cuda.so`: see the next section.
+- `…gae525e9` (2026-11-04, `./container/archs`, exit 0): same table except as the repin predicted.
+  `_qutlass_C` is gone (vllm#65230), and `_moe_C_stable_libtorch` is sm_120 x28 (+1: the Muse Spark routing
+  kernel); still sm_80 x1 + PTX. `_vllm_fa2_C` is still sm_120 x76 with no sm_80. `libtorch_cuda.so` is unchanged
+  (sm_100 x10 open item below).
 - This answers two Open Questions, removed 2026-10-27: "archs not run on the `df6c7ad`/`187a0eb` images" (those
   images are superseded and still unmeasured) and "is FA2 still sm_120-native on main" (yes, as of both images).
 

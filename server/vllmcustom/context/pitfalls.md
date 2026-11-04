@@ -636,3 +636,30 @@ the check prints back before trusting the rest of its output. repin.md step 3 no
 - `docker run --rm --entrypoint bash …gfe8f214 -c "uv pip install transformers==5.20.2"` → `error: failed
   to remove file …/bin/transformers: Permission denied (os error 13)`; the `--target` rerun printed
   `transformers 5.20.2`.
+
+---
+
+# A 15-minute weight load is the 40 GbE link at 1 Gb/s, not vLLM [OBSERVED 2026-11-03]
+
+## Problem
+After the host rebooted onto kernel 7.3.1 (2026-11-01 15:27), every FP4-Local boot took 845–940 s in WEIGHT LOAD
+(79–88 MiB/s), with ~43 s per 4.6 GB shard whatever the page cache held. Before that: 100–420 s. It looked like the
+`ae525e9` repin's upstream CSF decode, but the first slow boot (926 s, 2026-11-03 03:22) ran the *old* image.
+The checkpoint NFS mount is `proto=rdma` over the ConnectX-3 (`mel00`). `ethtool mel00` said `Speed: 1000Mb/s`, and
+"Supported link modes" listed only `1000baseX/Full`. Those modes come from the NIC firmware's PTYS
+`eth_proto_cap` (`drivers/net/ethernet/mellanox/mlx4/en_ethtool.c:739-765`), i.e. what it read from the module.
+The kernel config and the mlx4 sources were identical across 7.2.8 / 7.3.0 / 7.3.1, and `ethtool -s … speed` cannot
+pick a mode outside that cap (`:950-954`). On 2026-11-04 the link read 40000 again (the fix was host-side, not
+recorded here) and the next boot loaded in 57 s.
+
+## How to avoid
+When WEIGHT LOAD is far over ~1–2 min, check the link before the code: `cat /sys/class/net/mel00/speed` (want
+40000), then `dd if=<uncached shard> of=/dev/null bs=16M count=128 iflag=direct` (1 GbE ≈ 110 MB/s). The boot
+report's "cold NFS read; page cache helps the next boot" note does not apply: the 95 GiB checkpoint does not stay
+cached beside the 31 GiB pinned PLE table.
+
+## Sources
+- `storage/vllm_boot_stats.jsonl` worker.load per FP4-Local boot (10-16 → 11-04); `dd … iflag=direct` 102 MB/s and
+  `dd` 113–114 MB/s on 2026-11-03, with `mlx4_0/ports/1/counters/port_rcv_data` +686 MiB for a 640 MiB read.
+- `uptime -s` 2026-11-01 15:27:07; `/boot/vmlinuz-linux-7.3.1-gentoo.032-gcc` 2026-11-01 15:17.
+

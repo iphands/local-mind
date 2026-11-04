@@ -138,6 +138,7 @@ SPEC_LIVE_K=${SPEC_LIVE_K:-}                     # initial live depth; EMPTY = S
 SPEC_LIVE_CAPTURE=${SPEC_LIVE_CAPTURE:-}         # K values to pre-capture CUDA graphs for, comma-separated, main one first; EMPTY = K..1
 ONLINE_FP8=${ONLINE_FP8:-0}                      # 1 = online FP8 (fp8_per_channel) for the BF16 dense layers; or a vLLM scheme name; 0 = off (see "ONLINE_FP8")
 SM120_SKINNY=${SM120_SKINNY:-0}                  # 1 = reuse the SM121 skinny-GEMM plan table on SM120 (see "SM120_SKINNY")
+MARLIN_ATOMIC_ADD=${MARLIN_ATOMIC_ADD:-1}        # VLLM_MARLIN_USE_ATOMIC_ADD: 1 = atomicAdd split-K reduce for Marlin GEMMs with n<2048, k>=2048 (A/B 2026-11-04: code no effect, long +8.6% within noise)
 VISION=${VISION:-1}                              # 0 = --language-model-only
 PLE_OFFLOAD=${PLE_OFFLOAD:-$_d_ple}              # 1 = --engram-config cpu_offload (the single-GPU path); default 1 for flashnext only
 PINNED_ROUND_MB=${PINNED_ROUND_MB:-1024}         # pinned requests above this are not rounded to a power of 2; 0 = torch default (see header)
@@ -519,6 +520,7 @@ if [[ "$_gu_warn" == 1 ]]; then
   echo "##          Watch \"Available KV cache memory\" at boot; drop GPU_MEM_UTIL=0.955 on OOM."
 fi
 
+case "$MARLIN_ATOMIC_ADD" in 0|1) ;; *) echo "MARLIN_ATOMIC_ADD must be 0 or 1 (got '$MARLIN_ATOMIC_ADD')"; exit 1 ;; esac
 docker_core_args
 CONTAINER_ARGS+=(
   -e VLLM_GDN_DECODE_KERNEL="$GDN_KERNEL"                  # triton REQUIRED for the FP8 GDN projections (card)
@@ -527,6 +529,10 @@ CONTAINER_ARGS+=(
   # today's behaviour (3.8/3.9 default = ON) so a rebuild cannot change the numerics of
   # every Triton kernel that does not set enable_fp_fusion itself (GDN, QSA, warmups).
   -e TRITON_DEFAULT_FP_FUSION=1
+  # Marlin split-K reduce via atomicAdd (n < 2048, k >= 2048 only; vLLM reads exactly "1").
+  # Not bitwise reproducible run to run. Evidence and caveats: context/distilled.md
+  # ("Marlin atomic-add"), scripts/flashnext-marlin-atomic-ab.
+  -e VLLM_MARLIN_USE_ATOMIC_ADD="$MARLIN_ATOMIC_ADD"
   # The model is a directory under the read-only /models mount, loaded in place;
   # this makes any Hub access an error rather than a 184 GB surprise.
   -e HF_HUB_OFFLINE=1
@@ -654,5 +660,6 @@ CONTAINER_ARGS+=( -e VLLM_BOOT_ARGS="$VLLM_BOOT_ARGS" )
 echo
 _ple_note=; [[ "$PLE_OFFLOAD" != "0" ]] && _ple_note=", PLE table pinned in host RAM via --engram-config"
 _sm120_note=''; [[ "$SM120_SKINNY" == 1 ]] && _sm120_note=' sm120-skinny'
-echo "## Running $CONTAINER  (model=$MODEL family=$FAMILY attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS${SPEC_LIVE_K_EFF:+ live-k=$SPEC_LIVE_K_EFF}${_ONLINE_FP8_SCHEME:+ online-fp8=$_ONLINE_FP8_SCHEME}${_sm120_note}${DRAFT_SAMPLE:+/$DRAFT_SAMPLE}${KV_SKIP_ARG[*]:+ kv-bf16-layers=${KV_SKIP_ARG[*]}} block=${BLOCK_ARG:-64} load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0$_ple_note)"
+_marlin_note=' marlin-atomic=off'; [[ "$MARLIN_ATOMIC_ADD" == 1 ]] && _marlin_note=' marlin-atomic=on'
+echo "## Running $CONTAINER  (model=$MODEL family=$FAMILY attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS${SPEC_LIVE_K_EFF:+ live-k=$SPEC_LIVE_K_EFF}${_ONLINE_FP8_SCHEME:+ online-fp8=$_ONLINE_FP8_SCHEME}${_sm120_note}${DRAFT_SAMPLE:+/$DRAFT_SAMPLE}${KV_SKIP_ARG[*]:+ kv-bf16-layers=${KV_SKIP_ARG[*]}} block=${BLOCK_ARG:-64} load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS${_marlin_note} gpu0$_ple_note)"
 vllm_launch
