@@ -28,7 +28,7 @@ still stand — see `context/distilled.md`.
 
 **06 — b12x SM12x kernels as an opt-in overlay** (`in-progress`). T1–T2 landed (fetch + launcher mount); T3 is the owner's A/B boots.
 
-**07 — boot-timing: account for vLLM's extensible KV cache** (`in-progress`). T1 landed (hook + report + test); T2 is the owner boot that checks the report against vLLM's "Extended KV cache" line.
+**07 — boot-timing: account for vLLM's extensible KV cache** is **done** (2026-11-03, `completed/`): the report now reads the KV cache vLLM commits after warmup; verified on an owner boot.
 
 **04 — Decode NVFP4-CSF expert scales** is **done** (2026-11-03, `completed/`): booted 2026-10-18, then superseded by upstream vllm#64312 and deleted at the `ae525e9` repin.
 
@@ -47,7 +47,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 04 | Decode NVFP4-CSF expert scales at load time | — | done | Closed 2026-11-03 (`completed/`). Booted 2026-10-18; superseded by upstream vllm#64312, so the `ae525e9` repin deleted the overlay. |
 | 05 | Trim the source build to what sm_120 serving uses | — | pending | Torch/torchaudio flags, Marlin int8-act, FlashInfer AOT trims; tiered keep-list for Muse/Nemotron/Qwen/gpt-oss; baseline + smoke gate first. Needs one owner full rebuild. |
 | 06 | b12x SM12x kernels as an opt-in overlay | — | in-progress | Pinned pure-Python wheel fetched to `$CACHE_DIR`, mounted + `.pth` when `MOE_BACKEND`/`NVFP4_BACKEND`=`b12x`; no rebuild. Owner A/B decides the Dockerfile. |
-| 07 | boot-timing: account for vLLM's extensible KV cache | 03 | in-progress | `ae525e9` commits KV after warmup, outside torch; report read KV 0.0 / outside 14.7. Hook `Worker.extend_kv_cache`; owner boot verifies. |
+| 07 | boot-timing: account for vLLM's extensible KV cache | 03 | done | Closed 2026-11-03 (`completed/`). Optional `Worker.extend_kv_cache` hook; owner boot: KV 16.8 = vLLM's 16.82 GiB, outside 14.7 → 1.7. |
 
 ## Pre-existing material <!-- hp:pre-existing -->
 

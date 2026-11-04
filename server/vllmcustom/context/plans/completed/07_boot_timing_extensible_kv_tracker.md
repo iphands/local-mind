@@ -4,7 +4,7 @@
 
 - Status: 100% complete (2/2 tasks)
 - Start date: 2026-11-03
-- Plan: `context/plans/07_boot_timing_extensible_kv.md`
+- Plan: `context/plans/completed/07_boot_timing_extensible_kv.md`
 - Evidence:
   - the owner's pasted boot report (2026-11-03, `iphands/vllm-blackwell:cu1321-sm120-main-vllm0.34.0.dev20261103-gae525e9`, `./qwen3.8-flash-next/run-fp4local` defaults: util 0.975, fp8 KV, MTP K=3, humming);
   - that boot's `docker logs vllm`;
@@ -12,7 +12,7 @@
 
 ## Resume Instructions
 
-1. Read `CLAUDE.md`, `context/plans/RULES.md` (in full), then `07_boot_timing_extensible_kv.md`.
+1. Closed 2026-11-03. To reopen: read `CLAUDE.md`, `context/plans/RULES.md` (in full), then `completed/07_boot_timing_extensible_kv.md`.
 2. Environment:
    - no launcher knobs;
    - the `…gae525e9` image for the throwaway-container seam check (`--rm`, no GPU);

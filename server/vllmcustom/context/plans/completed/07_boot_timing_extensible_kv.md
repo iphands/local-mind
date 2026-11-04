@@ -1,7 +1,8 @@
 # Plan 07 — boot-timing: account for vLLM's extensible KV cache
 
-> **Status**: in-progress
+> **Status**: done
 > **Created**: 2026-11-03
+> **Revised**: 2026-11-03 — closed after the T2 owner boot; moved to `completed/`
 > **Depends on**: N/A (Plan 03 shipped the report this fixes)
 > **Goal**: The boot report's KV row, outside-budget line, headroom section and KV cross-check show the KV cache vLLM actually committed, on images with the extensible KV cache on (vllm#56492, default from `ae525e9`).
 > **Agent**: implementation agent
@@ -197,5 +198,5 @@ docker logs vllm 2>&1 | grep -E 'Extended KV cache|Memory after warmup|KV cache 
 - [x] T2: the owner boot's KV row equals vLLM's "Extended KV cache … (X GiB)" within 0.1 GiB, and outside-budget is under 3 GiB
 - [x] All: the project gate (Rule A) passes on the final commit, every step `pass` or the skip named in the tracker
 - [x] All: step 6 ran (T2), **or** the tracker says the behavior went unverified at runtime
-- [ ] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read
-- [ ] All: plan + tracker `git mv`'d to `completed/`, `SERIES.md` marked done (Rule C)
+- [x] All: findings harvested into `context/` (Rule D) — `context/distilled.md` (`ae525e9` section, LIVE bullet) and `container/patches/boot-timing/UPSTREAM`, re-read
+- [x] All: plan + tracker `git mv`'d to `completed/`, `SERIES.md` marked done (Rule C)
