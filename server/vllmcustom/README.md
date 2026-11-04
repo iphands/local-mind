@@ -157,7 +157,7 @@ re-check its `requirements/cuda.txt` when you do. What differs from the release 
 |---|---|---|
 | FlashInfer | v0.6.18 | **v0.7.2.post1** (`VLLM_MAIN_FLASHINFER_REF`; vllm#63466 from `40fe396`, 0.7.2 from `fe8f214` (vllm#61913), was 0.6.18.post1 through `826e300`, 0.7.0 from `36f94d5`, 0.7.0.post1 from `47de9d4`, 0.7.1 from `4d9a8d6` (vllm#60948); cubin wheel is published). 0.7.2 (and 0.7.2.post1, same `pyproject.toml` mapping) also ships a top-level `b12x` compat package (b12x 1.5.0 embedded, flashinfer#5767), so the image carries b12x without the Plan 06 mount — see `container/patches/b12x/UPSTREAM`. 0.7.0 split the AOT jit-cache into a shim plus per-arch provider wheels (flashinfer#4514): flashinfer-build builds `flashinfer-jit-cache-sm120f` + the shim, and vllm-openai asserts the shim finds an sm120 provider |
 | torch / torchaudio / torchvision | 2.13.0 / 2.11.0 / 0.28.0 | **2.14.0 / 2.11.0 / 0.29.0** (`VLLM_MAIN_TORCH_REF` / `VLLM_MAIN_TORCHVISION_VERSION`; vllm#52183 from `4d9a8d6`). The **first repin to move torch**, so the snapshot no longer shares the release set's torch — torchaudio stays 2.11.0 because that is still main's own pairing. Consequence: `torch-build` is dead, the stages are a chain, so a snapshot bump that moves torch is a full multi-hour rebuild, not an incremental one |
-| runtime deps (from PyPI) | — | + `instanttensor` (floor now `>=0.2.2`; the image already carried 0.2.2), cutlass-dsl 4.8.0, quack 0.6.5, transformers ≥ 5.16.1 (< 5.21.0 from `be03d19`, which resolves 5.20.2), `humming-kernels[cu13]==0.1.18` (vllm#62816 from `be03d19`; 0.1.12 at `468663a`, 0.1.15 at `826e300`, 0.1.16 at `36f94d5`, 0.1.17 through `fe8f214`) — **on this launcher's default `--moe-backend`, so it is on the Flash-Next path** — `tokenspeed-mla==2.0.3` (2.0.2 at `4d9a8d6`, was 0.2.15; a major jump, MLA-only and off this path), and via flashinfer `nccl-extensions` / `nccl4py>=0.4.1`. The full `4d9a8d6` `requirements/cuda.txt` re-resolves clean with **no conflicts** (whole-graph `uv pip install --dry-run --upgrade` in the `g698e79f` image, 2026-10-15); torch moves to 2.14.0 as intended, and torch's own metadata additionally pulls `cuda-toolkit==13.0.3.0` and takes `nvidia-cuda-runtime` / `nvidia-cuda-nvrtc` **down** to 13.0.96 / 13.0.88 |
+| runtime deps (from PyPI) | — | + `instanttensor` (floor now `>=0.2.2`; the image already carried 0.2.2), cutlass-dsl 4.8.0, quack 0.6.5, transformers ≥ 5.16.1 (< 5.23.0 from `ae525e9`, which resolves 5.22.1; < 5.21.0 / 5.20.2 from `be03d19`), huggingface_hub ≥ 2.0.0 (vllm#64779, `ae525e9`), triton **unpinned** (our source-built torch declares none, so the vLLM layer takes the newest: 3.9.0 from `ae525e9`, where official torch 2.14.0 and vLLM's CI use 3.8.0), `humming-kernels[cu13]==0.1.18` (vllm#62816 from `be03d19`; 0.1.12 at `468663a`, 0.1.15 at `826e300`, 0.1.16 at `36f94d5`, 0.1.17 through `fe8f214`) — **on this launcher's default `--moe-backend`, so it is on the Flash-Next path** — `tokenspeed-mla==2.0.3` (2.0.2 at `4d9a8d6`, was 0.2.15; a major jump, MLA-only and off this path), and via flashinfer `nccl-extensions` / `nccl4py>=0.4.1`. The full `4d9a8d6` `requirements/cuda.txt` re-resolves clean with **no conflicts** (whole-graph `uv pip install --dry-run --upgrade` in the `g698e79f` image, 2026-10-15); torch moves to 2.14.0 as intended, and torch's own metadata additionally pulls `cuda-toolkit==13.0.3.0` and takes `nvidia-cuda-runtime` / `nvidia-cuda-nvrtc` **down** to 13.0.96 / 13.0.88 |
 | system packages | — | **`libdw-dev`** in vllm-build, **`libdw1`** in vllm-openai: vllm#56876 repinned DeepGEMM (built for sm120) to the `vllm-project` fork, whose `deep_jit` submodule includes `<elfutils/libdwfl.h>` and `dlopen`s `libdw.so.1` for stack traces. Deliberately not in `base`, so torch/flashinfer layers stay cached |
 | new CUDA extensions | — | `_deepselect_C` (10.0f only → empty target on sm120, nothing compiled); FlashMLA repinned, still 9.0/10.x only |
 | vllm-flash-attention commit | `06bdd47` | `b273a02` (was `9cd61de`, before that `506341a`) — `CMakeLists.txt` byte-identical across the move, the sm120 patch applies (re-run against the new tag, 2026-10-13) |
@@ -209,19 +209,17 @@ arithmetic on measured bytes, not estimates. `BOOT_TIMING=0` disables everything
 `/tmp/vllm-boot-timing/marks.log`, and `container/patches/boot-timing/test_boot_timing.py`
 covers the renderer on any host without vLLM.
 
-### NVFP4-CSF scale decode (`container/patches/csf-scale-decode/`)
+### NVFP4-CSF scales (`nvidia/Qwen3.8-Flash-Next-FP4-Local`)
 
-`nvidia/Qwen3.8-Flash-Next-FP4-Local` stores every routed-expert NVFP4 block-scale matrix as a
-lossless compressed pair, `<X>.weight_scale.nvfp4_csf_fixed` (uint8) + `…_exceptions` (uint32); its
-model card says upstream vLLM has no reader and points at community containers whose reader needs
-b12x kernels. Without help our image dies at the first MoE layer with `has no parameter
-'w2_weight_scale.nvfp4_csf_exceptions'`. The patch wraps `DefaultModelLoader.get_all_weights` and
-yields the ordinary `float8_e4m3fn` `<X>.weight_scale` in place of each pair (decoded on the CPU,
-~0.4 s per 5 GB shard), so HUMMING/Marlin see a normal NVFP4 checkpoint and the resident weights are
-the same size as any other. Like the other patches it overlays no upstream file: a renamed target
-prints `[csf-scale-decode] NOT applied`. `./qwen3.8-flash-next/run-fp4local` mounts it by default;
-`CSF_SCALE_DECODE=0` turns it off. Codec, sources and what is and is not verified:
-`container/patches/csf-scale-decode/UPSTREAM`, `context/plans/04_csf_scale_decode.md`.
+That checkpoint stores every routed-expert NVFP4 block-scale matrix as a lossless compressed
+pair, `<X>.weight_scale.nvfp4_csf_fixed` (uint8) + `…_exceptions` (uint32), declared per layer as
+`weight_scale_encoding: "csf"` in `config.json`. Upstream vLLM reads it itself since vllm#64312
+(in the main snapshot from `ae525e9`): `ModelOptMixedPrecisionConfig` adds a weights transform that
+pairs the two streams and yields the ordinary `float8_e4m3fn` `<X>.weight_scale`, so HUMMING/Marlin
+see a normal NVFP4 checkpoint. Our own overlay, `container/patches/csf-scale-decode/` (Plan 04),
+did the same job from 2026-10-15 until the `ae525e9` repin removed it, so **an image older than
+`ae525e9` cannot load this checkpoint any more**: it dies at the first MoE layer with
+`has no parameter 'w2_weight_scale.nvfp4_csf_exceptions'`.
 
 ### b12x SM12x kernels (`container/patches/b12x/`)
 

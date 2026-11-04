@@ -79,6 +79,20 @@
 # grep the same at both shas and are on no +/- line. Still needed: `git grep
 # is_unused_checkpoint_weight` under vllm/models/qwen4_exp/ at 40fe396 returns nothing.
 # test_draft_load_filter.py passes.
+# Re-grepped at ae525e9 (2026-11-03, 578 commits). default_loader.py is
+# byte-identical since 40fe396 (load_weights still :490). weight_utils.py changed
+# (vllm#63174 skips clones for owned tensors, vllm#58868 faults in mmap pages on
+# integrated GPUs), and should_skip_weight is still imported (:49) and called at the
+# same five sites (safetensors 1193/1210/1228, instanttensor 1419/1427). model.py
+# and mtp.py (12 lines each) changed only through post-load hook signatures
+# (vllm#57678, #64357), the DP-shared Engram tables (vllm#62359) and per-layer fused
+# shared experts (vllm#61457). _remap_mtp_weight_name (mtp.py:95, :473) and
+# {"mtp.": None} (model.py:924, :1123) grep the same at both shas and are on no +/-
+# line. Still needed: `git grep is_unused_checkpoint_weight` under
+# vllm/models/qwen4_exp/ at ae525e9 returns nothing. Coexistence note: vllm#64312 adds
+# a CSF weights transform to the ModelOpt configs; it runs inside AutoWeightsLoader,
+# downstream of should_skip_weight, and the MTP drafter's names reach it only after
+# _remap_mtp_weight_name, so the filter rule is unchanged. test_draft_load_filter.py passes.
 #   vllm.model_executor.model_loader.weight_utils
 #       should_skip_weight   -- bound BY NAME from ep_weight_filter at import;
 #                               safetensors_weights_iterator resolves it as a

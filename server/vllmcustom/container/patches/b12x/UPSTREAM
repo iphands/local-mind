@@ -84,3 +84,9 @@
 # site-packages/b12x/__init__.py. That compat __init__ re-execs itself from
 # flashinfer/experimental/b12x/_api.py with that directory as its search path, and all
 # six _B12X_SUBMODULES exist there. No backend boot.
+# ae525e9 repin (2026-11-03): retired-kept, unchanged. flashinfer-python stays
+# 0.7.2.post1 (requirements/cuda.txt byte-identical since 40fe396), so layer 1 and its
+# bundled b12x are reused as-is; v0.7.2.post1's pyproject still maps "b12x" =
+# "flashinfer/experimental/b12x/_compat/b12x" (:77). vllm/utils/b12x.py is byte-identical
+# since 40fe396 (_B12X_SUBMODULES :37), and setup.py's extra is still b12x==1.5.1 (now
+# :1736).

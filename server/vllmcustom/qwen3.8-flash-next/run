@@ -31,10 +31,10 @@
 # READY_TIMEOUT env, no connector mount. Everything below that is not about the
 # offload path is copied from ./qwen3.8-flash-next/run-legacy and its model-card notes.
 #
-# Last verified against main @ 40fe396 (2026-10-27, VLLM_MAIN_SHA in
+# Last verified against main @ ae525e9 (2026-11-03, VLLM_MAIN_SHA in
 # container/versions.env at the time; first verified at 1ee4be4, 2026-09-12, re-checked at
 # 468663a, 826e300, 36f94d5, a44d7b5, 2b9b55c, 47de9d4, 84bcbc6, bdd31c3, b6d8e8a, 187a0eb,
-# df6c7ad, 698e79f, 4d9a8d6, fe8f214, be03d19 and on each bump): vllm/config/engram.py with
+# df6c7ad, 698e79f, 4d9a8d6, fe8f214, be03d19, 40fe396 and on each bump): vllm/config/engram.py with
 # cpu_offload, Qwen4ExpPLEPinnedHostEmbedding (in qwen4_exp/common/ since
 # vllm#57497) selected when it is set, Qwen4ExpForConditionalGeneration +
 # Qwen4ExpMTP in the registry, VLLM_GDN_DECODE_KERNEL still an env, the qwen3
@@ -60,7 +60,9 @@
 # still gives indexed_attention x12 + linear_attention x36, the same
 # ple_embedding_dtype (missing / float8_e4m3fn / nvfp4), and the setattr override
 # still lands. At 40fe396 transformers stays 5.20.2 and the same check gives the
-# same three answers.
+# same three answers. At ae525e9 the resolve picks transformers 5.22.1 (ceiling
+# < 5.23.0, vllm#64529), and the same check under 5.22.1 still gives the same three
+# answers; _QSA_LAYER_TYPES still lists both spellings.
 # primitive-ai does NOT boot from vLLM 042ab03 on (vllm#59533, 2026-10-05):
 # qkv_proj now also packs indexer.index_qk_proj, and that checkpoint stores
 # q/k/v_proj in FP8 but ignores the indexer ('re:.*indexer.*', BF16), so
@@ -331,10 +333,10 @@ PY
   esac
 fi
 
-# --block-size for the QSA key ring (upstream gap, vLLM 47de9d4; qsa_cache.py and
-# platforms/interface.py still do not fold it in at df6c7ad -- neither file changed
-# between 187a0eb and df6c7ad -- so still needed). With MTP,
-# qwen4_exp/common/qsa_cache.py sizes each QSA layer's key ring as
+# --block-size for the QSA key ring (upstream gap, vLLM 47de9d4; still not folded in
+# at ae525e9, so still needed). With MTP, qwen4_exp/common/qsa_indexer.py (the
+# QSARawKeyCache spec; it was common/qsa_cache.py until vllm#64110 renamed it,
+# byte-identical logic) sizes each QSA layer's key ring as
 # capacity = cr * ceil((cr + k) / cr)   (cr = indexer_compress_ratio, k = SPEC_TOKENS)
 # and asserts block_size % capacity == 0 -- its comment says the ring joins
 # the LCM that sets the block size, but platforms/interface.py

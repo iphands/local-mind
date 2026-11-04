@@ -34,10 +34,19 @@
 # --engram-config cpu_offload, HF_HUB_OFFLINE=1, --user 1000:1000, --gpus device=0,
 # the call order with env_extra_args/vllm_extra_args LAST) is identical to ./run.
 #
-# Last verified against main @ 40fe396 (2026-10-27: source re-checked by ./repin.md, NOT yet
-# booted; last booted and benched on the …gfe8f214 image, 2026-10-18 -- the …gbe03d19 and
+# Last verified against main @ ae525e9 (2026-11-03: source re-checked by ./repin.md, NOT yet
+# built or booted; last booted and benched on the …gfe8f214 image, 2026-10-18 -- the …gbe03d19 and
 # …g40fe396 images are built, but no boot or bench of either is recorded here). ./repin.md
 # updates this line.
+#
+# CSF scales: this checkpoint stores its routed-expert NVFP4 block scales CSF-compressed
+# (config.json quantized_layers[*experts].weight_scale_encoding = "csf"). Upstream vLLM
+# decodes them itself since vllm#64312 (608365b0f2, 2026-11-03; ModelOptMixedPrecisionConfig
+# adds a weights transform), so this launcher mounts nothing for them. Our own
+# container/patches/csf-scale-decode overlay did this job until the ae525e9 repin removed it.
+# Consequence: an image older than ae525e9 (…g40fe396 and before) can no longer load this
+# checkpoint from here -- IMAGE_TAG=<an older tag> fails at the first MoE layer with
+# "has no parameter 'w2_weight_scale.nvfp4_csf_exceptions'".
 set -euo pipefail
 
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -135,7 +144,6 @@ PINNED_ROUND_MB=${PINNED_ROUND_MB:-1024}         # pinned requests above this ar
 BOOT_TIMING=${BOOT_TIMING:-1}                    # mount container/patches/boot-timing on PYTHONPATH: per-section boot report at "Application startup complete"
 VLLM_BOOT_LOG=${VLLM_BOOT_LOG:-1}                # 1 = append boot stats JSONL to ./storage (mounted by docker_core_args when set)
 DRAFT_LOAD_FILTER=${DRAFT_LOAD_FILTER:-1}        # skip checkpoint tensors a model drops, before reading them (see below)
-CSF_SCALE_DECODE=${CSF_SCALE_DECODE:-1}        # decode this checkpoint's NVFP4-CSF expert scales to plain E4M3 as they load (see below); 0 = vLLM fails on the *.nvfp4_csf_* tensors
 GDN_KERNEL=${GDN_KERNEL:-triton}                 # VLLM_GDN_DECODE_KERNEL
 EXECUTOR=${EXECUTOR:-}                           # --distributed-executor-backend; empty = default
 CACHE_DIR=${CACHE_DIR:-/mnt/noir/scratch/ai/vllm/cache}
@@ -194,10 +202,10 @@ PY
   esac
 fi
 
-# --block-size for the QSA key ring (upstream gap, vLLM 47de9d4; qsa_cache.py and
-# platforms/interface.py still do not fold it in at df6c7ad -- neither file changed
-# between 187a0eb and df6c7ad -- so still needed). With MTP,
-# qwen4_exp/common/qsa_cache.py sizes each QSA layer's key ring as
+# --block-size for the QSA key ring (upstream gap, vLLM 47de9d4; still not folded in
+# at ae525e9, so still needed). With MTP, qwen4_exp/common/qsa_indexer.py (the
+# QSARawKeyCache spec; it was common/qsa_cache.py until vllm#64110 renamed it,
+# byte-identical logic) sizes each QSA layer's key ring as
 # capacity = cr * ceil((cr + k) / cr)   (cr = indexer_compress_ratio, k = SPEC_TOKENS)
 # and asserts block_size % capacity == 0 -- its comment says the ring joins
 # the LCM that sets the block size, but platforms/interface.py
@@ -236,7 +244,7 @@ elif [[ -n "$BLOCK_SIZE" ]]; then
   BLOCK_ARG=$BLOCK_SIZE
 fi
 # Validate a forced --block-size against the QSA key-ring capacity. With MTP,
-# qwen4_exp/common/qsa_cache.py sizes the ring as cr*ceil((cr+k)/cr) and asserts
+# qwen4_exp/common/qsa_indexer.py sizes the ring as cr*ceil((cr+k)/cr) and asserts
 # block_size % capacity == 0. The `auto` path above picks lcm(16, capacity); a
 # forced size that isn't a multiple of the capacity fails *after* an ~8-minute
 # weight load (QSA ring capacity 12 must divide the block size for k=5-8, so the
@@ -553,22 +561,6 @@ if [[ "$DRAFT_LOAD_FILTER" != "0" ]]; then
     -v "$DRAFT_FILTER_DIR/draft_load_filter.pth:/opt/venv/lib/python3.12/site-packages/zz_draft_load_filter.pth:ro"
   )
 fi
-# NVFP4-CSF scale decode. This checkpoint stores every routed-expert block-scale
-# matrix losslessly compressed (<X>.weight_scale.nvfp4_csf_fixed + _exceptions);
-# upstream vLLM has no reader (the model card says so) and the community readers
-# need b12x kernels. csf_scale_decode wraps DefaultModelLoader.get_all_weights and
-# yields the ordinary float8_e4m3fn <X>.weight_scale instead, so HUMMING/Marlin
-# see a normal NVFP4 checkpoint. Same mechanism as the load filter above: a NEW
-# .pth, no upstream file replaced, "NOT applied" on drift (see its UPSTREAM).
-CSF_DECODE_DIR="$HERE/../container/patches/csf-scale-decode"
-if [[ "$CSF_SCALE_DECODE" != "0" ]]; then
-  [[ -f "$CSF_DECODE_DIR/csf_scale_decode.py" && -f "$CSF_DECODE_DIR/csf_scale_decode.pth" ]] || {
-    echo "missing $CSF_DECODE_DIR/csf_scale_decode.{py,pth}"; exit 1; }
-  CONTAINER_ARGS+=(
-    -v "$CSF_DECODE_DIR:/opt/csf-scale-decode:ro"
-    -v "$CSF_DECODE_DIR/csf_scale_decode.pth:/opt/venv/lib/python3.12/site-packages/zz_csf_scale_decode.pth:ro"
-  )
-fi
 # SM120_SKINNY overlay: same mechanism (a new .pth, no upstream file replaced).
 if [[ "$SM120_SKINNY" == 1 ]]; then
   [[ -f "$SM120_SKINNY_DIR/sm120_gemm_plans.py" && -f "$SM120_SKINNY_DIR/sm120_gemm_plans.pth" ]] || {
@@ -658,5 +650,5 @@ CONTAINER_ARGS+=( -e VLLM_BOOT_ARGS="$VLLM_BOOT_ARGS" )
 echo
 _ple_note=; [[ "$PLE_OFFLOAD" != "0" ]] && _ple_note=", PLE table pinned in host RAM via --engram-config"
 _sm120_note=''; [[ "$SM120_SKINNY" == 1 ]] && _sm120_note=' sm120-skinny'
-echo "## Running $CONTAINER  (model=$MODEL family=$FAMILY attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS${SPEC_LIVE_K_EFF:+ live-k=$SPEC_LIVE_K_EFF}${_ONLINE_FP8_SCHEME:+ online-fp8=$_ONLINE_FP8_SCHEME}${_sm120_note}${DRAFT_SAMPLE:+/$DRAFT_SAMPLE}${KV_SKIP_ARG[*]:+ kv-bf16-layers=${KV_SKIP_ARG[*]}} block=${BLOCK_ARG:-64} load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) csf-decode=$([[ "$CSF_SCALE_DECODE" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0$_ple_note)"
+echo "## Running $CONTAINER  (model=$MODEL family=$FAMILY attn=${ATTN_BACKEND:-auto} moe=${MOE_BACKEND:-auto} mtp=$SPEC_TOKENS${SPEC_LIVE_K_EFF:+ live-k=$SPEC_LIVE_K_EFF}${_ONLINE_FP8_SCHEME:+ online-fp8=$_ONLINE_FP8_SCHEME}${_sm120_note}${DRAFT_SAMPLE:+/$DRAFT_SAMPLE}${KV_SKIP_ARG[*]:+ kv-bf16-layers=${KV_SKIP_ARG[*]}} block=${BLOCK_ARG:-64} load-filter=$([[ "$DRAFT_LOAD_FILTER" != "0" ]] && echo on || echo off) ctx=$MAX_MODEL_LEN seqs=$MAX_NUM_SEQS gpu0$_ple_note)"
 vllm_launch

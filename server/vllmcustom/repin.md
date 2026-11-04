@@ -104,7 +104,9 @@ transformers 5.17.0 -> 5.18.0 in the build). The exception is what the `base` st
 them (the 40fe396 numpy case, `context/distilled.md`).
 
 List every `-`/`+` pair. torch, torchaudio and flashinfer must stay put unless step 1 moved
-flashinfer. For each moved package, say whether it is on the Flash-Next path (e.g. nvidia-cutlass-dsl
+flashinfer. **triton is not pinned** in our images (our source-built torch declares no triton requirement; see
+`context/distilled.md` § *From `ae525e9`*), so the full `--upgrade` line for triton is what the build will do; call it
+out every time it moves. For each moved package, say whether it is on the Flash-Next path (e.g. nvidia-cutlass-dsl
 is: Qwen4Exp's hc_down_silu / hyperconnection kernels are CuTe DSL). If a version goes *down*, find
 the requirement that caused it (`git log -S` on the pin line) and say why.
 
@@ -130,13 +132,14 @@ either dies at boot or, worse, boots and is slower:
 | `VLLM_GDN_DECODE_KERNEL` env | `vllm/envs.py` |
 | `"qwen3"` reasoning parser; `"qwen3_coder"` (`run`) and `"qwen3_xml"` (`run-fp4local`) tool parsers | `vllm/reasoning/__init__.py`, `vllm/tool_parsers/__init__.py` |
 | `_update_nested` / `_apply_dict_overrides` still merge nested `--hf-overrides` | `vllm/config/model.py` |
-| QSA ring assert still not folded into the block-size LCM (if it is now, the `BLOCK_SIZE=auto` workaround can go) | `common/qsa_cache.py`, `vllm/platforms/interface.py` `_align_hybrid_block_size` |
+| QSA ring assert still not folded into the block-size LCM (if it is now, the `BLOCK_SIZE=auto` workaround can go) | `common/qsa_indexer.py` `QSARawKeyCache.get_kv_cache_spec` (it was `common/qsa_cache.py` until vllm#64110, at the `ae525e9` repin), `vllm/platforms/interface.py` `_align_hybrid_block_size` |
 | PLE table still one `torch.empty(..., pin_memory=True)` (if chunked / registered, `PINNED_ROUND_MB` can go) | `common/ngram_embedding.py` `allocate_embedding_weight` |
 | `DraftSampleMethod` still offers `"probabilistic"` (`run-fp4local`'s `DRAFT_SAMPLE` default; +8–15% on code over greedy at temperature 0.6) | `vllm/config/speculative.py` |
-| QSA still honours `kv_cache_dtype_skip_layers` (`KV_SKIP_MTP=1`, the drafter's BF16 KV; +5–8% on code). The check: `cache_config.kv_cache_dtype_skip_layers` is still read in QSA. Without it the flag is accepted and does nothing | `vllm/models/qwen4_exp/nvidia/qsa.py` |
+| QSA still honours `kv_cache_dtype_skip_layers` (`KV_SKIP_MTP=1`, the drafter's BF16 KV; +5–8% on code). The check: `cache_config.kv_cache_dtype_skip_layers` is still read in QSA. Without it the flag is accepted and does nothing | `qsa_kv_cache_dtype()` in `vllm/models/qwen4_exp/common/qsa_indexer.py`, still called from `nvidia/qsa.py` (the read moved there in vllm#64110, at the `ae525e9` repin) |
 | `VLLM_GDN_DECODE_KERNEL` still offers `triton` (`run-fp4local`'s `GDN_KERNEL` default; upstream's default is `cuda`, `env_with_choices` at `fe8f214`) | `vllm/envs.py` |
 | `-O1` and up still set `enable_flashinfer_autotune=True`, and `-O2` is still the default. The README and both launchers call `FLASHINFER_AUTOTUNE=1` a no-op because of it | `vllm/config/vllm.py` |
 | `SpeculativeConfig.moe_backend` still exists (only `scripts/flashnext-matrix`'s `DRAFT_MOE_BACKEND` uses it; b12x on NVFP4 needs it) | `vllm/config/speculative.py` |
+| Upstream still decodes CSF scales: `"csf"` in `CSF_SCALE_ENCODINGS`, and `ModelOptMixedPrecisionConfig.get_checkpoint_weight_mapper` still adds the transform (vllm#64312). FP4-Local cannot load without it, and since the `ae525e9` repin there is no local overlay to fall back on, so a miss here is a **stop and ask** | `vllm/model_executor/layers/quantization/utils/nvfp4_utils.py`, `quantization/modelopt.py` |
 
 If `requirements/common.txt`'s `transformers` line changed, or anything touched the Qwen4Exp
 config / layer types, load **both** checkpoints' configs with the transformers version the dry-run
@@ -182,9 +185,8 @@ launcher.
 ## 4. Overlays (hook by name, no-op on drift)
 
 Re-grep every name in the hook tables of `container/patches/boot-timing/UPSTREAM`,
-`container/patches/draft-load-filter/UPSTREAM`, `container/patches/spec-live/UPSTREAM`,
-`container/patches/sm120-gemm-plans/UPSTREAM` and `container/patches/csf-scale-decode/UPSTREAM`
-(`run-fp4local` mounts it over this same image) at `$NEW`,
+`container/patches/draft-load-filter/UPSTREAM`, `container/patches/spec-live/UPSTREAM`
+and `container/patches/sm120-gemm-plans/UPSTREAM` at `$NEW`,
 and say which hooked files changed (`git -C $V diff --stat $OLD $NEW -- <those files>`). For
 draft-load-filter, `_remap_mtp_weight_name` and the `"mtp.": None` mapper entry must be untouched.
 For spec-live (`SPEC_LIVE=1`, optional; not on the daily-driver path) check `Scheduler.dynamic_sd_lookup`
@@ -201,7 +203,6 @@ python3 container/patches/boot-timing/test_boot_timing.py
 python3 container/patches/draft-load-filter/test_draft_load_filter.py
 python3 container/patches/spec-live/test_spec_live.py
 python3 container/patches/sm120-gemm-plans/test_sm120_gemm_plans.py
-python3 container/patches/csf-scale-decode/test_csf_scale_decode.py
 ```
 
 For `container/patches/b12x` (a mounted package, no hooks): check `_B12X_SUBMODULES` in
@@ -228,7 +229,7 @@ before step 6 and report the table as far as it goes.
 | `container/patches/draft-load-filter` | did a loader-side MTP-head skip ship that covers `Qwen4ExpMTP`? | `git -C $V log --format='%h %s' $OLD..$NEW -- vllm/model_executor/model_loader/ vllm/models/qwen4_exp/`; `git -C $V grep -n is_unused_checkpoint_weight $NEW -- vllm/models/qwen4_exp/`. vllm#60152's shard-level hook is the candidate and it is model-declared: the row is **merged** only when `Qwen4ExpMTP` declares it |
 | `container/patches/spec-live` (opt path) | did Dynamic SD gain a live-K API that subsumes the utility call? | `git -C $V log --format='%h %s' $OLD..$NEW -- vllm/v1/core/sched vllm/v1/engine/ vllm/config/speculative.py vllm/entrypoints/launchers/api_server` — a live-K knob would surface beside `num_speculative_tokens_per_batch_size` in `speculative.py` |
 | `container/patches/sm120-gemm-plans` (opt path) | does upstream ship a `(12,0)` GEMM table? | step 4's check. Yes ⇒ **merged → remove in this commit** |
-| `container/patches/csf-scale-decode` (`run-fp4local`) | did upstream learn to decode CSF-encoded NVFP4 scales? | `git -C $V grep -inE 'nvfp4_csf\|csf_exceptions\|byte-window4' $NEW -- vllm`; a hit ⇒ read it before calling it **merged** |
+| ~~`container/patches/csf-scale-decode`~~ | **DELETED at the `ae525e9` repin** (owner's call, 2026-11-03): this row is history, not a task. Upstream decodes CSF since vllm#64312 (`608365b0f2`), an ancestor of every pin from `ae525e9` on | The regression check is step 3's last table row. Removing it also meant images before `ae525e9` can no longer load FP4-Local, because nothing decodes CSF on them |
 | `container/patches/b12x` (opt path) | does the image still ship `b12x` itself? | step 4's b12x check, plus step 1's bundle check when flashinfer moved. Still bundled ⇒ **retired-kept** for this image (the launcher mounts nothing, Plan 06 T5; the mount still serves older tags). Bundle gone ⇒ **STOP** (step 1). Dropping the mount entirely is a Plan 06-style decision, not a repin edit |
 | ~~`qwen3.8-flash-next/patches/ple-ct-ignore`~~ | **DELETED at the `4d9a8d6` repin** — this row is history, not a task; the dir no longer exists, so do not go looking for it. It was retired upstream at `c32513b` (vllm#59431), an ancestor of every pin since, and a repin only moves forward, so it could never fire again | Keep the regression check, without the overlay: `git -C $V grep -n 'isinstance(quant_config, CompressedTensorsConfig)' $NEW -- vllm/models/qwen4_exp/common/ngram_embedding.py`. If that branch ever disappears, upstream regressed and there is no longer a local workaround — that is a stop-and-ask, not a re-derive |
 | launcher: `--hf-overrides` dtype fix | retires with a corrected checkpoint, not with a sha | step 3's cfgcheck shows whether the checkpoint still mislabels ⇒ **checkpoint-driven** |
@@ -257,7 +258,7 @@ minor and update that comment (pattern: the 0.31.0 -> 0.32.0 move in `6a9bac4`).
 - `container/Dockerfile` header: the `pinned at <sha7>, <date>; was ...` line, plus a
   `<old7> -> <new7> (<date>, N commits): ...` paragraph above "Otherwise nothing in this file is
   snapshot-specific". It covers which layers rebuild, the runtime resolve and CMake.
-- `container/patches/{boot-timing,draft-load-filter,spec-live,sm120-gemm-plans,csf-scale-decode,b12x}/UPSTREAM`: a
+- `container/patches/{boot-timing,draft-load-filter,spec-live,sm120-gemm-plans,b12x}/UPSTREAM`: a
   "re-grepped at <sha7>" note carrying the row's 4b answer.
 - `qwen3.8-flash-next/run` header: `Last verified against main @ <sha7>`, append the old sha to the
   re-checked list, and update any workaround note that step 3 changed. Edit code only if an
@@ -343,11 +344,11 @@ Expect on the `docker ` line:
 - `--speculative-config {"method":"mtp","num_speculative_tokens":3,"draft_sample_method":"probabilistic"}`;
 - `--kv-cache-dtype fp8 --kv-cache-dtype-skip-layers 48`, `--moe-backend humming`;
 - `--gpu-memory-utilization 0.975`, `--block-size 64`, `--max-num-seqs 16`, `--max-num-batched-tokens 6019`;
-- `-e VLLM_GDN_DECODE_KERNEL=triton`, and the two csf-scale-decode `-v` mounts (the dir and `zz_csf_scale_decode.pth`);
+- `-e VLLM_GDN_DECODE_KERNEL=triton`, and no csf-scale-decode mount (the overlay was deleted at the `ae525e9` repin; upstream decodes CSF);
 - no `--hf-overrides` PLE dtype (`PLE_DTYPE` is empty by design);
 - no b12x mount (`MOE_BACKEND` is not b12x) and no `sm120_gemm_plans.pth` mount.
 
-The `## Running` line summarises the same as `mtp=3/probabilistic kv-bf16-layers=48 block=64 … csf-decode=on`.
+The `## Running` line summarises the same as `mtp=3/probabilistic kv-bf16-layers=48 block=64 load-filter=on …` (no `csf-decode=` field since `ae525e9`).
 These are `run-fp4local`'s own defaults (`SPEC_TOKENS:-3`, `DRAFT_SAMPLE-probabilistic`,
 `GPU_MEM_UTIL:-0.975`, `GDN_KERNEL:-triton`, …), so as above, read them off the launcher. This
 paragraph matched a stub run on `…gfe8f214` on 2026-10-23.

@@ -26,9 +26,9 @@ image rebuild). Wave 1 needs no GPU and no rebuild; do T4 before asking the owne
 Superseded in part by 02 (`sudo` machinery removed 2026-10-13); the uid contract and its gate steps
 still stand — see `context/distilled.md`.
 
-**04 — Decode NVFP4-CSF expert scales at load time** (`in-progress`). T1 landed; T2 (real shards, CPU, in the image) is next, T4 is an owner boot.
-
 **06 — b12x SM12x kernels as an opt-in overlay** (`in-progress`). T1–T2 landed (fetch + launcher mount); T3 is the owner's A/B boots.
+
+**04 — Decode NVFP4-CSF expert scales** is **done** (2026-11-03, `completed/`): booted 2026-10-18, then superseded by upstream vllm#64312 and deleted at the `ae525e9` repin.
 
 **02 — No sudo anywhere** is **done** (2026-10-13, `completed/`). Nothing left active: the next move is
 Plan 01's T4, or a new plan against the north star.
@@ -42,7 +42,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 01 | Run everything as uid/gid 1000:1000, host and container | — | pending | Containers run as root today; cache mount target is unreadable to uid 1000, so identity and mount must move together. |
 | 02 | No sudo anywhere: plain `docker` is the only privilege path | 01 | done | Closed 2026-10-13, gate rc 0. Root refusal kept — `su` still reaches root; `ALLOW_ROOT` deleted, no escape hatch. |
 | 03 | Persist vLLM post-startup stats as JSONL in ./storage, with model name and VLLM args | — | done | All six tasks complete. JSONL writer in boot_timing.py; launcher mounts ./storage, passes VLLM_MODEL_NAME and JSON-encoded VLLM_BOOT_ARGS; gate green. |
-| 04 | Decode NVFP4-CSF expert scales at load time | — | in-progress | Runtime patch so nvidia/Qwen3.8-Flash-Next-FP4-Local boots without b12x: wrap the loader's weight stream, decode CSF to plain E4M3. |
+| 04 | Decode NVFP4-CSF expert scales at load time | — | done | Closed 2026-11-03 (`completed/`). Booted 2026-10-18; superseded by upstream vllm#64312, so the `ae525e9` repin deleted the overlay. |
 | 05 | Trim the source build to what sm_120 serving uses | — | pending | Torch/torchaudio flags, Marlin int8-act, FlashInfer AOT trims; tiered keep-list for Muse/Nemotron/Qwen/gpt-oss; baseline + smoke gate first. Needs one owner full rebuild. |
 | 06 | b12x SM12x kernels as an opt-in overlay | — | in-progress | Pinned pure-Python wheel fetched to `$CACHE_DIR`, mounted + `.pth` when `MOE_BACKEND`/`NVFP4_BACKEND`=`b12x`; no rebuild. Owner A/B decides the Dockerfile. |
 

@@ -80,6 +80,25 @@
 #   (a profile_prefix for the on-demand /start_profile) and four MRV2
 #   memory-profiling fixes (vllm#63154, #63431, #61509, #57926). None is a waterfall.
 #   test_boot_timing.py passes.
+#   Re-grepped present at ae525e9 (2026-11-03, 578 commits). Of the hooked files,
+#   core.py (+100), core_client.py (+39), gpu_worker.py (+307, mostly vllm#56492's
+#   extensible KV cache), gpu/model_runner.py (+177 churn) and kernel_warmup.py (+108
+#   churn) changed since 40fe396; entry.py, app_state.py and renderers/base.py are
+#   byte-identical. Every hooked def greps to the same count at both shas (entry 2,
+#   app_state 1, warmup_mm 1, make_client 1, run_engine_core 1, EngineCore 1,
+#   gpu_worker 7, capture_model 1, kernel_warmup+flashinfer_autotune 2), and no hooked
+#   def line is on a +/- line. Still needed: the startup_timing|boot_timing|profile_report
+#   grep over the whole tree at ae525e9 returns nothing. Of the 94 commits under the 4b
+#   paths, the startup-flavoured ones are warmup/profiling fixes (vllm#62560 sampler
+#   warmup after graph capture, #63778 the runner decides graph-memory profiling,
+#   #63819, #64338, #64989, #63237). None is a waterfall. test_boot_timing.py passes.
+#   WATCH on the first ae525e9 boot (runtime, NOT verified): vllm#56492 turns on an
+#   extensible KV cache by default on CUDA with the V2 runner. It reserves the KV range
+#   with VMM and commits pages after warmup (compile_or_warm_up_model), sized from
+#   memory measured after graph capture. So the KV bytes this report reads at
+#   initialize_from_config may no longer be the final KV, and the util floors, which
+#   assume KV is the only util-scaled component, may read differently. The hooks
+#   still fire; whether the memory section's numbers still mean the same is unknown.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client

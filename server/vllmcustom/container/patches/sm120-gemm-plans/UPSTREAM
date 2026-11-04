@@ -44,6 +44,11 @@
 # byte-identical since be03d19, and the capability dict still keys exactly (10, 3)
 # (10, 0) (9, 0) (12, 1) at :305-308. There is no (12, 0), so still needed (opt path,
 # SM120_SKINNY=0 default). test_sm120_gemm_plans.py passes.
+# Re-grepped at ae525e9 (2026-11-03, 578 commits): low_latency_gemm.py gains
+# QWEN4_EXP_SM103_GEMM_PLANS (vllm#64650, after vllm#64482's SM100 table), and the
+# capability dict now keys (10, 3) (10, 0) (9, 0) (12, 1) at :359-362.
+# QWEN4_EXP_SM121_GEMM_PLANS is still at :226. There is still no (12, 0), so still
+# needed (opt path, SM120_SKINNY=0 default). test_sm120_gemm_plans.py passes.
 # Verified at vLLM 187a0eb (2026-10-10) and in a throwaway container of the b6d8e8a image
 # (no GPU): the capability key type is a tuple subclass (DeviceCapability(12, 0) == (12, 0),
 # equal hash), the existing keys are exactly (10, 0) (10, 3) (12, 1) (9, 0), the hook applies

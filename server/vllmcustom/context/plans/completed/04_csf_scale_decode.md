@@ -1,7 +1,8 @@
 # Plan 04 — Decode NVFP4-CSF expert scales at load time
 
-> **Status**: in-progress
+> **Status**: done
 > **Created**: 2026-10-15
+> **Revised**: 2026-11-03 — closed: T4 recorded from the owner's 2026-10-18 boot logs; superseded the same day by upstream vllm#64312, so the `ae525e9` repin deleted the overlay
 > **Depends on**: N/A
 > **Goal**: `nvidia/Qwen3.8-Flash-Next-FP4-Local` boots on our source-built image, via a runtime patch that turns the checkpoint's compressed expert scales back into ordinary E4M3 `weight_scale` tensors before vLLM's own loader sees them.
 > **Agent**: implementation agent
@@ -59,7 +60,7 @@ Rejected: porting the b12x/vLLM CSF reader (needs the b12x CUTLASS-DSL kernels, 
 | Only routed-expert scales are compressed | 913 pairs in shard 1; MTP/vision/PLE/shared stay plain | model card (HF `Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD`), config `quantized_layers[…experts].weight_scale_encoding=csf` |
 | Seam | `DefaultModelLoader.get_all_weights(self, model_config, model)` is a generator over `_get_weights_iterator` | `inspect.getsource` in image `…g4d9a8d6`, 2026-10-15 |
 | U32 reads as `torch.uint32`; `.view(torch.int32)` works | | same probe |
-| Nibble order and the decode as a whole are **unverified against ground truth** | only the b12x fixture vouches for it; the boot's output quality is the real test | unconfirmed — settle in T4 |
+| Nibble order and the decode as a whole are **unverified against ground truth** | only the b12x fixture vouches for it; the boot's output quality is the real test | T4 (2026-10-18 boots): loads, serves, MTP acceptance 2.5–3.4; text not read by eye. Upstream's decoder (vllm#64312) uses the same codec |
 
 ### Rejected Claims
 
@@ -126,10 +127,10 @@ Expected: tests cover decode vs an independent encoder, exception override, inte
 
 ## Open Questions / Risks
 
-1. **Is the nibble/exception reading right?** Only the b12x fixture vouches. *How we'll settle it*: T4 output coherence; T2 cannot.
-2. **Do other tensors differ?** The community loader also casts 100 FP32 norm tensors to BF16 and the model card lists a quantized vision tower. *How we'll settle it*: T4; a new loader error is a recorded blocker, not scope creep.
-3. **Load time.** ~73k small CPU decodes on top of a 95 GiB NFS read. *How we'll settle it*: T2 measures decode cost per shard.
-4. **Risk: the seam moves on a repin.** *Mitigation*: `NOT applied` line + host test + `UPSTREAM` hook table.
+1. ~~**Is the nibble/exception reading right?** Only the b12x fixture vouches. *How we'll settle it*: T4 output coherence; T2 cannot.~~ RESOLVED (T4): the 2026-10-18 boots serve with MTP acceptance 2.5–3.4, which garbage scales would not give; vllm#64312 later implements the same codec independently.
+2. ~~**Do other tensors differ?** The community loader also casts 100 FP32 norm tensors to BF16 and the model card lists a quantized vision tower. *How we'll settle it*: T4; a new loader error is a recorded blocker, not scope creep.~~ RESOLVED (T4): no other loader error; the engine loads and serves.
+3. ~~**Load time.** ~73k small CPU decodes on top of a 95 GiB NFS read. *How we'll settle it*: T2 measures decode cost per shard.~~ RESOLVED (T4): 83.6–93.0 s per boot over 6 boots, ~10x T2's extrapolation (tracker Notes).
+4. ~~**Risk: the seam moves on a repin.** *Mitigation*: `NOT applied` line + host test + `UPSTREAM` hook table.~~ RESOLVED (2026-11-03): moot. Upstream shipped its own reader (vllm#64312) and the `ae525e9` repin deleted the overlay.
 
 ---
 
@@ -138,7 +139,7 @@ Expected: tests cover decode vs an independent encoder, exception override, inte
 - [x] T1: `python3 container/patches/csf-scale-decode/test_csf_scale_decode.py` → `ALL TESTS PASS`
 - [x] T2: real-shard seam run prints the expected dtype/shape for every decoded tensor and no `csf` name; numbers in the tracker
 - [x] T3: `bash -n` clean; gate steps 1, 3 report the new counts
-- [ ] T4: owner boot log shows the decode line and a coherent completion — or the tracker says it did not run
-- [ ] All: the project gate passes on the final commit, skips named
-- [ ] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read
-- [ ] All: plan + tracker moved to `completed/`, `SERIES.md` marked done (Rule C)
+- [x] T4: owner boot log shows the decode line and a coherent completion — or the tracker says it did not run (decode line: yes, 6 logs; coherence inferred from MTP acceptance, not read by eye — tracker Evidence says so)
+- [ ] All: the project gate passes on the final commit, skips named — NOT tickable: on the closing commit (`ae525e9` repin, 2026-11-03) steps 1, 3, 4, 5 pass (37 b / 24 p, env ok; 4/4 tests; preflight OK both sets; last-build == 40fe396, 1 image id), but step 2 reports 16 pre-existing shellcheck findings in 12 files this plan never touched (tracker Follow-ups)
+- [x] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read (`distilled.md` § *NVFP4-CSF checkpoints*, `pitfalls.md` CSF entry, 2026-11-03)
+- [x] All: plan + tracker moved to `completed/`, `SERIES.md` marked done (Rule C) — in the `ae525e9` repin commit

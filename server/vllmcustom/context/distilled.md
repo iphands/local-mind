@@ -17,9 +17,9 @@ section**, which always stays last. Keep it dense.
 - What it means for this project.
 -->
 
-## The host-runnable test surface is exactly five files, and two patches have none [LIVE 2026-10-13, amended 2026-10-15 (Plan 04)]
+## The host-runnable test surface is exactly four files, and two patches have none [LIVE 2026-10-13, amended 2026-10-15 (Plan 04), 2026-11-03 (csf-scale-decode removed at the `ae525e9` repin)]
 
-- `container/patches/{boot-timing,csf-scale-decode,draft-load-filter,sm120-gemm-plans,spec-live}/test_*.py` run on
+- `container/patches/{boot-timing,draft-load-filter,sm120-gemm-plans,spec-live}/test_*.py` run on
   the host with plain `python3 <file>` (stdlib only, no vLLM, no pytest — pytest is not installed).
   Each prints `ALL TESTS PASS` and exits 0.
 - `muse/patches/atem-parsers/selftest.py` looks host-runnable from its docstring but is not: it
@@ -94,8 +94,10 @@ section**, which always stays last. Keep it dense.
 
 - Format: routed-expert E4M3 block scales stored as `<X>.weight_scale.nvfp4_csf_fixed` (U8 `[rows/16, 16*(1+cols/2)]`: per 16-row slab, 16 row-base bytes then packed nibbles, low nibble = even column) + `…_exceptions` (U32: `row*cols+col | value<<24`, sorted). Scale = `base[row] + nibble`, exception words overwrite. cols = K/16. Codec string `byte-window4-fixed-stream-u24-exceptions/1`. [SOURCE: b12x `tests/quantization/test_nvfp4_csf.py::_fixture` codec 0, `local-inference-lab/b12x` master; vLLM fork `…/utils/nvfp4_csf_utils.py:_slice_scale_plane`, 2026-10-15]
 - Only main-decoder routed experts are compressed; MTP, vision, PLE, shared experts, global scales stay plain. [DOC: HF card of `local-inference-lab/Qwen3.8-Flash-Next-NVFP4-MXFP8-CSF-QAD`]
-- The community readers are bound to b12x kernels (and PP1/DP1, no EP); there is no upstream-vLLM reader. `container/patches/csf-scale-decode/` decodes in the weight stream instead. Real shard 1: 913 planes decoded in 0.3–0.4 s, torch backend == pure-Python reference on 6/6 planes. [LIVE 2026-10-15]
+- **Superseded 2026-11-03:** upstream vLLM reads CSF since vllm#64312 (`608365b0f2`), in the main snapshot from `ae525e9`. `ModelOptNvFp4Config` and `ModelOptMixedPrecisionConfig` take `weight_scale_encoding` (`csf`, plus a newer `csf_32x2_v1`) and add a weights transform via `get_checkpoint_weight_mapper()`; `AutoWeightsLoader.load_weights` folds that mapper in (`vllm/model_executor/models/utils.py:485`), and Qwen4Exp reaches it through `language_model.quant_config`. Same codec as ours, but rows/cols come from the 2-D fixed-stream shape and the decode is numpy on the CPU. `container/patches/csf-scale-decode/` was deleted in that repin, so images before `ae525e9` can no longer load FP4-Local from `run-fp4local`. Not yet booted on upstream's path. [SOURCE ae525e9, 2026-11-03]
+- (History, until 2026-11-03.) The community readers are bound to b12x kernels (and PP1/DP1, no EP); there is no upstream-vLLM reader. `container/patches/csf-scale-decode/` decodes in the weight stream instead. Real shard 1: 913 planes decoded in 0.3–0.4 s, torch backend == pure-Python reference on 6/6 planes. [LIVE 2026-10-15]
 - A decode of real data looks sane (bases 89–104, no NaN codes, 0.2–1 % exceptions, scales finite 14–448) but ground truth is only the b12x fixture; boot coherence is the test (Plan 04 T4).
+- Whole-checkpoint cost on a real boot was far above the shard-1 extrapolation (~8 s): `[csf-scale-decode] decoded 73728 compressed expert scale planes in` 83.6–93.0 s, over 6 boots of the `…gfe8f214` image on 2026-10-18 (`grep -rh '\[csf-scale-decode\]' bench/bench-logs`). Those boots served the bench with MTP mean acceptance 2.5–3.4 on code prompts, so the decoded scales are sane; output text was not read by eye. Compare upstream's decode time on the first `ae525e9` boot (vLLM logs `Decoded %d CSF scale tensors at load`). [LIVE 2026-10-18, 6 boots]
 
 ## b12x is a mount, not a build: pure-Python wheel, every dependency already in the image (Plan 06) [SOURCE][LIVE 2026-10-16]
 
@@ -217,6 +219,30 @@ section**, which always stays last. Keep it dense.
   primitive-ai (CT FP8 q/k/v, `re:.*indexer.*` ignored), which has refused at model init since vllm#59533
   (`042ab03`). Both nvidia checkpoints still fuse: they are ModelOpt `MIXED_PRECISION`, with FP4-Local MXFP8 on
   both sides and NVFP4 unquantized on both. [SOURCE + all three config.json; primitive-ai NOT booted]
+
+## From `ae525e9`: QSA files renamed, extensible KV cache on by default, QuTLASS gone, and triton floats [SOURCE 2026-11-03]
+
+- vllm#64110 (`d492ee7862`) drops QSA's FlashAttention dependency. The FA backend/impl/metadata subclasses become
+  `Qwen4ExpQSAImpl` / `Qwen4ExpQSAMetadataBuilder` (`common/qsa.py`); compute was already its own Triton kernel.
+  Files are renamed: `common/qsa_cache.py` → `common/qsa_indexer.py` (the ring-capacity assert is byte-identical,
+  now in `QSARawKeyCache.get_kv_cache_spec`), and `nvidia/indexer_qsa.py` → `nvidia/qsa_indexer.py`.
+  `--kv-cache-dtype-skip-layers` is now honoured through `qsa_kv_cache_dtype()` (`common/qsa_indexer.py:896`),
+  called from `nvidia/qsa.py:407`. `_align_hybrid_block_size` still ignores the ring. [SOURCE]
+- vllm#56492 (`860da3dafd`): `enable_extensible_kv_cache` defaults to on for CUDA with the V2 model runner unless
+  `kv_cache_memory_bytes` / `num_gpu_blocks_override` is set (`vllm/config/vllm.py`, the `_extensible_kv_cache`
+  resolution). The KV range is reserved with VMM and committed after warmup, sized from memory measured after graph
+  capture. An unset `--gpu-memory-utilization` now means 1.0 with it and 0.92 without; both Flash-Next launchers
+  pass one explicitly. Expect a different "Available KV cache memory" line and boot-timing memory rows. [SOURCE; NOT
+  booted]
+- vllm#65230 (`37753d9dd9`): QuTLASS and fp_quant are removed (QuIP NVFP4 runs on Humming), so `_qutlass_C` leaves
+  the main image and `./container/archs` no longer lists it. [SOURCE]
+- **triton is unpinned in our images.** Our source-built torch wheel declares no `triton` requirement (official
+  torch wheels pin it, 2.14.0 → `triton==3.8.0`, `.ci/docker/triton_version.txt`), and in the image only
+  humming-kernels and xgrammar require it, unversioned. vllm-openai layer 2 resolves fresh on every vLLM bump, so it
+  takes the newest triton on PyPI: 3.9.0 (uploaded 2026-10-27) from the `ae525e9` build on, while vLLM's CI tests
+  3.8.0 (`requirements/test/cuda.txt`). Owner accepted the move at the `ae525e9` repin (2026-11-03); the post-build
+  bench is the check. If it regresses, pin triton next to torch rather than in a repin. [SOURCE + `uv pip show
+  triton` in `…g40fe396` (3.8.0, required by humming-kernels, xgrammar); PyPI JSON]
 
 ## A full `--upgrade` dry-run overstates the runtime resolve: base-stage packages keep their version [REPO][LIVE 2026-10-27]
 

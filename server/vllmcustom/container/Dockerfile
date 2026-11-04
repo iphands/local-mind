@@ -35,16 +35,16 @@
 #     build-time dependency policy (nvidia-cutlass-dsl) that the jit-cache
 #     backend declares; flashinfer-build now installs whatever the tree
 #     declares. See the comment in that stage.
-#   - main snapshot (VLLM_REF=main in ./build, pinned at 40fe396, 2026-10-27;
-#     was be03d19, 2026-10-23, fe8f214, 2026-10-18, 4d9a8d6, 2026-10-15, 698e79f, 2026-10-13, df6c7ad, 2026-10-13, 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
+#   - main snapshot (VLLM_REF=main in ./build, pinned at ae525e9, 2026-11-03;
+#     was 40fe396, 2026-10-27, be03d19, 2026-10-23, fe8f214, 2026-10-18, 4d9a8d6, 2026-10-15, 698e79f, 2026-10-13, df6c7ad, 2026-10-13, 187a0eb, 2026-10-10, b6d8e8a, 2026-10-06, bdd31c3, 2026-10-04, 84bcbc6, 2026-10-03, 47de9d4, 2026-10-01, 2b9b55c, 2026-09-27, a44d7b5, 2026-09-25, 36f94d5, 2026-09-24, 826e300, 2026-09-22, 468663a, 2026-09-18,
 #     and 1ee4be4, 2026-09-12):
 #     READ THIS BEFORE QUOTING A PIN: the "same torch 2.13.0 / torchvision 0.28.0" below
 #     describes that 1ee4be4..698e79f line, NOT the current one. 4d9a8d6 moved to
 #     torch 2.14.0 / torchvision 0.29.0 and flashinfer 0.7.1, fe8f214 to
 #     flashinfer 0.7.2 (be03d19 keeps both), and 40fe396 to flashinfer
-#     0.7.2.post1 -- see the "698e79f -> 4d9a8d6", "4d9a8d6 -> fe8f214",
-#     "fe8f214 -> be03d19" and "be03d19 -> 40fe396" paragraphs further down; the
-#     last one is the current state.
+#     0.7.2.post1 (ae525e9 keeps it) -- see the "698e79f -> 4d9a8d6",
+#     "4d9a8d6 -> fe8f214", "fe8f214 -> be03d19", "be03d19 -> 40fe396" and
+#     "40fe396 -> ae525e9" paragraphs further down; the last one is the current state.
 #     same torch 2.13.0 / torchaudio 2.11.0 /
 #     torchvision 0.28.0; up to 826e300 flashinfer 0.6.18.post1 (cubin wheel published at
 #     flashinfer.ai/whl), same requirements/build/cuda.txt, same
@@ -368,6 +368,41 @@
 #     1.7.0, nvidia-cudnn-frontend 1.32.0. ./container/archs on it prints the same
 #     table as …gbe03d19, with _vllm_fa2_C at sm_120 x76 and no sm_80, so the FA
 #     hook below still lands.
+#     40fe396 -> ae525e9 (2026-11-03, 578 commits): torch 2.14.0 / torchaudio
+#     2.11.0 / torchvision 0.29.0 and flashinfer 0.7.2.post1 are unchanged
+#     (requirements/cuda.txt and requirements/build/cuda.txt are byte-identical), so
+#     torch-build, torchaudio-build, flashinfer-build and vllm-openai layer 1 are
+#     reused; only vllm-build and vllm-openai layer 2 rebuild. Build-side: QuTLASS is
+#     gone (vllm#65230 removes cmake/external_projects/qutlass.cmake and the
+#     _qutlass_C extension; QuIP NVFP4 runs on Humming), so ./container/archs no
+#     longer lists _qutlass_C. DeepGEMM 0820030 -> ae4fd25 (vllm#64411, #64580) keeps
+#     12.0f on CUDA >= 13.0, and its include moves up into the CUDA block because the
+#     new fused MQA top-k kernel (vllm#60618) compiles against its headers; that
+#     kernel is 10.0f only, so empty for CUDA_ARCHS 12.0. The new Muse Spark routing
+#     kernel (vllm#64553, csrc/moe/muse_spark_routing.cu) compiles for CUDA_ARCHS,
+#     i.e. sm_120 here. FlashKDA 17a037d -> 9d9e928 (still 10.0f/12.0f), FlashMLA
+#     e2afa5f -> 847ef30 (no 12.x arch, empty here), fmha_sm100 (CuTe DSL, no
+#     compile) and triton_kernels (now fetched as a codeload tarball, vllm#65162)
+#     move too. The rest is ROCm (generated paged-attention units, gfx1151 GDN) and
+#     the CPU MRv2 sources. vllm_flash_attn.cmake is byte-for-byte unchanged
+#     (GIT_PROGRESS TRUE once).
+#     Runtime resolve (dry-run of the ae525e9 requirements/cuda.txt in the
+#     g40fe396 image). In place, only mistral-common 1.12.0 -> 1.13.1 (vllm#64169
+#     floor). With --upgrade-package on every changed common.txt line, transformers
+#     5.20.2 -> 5.22.1 (ceiling < 5.23, vllm#64529) and huggingface-hub 2.3.0 ->
+#     2.4.0 (floor >= 2.0, vllm#64779; the image already had 2.x) are added;
+#     tokenizers 0.23.3 already meets its new floor. Because layer 2 resolves fresh,
+#     it will ALSO take triton 3.8.0 -> 3.9.0 (released 2026-10-27, after the
+#     g40fe396 build): our source-built torch wheel declares no triton requirement,
+#     and humming-kernels / xgrammar take any version, while the official torch
+#     2.14.0 wheel and vLLM's CI (requirements/test/cuda.txt) both pin 3.8.0.
+#     Accepted by the owner for this repin (2026-11-03); it is index drift, so any
+#     rebuild now gets it, release images included. The post-build bench is the check.
+#     The full --upgrade also shows API/infra drift (openai, anthropic, pydantic,
+#     opentelemetry, ...), nvidia-cudnn-frontend 1.32.1 and cuda-pathfinder 1.8.5
+#     (both in the cached layer 1, so they stay put), and numpy 2.3.5 (stays 2.2.6:
+#     base installs "numpy<2.3"). torch, torchaudio, flashinfer, humming-kernels
+#     0.1.18 and nvidia-cutlass-dsl 4.8.0 stay put.
 #     Otherwise nothing in this file is snapshot-specific; ./build passes the pins.
 #
 # Source trees are supplied as named build-contexts (pytorch=, flashinfer=,

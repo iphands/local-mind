@@ -608,7 +608,9 @@ has not yet landed. You must use one of the containers"). [OBSERVED 2026-10-15]
 ## How to avoid
 `grep -rl <odd tensor suffix>` the image's `vllm/` before debugging flags, and read the card's first
 IMPORTANT line. Then decide: patch the weight stream (Plan 04, `container/patches/csf-scale-decode/`)
-or use their container.
+or use their container. (2026-11-03: upstream now reads this format, vllm#64312, so that overlay was
+removed at the `ae525e9` repin. The same error on a newer image means the ModelOpt CSF transform did
+not run; on an image before `ae525e9` it is expected, because nothing decodes CSF there any more.)
 
 ## Sources
 - `models/vllm/nvidia/Qwen3.8-Flash-Next-FP4-Local/README.md:20`; `docker run … grep -rIl csf_exceptions`

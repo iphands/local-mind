@@ -71,6 +71,18 @@
 # speculative.py adds only disable_lookahead_block_hashes (vllm#61589), not a live-K
 # knob, so num_speculative_tokens_per_batch_size (:524) is still the only Dynamic SD
 # input. test_spec_live.py passes. Still NOT repeated in-container.
+# Re-grepped present at ae525e9 (2026-11-03, 578 commits). scheduler.py (+119 churn),
+# core.py (+100) and core_client.py (+39) changed since 40fe396; routers.py is
+# byte-identical (register_api_routers still :12). dynamic_sd_lookup is declared at
+# scheduler.py:321 and built at :324, and num_spec_tokens_to_schedule still comes
+# from dynamic_sd_lookup[len(num_scheduled_tokens)] at :1709-1713. The UTILITY
+# dispatch getattr(self, method_name) -> _convert_msgspec_args is at core.py:1894-1895
+# (def :1977). call_utility_async is at core_client.py:1314 and :1861. Still needed:
+# speculative.py is refactored by vllm#63205 (speculator config classes: method may
+# now be a custom string, plus custom_method / speculator_options /
+# suffix_decoding_corpus_tokens), but there is no live-K knob, so
+# num_speculative_tokens_per_batch_size (:578) is still the only Dynamic SD input.
+# test_spec_live.py passes. Still NOT repeated in-container.
 # Verified at vLLM 187a0eb (2026-10-10), by reading the source, by the host test
 # (test_spec_live.py: fakes shaped like these seams), and by importing the three
 # targets with the hook in a throwaway container of the b6d8e8a image (no GPU):
