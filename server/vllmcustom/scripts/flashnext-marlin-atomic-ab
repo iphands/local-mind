@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+# Does VLLM_MARLIN_USE_ATOMIC_ADD=1 help on this card? FP4-Local, launcher defaults, SPEC_TOKENS=3,
+# atomic-add reduce on vs off. Everything else is identical across the two arms.
+#
+#   REPLACE=1 ./scripts/flashnext-marlin-atomic-ab        # 2 configs x 4 runs on run-fp4local
+#   RUNS=6 REPLACE=1 ./scripts/flashnext-marlin-atomic-ab # more runs, a tighter spread
+#   ONLY=atomic-on RUNS=2 ./scripts/flashnext-marlin-atomic-ab   # one arm (a smoke test)
+#
+# What the knob does (vllm/model_executor/layers/quantization/utils/marlin_utils.py,
+# should_use_atomic_add_reduce): a Marlin GEMM whose output width n < 2048 and reduction depth
+# k >= 2048 combines its split-K partial sums with atomicAdd instead of a global reduce. vLLM
+# reads the env as exactly "1" (envs.py). On FP4-Local the dense NVFP4 and MXFP8 layers run on
+# Marlin (MarlinNvFp4LinearKernel / MarlinMxfp8LinearKernel); hidden is 2560, so the qualifying
+# layers are those projecting 2560 down to < 2048. Cost: the reduction order is no longer fixed,
+# so outputs are not bitwise reproducible run to run.
+#
+# Both arms pin SM120_SKINNY=0, the launchers' default. flashnext-matrix would otherwise turn it
+# on, and it is a second variable this A/B does not want.
+#
+# Proof each arm got what it asked for: vLLM logs "Marlin kernel can achieve better performance
+# for small size_n with experimental use_atomic_add feature" only when a qualifying GEMM runs
+# with the env UNSET (maybe_warn_marlin_atomic_add_env). So the off arm should log it, and the on
+# arm should not. summary.md gets a line per arm saying which happened. An on arm that still
+# logs the hint never received the env, and its numbers are the off arm's.
+#
+# This is scripts/flashnext-matrix with MATRIX_CONFIGS set, like flashnext-skinny-ab. Same flow
+# per config: boot, wait, one unrecorded warm-up, RUNS recorded passes of bench's short / code /
+# long, single stream. Arms run back to back (off first), not interleaved.
+# Output: bench/bench-logs/flashnext-marlin-atomic-ab-<UTC stamp>/
+set -euo pipefail
+
+HERE=$(cd "$(dirname "$0")/.." && pwd)
+# The on arm sets ENV_EXTRA itself. A caller's ENV_EXTRA would reach only the off arm, so the arms
+# would differ by more than the knob under test. Refuse rather than measure that.
+if [[ -n ${ENV_EXTRA:-} ]]; then
+  echo "## ENV_EXTRA is set ('$ENV_EXTRA'): it would apply to the off arm only. Unset it for this A/B."
+  exit 2
+fi
+export MATRIX_CONFIGS="atomic-off|SPEC_TOKENS=3|SM120_SKINNY=0;atomic-on|SPEC_TOKENS=3|SM120_SKINNY=0|ENV_EXTRA=VLLM_MARLIN_USE_ATOMIC_ADD=1"
+export LAUNCHER=${LAUNCHER:-qwen3.8-flash-next/run-fp4local}
+export OUT=${OUT:-$HERE/bench/bench-logs/flashnext-marlin-atomic-ab-$(date -u +%Y%m%d-%H%M%S)}
+
+rc=0
+"$HERE/scripts/flashnext-matrix" "$@" || rc=$?
+
+# Per-arm proof, appended to the matrix's own summary.
+HINT='with experimental use_atomic_add feature'
+if [[ -f "$OUT/summary.md" ]]; then
+  {
+    echo
+    echo "Atomic-add hint in each arm's boot log (off arm: expected; on arm: must be absent):"
+    for arm in atomic-off atomic-on; do
+      log="$OUT/$arm.log"
+      if [[ ! -s $log ]]; then state="no log (arm not run)"
+      elif grep -q "$HINT" "$log"; then state="logged"
+      else state="not logged"; fi
+      echo "- \`$arm\`: $state"
+    done
+  } | tee -a "$OUT/summary.md"
+  if [[ -s "$OUT/atomic-on.log" ]] && grep -q "$HINT" "$OUT/atomic-on.log"; then
+    echo "## WARNING: atomic-on logged the hint -- the env did not reach vLLM; its numbers are an off arm."
+    [[ $rc == 0 ]] && rc=3
+  fi
+fi
+exit "$rc"
