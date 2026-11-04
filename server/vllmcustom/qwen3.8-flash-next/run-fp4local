@@ -523,6 +523,10 @@ docker_core_args
 CONTAINER_ARGS+=(
   -e VLLM_GDN_DECODE_KERNEL="$GDN_KERNEL"                  # triton REQUIRED for the FP8 GDN projections (card)
   -e VLLM_SLEEP_WHEN_IDLE=1                                # release SMs when no requests pending (idle power)
+  # triton is unpinned in the image and its default flips in 3.10 (fusion OFF). Pin
+  # today's behaviour (3.8/3.9 default = ON) so a rebuild cannot change the numerics of
+  # every Triton kernel that does not set enable_fp_fusion itself (GDN, QSA, warmups).
+  -e TRITON_DEFAULT_FP_FUSION=1
   # The model is a directory under the read-only /models mount, loaded in place;
   # this makes any Hub access an error rather than a 184 GB surprise.
   -e HF_HUB_OFFLINE=1
