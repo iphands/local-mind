@@ -99,6 +99,24 @@
 #   initialize_from_config may no longer be the final KV, and the util floors, which
 #   assume KV is the only util-scaled component, may read differently. The hooks
 #   still fire; whether the memory section's numbers still mean the same is unknown.
+#   SETTLED on the first ae525e9 boot (2026-11-03, FP4-Local) -> Plan 07. They did not
+#   mean the same: kv.x - kv.e was 0.95 MiB and mem.final (6.51 GiB free) predates the
+#   commit, so the report read KV 0.0, outside-budget 14.7 GiB and hard floor 0.93,
+#   while vLLM logged "Extended KV cache to 373 blocks (16.86 GiB)". The cache is
+#   VMM-mapped outside torch's allocator (used - res = 14.71 GiB = 13.06 committed +
+#   context), so no torch counter can see it. Plan 07 T1 adds one OPTIONAL hook,
+#   Worker.extend_kv_cache (gpu_worker.py:1048, called once after warmup from
+#   engine/core.py:414). It writes mem.kvext (device + host + kv_bytes =
+#   model_runner.extensible_kv_cache.physical_bytes, blocks = num_committed_blocks),
+#   and the report reads that sample when it carries kv_bytes. KV = kv_bytes,
+#   outside = total - free - res - kv_bytes, and host/final come from mem.kvext. The KV
+#   cross-check becomes "KV sized after warmup …", and the token label is withheld (kvcfg
+#   is the reservation). Optional = an absent method records no miss (older images,
+#   non-extensible boots), and the span is exempt from "spans not seen". The drift
+#   guard instead: with no kv_bytes and a kv alloc delta under half of mem.kvbudget,
+#   the KV, outside and headroom rows are WITHHELD with a note, never rendered as 0.0.
+#   Replaying that boot's real marks plus the extension: KV 16.9, outside 1.7, hard 0.79
+#   (the 2026-10-18 non-extensible report: 17.0 / 1.8 / 0.79). Runtime: Plan 07 T2.
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client
@@ -109,7 +127,8 @@
 #   vllm.v1.engine.core                           EngineCoreProc.run_engine_core, EngineCore.__init__
 #   vllm.v1.worker.gpu_worker                     Worker.__init__/init_device/load_model/
 #                                                 determine_available_memory/initialize_from_config/
-#                                                 compile_or_warm_up_model
+#                                                 compile_or_warm_up_model,
+#                                                 extend_kv_cache (OPTIONAL: no miss when absent; Plan 07)
 #   vllm.v1.worker.gpu.model_runner               GPUModelRunner.capture_model (profile|final flag)
 #   vllm.model_executor.warmup.kernel_warmup      kernel_warmup, flashinfer_autotune
 #

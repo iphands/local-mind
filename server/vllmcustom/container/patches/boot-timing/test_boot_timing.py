@@ -375,6 +375,133 @@ try:
 finally:
     shutil.rmtree(tmpd, ignore_errors=True)
 
+# --- extensible KV cache (vllm#56492, default from vLLM ae525e9) ------------
+# The mem marks of the first real ae525e9 boot (2026-11-03, FP4-Local,
+# util 0.975), verbatim bytes. vLLM's log for that boot: "Available KV cache
+# memory: 17.66 GiB", "Memory after warmup: 6.51 GiB free, 13.06 GiB
+# committed", "Extended KV cache to 373 blocks (16.86 GiB)". KV is VMM-mapped
+# outside torch and committed AFTER mem.final, so kv.x - kv.e is ~1 MiB.
+TOT = 102066159616
+REAL = [
+    ("mem.host0", 0, "rss=15179776,mtotal=134991175680,avail=125561913344"),
+    ("mem.device", 19, f"alloc=157454848,res=159383552,free=100563615744,total={TOT}"),
+    ("mem.cfg", 19, "util=0.975,tokens=6019"),
+    ("mem.load.e", 19, f"alloc=157454848,res=159383552,free=100563615744,total={TOT}"),
+    ("mem.load.x", 864, f"alloc=78137362944,res=78248935424,free=22425763840,total={TOT}"),
+    ("mem.prof.e", 864, f"alloc=78137362944,res=78248935424,free=22425763840,total={TOT}"),
+    ("mem.prof.x", 907, f"alloc=78674678272,res=78798389248,free=21867528192,total={TOT},peak=80330247168"),
+    ("mem.kvbudget", 907, "bytes=18966110106"),
+    ("mem.kv.e", 907, f"alloc=78674678272,res=78798389248,free=21867528192,total={TOT}"),
+    ("mem.kv.x", 907.1, f"alloc=78675672576,res=78800486400,free=21815099392,total={TOT}"),
+    ("mem.gr.e", 948, f"alloc=78805551616,res=80612425728,free=6018564096,total={TOT},phase=final"),
+    ("mem.gr.x", 956, f"alloc=78906873344,res=79274442752,free=6991249408,total={TOT},phase=final"),
+    ("mem.final", 958, f"alloc=78906873344,res=79274442752,free=6991642624,total={TOT},"
+                       "rss=33121628160,mtotal=134991175680,avail=92008566784"),
+]
+real_rows = [Row(T, 522, "engine", "start", "process.start", "")] + [
+    Row(T + dt, 522, "engine", "mem", n, d) for n, dt, d in REAL
+]
+# The extension: 13.06 -> 16.86 GiB committed, so free drops by the growth;
+# torch's counters do not move (the cache is not torch's).
+KV_EXT = B(16.86)
+FREE_X = 6991642624 - (KV_EXT - B(13.06))
+ext_rows = real_rows + [
+    Row(T + 958.5, 522, "engine", "mem", "mem.kvext",
+        f"alloc=78906873344,res=79274442752,free={FREE_X},total={TOT},"
+        f"rss=33221628160,mtotal=134991175680,avail=91908566784,"
+        f"kv_bytes={KV_EXT},blocks=373"),
+]
+rep_ext = bt.format_report(ext_rows, now=T + 960)
+m_ext = bt._mem_map(ext_rows)
+p_ext = bt._gpu_parts(m_ext)
+assert p_ext["kv"] == KV_EXT, p_ext["kv"]
+out_b = TOT - FREE_X - 79274442752 - KV_EXT
+assert p_ext["outside"] == out_b and 1.0 * G < out_b < 3.0 * G, out_b / G
+assert next(ln for ln in rep_ext.splitlines() if ln.strip().startswith("KV cache")) \
+    .split()[2:4] == [f"{KV_EXT / G:.1f}", "GiB"]
+assert "KV cache  (~" not in rep_ext          # kvcfg would be the reservation
+assert f"outside budget (driver, other)" in rep_ext
+assert f"{out_b / G:.1f} GiB" in next(
+    ln for ln in rep_ext.splitlines() if "outside budget" in ln)
+assert ("KV sized after warmup (extensible KV cache): profile estimate "
+        f"{18966110106 / G:.1f} GiB → committed {KV_EXT / G:.1f} GiB, 373 blocks") in rep_ext
+assert "KV cross-check" not in rep_ext and "withheld" not in rep_ext
+# headroom from the post-extension sample: non-KV = used - KV
+non_kv_x = (TOT - FREE_X) - KV_EXT
+assert f"hard floor     {non_kv_x / TOT:.2f}" in rep_ext
+assert 0.75 < non_kv_x / TOT < 0.82, non_kv_x / TOT   # the 2026-10-18 shape: 0.79
+# host RAM reads the later sample too
+assert f"{91908566784 / G:.1f} GiB / {134991175680 / G:.1f} GiB" in rep_ext
+assert "GPU accounting drift" not in rep_ext   # (mem-only rows: spans are absent by design)
+assert "worker.kv_extend" not in rep_ext.split("spans not seen this boot:")[1]
+
+# withheld: the same boot with NO kvext mark (hook drifted) -> no 0.0 KV row,
+# no outside line (it would hold the KV), no headroom, one note saying why
+rep_wh = bt.format_report(real_rows, now=T + 960)
+assert bt._kv_withheld(bt._mem_map(real_rows))
+assert not any(ln.strip().startswith("KV cache") for ln in rep_wh.splitlines())
+assert "outside budget" not in rep_wh and "── headroom ──" not in rep_wh
+assert "budget headroom" not in rep_wh and "KV cross-check" not in rep_wh
+assert "KV cache not allocated at initialize_from_config and no extend_kv_cache mark" in rep_wh
+assert "model weights" in rep_wh and "MemAvailable at serve-ready" in rep_wh
+# ... and a kvext mark whose runner attrs were renamed (no kv_bytes) is the
+# same withheld case, not a KV of zero
+noattr = real_rows + [Row(T + 958.5, 522, "engine", "mem", "mem.kvext",
+                          f"alloc=1,res=2,free={FREE_X},total={TOT}")]
+assert bt._kv_withheld(bt._mem_map(noattr)) and bt._gpu_parts(bt._mem_map(noattr))["kv"] is None
+# the classic (torch-allocated) boot above is NOT withheld
+assert not bt._kv_withheld(bt._mem_map(rows))
+
+
+# _kvext_detail: reads the real attribute path, each key guarded
+class _KVC:
+    physical_bytes = KV_EXT
+    num_committed_blocks = 373
+
+
+class _Runner:
+    extensible_kv_cache = _KVC()
+
+
+class _W:
+    model_runner = _Runner()
+
+
+assert bt._kvext_detail((_W(),)) == f",kv_bytes={KV_EXT},blocks=373"
+assert bt._kvext_detail((object(),)) == ""
+assert bt._kvext_detail(()) == ""
+
+# the hook target is optional: an image without Worker.extend_kv_cache gets
+# no "hooks NOT applied" miss; one with it gets it wrapped
+import types  # noqa: E402
+
+tmpd2 = tempfile.mkdtemp(prefix="bt-test-")
+try:
+    os.environ["VLLM_BOOT_TIMING_DIR"] = tmpd2
+    importlib.reload(bt)
+    meths = ("__init__", "init_device", "load_model", "determine_available_memory",
+             "initialize_from_config", "compile_or_warm_up_model")
+    for has_ext in (False, True):
+        mod = types.ModuleType("vllm.v1.worker.gpu_worker")
+        ns = {k: (lambda self, *a, **kw: None) for k in meths}
+        if has_ext:
+            ns["extend_kv_cache"] = lambda self, n: None
+        ns["__module__"] = mod.__name__
+        mod.Worker = type("Worker", (), ns)
+        del bt._MISSING[:], bt._HOOKED[:]
+        bt._apply(mod)
+        full = "vllm.v1.worker.gpu_worker.Worker.extend_kv_cache"
+        assert full not in bt.missing(), bt.missing()
+        assert (full in bt.hooked()) is has_ext, bt.hooked()
+        assert getattr(mod.Worker, "extend_kv_cache", None) is None or \
+            mod.Worker.extend_kv_cache.__boot_timed__
+        # the non-optional targets still report drift as before
+        assert not bt.missing(), bt.missing()
+    marks2 = os.path.join(tmpd2, "marks.log")
+    assert not os.path.exists(marks2) or "miss" not in open(marks2).read()
+finally:
+    shutil.rmtree(tmpd2, ignore_errors=True)
+
 if (mock := os.environ.get("BT_MOCK_OUT")):
     with open(mock, "w") as f:
         f.write(report + "\n")

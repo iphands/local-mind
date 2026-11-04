@@ -1,6 +1,6 @@
 # Plan 07 — boot-timing: account for vLLM's extensible KV cache
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-11-03
 > **Depends on**: N/A (Plan 03 shipped the report this fixes)
 > **Goal**: The boot report's KV row, outside-budget line, headroom section and KV cross-check show the KV cache vLLM actually committed, on images with the extensible KV cache on (vllm#56492, default from `ae525e9`).
@@ -193,7 +193,7 @@ docker logs vllm 2>&1 | grep -E 'Extended KV cache|Memory after warmup|KV cache 
 
 ## Verification Checklist
 
-- [ ] T1: `python3 container/patches/boot-timing/test_boot_timing.py` → `ALL TESTS PASS`, including the extensible-boot numeric asserts; the throwaway-container check prints `True` for `Worker.extend_kv_cache.__boot_timed__`
+- [x] T1: `python3 container/patches/boot-timing/test_boot_timing.py` → `ALL TESTS PASS`, including the extensible-boot numeric asserts; the throwaway-container check prints `True` for `Worker.extend_kv_cache.__boot_timed__`
 - [ ] T2: the owner boot's KV row equals vLLM's "Extended KV cache … (X GiB)" within 0.1 GiB, and outside-budget is under 3 GiB
 - [ ] All: the project gate (Rule A) passes on the final commit, every step `pass` or the skip named in the tracker
 - [ ] All: step 6 ran (T2), **or** the tracker says the behavior went unverified at runtime

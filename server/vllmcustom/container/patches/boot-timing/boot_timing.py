@@ -75,7 +75,13 @@ LABELS: dict[tuple[str, str], str] = {
     ("warmup.autotune", ""): "flashinfer autotune",
     ("runner.graphs", "final"): "cudagraph capture (final)",
     ("runner.graphs", "profile"): "cudagraph capture (memory probe)",
+    ("worker.kv_extend", ""): "KV cache commit (final size, after warmup)",
 }
+
+# Phases that fire only on some boots (the extensible KV cache, vllm#56492,
+# is off for V1-runner models and with --no-enable-extensible-kv-cache): never
+# listed under "spans not seen this boot", which is for drift.
+_OPTIONAL_SPANS = {"worker.kv_extend"}
 
 
 class Span(NamedTuple):
@@ -279,9 +285,36 @@ def _rate_suffix(pid_mem: dict[str, tuple[float, dict[str, str]]], sp: "Span") -
     return "" if r is None else f" @ {r} ({b / _GIB:.1f} GiB)"
 
 
+def _kv_ext(m: dict[str, dict[str, str]]) -> float | None:
+    """Bytes vLLM's extensible KV cache committed (vllm#56492), read off the
+    runner at Worker.extend_kv_cache exit. That cache is VMM-mapped OUTSIDE
+    torch's allocator and committed after warmup — after mem.kv.* and
+    mem.final — so torch's counters never see it."""
+    return _mv(m, "mem.kvext", "kv_bytes")
+
+
+def _fin(m: dict[str, dict[str, str]]) -> str:
+    """The latest whole-device + host sample: mem.kvext when the KV cache was
+    committed after warmup (it postdates mem.final), else mem.final."""
+    return "mem.kvext" if _kv_ext(m) is not None else "mem.final"
+
+
+def _kv_withheld(m: dict[str, dict[str, str]]) -> bool:
+    """True when the KV cache cannot be accounted for: no committed-bytes
+    mark, yet initialize_from_config allocated under half of vLLM's own
+    budget — i.e. the KV went somewhere torch cannot see (an extensible
+    cache whose hook drifted away). Rendering the 0.0 delta as "KV" would
+    file the cache under outside-budget and wreck the headroom floors."""
+    if _kv_ext(m) is not None:
+        return False
+    d = _mdelta(m, "mem.kv.e", "mem.kv.x")
+    kvb = _mv(m, "mem.kvbudget", "bytes")
+    return d is not None and kvb is not None and kvb > 0 and d < 0.5 * kvb
+
+
 def _mem_total(m: dict[str, dict[str, str]]) -> float | None:
-    """Card size in bytes; mem.final preferred (latest read), device fallback."""
-    t = _mv(m, "mem.final", "total")
+    """Card size in bytes; the final sample preferred (latest read), device fallback."""
+    t = _mv(m, _fin(m), "total")
     if t is None or t <= 0:
         t = _mv(m, "mem.device", "total")
     return t if t is not None and t > 0 else None
@@ -301,26 +334,38 @@ def _gpu_parts(m: dict[str, dict[str, str]]) -> dict[str, float | None]:
     util = _mv(m, "mem.cfg", "util")
     budget = util * total if util is not None and total is not None else None
     free_dev = _mv(m, "mem.device", "free")
-    res = _mv(m, "mem.final", "res")
-    alloc = _mv(m, "mem.final", "alloc")
-    free = _mv(m, "mem.final", "free")
+    fin = _fin(m)
+    res = _mv(m, fin, "res")
+    alloc = _mv(m, fin, "alloc")
+    free = _mv(m, fin, "free")
+    ext = _kv_ext(m)
+    withheld = _kv_withheld(m)
+    if ext is not None:
+        kv: float | None = ext
+    elif withheld:
+        kv = None
+    else:
+        # the alloc step across initialize_from_config
+        kv = _mdelta(m, "mem.kv.e", "mem.kv.x")
     return {
         "total": total,
         "util": util,
         "budget": budget,
         # weights = the alloc step across the model load
         "weights": _mdelta(m, "mem.load.e", "mem.load.x"),
-        # kv = the alloc step across initialize_from_config
-        "kv": _mdelta(m, "mem.kv.e", "mem.kv.x"),
+        # kv = the committed extensible cache, else the alloc step across
+        # initialize_from_config; None when neither accounts for it
+        "kv": kv,
         # graphs = the alloc step across the FINAL capture_model call only
         "graphs": _mdelta(m, "mem.gr.e|final", "mem.gr.x|final"),
         # context+torch runtime = what the driver/had already taken at CUDA init
         "ctx": None if free_dev is None or total is None else total - free_dev,
         "overhead": None if res is None or alloc is None else res - alloc,
-        # outside = card memory the torch allocator never owned at all
+        # outside = card memory the torch allocator never owned at all, less
+        # the extensible KV cache (also never torch's, but it has its own row)
         "outside": (
-            None if total is None or free is None or res is None
-            else total - free - res
+            None if total is None or free is None or res is None or withheld
+            else total - free - res - (ext or 0.0)
         ),
         "final_used": None if total is None or free is None else total - free,
     }
@@ -335,6 +380,10 @@ def _act_peak(m: dict[str, dict[str, str]]) -> float | None:
 
 
 def _mem_tokens(m: dict[str, dict[str, str]]) -> float | None:
+    # An extensible cache's kvcfg blocks are the RESERVED capacity, not what
+    # was committed: no token figure beats a wrong one.
+    if _kv_ext(m) is not None:
+        return None
     blocks = _mv(m, "mem.kvcfg", "blocks")
     bsize = _mv(m, "mem.kvcfg", "block_size")
     return None if blocks is None or bsize is None else blocks * bsize
@@ -410,10 +459,11 @@ def _render_gpu(m: dict[str, dict[str, str]], pid: int) -> list[str]:
 
 
 def _render_host(m: dict[str, dict[str, str]], api_rss: float | None) -> list[str]:
-    avail = _mv(m, "mem.final", "avail")
-    rss = _mv(m, "mem.final", "rss")
+    fin = _fin(m)
+    avail = _mv(m, fin, "avail")
+    rss = _mv(m, fin, "rss")
     avail0 = _mv(m, "mem.host0", "avail")
-    mtotal = _mv(m, "mem.final", "mtotal")
+    mtotal = _mv(m, fin, "mtotal")
     lines: list[str] = []
     # MemAvailable is machine-wide, so another process can invert the delta
     # between the two marks; a negative "consumed" is noise, not a number.
@@ -536,7 +586,25 @@ def _mem_notes(m: dict[str, dict[str, str]]) -> list[str]:
         )
     p = _gpu_parts(m)
     kvb = _mv(m, "mem.kvbudget", "bytes")
-    if p["kv"] is not None and kvb is not None:
+    ext = _kv_ext(m)
+    if ext is not None:
+        # The profile-time budget is only vLLM's first estimate here: it
+        # re-measures after warmup and commits that. Comparing the two would
+        # report vLLM's own re-sizing as a measurement error.
+        blocks = _mv(m, "mem.kvext", "blocks")
+        btail = f", {int(blocks)} blocks" if blocks is not None else ""
+        est = f"profile estimate {kvb / _GIB:.1f} GiB → " if kvb is not None else ""
+        notes.append(
+            f"KV sized after warmup (extensible KV cache): {est}committed "
+            f"{ext / _GIB:.1f} GiB{btail}"
+        )
+    elif _kv_withheld(m):
+        notes.append(
+            "KV cache not allocated at initialize_from_config and no "
+            "extend_kv_cache mark — KV, outside-budget and headroom rows "
+            "withheld (upstream drift?)"
+        )
+    elif p["kv"] is not None and kvb is not None:
         diff = abs(p["kv"] - kvb) / _GIB
         if diff <= 0.5:
             notes.append(
@@ -695,7 +763,7 @@ def format_report(rows: list[Row], now: float, width: int = 74) -> str:
     notes += mem_notes
     # a label that never fired is either drifted-out or not on this boot's
     # path — say which names, so a silently shrinking report stays visible
-    unfired = sorted({name for name, _ in LABELS} - {r.name for r in rows})
+    unfired = sorted({name for name, _ in LABELS} - _OPTIONAL_SPANS - {r.name for r in rows})
     if unfired:
         notes.append("spans not seen this boot: " + ", ".join(unfired))
     if notes:
@@ -827,10 +895,11 @@ def _report_struct(rows: list[Row], now: float) -> dict:
         }
 
     host_out: dict = {}
-    _avail = _mv(m, "mem.final", "avail")
-    _rss = _mv(m, "mem.final", "rss")
+    _f = _fin(m)
+    _avail = _mv(m, _f, "avail")
+    _rss = _mv(m, _f, "rss")
     _avail0 = _mv(m, "mem.host0", "avail")
-    _mtotal = _mv(m, "mem.final", "mtotal")
+    _mtotal = _mv(m, _f, "mtotal")
     if _avail is not None and _avail0 is not None and _avail0 >= _avail:
         host_out["consumed_by_boot_gib"] = round((_avail0 - _avail) / _GIB, 2)
     parts: list[str] = []
@@ -893,7 +962,7 @@ def _report_struct(rows: list[Row], now: float) -> dict:
             "above): " + ", ".join(misses)
         )
     notes_out += _mem_notes(m)
-    unfired = sorted({name for name, _ in LABELS} - {r.name for r in rows})
+    unfired = sorted({name for name, _ in LABELS} - _OPTIONAL_SPANS - {r.name for r in rows})
     if unfired:
         notes_out.append("spans not seen this boot: " + ", ".join(unfired))
 
@@ -1045,6 +1114,27 @@ def _kvcfg_detail(a: tuple) -> str:
         return ""
 
 
+def _kvext_detail(a: tuple) -> str:
+    """Committed bytes + blocks off the Worker's extensible KV cache
+    (Worker.model_runner.extensible_kv_cache, an ExtensibleKVCache). Each
+    key rides its own guard; a rename drops the key, and the report then
+    withholds the KV rows instead of guessing (_kv_withheld)."""
+    out = ""
+    try:
+        kvc = a[0].model_runner.extensible_kv_cache
+    except Exception:
+        return ""
+    try:
+        out += f",kv_bytes={int(kvc.physical_bytes)}"
+    except Exception:
+        pass
+    try:
+        out += f",blocks={int(kvc.num_committed_blocks)}"
+    except Exception:
+        pass
+    return out
+
+
 def _mem_sample(
     tag: str, where: str, flag: str = "", a: tuple = (), rv: Any = None
 ) -> None:
@@ -1101,6 +1191,12 @@ def _mem_sample(
             host = _host_mem()
             extra = "".join(f",{k}={v}" for k, v in host.items())
             _record("mem", "mem.final", base + extra)
+        elif tag == "kvext" and where == "x":
+            # extensible KV cache committed (vllm#56492): this sample
+            # postdates mem.final and is the one the report reads
+            host = _host_mem()
+            extra = "".join(f",{k}={v}" for k, v in host.items())
+            _record("mem", "mem.kvext", base + extra + _kvext_detail(a))
     except Exception:
         pass
 
@@ -1201,6 +1297,15 @@ TARGETS: dict[str, list[dict[str, Any]]] = {
             name="worker.warmup",
             cb=_engine_summary,
             mem="final",
+        ),
+        # vllm#56492 (default on CUDA + V2 runner from ae525e9): called once,
+        # after compile_or_warm_up_model, to commit the final KV size. Absent
+        # on older images and skipped by non-extensible boots, hence optional.
+        dict(
+            qual="Worker.extend_kv_cache",
+            name="worker.kv_extend",
+            mem="kvext",
+            optional=True,
         ),
     ],
     "vllm.v1.worker.gpu.model_runner": [
@@ -1345,7 +1450,7 @@ def _apply(module: types.ModuleType) -> None:
                 _HOOKED.append(full)
             except Exception as e:
                 _record("miss", name, f"{full} ({e!r})")
-        if not done and full not in _HOOKED:
+        if not done and full not in _HOOKED and not spec.get("optional"):
             _MISSING.append(full)
             _record("miss", name, full)
 
