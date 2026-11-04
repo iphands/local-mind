@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `07`.** <!-- hp:next-free -->
+**Next free plan number: `08`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-10-13):** single-stream decode throughput on one RTX PRO 6000
 > (sm_120), from a vLLM stack we build ourselves — torch, FlashInfer and vLLM all compiled from
@@ -45,6 +45,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 04 | Decode NVFP4-CSF expert scales at load time | — | done | Closed 2026-11-03 (`completed/`). Booted 2026-10-18; superseded by upstream vllm#64312, so the `ae525e9` repin deleted the overlay. |
 | 05 | Trim the source build to what sm_120 serving uses | — | pending | Torch/torchaudio flags, Marlin int8-act, FlashInfer AOT trims; tiered keep-list for Muse/Nemotron/Qwen/gpt-oss; baseline + smoke gate first. Needs one owner full rebuild. |
 | 06 | b12x SM12x kernels as an opt-in overlay | — | in-progress | Pinned pure-Python wheel fetched to `$CACHE_DIR`, mounted + `.pth` when `MOE_BACKEND`/`NVFP4_BACKEND`=`b12x`; no rebuild. Owner A/B decides the Dockerfile. |
+| 07 | boot-timing: account for vLLM's extensible KV cache | 03 | pending | `ae525e9` commits KV after warmup, outside torch; report read KV 0.0 / outside 14.7. Hook `Worker.extend_kv_cache`; owner boot verifies. |
 
 ## Pre-existing material <!-- hp:pre-existing -->
 
