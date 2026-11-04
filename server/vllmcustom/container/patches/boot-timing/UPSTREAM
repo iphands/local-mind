@@ -117,6 +117,9 @@
 #   the KV, outside and headroom rows are WITHHELD with a note, never rendered as 0.0.
 #   Replaying that boot's real marks plus the extension: KV 16.9, outside 1.7, hard 0.79
 #   (the 2026-10-18 non-extensible report: 17.0 / 1.8 / 0.79). Runtime: Plan 07 T2.
+#   LIVE 2026-11-03 (Plan 07 T2, owner boot, FP4-Local): mem.kvext kv_bytes=18056478720
+#   blocks=372; report KV 16.8 GiB vs vLLM "Extended KV cache to 372 blocks (16.82 GiB)",
+#   outside 1.7, hard 0.79; no "hooks NOT applied".
 #
 # Hook table (module -> attr; all confirmed present in that image):
 #   vllm.entrypoints.launchers.api_server.entry   run_server, build_async_engine_client

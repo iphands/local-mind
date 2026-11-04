@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 50% complete (1/2 tasks)
+- Status: 100% complete (2/2 tasks)
 - Start date: 2026-11-03
 - Plan: `context/plans/07_boot_timing_extensible_kv.md`
 - Evidence:
@@ -28,7 +28,7 @@
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 1 | T1: hook `extend_kv_cache`, render from `mem.kvext` | `container/patches/boot-timing/` | done | Host test passes, including the new cases. A throwaway `--rm` container of `…gae525e9` (uid 1000, no GPU) wraps the real `Worker.extend_kv_cache` with `missing: []`. Gate steps 1–5 below. **Runtime not verified: gate step 6 is T2.** |
-| 2 | T2: owner boot agrees with vLLM's log | — | pending | needs the owner |
+| 2 | T2: owner boot agrees with vLLM's log | — | done | Owner boot 2026-11-03 (container start 02:20 UTC 11-04, pid 240). KV row 16.8 GiB vs vLLM's "Extended KV cache to 372 blocks (16.82 GiB)"; outside 1.7; hard 0.79; no `hooks NOT applied`; `worker.kv_extend` not in "spans not seen". |
 
 ## Evidence
 
@@ -37,9 +37,11 @@
 | 2026-11-03 | first `…gae525e9` boot, `run-fp4local` defaults; report + `docker logs vllm` | report: KV 0.0, outside 14.7, hard 0.93, cross-check differs by 17.7; vLLM: extended to 373 blocks (16.86 GiB), 6.51 GiB free after warmup | 1 | accounting, not timing |
 | 2026-11-03 | `test_boot_timing.py`: the real boot's 13 mem marks (verbatim bytes) plus a synthetic `mem.kvext` (16.86 GiB, free reduced by the 3.80 GiB growth vLLM logged) | KV 16.9, outside 1.7, hard 0.79, safe 0.83; note "profile estimate 17.7 GiB → committed 16.9 GiB, 373 blocks". Without `mem.kvext`: KV/outside/headroom withheld with a note. | 1 | **replay, not a boot**: the `mem.kvext` row is built from vLLM's rounded log figures |
 | 2026-11-03 | `docker run --rm --user 1000:1000 … gae525e9` importing `gpu_worker` under the hook finder | `wrapped: True`; 7 gpu_worker targets in `hooked()`; `missing: []`; `ExtensibleKVCache.physical_bytes` is a property | 1 | seam check only, no GPU |
+| 2026-11-03 | owner boot of `./qwen3.8-flash-next/run-fp4local` on `…gae525e9` with the T1 tree mounted (gate step 6); pasted report + `docker logs vllm` + `docker exec vllm grep mem\. /tmp/vllm-boot-timing/marks.log` | `mem.kvext`: `kv_bytes=18056478720` (16.82 GiB), `blocks=372`, `free=2959015936`; vLLM: "Extended KV cache to 372 blocks (16.82 GiB)", "Available KV cache memory: 17.64 GiB". Report: KV 16.8, outside 1.7 (= 1.65 by hand), hard 0.79, safe 0.83, note "profile estimate 17.6 GiB → committed 16.8 GiB, 372 blocks" | 1 | accounting identity, not a timing; one boot settles it |
 
 ## Notes / Deviations
 
+- Open Question 3 settled on the T2 boot: `model_runner` is the V2 runner when `extend_kv_cache` runs, and the attribute read worked (`kv_bytes` present).
 - The `[P7][plan]` commit was made before running the gate. It was docs-only (plan, tracker, SERIES), and the full gate ran before T1.
 
 ## Follow-ups

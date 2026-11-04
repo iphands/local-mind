@@ -237,7 +237,7 @@ section**, which always stays last. Keep it dense.
   Booted 2026-11-03 (FP4-Local, util 0.975, 1 boot) [LIVE 2026-11-03]:
   - "Available KV cache memory: 17.66 GiB" is only the profile-time estimate. After warmup vLLM logged "6.51 GiB free, 13.06 GiB committed … 1.54 GiB kept for transient activations" and then "Extended KV cache to 373 blocks (16.86 GiB)". On 2026-10-18, without the extensible cache, KV was 17.07 GiB / 959,497 tokens; now it is 913,829 tokens.
   - The committed pages sit **outside torch's allocator**: `memory_allocated`/`memory_reserved` don't move, and `initialize_from_config` allocated 0.95 MiB.
-  - So any memory accounting built on torch counters must read `Worker.model_runner.extensible_kv_cache.physical_bytes` after `Worker.extend_kv_cache` (`gpu_worker.py:1048`; called once after warmup, `engine/core.py:414`). boot-timing does this since Plan 07.
+  - So any memory accounting built on torch counters must read `Worker.model_runner.extensible_kv_cache.physical_bytes` after `Worker.extend_kv_cache` (`gpu_worker.py:1048`; called once after warmup, `engine/core.py:414`). boot-timing does this since Plan 07; confirmed on a second boot 2026-11-03: `physical_bytes` 18,056,478,720 B (16.82 GiB, 372 blocks) and vLLM's own "Extended KV cache to 372 blocks (16.82 GiB)" agree, and outside-budget falls from 14.7 GiB back to 1.7 GiB.
 - vllm#65230 (`37753d9dd9`): QuTLASS and fp_quant are removed (QuIP NVFP4 runs on Humming), so `_qutlass_C` leaves
   the main image and `./container/archs` no longer lists it. [SOURCE]
 - **triton is unpinned in our images.** Our source-built torch wheel declares no `triton` requirement (official

@@ -187,15 +187,15 @@ docker logs vllm 2>&1 | grep -E 'Extended KV cache|Memory after warmup|KV cache 
 
 1. **Risk: an optional hook can vanish silently on a later repin.** *Mitigation*: the withheld-KV guard. With no `mem.kvext` and a KV delta under half of vLLM's budget, the report withholds the KV rows and says so instead of printing 0.0. The UPSTREAM re-grep list names the target too.
 2. **Risk: `physical_bytes` includes granule rounding, so it reads a little above vLLM's "373 blocks (16.86 GiB)".** *Mitigation*: that is the right number for a *memory* report (it is what is mapped). T2's 0.1 GiB tolerance covers it.
-3. **Question: is `model_runner` the V2 runner whenever `extend_kv_cache` runs?** *How we'll settle it*: upstream asserts `use_v2_model_runner` inside `_v2_model_runner()` (`gpu_worker.py:1045`), so a non-V2 worker would raise before our exit sample. T2 observes it on the real boot.
+3. ~~**Question: is `model_runner` the V2 runner whenever `extend_kv_cache` runs?**~~ RESOLVED (T2): yes on the real boot — `mem.kvext` carried `kv_bytes=18056478720,blocks=372`. *How we'll settle it*: upstream asserts `use_v2_model_runner` inside `_v2_model_runner()` (`gpu_worker.py:1045`), so a non-V2 worker would raise before our exit sample. T2 observes it on the real boot.
 
 ---
 
 ## Verification Checklist
 
 - [x] T1: `python3 container/patches/boot-timing/test_boot_timing.py` → `ALL TESTS PASS`, including the extensible-boot numeric asserts; the throwaway-container check prints `True` for `Worker.extend_kv_cache.__boot_timed__`
-- [ ] T2: the owner boot's KV row equals vLLM's "Extended KV cache … (X GiB)" within 0.1 GiB, and outside-budget is under 3 GiB
-- [ ] All: the project gate (Rule A) passes on the final commit, every step `pass` or the skip named in the tracker
-- [ ] All: step 6 ran (T2), **or** the tracker says the behavior went unverified at runtime
+- [x] T2: the owner boot's KV row equals vLLM's "Extended KV cache … (X GiB)" within 0.1 GiB, and outside-budget is under 3 GiB
+- [x] All: the project gate (Rule A) passes on the final commit, every step `pass` or the skip named in the tracker
+- [x] All: step 6 ran (T2), **or** the tracker says the behavior went unverified at runtime
 - [ ] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read
 - [ ] All: plan + tracker `git mv`'d to `completed/`, `SERIES.md` marked done (Rule C)
