@@ -32,6 +32,7 @@ nasm
 npm
 openssl
 openssl-devel
+openssl3-libs
 pango-devel
 php
 procps-ng psmisc

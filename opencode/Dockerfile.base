@@ -1,6 +1,6 @@
 # Shared base (ocli-base) for opencode/Dockerfile (ocli) and opencode2/Dockerfile (ocli2)
 # Built by ./bin/build-container-opencode-base
-ARG BASE_IMAGE=iphands/pkgcache-fedora:44
+ARG BASE_IMAGE=iphands/pkgcache-fedora:45
 FROM ${BASE_IMAGE} AS builder
 
 RUN echo "bump_017"
@@ -29,11 +29,16 @@ RUN composer require drush/drush
 RUN mkdir ~/bin && ln -s ~/vendor/bin/drush ~/bin/drush
 
 RUN curl https://pyenv.run | bash
+# Fedora 45 ships OpenSSL 4.0, which CPython 3.12's _ssl module can't build against.
+# Temporarily swap in the OpenSSL 3 compat headers (they conflict with openssl-devel)
+# for the pyenv build, then swap back. openssl3-libs stays installed via .dnf-deps.
 RUN export PATH="$HOME/.pyenv/bin:$PATH" && \
     eval "$(pyenv init --path)" && \
     eval "$(pyenv init -)" && \
+    sudo dnf swap -y openssl-devel openssl3-devel && \
     pyenv install 3.12 && \
-    pyenv global 3.12
+    pyenv global 3.12 && \
+    sudo dnf swap -y openssl3-devel openssl-devel
 
 ENV PATH="/home/iphands/.pyenv/bin:$PATH"
 env PATH="/home/iphands/.pyenv/shims:${PATH}"
