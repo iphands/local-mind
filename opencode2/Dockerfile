@@ -3,7 +3,7 @@
 FROM ocli-base
 
 ## FAST UPGRADE PATH
-RUN echo bump_001
+RUN echo bump_002
 # v2 installs as ~/.opencode/bin/opencode (plus an opencode2 shim); --no-modify-path: ~/bin symlinks below
 RUN curl -fsSL https://opencode.ai/v2/install | bash -s -- --no-modify-path
 

@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+# MAX_BATCHED_TOKENS sweep on FP4-Local (run-fp4local, launcher defaults, SPEC_TOKENS=3):
+#   values {512 1024 2048 4096 6019 8192 12288} x streams {1,2,4} x prompts {long, code}
+#
+#   REPLACE=1 ./tmp_sweep_batched                      # stops a running vllm first (otherwise it refuses)
+#   VALUES="2048 6019 12288" ROUNDS=5 ./tmp_sweep_batched
+#   STAGGER=0 ./tmp_sweep_batched                      # all streams' prefills at once instead
+#   PROMPTS=long ./tmp_sweep_batched                   # skip the code control
+#
+# What MAX_BATCHED_TOKENS (--max-num-batched-tokens) changes: the token budget of one engine step.
+# A long prefill (~12k tokens) is split into chunks of about that size and each chunk rides in a
+# step with every other stream's decode tokens. Small values: short stalls for the streams that are
+# decoding, but many steps per prefill (slow TTFT). Large values: fast TTFT, but each prefill chunk
+# is one long step that everybody else waits on, plus more activation memory, so less KV cache.
+#
+# Prompts:
+#   long   ~12k-token prompt, 1024 tokens out. This is where the value matters.
+#   code   ~20-token prompt, 1024 tokens out. A control: the prompt is below every value, so all
+#          configs should match here. A difference on code is noise or a decode-path change.
+# STAGGER=2 (default): stream i starts 2*i s after stream 0, so every later prefill lands while the
+# earlier streams are decoding (a long prefill takes ~1 s, a long decode ~5-7 s). Stream 0's TTFT
+# is then an uncontended prefill, and the later streams' TTFT is prefill under decode load.
+#
+# Each config boots its own server (~3.5 min), warms up, runs ROUNDS rounds per prompt x stream
+# count, then stops it. Seven configs take roughly 45-60 min. A value that does not boot becomes a
+# BOOT FAILED line and the rest still run. Nothing is left running.
+#
+# Output: bench/bench-logs/flashnext-batched-sweep-<UTC stamp>/
+#   summary.md     flashnext-conc-sweep's table (vs mbt-6019, the current default), then a detail
+#                  section: TTFT p50/max and stream 0 vs the rest, worst-stream tok/s, KV tokens.
+#   results.jsonl  one record per round; <label>.log per config (launcher + container log)
+set -uo pipefail
+cd "$(dirname "$0")" || exit 1
+HERE=$PWD
+
+VALUES=${VALUES:-512 1024 2048 4096 6019 8192 12288}
+BASE=${BASE:-6019}   # the "vs" column's baseline: run-fp4local's default
+read -r -a VLIST <<<"$VALUES"
+for v in "${VLIST[@]}"; do
+  [[ $v =~ ^[1-9][0-9]*$ ]] || { echo "## VALUES must be positive integers (got '$v')"; exit 2; }
+done
+[[ " ${VLIST[*]} " == *" $BASE "* ]] || { echo "## BASE=$BASE is not in VALUES ($VALUES)"; exit 2; }
+if [[ ${ENV_EXTRA:-}${EXTRA_ARGS:-} == *[Bb][Aa][Tt][Cc][Hh][Ee][Dd]* ]]; then
+  echo "## ENV_EXTRA/EXTRA_ARGS mention batched tokens; they would override every config. Drop them."
+  exit 2
+fi
+if [[ -v MAX_BATCHED_TOKENS ]]; then
+  echo "## MAX_BATCHED_TOKENS=$MAX_BATCHED_TOKENS is set in the environment; each config sets its own. Unset it."
+  exit 2
+fi
+
+# Baseline first (flashnext-conc-sweep divides by its first config), then the rest ascending.
+CFGS="mbt-$BASE|SPEC_TOKENS=3|MAX_BATCHED_TOKENS=$BASE"
+for v in $(printf '%s\n' "${VLIST[@]}" | sort -n -u); do
+  [[ $v == "$BASE" ]] || CFGS+=";mbt-$v|SPEC_TOKENS=3|MAX_BATCHED_TOKENS=$v"
+done
+export CONC_CONFIGS=$CFGS
+export CONC=${CONC:-1,2,4}
+export PROMPTS=${PROMPTS:-long,code}
+export STAGGER=${STAGGER:-2}
+export ROUNDS=${ROUNDS:-3}
+export OUT=${OUT:-$HERE/bench/bench-logs/flashnext-batched-sweep-$(date -u +%Y%m%d-%H%M%S)}
+
+echo "## tmp_sweep_batched: MAX_BATCHED_TOKENS {$VALUES} x streams {$CONC} x prompts {$PROMPTS}, stagger ${STAGGER}s, $ROUNDS rounds"
+rc=0
+./scripts/flashnext-conc-sweep "$@" || rc=$?
+[[ -s $OUT/results.jsonl ]] || { echo "## no results in $OUT"; exit "$(( rc ? rc : 1 ))"; }
+
+# Detail section: the numbers flashnext-conc-sweep's table averages away.
+python3 -I - "$OUT" "$BASE" "$CONC" "$PROMPTS" "${VLIST[@]}" <<'PY' | tee -a "$OUT/summary.md"
+import json, re, statistics as st, sys
+from collections import defaultdict
+from pathlib import Path
+
+out, base, cs, ps, *vals = sys.argv[1:]
+cs = [int(c) for c in cs.split(",")]; ps = ps.split(",")
+vals = sorted({int(v) for v in vals}); base = int(base)
+rows = defaultdict(list)
+for line in (Path(out) / "results.jsonl").read_text().splitlines():
+    if line.strip():
+        r = json.loads(line)
+        if "mean_stream_tps" in r:
+            rows[(r["prompt"], r["streams"], int(r["label"].removeprefix("mbt-")))].append(r)
+
+def kv_tokens(v):
+    log = Path(out) / f"mbt-{v}.log"
+    if not log.exists():
+        return None
+    m = re.findall(r"GPU KV cache size: ([\d,]+) tokens", log.read_text(errors="replace"))
+    return int(m[-1].replace(",", "")) if m else None
+
+def rng(xs):
+    return f"{st.mean(xs):.1f} ({min(xs):.1f}–{max(xs):.1f})"
+
+print("\n## Detail (tmp_sweep_batched)\n")
+kv = {v: kv_tokens(v) for v in vals}
+print("KV cache per config (\"GPU KV cache size\", last line in the boot log): "
+      + ", ".join(f"{v}: {kv[v]:,}" if kv[v] else f"{v}: ?" for v in vals) + "\n")
+print("Per round, then over rounds. TTFT columns pool every stream of every round. *stream 0* is the first")
+print("stream to start (uncontended prefill when staggered); *later* are streams whose prefill lands while")
+print("others decode. *worst stream* is the slowest stream in each round (mean over rounds, min–max): the")
+print("stall victim. *agg* is all tokens / wall time. Ranges are over rounds.\n")
+print("| prompt | streams | MBT | TTFT mean | TTFT p50 | TTFT max | TTFT stream 0 | TTFT later | per-stream tok/s | worst stream tok/s | agg tok/s | accept len |")
+print("|---|---|---|---|---|---|---|---|---|---|---|---|")
+best = defaultdict(dict)
+for p in ps:
+    for c in cs:
+        for v in vals:
+            rs = rows.get((p, c, v))
+            if not rs:
+                print(f"| {p} | {c} | {v} | no data | | | | | | | | |")
+                continue
+            tt = [t for r in rs for t in r["ttft_ms"]]
+            t0 = [r["ttft_ms"][0] for r in rs]
+            tl = [t for r in rs for t in r["ttft_ms"][1:]]
+            per = [r["mean_stream_tps"] for r in rs]
+            worst = [min(r["stream_tps"]) for r in rs]
+            agg = [r["agg_tps"] for r in rs]
+            d = sum(r["drafts"] for r in rs); a = sum(r["accepted"] for r in rs)
+            later = f"{st.mean(tl):.0f}" if tl else "-"
+            print(f"| {p} | {c} | {v} | {st.mean(tt):.0f} | {st.median(tt):.0f} | {max(tt):.0f} | {st.mean(t0):.0f} | {later} | "
+                  f"{rng(per)} | {rng(worst)} | {rng(agg)} | {1 + a / d if d else 1:.2f} |")
+            best[(p, c)][v] = dict(ttft=[st.mean(r["ttft_ms"]) for r in rs], per=per, worst=worst, agg=agg)
+
+print("\n### Best per metric (vs the baseline's range; overlapping ranges are noise)\n")
+print("| prompt | streams | lowest TTFT mean ms | highest per-stream | highest worst-stream | highest agg |")
+print("|---|---|---|---|---|---|")
+def pick(cell, key, hi=True):
+    if not cell:
+        return "-"
+    v = (max if hi else min)(cell, key=lambda k: st.mean(cell[k][key]))
+    b = cell.get(base)
+    note = ""
+    if b and v != base:
+        lo1, hi1 = min(cell[v][key]), max(cell[v][key])
+        lo2, hi2 = min(b[key]), max(b[key])
+        note = f" (within noise of {base})" if lo1 <= hi2 and lo2 <= hi1 else f" (beats {base})"
+    return f"{v}: {st.mean(cell[v][key]):.1f}{note}"
+for p in ps:
+    for c in cs:
+        cell = best.get((p, c), {})
+        if not cell:
+            continue
+        print(f"| {p} | {c} | {pick(cell, 'ttft', hi=False)} | {pick(cell, 'per')} | {pick(cell, 'worst')} | {pick(cell, 'agg')} |")
+PY
+
+echo
+echo "## done -- $OUT/summary.md (exit $rc). Nothing is running now."
+exit "$rc"
