@@ -1,35 +1,7 @@
 # Distilled — confirmed facts for vllmcustom
 
 Compact, confirmed learnings: formats, protocols, tool/library behavior, measured limits. Read
-before new work; add an entry whenever something is confirmed — **above the `## ae525e9 on FP4-Local: no decode regression; Marlin atomic-add within noise; 57 s weight load on 40 GbE [LIVE 2026-11-04]
-
-All on `…gae525e9`, `./qwen3.8-flash-next/run-fp4local` defaults (humming MoE, K=3, probabilistic drafts,
-`SM120_SKINNY=0`, `TRITON_DEFAULT_FP_FUSION=1`), code prompt unless stated.
-- **Concurrency sweep** (`KS=3 CONC=1,4 ROUNDS=3 ./scripts/flashnext-conc-sweep`, 3 rounds;
-  `bench/bench-logs/flashnext-conc-20261104-054804/summary.md`). Compared with `…gfe8f214`
-  (`flashnext-conc-20261019-042515`), every number is **within noise**:
-  - 1 stream 193.0 (188.3–201.8) vs 198.0 (192.0–207.9) tok/s;
-  - 4 streams 140.2 (138.1–142.0) vs 137.9 (136.2–139.3) per stream, 546.0 (538.6–554.0) vs 532.7 (527.8–539.6) aggregate;
-  - accept length 2.66 / 2.74 vs 2.76 / 2.74.
-
-  So triton 3.9, the extensible KV cache and upstream CSF decode cost nothing measurable. The baseline is
-  two repins old (`be03d19` and `40fe396` were never swept).
-- **`VLLM_MARLIN_USE_ATOMIC_ADD` A/B** (`scripts/flashnext-marlin-atomic-ab`, 4 runs per arm, single stream;
-  `bench/bench-logs/flashnext-marlin-atomic-ab-20261104-055228/`). The hint line proves each arm: off
-  logged it, on did not. Off vs on, tok/s:
-  - code 202.7 (198.6–211.7) vs 201.3 (199.9–202.5): no effect;
-  - long 194.2 (189.9–198.5) vs 210.9 (194.7–225.2): +8.6%, but **within noise** (three on runs above every off run, one inside);
-  - short 204.6 (116.0–252.6) vs 231.8 (219.2–257.9): inconclusive, because one off run collapsed to 116.
-
-  MTP acceptance varies per run at T=1.0, and atomic-add changes the numerics, so the arms don't generate
-  the same tokens. The owner turned it on by default in `run-fp4local` anyway (knob `MARLIN_ATOMIC_ADD`).
-  `RUNS=8` would settle long.
-- **Weight load with the 40 GbE link healthy** (one boot, 2026-11-04 05:16 UTC, `storage/vllm_boot_stats.jsonl`):
-  - "Loading weights took 56.76 seconds" for the target pass, upstream's "Decoded 73728 CSF scale tensors" included. That bounds upstream's decode at ≤ 57 s, against the overlay's 84–93 s alone;
-  - drafter pass 1.43 s; total boot 3m25s; report KV 16.9 GiB, outside-budget 1.4 GiB, hard floor 0.79.
-  - n = 1: an anecdote for timing.
-
-## Open Questions`
+before new work; add an entry whenever something is confirmed — **above the `## Open Questions`
 section**, which always stays last. Keep it dense.
 
 **Provenance discipline:** every entry carries a tag — `[SOURCE]` (upstream code, cite
@@ -318,6 +290,69 @@ section**, which always stays last. Keep it dense.
   passed on the `_vllm_fa2_C` check alone without mentioning it. Which torch sources emit sm_100 despite
   `TORCH_CUDA_ARCH_LIST=12.0` is not investigated. It is an owner call: document it as tolerated, or chase it in
   torch-build (Plan 05 territory).
+
+## ae525e9 on FP4-Local: no decode regression; Marlin atomic-add within noise; 57 s weight load on 40 GbE [LIVE 2026-11-04]
+
+All on `…gae525e9`, `./qwen3.8-flash-next/run-fp4local` defaults (humming MoE, K=3, probabilistic drafts,
+`SM120_SKINNY=0`, `TRITON_DEFAULT_FP_FUSION=1`), code prompt unless stated.
+- **Concurrency sweep** (`KS=3 CONC=1,4 ROUNDS=3 ./scripts/flashnext-conc-sweep`, 3 rounds;
+  `bench/bench-logs/flashnext-conc-20261104-054804/summary.md`). Compared with `…gfe8f214`
+  (`flashnext-conc-20261019-042515`), every number is **within noise**:
+  - 1 stream 193.0 (188.3–201.8) vs 198.0 (192.0–207.9) tok/s;
+  - 4 streams 140.2 (138.1–142.0) vs 137.9 (136.2–139.3) per stream, 546.0 (538.6–554.0) vs 532.7 (527.8–539.6) aggregate;
+  - accept length 2.66 / 2.74 vs 2.76 / 2.74.
+
+  So triton 3.9, the extensible KV cache and upstream CSF decode cost nothing measurable. The baseline is
+  two repins old (`be03d19` and `40fe396` were never swept).
+- **`VLLM_MARLIN_USE_ATOMIC_ADD` A/B** (`scripts/flashnext-marlin-atomic-ab`, 4 runs per arm, single stream;
+  `bench/bench-logs/flashnext-marlin-atomic-ab-20261104-055228/`). The hint line proves each arm: off
+  logged it, on did not. Off vs on, tok/s:
+  - code 202.7 (198.6–211.7) vs 201.3 (199.9–202.5): no effect;
+  - long 194.2 (189.9–198.5) vs 210.9 (194.7–225.2): +8.6%, but **within noise** (three on runs above every off run, one inside);
+  - short 204.6 (116.0–252.6) vs 231.8 (219.2–257.9): inconclusive, because one off run collapsed to 116.
+
+  MTP acceptance varies per run at T=1.0, and atomic-add changes the numerics, so the arms don't generate
+  the same tokens. The owner turned it on by default in `run-fp4local` anyway (knob `MARLIN_ATOMIC_ADD`).
+  `RUNS=8` would settle long.
+- **Weight load with the 40 GbE link healthy** (one boot, 2026-11-04 05:16 UTC, `storage/vllm_boot_stats.jsonl`):
+  - "Loading weights took 56.76 seconds" for the target pass, upstream's "Decoded 73728 CSF scale tensors" included. That bounds upstream's decode at ≤ 57 s, against the overlay's 84–93 s alone;
+  - drafter pass 1.43 s; total boot 3m25s; report KV 16.9 GiB, outside-budget 1.4 GiB, hard floor 0.79.
+  - n = 1: an anecdote for timing.
+
+## MAX_BATCHED_TOKENS on FP4-Local: flat from 4096 to 8192 at 12k and 99k prompts; ≤ 2048 and 12288 lose [LIVE 2026-11-04]
+
+All on `…gae525e9`, `run-fp4local` defaults (K=3, Marlin atomic-add on, `SM120_SKINNY=0`), one boot per value,
+`./bench/conc` through `scripts/flashnext-conc-sweep` (`CONC_CONFIGS` = one `MAX_BATCHED_TOKENS` per config),
+3 rounds per cell, streams started STAGGER s apart so later prefills land while earlier streams decode. The
+driver scripts (`tmp_sweep_batched`, `tmp_followup.sh`) were not committed; each output dir's `summary.md` has the
+full tables, and the 99k run keeps its prompt wrapper as `conc-xlong`.
+- **12k prompt** (bench's `long`, 1024 out, stagger 2 s; plus the `code` prompt as a control;
+  `bench/bench-logs/flashnext-batched-sweep-20261104-200243/`). TTFT 1 / 4 streams, per-stream / worst-stream /
+  aggregate tok/s at 4 streams:
+  - 512: 2.90 / 5.11 s, 98 / 66 / 240. 1024: 1.57 / 2.07 s, 110 / 82 / 300. 2048: 1.02 / 1.12 s, 127 / 108 / 320;
+  - 4096: 0.82 / 0.89 s, 132 / 112 / 323. **6019: 0.84 / 0.91 s, 131 / 112 / 324.** 8192: 0.81 / 0.87 s, 132 / 115 / 326;
+  - 12288: 0.86 / 0.92 s, 125 / 99 (90–110) / 318.
+  - At 1 stream every value decodes the same, within noise (196–208 tok/s). The code control is flat at every
+    value and stream count (TTFT 38 ms at 1 stream in all 7 boots — a data point for the Open Question below).
+- **99k prompt** (99,097–99,100 prompt tokens per the server's usage, 0 prefix-cache hits in 75 requests; 2048 out,
+  stagger 8 s; 4096 / 6019 / 8192 only; `bench/bench-logs/flashnext-batched-100k-20261104-210224/`):
+  - TTFT at 1 stream 7.01 / 6.98 / 6.99 s; at 2 streams the second stream 7.51 / 7.49 / 7.44 s;
+  - every per-stream, worst-stream and aggregate number at 1, 2 and 4 streams overlaps the others. At 4 streams
+    per-stream ~93 and worst-stream ~58 tok/s at every value: a 7 s prefill landing on decoding streams costs the
+    same whichever of the three budgets chunks it.
+- **Prefill runs at a flat ~14.2k tok/s** whatever the prompt length or chunk count: 12k / 0.84 s and
+  99.1k / 6.98 s. A 99k prefill is ~25 steps at 4096 and ~13 at 8192 with the same TTFT, so per-step overhead is
+  not measurable here.
+- **KV cache** ("GPU KV cache size" at boot): 512 933,428 · 1024 930,978 · 2048 923,628 · 4096 923,628 ·
+  6019 913,829 · 8192 864,830 and 881,979 (two boots) · 12288 781,532 tokens. The profiled activation peak grows
+  with the budget, and below 4096 something else sets it (2048 = 4096). 4096 and 6019 repeated exactly across
+  the two sweeps; 8192 did not.
+- **Reading:** 6019 is on the plateau and stays the default. 4096 would add ~10k KV tokens (1%) with nothing
+  measured lost, too small to churn the default. ≤ 2048 loses TTFT *and* decode under contention, because the
+  prefill is spread over many steps that each slow the decoding streams. 12288 gives up 132k KV tokens (−14%)
+  for no TTFT gain. README's generic "16384/32768 speeds long-context prefill" does not hold on FP4-Local.
+- **Noise caveat:** with 3 rounds, the "beats" test flagged 1024 over 6019 on the code control's worst stream
+  at 4 streams, where no difference should exist. Treat single "beats" flags of a few percent as noise.
 
 ---
 
