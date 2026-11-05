@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `05`.** <!-- hp:next-free -->
+**Next free plan number: `08`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-11-04):** serve Qwen3.8-Flash-Next through
 > [Basalt](https://github.com/jesdga95/basalt), source-built from a pinned commit in our own
@@ -30,7 +30,6 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 01** — Basalt Flash-Next container: 7/7 tasks done; ready for `/hands-plan close 01`.
 - **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 1/19 slices done; next T1 — freeze the pin and manifest all 862 files.
 
 ## Plans <!-- hp:plans -->
@@ -39,15 +38,18 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
-| 01 | Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700 | — | in-progress | Pins + Dockerfile + `./build` + `./run` (4×262144 slots; `--single`); owner builds and boots the DQ6_K pack; real reply via `cosmo.lan`. |
+| 01 | Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700 | — | done | `./run` boots the local DQ6_K pack in 40 s (4×262144) / 34 s (`--single`); all experts in VRAM; serves `cosmo-6000` on `cosmo.lan:8700`. → `completed/`. |
 | 02 | Basalt vendor audit: leak / theft / keylog / phone-home in `vendor/basalt` | — | in-progress | Boundary-first audit of all 862 files at the pin; manifest + 6-canary-proven census; Tier A ≈34k lines read, engine bulk triaged not read. Owner-chosen two-stage depth. |
 | 03 | Basalt audit, runtime half: observed egress, exec and input capture | 02 | pending | Owner-run: `--network none` vs a monitored netns under strace/tcpdump, plus `strings`/`nm`/`readelf` on the shipped binary. **The gate on Plan 02's verdict.** Blocked on the owner's `./build`. |
 | 04 | Basalt audit, engine bulk line-by-line: `src/kernels` + `src/core` + `include/` | 02 | pending | The deferred half of "line by line" (~92k lines, 20–30 sessions). Plan 02 gives each file a census result + triage reason; none is read. |
+| 05 | Tune Basalt past the owner's defaults on this card | 01 | pending | Measured A/Bs: `basalt-probe` suggestions, `expert-profile-save`, `prefill-cpu-share`, `spec` depth, `kv` q4_0/k8v4; 4 slots vs `--single` under load. |
+| 06 | `sm_120a` build A/B | 01 | pending | Basalt accepts `120a` but tests only `120`; build both, compare decode/prefill and output identity. |
+| 07 | Boot from the defragmented NFS copy | 01 | pending | noir's pack now has 927 extents: does a boot from `/mnt/noir` load fast enough to retire `models.local/`? |
 
 ## Dependency Chain <!-- hp:chain -->
 
 ```text
-01_flashnext_container ──(builds the image Plan 03 observes)──┐
+completed/01_flashnext_container ──(builds the image Plan 03 observes; feeds 05, 06, 07)──┐
                                                               ├── 03_audit_runtime  ← gates 02's verdict
 02_basalt_vendor_audit ──(manifest + census + verdict)────────┤
                                                               └── 04_audit_engine_bulk
@@ -66,6 +68,10 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 - **04 — Engine bulk.** 125k lines of C++/CUDA cannot be read line-by-line in one plan at honest
   adversarial speed. Owner chose boundary-first now, this later (Plan 02 § Scope, dated 2026-11-05),
   so the deferral is a numbered plan rather than an invisible gap.
+- **05–07 — Plan 01's follow-ups** (registered at its close, 2026-11-04). 05: the defaults are the
+  owner's choices, not measured winners (ordering principle: boot before tune). 06: `120a` is accepted
+  but untested upstream. 07: the NFS crawl was fragmentation + `O_DIRECT`; noir's copy is now
+  defragmented, so the local copy may be unnecessary.
 
 <!-- Add these sections when they earn their place:
 

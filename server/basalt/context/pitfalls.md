@@ -122,7 +122,7 @@ shell produced them.
 ## Sources
 - basalt: `context/plans/02_basalt_vendor_audit.md` (Key Facts — the two downgraded rows)
 - basalt: `context/plans/02_basalt_vendor_audit_tracker.md` § Notes / Deviations, 2026-11-05
-- basalt: `context/plans/01_flashnext_container.md` § Gate status (the `ss` incident, 2026-11-05)
+- basalt: `context/plans/completed/01_flashnext_container.md` § Gate status (the `ss` incident, 2026-11-05)
 - **Corrected in place 2026-11-05:** this entry originally stated the docker socket *is* `root:rtkit 660`
   and that the session was "not in group `docker` (gid 991)". That named the **agent container's**
   `/etc/group`, where gid 995 resolves to `rtkit` and `docker` is 991; the host socket's group was never
@@ -155,7 +155,7 @@ bad script and required SC2115 to fire).
 ## Sources
 - basalt: `context/plans/RULES.md` § Project gate step 2, § Prerequisites
 - basalt: `context/plans/02_basalt_vendor_audit.md` § Gate status
-- basalt: `context/plans/01_flashnext_container.md` § Gate status (added 2026-11-05 for exactly this)
+- basalt: `context/plans/completed/01_flashnext_container.md` § Gate status (added 2026-11-05 for exactly this)
 
 ---
 
@@ -199,7 +199,7 @@ the task `in-progress` with the reason recorded.
 
 ## Sources
 - basalt: `run:92-97` (`refuse_busy`, and that `DRY_RUN` reports rather than refuses); `run:96`
-- basalt: `context/plans/01_flashnext_container.md` § T6 (the probes as specified), § Gate status
+- basalt: `context/plans/completed/01_flashnext_container.md` § T6 (the probes as specified), § Gate status
 - live server's own lines: `/metrics` (`batch_slots 4`, `expert_cache_primary_mib 64806`, `vram_free_mib
   24435`), `storage/cache/basalt/aefd5d98dc650ed4/engine.log` (elastic-KV / expert-cache loan lines)
 
@@ -259,7 +259,7 @@ half-reconciled — the same failure as a stale gate prerequisite, which "reads 
 - basalt: `context/plans/RULES.md` § Rule B2 (append-only; the banned-command table), § Rule B.4
   (`git add <paths>`, never `-A`)
 - basalt: `git show b308244` (its subject vs its `--stat`: `01_flashnext_container.md` +30/−2)
-- basalt: `context/plans/01_flashnext_container_tracker.md` § Notes / Deviations, "Two writers, one
+- basalt: `context/plans/completed/01_flashnext_container_tracker.md` § Notes / Deviations, "Two writers, one
   worktree", 2026-11-05
 
 ---
@@ -281,6 +281,6 @@ from noir, defragment it there first (`btrfs filesystem defragment -f -t 128M <f
 `ps -L -o tid,stat,wchan:32 -p <engine pid>` — `nfs_file_direct_read` in state `D` is this pitfall.
 
 ## Sources
-- basalt: `context/plans/01_flashnext_container_tracker.md` (boot 2 rows, Notes)
+- basalt: `context/plans/completed/01_flashnext_container_tracker.md` (boot 2 rows, Notes)
 - basalt: `include/basalt/core/direct_upload.hpp:1-6` at `dc047a77`
 

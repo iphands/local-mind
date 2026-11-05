@@ -4,7 +4,7 @@
 
 - Status: 100% complete (7/7 tasks)
 - Start date: 2026-11-04
-- Plan: `context/plans/01_flashnext_container.md`
+- Plan: `context/plans/completed/01_flashnext_container.md`
 - Evidence: the table below; build logs in `captures/build_<date>_<sha7>.log` (gitignored); boot
   start blocks pasted by the owner into the Evidence rows. Test environment: host `cosmo`, RTX PRO
   6000 (GPU 0), 125 GiB RAM, docker 29.8.1, the pack on NFS (`models/vllm/jesdga/`).
@@ -201,8 +201,8 @@ the last three always carry a reason in the row's Notes cell.
 
 | Follow-up | Why | Lands in |
 |-----------|-----|----------|
-| Tune past the owner's defaults (`basalt-probe` suggestions, `expert-profile-save`, `prefill-cpu-share`, `spec`, `kv` q4_0/k8v4) | Ordering principle: boot before tune | a later plan |
-| `sm_120a` build A/B | Basalt accepts `120a` but tests only `120` (plan *Rejected Claims*) | a later plan |
+| Tune past the owner's defaults (`basalt-probe` suggestions, `expert-profile-save`, `prefill-cpu-share`, `spec`, `kv` q4_0/k8v4) | Ordering principle: boot before tune | Plan 05 |
+| `sm_120a` build A/B | Basalt accepts `120a` but tests only `120` (plan *Rejected Claims*) | Plan 06 |
 | More than one served model name (vLLM's `claude-*` aliases) | `--alias` takes one name (plan Q6) | later, if a client needs it |
 | RULES § Project gate prerequisites name one environment's paths (shellcheck at `~/.local/bin`; docker "owner-only") | Written from the opencode2 container; on the host shellcheck is `/usr/local/bin` and steps 3–6 run. Make the prerequisites per-environment | owner / Plan 02's session |
-| A boot from the defragmented NFS copy (927 extents) | Would show whether `models.local/` is still needed | a later plan, if wanted |
+| A boot from the defragmented NFS copy (927 extents) | Would show whether `models.local/` is still needed | Plan 07 |

@@ -318,7 +318,7 @@ refused before docker runs anything; the dry runs create nothing.
 
 ### T4: Owner build; verify the image is the pin
 
-**File**: `context/plans/01_flashnext_container_tracker.md` (Evidence), `context/distilled.md`,
+**File**: `context/plans/completed/01_flashnext_container_tracker.md` (Evidence), `context/distilled.md`,
 `README.md` (built image line).
 
 **What to do**: the owner runs `./build` (Standing Constraints). The agent, without a GPU or a
@@ -364,7 +364,7 @@ Expected: every emitted flag is known; an injected bogus flag is caught.
 
 ### T6: Owner boots — default and `--single` — with a real reply each
 
-**File**: `context/plans/01_flashnext_container_tracker.md` (Evidence), `context/distilled.md`.
+**File**: `context/plans/completed/01_flashnext_container_tracker.md` (Evidence), `context/distilled.md`.
 
 **What to do**: with `:8700` free, the owner runs `./run` and pastes the start block (from
 `[server] legend` through `[server] weights loaded`, plus any `warning:` and the `RAM floor`/`RAM …
@@ -444,6 +444,8 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
    experts, which then run from RAM over PCIe on a DDR4 host. *Mitigation*: elastic KV backs only
    what requests use; T6 records the `kv` line and any starvation warning; `--single` is one word
    away. The default stays the owner's decision (2026-11-04).
+   RESOLVED (close, 2026-11-04): measured, not mitigated — the default keeps 4 × 262144; `--single`
+   borrows at most 1,284 slots. Whether the squeeze costs speed under load → Plan 05 (tuning).
 2. ~~**Risk: the resident RAM copy cannot page-lock inside the container.** *Mitigation*:
    `--ulimit memlock=-1` (as vllmcustom); T6 looks for the fallback/warning lines.~~
    RESOLVED (T6 boot 3): `ulimit -l` is `unlimited` inside the container; no fallback warning.
@@ -452,6 +454,8 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
    and the OS. *Mitigation*: Basalt sizes `resident` from free RAM above its floor and falls back to
    a file mapping (`index.md:76,149`); `refuse_busy` keeps vLLM (which pins host RAM too) down.
    T6 records the `auto … resident=` and `RAM floor` lines.
+   RESOLVED (T6): every expert fits in VRAM; the RAM copy is 22.8 GB (4 slots) / 12.4 GB (`--single`)
+   and no RAM-guard warning appeared on either boot.
 4. ~~**Question: does `bin/basalt --help` run without a GPU?** *How we'll settle it*: T4 runs it with
    `--network none` and no `--gpus`; if not, T5's gate step passes `--gpus device=0` and says so.~~
    RESOLVED (T4): yes, rc=0 with no `--gpus` (tracker Evidence).
@@ -459,6 +463,8 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
    refused. *Mitigation*: `ALLOWED_HOSTS` knob; T6 tests the client name and an IP.
    Partly settled (T4, mock engine): `cosmo.lan`/`cosmo`/`localhost` → 200, an unlisted name → 403.
    T6 still checks it on the real server through `cosmo.lan`.
+   RESOLVED (T6 boot 3): through `cosmo.lan` → 200; `Host: evil.example` → 403 and
+   `error: refused Host 'evil.example:8700' from 172.17.0.1`.
 6. **Risk: one alias.** vLLM also served `cosmo-proxy`, `claude-heavy`, `claude-light`,
    `claude-haiku-4-5-20251001` (`../vllmcustom/common/_run-lib.sh:420`); Basalt answers one name, so
    requests naming those get 404. *Mitigation*: `ALIAS` knob; deferred — a client that needs another
@@ -467,15 +473,19 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
    work, URL/path images are refused without `--image-url-host`/`--image-dir`. *Mitigation*:
    `EXTRA_ARGS`; deferred — opencode sends `data:` URLs; revisit if a client needs URLs.
 8. **Risk: no api key on `0.0.0.0`.** Same LAN exposure as vLLM today; Basalt warns at start.
-   *Mitigation*: `API_KEY` knob, printed as `***`. Owner's call.
+   *Mitigation*: `API_KEY` knob, printed as `REDACTED`. Owner's call.
+   deferred — owner's call (2026-11-04): no key, same LAN exposure as vLLM; `API_KEY=` is one knob away.
 9. **Risk: NFS load time.** 131.7 GB over NFS/RDMA at every boot (vLLM's FP4-Local: 57 s weight load
    on 40 GbE, `../vllmcustom/context/distilled.md`). *Mitigation*: none needed for correctness;
    T6 records it; a local-disk copy is a Follow-up if it hurts.
    **It hurts (T6, 2026-11-04):** boot 2 loads at ~5–10 MB/s — Basalt reads weights with `O_DIRECT`
    (no switch), and buffered NFS reads measured 28.9 MB/s during the boot. Owner let it run; see the
    tracker Notes.
+   RESOLVED (revision, 2026-11-04): the default pack is the local NVMe copy (40 s boots); noir's copy
+   was defragmented (927 extents). A boot from it → Plan 07.
 10. **Question: `pip install` at image build needs network.** *How we'll settle it*: T2 keeps
     upstream's pinned `requirements.txt`; the owner's build has network (ninfer's did).
+    RESOLVED (T4): pip installed upstream's 8 pins in 5.5 s during the owner's build.
 
 ---
 
@@ -489,4 +499,4 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
 - [x] T6: both modes boot; start blocks recorded; `cosmo.lan` chat → reply from `cosmo-6000`; wrong model → 404; `docker stop` clean
 - [x] All: the project gate (Rule A) passes on the final commit
 - [x] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read
-- [ ] All: plan + tracker `git mv`'d to `completed/`, `SERIES.md` marked done (Rule C)
+- [x] All: plan + tracker `git mv`'d to `completed/`, `SERIES.md` marked done (Rule C)
