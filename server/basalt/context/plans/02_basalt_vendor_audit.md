@@ -3,12 +3,59 @@
 > **Status**: in-progress
 > **Created**: 2026-11-05
 > **Revised**: 2026-11-05 — same day, before execution: added T0 (gate restoration) and a gate-status block; three Key Facts downgraded after self-check; T5 upgraded from "stale dependency" to a sourced CVE finding; T8 widened to cover the **Python** side of argv assembly; T6 and T11 split against the ≤1,500-line slice rule; canaries 3 → 6 (cross-file, side-channel, second-hop); explicit bypass checklist pre-committed in T4; effort corrected 10–14 → 14–19 sessions.
+> **Revised**: 2026-11-05 — **re-scoped onto the owner's question** (owner-approved). After 28 commits no line of Basalt had been read, and T3 had grown five layers of verification-of-verification, the last of which OOMed the host. Cut: evidence-about-evidence work and the bug-hunting tasks that do not answer "does it leak, steal, keylog or phone home". Pulled forward: runtime observation (Plan 03). **§ Re-scope below is authoritative over every task section it names.**
 > **Depends on**: N/A (shares Plan 01's `BASALT_SHA` pin; no code dependency — a pin bump invalidates this audit, see Risk 1)
 > **Goal**: A per-file, evidenced verdict on whether `vendor/basalt` at the pin does anything beyond acting as a local LLM server — capability-ranked findings, and a finite matrix of every way bytes can leave the box.
 > **Agent**: implementation agent
 
 > **Before writing any code, re-read `context/plans/RULES.md` in full.**
 > For historical context, completed plans live in `context/plans/completed/`.
+
+---
+
+## Re-scope (2026-11-05) — authoritative over the task text below
+
+**Why.** The owner's question is whether `vendor/basalt` leaks, steals, keylogs or phones home. At this
+re-scope `SERIES.md` read *"Still 0 lines of Basalt read"*; there was no `census.md` and no `verdict.md`,
+and T3 had run to seven `evidence-integrity`/`audit-integrity`/`census-tooling` commits: a census, ten
+mutant copies to prove it fires, a paste of their runs, a checker of the paste, a self-test of the checker
+(`context/pitfalls.md` § *A checker's self-test re-ran the checker unguarded…*). None of it says anything
+about Basalt. The census itself had already run clean on `real` with **278 sites, every one assigned a
+task** (`wave0/t3-sentinels-real.txt`, `SITES=278`, `SITES_WITHOUT_A_TN` PASS). Its site list was never kept.
+
+**Execution rule 7** is added to § *Execution rules that bind every task*.
+
+| Task | Disposition | Reason |
+|---|---|---|
+| T0–T2 | done, unchanged | — |
+| T2b | **skipped** | Provenance, not behaviour: `src/platform/` is read in T8 whatever its origin. Follow-up |
+| **T3** | **narrowed**: re-run `t3-census.sh vendor/basalt real` once; commit its `sites.tsv` as `census.md`'s table; plant canaries **1–3** in a `/tmp` copy, run the same command with `tag=canary` once, record caught or missed | The census ran; the deliverable was never kept. Canaries 1–3 prove the greps see their primitives. **4–6 dropped as census canaries**: side-channel and second-hop are invisible to any grep by design, so they are covered where they can be — T6a reads `/metrics`, Plan 03 watches egress |
+| T3 leftovers | **skipped** (rule 7): floor lines, content-leg `chk`, manifest column-6 fill, control re-fires, paste-checker full mode, wave0 file splits | Evidence about evidence. Existing T3 artifacts stay in the tree, frozen; unverifiable claims stay marked (`d349a96`) |
+| **T13** | **moved to right after T3** | Where *our* data actually leaves |
+| T4 | **narrowed**: read `image_source.py` + `security.py` line by line; the 9-class bypass list → Follow-up | The only code that connects out, so it is read. The bypass list hardens against attackers, not against Basalt |
+| T5 | **skipped** → Follow-up | Memory-safety bug hunting in the decoders; does not answer the question |
+| T6a, T6c | kept | Where prompts go; keylogging/credential reads directly |
+| T6b | **merged into T8** | Same question as the argv table |
+| T7 | **narrowed** to the template half (can a pack or request reach `Template`/`from_string`) | ReDoS is denial of service, not a leak. Follow-up |
+| T8 (+T6b), T9, T10, T12 | kept | — |
+| T11a–d | **one mechanical commit** (`T11`): bidi/zero-width + long-literal scans over `src/` `include/`, exceptions listed and explained | The census already covers every file for primitives; per-file human reasons for ~500 numerical files is bookkeeping |
+| T14 | kept, **lighter**: three plain sentences; one matrix row per channel with evidence or "not checked"; coverage = files read ÷ files present | No fixed vocabulary or ≥15-row quota |
+| Plan 03 | **runs alongside the reading**, depends on Plan 01 (the image), not on this plan | The most direct test of "phones home"/"keylogs"; an image for the pin exists and docker is reachable |
+
+**Still binding, carried through the re-scope:** T2's three hand-offs in § T3 — external identifiers found
+in the code are **never contacted** (no connect, fetch, install or `ls-remote`); "AI residue" is never the
+reason a site goes `benign`; and shipped files that instruct an agent (`AGENTS.md`, comments addressed to a
+model) are a census surface, which the census's `model-instruction.*` families already cover.
+
+**Order:** T3 → T13 → T4, T6a, T6c, T8, T7, T9, T10, T12, T11 (Plan 03 in parallel) → T14.
+Execution rule 1's 1,500-line commit slices stay. Execution rule 2's per-row manifest flips are dropped;
+the coverage figure is computed once, at T14, from the list of files actually read.
+
+**Estimate**, measured 2026-11-05 at the pin (`git ls-files … | xargs cat | wc -l`): core reading set
+**14,861 lines** — `serve/` Python excluding tests 9,269 · `src/platform/` + `include/basalt/platform/`
+3,877 · T9's named files 1,040 · `serve/web/` 675 — plus up to 7,558 in `tools/` where the census routes
+there. At this plan's 400–600 lines/h and 3–4 h/session: **7–10 sessions** of reading, **11–14** in all.
+`serve/` tests (14,173 lines) are an intent map, not read.
 
 ---
 
@@ -29,6 +76,8 @@ the artifact that carries "what the agent could and could not verify."**
 | 4 `./run` dry run | — | **BLOCKED** (docker) | owner only |
 | 5 flags vs image | — | **BLOCKED** (docker, and needs an image for the pin) | owner only |
 | 6 server imports | — | **BLOCKED** (docker) | owner only |
+
+**Re-read 2026-11-05, after the host's 03:05 reboot:** an agent session here is in group `docker` (gid 995, socket `root:docker 660`), and steps **3–6 ran and passed** at `d349a96`: `preflight ok`, `dry-run ok`, `flags ok (2 engine, 8 server: 142 engine flags known)`, `imports ok (32 serve modules)` (`wave0/t3-paste-check-runs.txt`). The rows above are the earlier shell's readings and stay. Re-check with `id` before treating a step as owner-only.
 
 **Standing decision (owner, 2026-11-05)**: the owner runs every docker step; the agent writes the
 command and records the pasted output. If a step stays unrunnable for a given commit, that commit's
@@ -79,6 +128,7 @@ row above. Steps 4–6 remain unrun for every T1 commit.
 **Out** (registered, not silently skipped):
 - **Engine bulk line-by-line** — `src/kernels/` 38,745 l · `src/core/` 19,976 l · `src/program/` minus `serve/` 15,432 l · `include/` 18,224 l. In this plan each gets the census, a vendored-dependency check, a unicode/stego scan and a **recorded per-file reason**; none is read line by line. That is **Plan 04**.
 - **Runtime observation** (strace/tcpdump/netns, keylogger probes, `strings`/`nm`/`readelf` on the built binary, venv hook files) — **Plan 03**, owner-run. See Risk 4.
+  *(Re-scope 2026-11-05: still out of **this** plan, but no longer last — Plan 03 runs alongside the reading, against the built image.)*
 - The model pack's weight **bytes** (its loaders that parse them are in scope). Upstream commits after the pin. Anything reachable only through the CUDA driver or GPU we do not control.
 
 > **Scope condition on the verdict — this repository has single-reviewer provenance everywhere.**
@@ -109,6 +159,7 @@ row above. Steps 4–6 remain unrun for every T1 commit.
 4. **Commands end with an unconditional sentinel** (`; echo "— done rc=$?"`) so an empty result is distinguishable from a failed command. See `context/pitfalls.md` — this plan already lost one Key Fact to the opposite mistake.
 5. **Audit commands are written inline** (plan/tracker/Evidence), never as helper scripts: gate step 1 classifies by **shebang first**, so even an extensionless `#!/usr/bin/env bash` helper in `context/` counts toward the gate's "Expected counts" line — owner: `RULES.md` § *Project gate* → **Expected counts** — and a count above it without a matching RULES bump fails the gate. If a helper is unavoidable it lands with a bump to that RULES.md paragraph in the same commit.
 6. **Every `context/audit/` file opens with a stamp:** `Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.`
+7. **Evidence is one command and its output, pasted once** (re-scope, 2026-11-05). No checker for a paste, no self-test for a checker, no re-verification of a control already shown to fire. A negative control is required only for a *new detector*, run once, recorded once. A review finding about the *evidence layer* is noted in the tracker and fixed only if it changes a finding about Basalt or a figure the verdict cites. **Stop rule:** a task that reaches 3 commits without reading or running Basalt code stops and asks the owner before a fourth.
 
 **The one freeze-check** (used by Resume step 1 and by every wave exit — there is deliberately only one).
 **`git diff` is not the tree.** `server/basalt/.gitignore` line 1 is `/vendor/`, so anything a probe
@@ -433,6 +484,8 @@ signature" limit this task predicted.
 
 ### T2b: Content lineage of the boundary — is the seam code *original*, or imported from Strata?
 
+> **Re-scope 2026-11-05: skipped** — provenance, not behaviour (§ Re-scope). Follow-up.
+
 **File**: `context/audit/wave0/t2b-content-lineage.txt` + a `lineage` column in
 `context/audit/wave0/t2-author-census.tsv` (**a sidecar joined by path — never a 5th column in T3's
 contract, never in `ledger-grid.sh`**, whose byte-identity checks cover the manifest)
@@ -485,6 +538,8 @@ was edited after the fork.
 
 ### T3: The primitive census, and six canaries that prove it can see
 
+> **Re-scope 2026-11-05: narrowed** — census re-run once, `sites.tsv` kept as `census.md`, canaries **1–3** only (§ Re-scope). The text below is the original scope.
+
 **File**: `context/audit/census.md`
 
 **What to do**: Enumerate boundaries **exhaustively rather than by guesswork**, shipped files and build-time files treated separately. Python: every `import`/`from` in every shipped module, plus the holes — `importlib.import_module(var)`, `__import__`, `getattr`-assembled calls, chr()/base64-assembled names. C++/CUDA: external deps from our build files. **Output contract — each row: `path:line TAB primitive TAB disposition TAB assigned-TN`**; a census row with no task number is unowned work and the Wave 0 gate fails. Sections: network syscalls · DNS · **exec/spawn wide** (`system`/`popen`/`fork`/`exec*`/`posix_spawn`/`os.exec*`/`os.system`/`os.spawn*`/`subprocess` incl. `shell=`) · `dlopen`/`dlsym` · raw `syscall()` · file writes outside expected paths · **fingerprint reads** (C++ `getenv`; Python `os.environ`/`os.getenv`/`platform.node`/`socket.gethostname`/`/etc/machine-id`/mac address/cpuinfo) *paired with* "is there a sink nearby?" — fingerprint-gated activation is how targeted malice hides · credential stores (`~/.ssh`, `~/.aws`, keyring, browser stores, wallet dirs) · `/proc`/`/sys` · persistence (cron, systemd, autostart, rc files) · **input capture** (`/dev/input`, `EVIOCGRAB`, X11 `XRecord`/`XInput`, `uinput`, `SetWindowsHookEx`, `GetAsyncKeyState`) · **parsers that accept network bytes** (image decoders, GGUF/mmproj readers, HTTP framing/chunked-body, JSON, tokenizer) — the class a danger grep cannot see · **vendored third-party** sources · **orphan config keys**: any key in the config schema or the GGUF/profile key space naming `host`/`port`/`url`/`token`/`endpoint` that has plumbing but **no sink** — the highest-signal malice residue available, because it is a network feature with the call site removed and the field kept · **diagnostics-shaped outbound**: search by *shape*, not keyword — a module whose job is assembling a report and handing it to something (a plausible `post_report()` in a plausible `util/`) will not contain `socket()`.
@@ -529,6 +584,8 @@ cd /tmp/opencode/basalt-audit/canary && <the identical census commands> | grep -
 
 ### T4: The one outbound channel — read line by line, then run the bypass list
 
+> **Re-scope 2026-11-05: narrowed** — read both files line by line; the bypass list below is a Follow-up.
+
 **File**: `serve/engine/image_source.py` (all), `serve/security.py` (all), `serve/tests/test_image_sources.py` as the intent map. Work in a scratch copy with **monkeypatched DNS**, so each bypass is an executed assertion with an observed outcome, not a paragraph.
 
 **What to do**: The server's only code that connects anywhere. The pinned-address literal already handles re-resolution (Key Facts); what remains is whether the **address set** can be steered and whether **peer classification** can be spoofed into granting local privilege (the privilege gained includes **local file read** — the more dangerous direction). **The list is pre-committed here so it is tickable, and the deliverable is the DELTA between upstream's test list and this one** — upstream's suite passing is not evidence of absence:
@@ -550,6 +607,8 @@ cd /tmp/opencode/basalt-audit/canary && <the identical census commands> | grep -
 
 ### T5: The decode path — resource bounds and first-party amplification (stb is 2.30, current)
 
+> **Re-scope 2026-11-05: skipped** — decoder memory-safety hunting does not answer the question. Follow-up.
+
 **File**: `src/vision/preprocess.cpp` and the rest of `src/vision/` (1,584 l, Tier A); `src/program/serve/vision.cpp`; `src/vision/stb_image.h` as **Tier B `vendored-third-party`** — diffed as a dependency version, not read as first-party.
 
 **What to do**: (a) Read the first-party half properly — that is where the non-diffable risk is: `(int) std::min<size_t>(len, 0x7fffffff)`, the `w*h > max_pixels` guard, and `out.rgb.assign(px, px + (size_t)w*h*3)`. **Check the guard is evaluated against the same product the `assign` consumes** — a guard on `w*h` protecting an allocation sized `w*h*3`, or one computed in `int64_t` while a consumer uses `int`, is a real bug independent of stb's own CVEs. Confirm where `max_pixels`/`kMaxImagePixels` comes from and **the maximum a request can actually produce**. (b) Build a **CPU** ASan/UBSan harness in a scratch copy driving `decode_image` over **JPEG, PNG, BMP and GIF only** — seed the corpus with **public PoCs for CVE-2022-28041/28042, GHSL-2023-145/148/150 and the 2.28 BMP offset hardening**, not only random mutations, and run it with `max_pixels` set to the request-reachable maximum so **the harness tests the code rather than being shielded by the guard**. (c) Confirm whether the server path calls `stbi_set_flip_vertically_on_load` (GHSL-2023-146 / CVE-2023-45662 is in `stbi__vertical_flip`). (d) Write the recommendation: a vendored bump to 2.30 in an **upstream** change is the real fix; ours is a `Dockerfile`-side patch, which is a build change and therefore its own plan.
@@ -566,6 +625,8 @@ grep -c 'STBI_ONLY' vendor/basalt/src/vision/preprocess.cpp; echo "— expect 4"
 
 ### T6a–T6c: The server surface, in three ≤1,500-line slices
 
+> **Re-scope 2026-11-05:** T6a and T6c kept; **T6b merged into T8**.
+
 **T6a — logging and metrics disclosure**: `serve/util/logbuf.py`, `serve/util/telemetry.py`, the logging/metrics parts of `serve/service.py` and `serve/handler.py`. Where do prompts and completions actually go — the engine `--log` file, `logbuf`, `--request-lines`, temp/cache under `--image-dir`, the vision cache — does any survive unload, and is it world-readable in the container? Does `GET /metrics` disclose host identifiers (GPU name, driver, CUDA version, CPU model, core count) to a **remote** caller (an identifier leak, ranked honestly as such, not a backdoor)? Confirm `telemetry.py`'s name is a misnomer by reading it, and confirm the `responses.py` base64 is the `encrypted_content` round-trip.
 
 **T6b — exec trust boundaries → feeds the T8 argv table**: trace `before_load` (`serve/config.py` → `service.py:250`) and prove it is reachable only from operator config/CLI, **never from a request body or from a model pack's GGUF metadata** — `serve/engine/modelfile.py` already maps `general.sampling.*` into request defaults, so check nothing else maps metadata into an exec-capable setting. Same for `--engine-bin`, `--script`, `--config`, `--tokenizer`. Every row you produce lands in `argv-table.md`.
@@ -578,6 +639,8 @@ grep -c 'STBI_ONLY' vendor/basalt/src/vision/preprocess.cpp; echo "— expect 4"
 **Commit (one per slice)**: `[basalt][P2][T6a][audit] trace server logging and metrics disclosure` · `[basalt][P2][T6b][audit] prove before_load and the exec flags have no request-reachable source` · `[basalt][P2][T6c][audit] sweep serve for input-capture and credential reads`
 
 ### T7: Template injection and tokenizer ReDoS on a single-GPU box
+
+> **Re-scope 2026-11-05: narrowed** to the template half; tokenizer ReDoS is a Follow-up.
 
 **File**: `serve/chat_template.jinja` (9,993 B), `serve/prompt.py`, `serve/api/*.py`, `tools/tokenizer.py`
 
@@ -631,6 +694,8 @@ grep -rnE 'capture_output|spawn_piped|spawn_and_wait|dlopen|execvp|posix_spawn|o
 
 ### T11a–T11d: Tier-B triage of the engine bulk, one commit per directory
 
+> **Re-scope 2026-11-05: one mechanical commit (`T11`)** — the scans below over `src/` `include/`, exceptions listed and explained; no per-file reasons, no per-directory commits.
+
 **File**: manifest rows in `context/audit/manifest/src.tsv`, `include.tsv`; ledger rows in `context/audit/coverage_ledger.md`. **Split by directory — one commit each — with the `comm → 0` check recorded after each**, so a session that dies mid-task leaves a committed record and a resumption point (514 files in one commit is the exact volume failure this rule exists to prevent).
 
 **What to do**: **Not** line-by-line — that is Plan 04; this makes the deferral *accountable rather than invisible*. Per directory, two passes: **(a) mechanical**, command-generated manifest fill (primitives hit, triage reason, coverage) in one commit; **(b) human judgment on the exception list only** — files with a primitive hit, non-ASCII identifiers, a long literal, or a vendored-suspect signature. Specifically: any primitive not already dispositioned; any **second vendored third-party source** (is `stb_image.h` alone? look for `stb_rect_pack`, `stb_truetype`, `miniaudio`, `xxhash`, single-file libs); any obfuscation marker (RTL/bidi `U+202E`/`U+202D`, zero-width `U+200B`–`U+200F`/`U+2060`–`U+2064`, homoglyph identifiers, long hex/base64 runs).
@@ -660,6 +725,8 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 
 ### T13: Our own posture — the part the owner can change today
 
+> **Re-scope 2026-11-05: moved to right after T3.**
+
 **File**: `run`, `lib/common.sh`, `Dockerfile`, `versions.env` (ours) — **in scope by owner decision 2026-11-05**
 
 **What to do**: Both reviewers independently judged this the audit's highest-value output, because it is where *our* data actually leaves or stays. `--host 0.0.0.0` + `-p 0.0.0.0:8700:8700` with an **optional** API key (`security.exposed_without_key` *flags* a non-loopback bind without a key — determine what `./run` actually **does** about it, and whether `--allowed-host cosmo.lan` widens or restricts); what `/metrics` discloses to a LAN peer; the container's network mode and whether the engine gets egress at all (the cheapest control: **no egress** — which Plan 03 proves); prompt retention in the container's writable layer and whether `--image-dir`/vision cache persists across boots; `--engine-bin`/`--script`/`--config` as trust boundaries we hold.
@@ -683,6 +750,8 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 **Wave 4 exit gate** = the plan closes: verdict written, harvested, moved.
 
 ### T14: The channel matrix, the verdict, the harvest
+
+> **Re-scope 2026-11-05: lighter** — three sentences, one matrix row per channel (evidence or "not checked"), coverage = files read ÷ files present; no row quota.
 
 **File**: `context/audit/verdict.md`; findings → `context/pitfalls.md`; confirmed facts → `context/distilled.md`; plan + tracker → `completed/`
 
@@ -719,7 +788,7 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 
 1. **Risk: a pin bump mid-audit silently invalidates everything.** `./build` re-checks-out vendor detached at `BASALT_SHA` and refuses a dirty tree. *Mitigation*: the single freeze-check command (Scope) is Resume step 1 and runs at every wave exit; mismatch = blocker row, never a silent continue. *How we'll settle it*: the check's output in each wave's Evidence.
 2. **Risk: Tier B is read as "clean" instead of "not read".** *Mitigation*: per-file reasons, `comm → 0`, and the depth table naming `src/kernels`/`src/core`/`include/` as Plan 04's, never as passed. *How we'll settle it*: a verdict whose coverage figure was typed rather than derived fails T14.
-3. **Risk: the census's *category list* is wrong, which three same-shaped canaries cannot detect.** *Mitigation*: canaries #4–#6 (cross-file, side-channel, second-hop) are deliberately invisible to the taxonomy; a miss voids the census and forces re-derivation of every Tier B reason. *How we'll settle it*: 6/6, evidenced per canary.
+3. ~~**Risk: the census's *category list* is wrong, which three same-shaped canaries cannot detect.** *Mitigation*: canaries #4–#6 (cross-file, side-channel, second-hop) are deliberately invisible to the taxonomy; a miss voids the census and forces re-derivation of every Tier B reason. *How we'll settle it*: 6/6, evidenced per canary.~~ **RESOLVED (re-scope 2026-11-05):** canaries 4–6 dropped as *census* canaries — no grep can see a side-channel or a second hop by design. The category-list risk is carried by reading (T6a `/metrics`) and by Plan 03's observed egress, which does not depend on a taxonomy.
 4. **Risk: a static verdict mistaken for the final answer.** Every blind spot (`dlopen`+`dlsym`, raw `syscall()`, venv C extensions, the link's true DT_NEEDED) closes only in Plan 03. *Mitigation*: Plan 03 registered as the runtime gate on this verdict; matrix rows say `runtime: Plan 03`. *How we'll settle it*: Plan 03's close, or the owner explicitly accepting a static-only verdict — recorded as their decision.
 5. **Risk: the hash gap makes "we audited what we run" false.** *Mitigation*: named in the verdict headline; fix is a hashed lock (itself a plan). *How we'll settle it*: owner decision, T12.
 6. **Question: is `stb_image.h` the only vendored third-party source?** *How we'll settle it*: T11's vendored-library sweep; any second one gets the same version-diff treatment, not a read.
@@ -730,6 +799,7 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 11. **Risk: audit helpers break the gate** (shebang-first counting vs the "Expected counts" line — **owner: `RULES.md` § *Project gate* → Expected counts**, which carries both numbers; membership is *derived* by 1b's class-and-path glob, and 2b's printed list is the check on who is in the set, so this row does not restate either). This row cites that owner rather than restating the pair: it held `3 b`/`3 b` for a day after the count moved to `5 b`, which is precisely Rule E.7's failure mode — "an agent who sees it disagree with the live tool concludes drift rather than staleness"). *Mitigation*: inline commands; any unavoidable helper lands with the RULES counts bump in the same commit, and **a new script is linted before it is `git add`ed** — an untracked file is invisible to every gate step. *How we'll settle it*: gate step 1b in each commit's Evidence, and its identity guard (`FAIL(1b) missing product bash: …`) firing rather than a count matching by luck.
 12. **Risk: blocked docker steps become silent passes.** *Mitigation*: the Gate status block names which steps are owner-only; a task whose only verifier is blocked is not `done`. *How we'll settle it*: commit messages that name skipped steps.
 13. **Risk: effort overrun (14–19 sessions, T5 on the critical path behind an owner-run build).** *Mitigation*: T11's mechanical pass is command-generated; the verdict can be issued at Tier-B completeness with the depth table explicit, and Plan 04 picked up later. *How we'll settle it*: the coverage ledger's time series.
+    *Re-scope 2026-11-05:* the overrun happened in T3's evidence layer, not in reading. Execution rule 7's stop rule is the mitigation; the measured estimate is in § Re-scope.
 
 ---
 
@@ -738,18 +808,23 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 - [x] T0: `shellcheck --version` → 0.11.0, gate step 2 → `shellcheck ok`, and RULES.md's step-2 prerequisite states the real path *(verified 2026-11-05: `~/.local/bin/shellcheck`, sha256 `8c3be12b…`, negative control fired SC2115+SC2086, gate step 2 passed)*
 - [x] T1: the one freeze-check prints `AUDIT TREE OK`; 0 `MISMATCH` under `GIT_NO_LAZY_FETCH=1`; 862 manifest rows; vendor porcelain-clean *(verified 2026-11-05: `AUDIT TREE OK`, `MISMATCH_COUNT=0`, `awk 'END{print NR+0}'` = **862** across 12 TSVs, `VENDOR_DIRTY=0`, `comm` vs `ls-tree` = 0; all in `context/audit/wave0/t1-freeze-and-manifest.txt`)*
 - [x] T2: GitHub's tree SHA for `dc047a7` equals `3f7b69ae…`; boundary-author census recorded with any outliers named *(verified 2026-11-05: `pin^{tree}` = `3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4` = GitHub's tree for the commit; `API_BLOBS=862 LOCAL_BLOBS=862 INTERSECT=862 ONLY_IN_API=0 ONLY_IN_LOCAL=0 BLOB_SHA_MISMATCH=0`, canonical `sha256(path⇥blob)` `a8216c69…` equal both sides; controls C1–C8 all fired. Census: 87 rows, **80 first-party blameable files / 20,111 lines**, Jesus Gulfo 72.4 %, outliers named in `audit/wave0/t2-boundary-authorship.txt` § 6. Two published figures were **corrected after the first draft** — the blame-boundary count (a false `0`; anchored truth 560) and the file denominator (86 → 80) — see `audit/wave0/t2-provenance.txt` § 6 and `pitfalls.md` items 10–14)*
-- [ ] T3: **6/6** canaries flagged, including cross-file, side-channel and second-hop, each with its own evidence line
-- [ ] T3: every census row carries a `assigned-TN`; **T9's file list frozen with a line count**
-- [ ] T4: all 9 bypass classes **executed** in the scratch copy with observed outcomes; delta vs upstream's test list written
-- [ ] T5: ASan/UBSan over JPEG/PNG/BMP/GIF at the request-reachable `max_pixels` → **zero** reports; the pixel guard shown to bound the same product `out.rgb.assign` consumes; public CVE PoCs in the corpus
+- [ ] ~~T3: **6/6** canaries flagged, including cross-file, side-channel and second-hop, each with its own evidence line~~ *re-scope 2026-11-05: canaries 4–6 dropped (§ Re-scope)*
+- [ ] T3: canaries **1–3** (base64 URL, literal `https://`, raw `socket()`) each appear in `sites.tsv` of a `tag=canary` run of the unedited `t3-census.sh`, each with its own evidence line
+- [ ] ~~T3: every census row carries a `assigned-TN`; **T9's file list frozen with a line count**~~ *re-scope 2026-11-05: replaced*
+- [ ] T3: `context/audit/census.md` committed with the `tag=real` run's site table — every site assigned a task (`SITES_WITHOUT_A_TN` PASS) — and T9's file list with its line count
+- [ ] ~~T4: all 9 bypass classes **executed** in the scratch copy with observed outcomes; delta vs upstream's test list written~~ *re-scope 2026-11-05: bypass list is a Follow-up*
+- [ ] T4: `image_source.py` and `security.py` read line by line; every outbound connect path named with `path:line` and its allow-list check
+- [ ] ~~T5: ASan/UBSan over JPEG/PNG/BMP/GIF at the request-reachable `max_pixels` → **zero** reports; the pixel guard shown to bound the same product `out.rgb.assign` consumes; public CVE PoCs in the corpus~~ *re-scope 2026-11-05: T5 skipped (Follow-up)*
 - [ ] T6a: every prompt/completion write site is operator-configured; `/metrics` disclosure enumerated
-- [ ] T6b: `before_load` and `--engine-bin`/`--script`/`--config`/`--tokenizer` have no request- or pack-reachable source
+- [ ] ~~T6b: `before_load` and `--engine-bin`/`--script`/`--config`/`--tokenizer` have no request- or pack-reachable source~~ *re-scope 2026-11-05: merged into T8 — its assertion moves to T8's box*
 - [ ] T6c: input-capture and credential-store sweeps over `serve/` empty, sentinel-terminated
-- [ ] T7: no request- or pack-supplied string reaches `Template`/`from_string`; tokenizer scan < 1 s on a pathological 40k input
-- [ ] T8: `argv-table.md` complete across **both** languages, **zero** `request field` origins; the boundary script's non-matches written down
+- [ ] ~~T7: no request- or pack-supplied string reaches `Template`/`from_string`; tokenizer scan < 1 s on a pathological 40k input~~ *re-scope 2026-11-05: ReDoS half dropped*
+- [ ] T7: no request- or pack-supplied string reaches `Template`/`from_string`
+- [ ] T8: `argv-table.md` complete across **both** languages, **zero** `request field` origins; the boundary script's non-matches written down — and (from T6b) `before_load` and `--engine-bin`/`--script`/`--config`/`--tokenizer` have no request- or pack-reachable source
 - [ ] T9: zero cross-host/IPC endpoints in loans/multi-GPU; `configure.cpp:40`'s `key` operator-only; no surviving plumbed-but-sinkless `host`/`port`/`url` key from `97ff061`
 - [ ] T10: no URL/path/`eval` literal in any binary asset; `.prof` structure confirmed by its parser
-- [ ] T11: `LC_ALL=C comm` → **0** unaccounted files, one commit per directory; 0 bidi/zero-width hits; vendored-library sweep done
+- [ ] ~~T11: `LC_ALL=C comm` → **0** unaccounted files, one commit per directory; 0 bidi/zero-width hits; vendored-library sweep done~~ *re-scope 2026-11-05: one mechanical commit*
+- [ ] T11: bidi/zero-width scan over `src/` `include/` → 0 hits or each explained; every long literal named; one commit
 - [ ] T12: 8 canonical names at published versions; 0 install hooks in the repo; `serve/` never reads `benchmarks.json`; hash gap in the verdict headline
 - [ ] T13: ordered action list with the exact flag per item
 - [ ] T14: ≥15 matrix rows, fixed cell vocabulary, no row `proved it can't` without evidence, coverage figure pasted not typed, "if you do only one thing" is the last line

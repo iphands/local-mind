@@ -30,33 +30,15 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 3/19 slices done
-  (T0, T1, T2 — T2 **closed** at five commits, `9a56c8d` `93b6bd5` `7822c1e` `6dbb312` `0c7517d`: the task,
-  the knowledge layer, then three post-review correction rounds — per-commit totals in the tracker);
-  next **T3** — the primitive census with the 6-canary control, **opening with the two zero-API commands in
-  `audit/wave0/t2-boundary-authorship.txt` § 6a** (read-order path/tier/LOC assertion, then the local
-  PR-suffix census whose 4.8 % base rate makes a missing PR reference non-evidence), **carrying T2's three scope
-  additions** (the "AI residue is never a reason for `benign`" calibration rule, the never-connect/never-
-  fetch/never-install rule for external identifiers, and agent-directed instructions in shipped files as
-  a census surface). **T2 (2026-11-05):** all 862 blob SHAs equal GitHub's tree object for `dc047a77`,
-  with the comparison shown sensitive against the first parent — but the attestation stops at **one
-  witness** (GitHub's own API: basalt's tags unsigned, the signature unverifiable here, and Software
-  Heritage holds **no** revision for the pin), so **nothing outside GitHub anchors the hash.** The
-  provenance half also established that the pin is **untagged `main`** (`v0.3.5` does not exist upstream),
-  that there is **no `SECURITY.md`**, and that `CMakeLists.txt` (287 commits) plus `serve/engine/process.py`
-  (1,419 l) were sitting `unassigned`. **The finding:** `jesdga95/basalt` and the `Niko1221/Strata` it
-  declares itself forked from share **0** commit SHAs and have **no merge-base**, yet 844 commits match on
-  content — two rewritten variants of one history, and the only measured difference between the identical
-  pairs is that ours carry AI co-authorship trailers (1,049 vs 0) while every other trailer is preserved;
-  **97.9 %** of the censused lines sit under commits that self-declare AI co-authorship. Consequence for
-  every later task: **narrative history in this supply chain is editable and has been edited — trust hash
-  pins, trees, blobs and patch-ids** (`context/audit/wave0/t2-lineage.txt`; `context/distilled.md`).
-  **T2b** is registered for the one question T2 could not answer — whether the `src/platform/` seam's
-  **bytes** are original or squashed-inherited — joinable only by **blob SHA and `patch-id`**, never by
-  commit SHA. Also owed: the repo publishes `refs/remotes/origin/multimodel`, **105 unaudited commits**.
-  Wave 0 exit conditions: **2 of 5 met** — tree frozen + manifest over all 862 files ✓, pin matched to
-  the objects public GitHub serves ✓; still owed: 6/6 canaries, every census row carrying a disposition +
-  assigned-T, and T9's list frozen to a named file list with a line count. **Still 0 lines of Basalt read.**
+- **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 3/15 tasks done
+  (T0–T2; 5 skipped by the **2026-11-05 re-scope**); next **T3, narrowed** — keep the census's real-run site
+  list (278 sites, all assigned) as `census.md` and run canaries 1–3 — then T13 and the boundary reading
+  (≈14.9k lines). The re-scope cut seven commits' worth of evidence-about-evidence work and the bug-hunting
+  tasks; plan § *Re-scope* and execution rule 7 (3-commit stop rule) govern. T2's findings stand: the pin's
+  862 blobs equal GitHub's tree; `jesdga95/basalt` and `Niko1221/Strata` share 0 SHAs — trust hashes,
+  not narrative history (`context/distilled.md`).
+- **Plan 03** — runtime observation: **next, alongside Plan 02's reading** (re-scope 2026-11-05). Unblocked:
+  an image for the pin exists and docker is reachable from an agent shell. The owner runs the boot.
 
 ## Plans <!-- hp:plans -->
 
@@ -65,8 +47,8 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
 | 01 | Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700 | — | done | `./run` boots the local DQ6_K pack in 40 s (4×262144) / 34 s (`--single`); all experts in VRAM; serves `cosmo-6000` on `cosmo.lan:8700`. → `completed/`. |
-| 02 | Basalt vendor audit: leak / theft / keylog / phone-home in `vendor/basalt` | — | in-progress | Boundary-first audit of all 862 files at the pin; manifest + 6-canary-proven census; Tier A ≈34k lines read, engine bulk triaged not read. Owner-chosen two-stage depth. |
-| 03 | Basalt audit, runtime half: observed egress, exec and input capture | 02 | pending | Owner-run: `--network none` vs a monitored netns under strace/tcpdump, plus `strings`/`nm`/`readelf` on the shipped binary. **The gate on Plan 02's verdict.** Blocked on the owner's `./build`. |
+| 02 | Basalt vendor audit: leak / theft / keylog / phone-home in `vendor/basalt` | — | in-progress | Re-scoped 2026-11-05 onto the question: census kept + canaries 1–3, ≈14.9k boundary lines read, Plan 03 alongside. Bug-hunting tasks → Follow-ups. |
+| 03 | Basalt audit, runtime half: observed egress, exec and input capture | 01 | pending | Owner-run boot on a no-egress network; capture every packet and every `connect`/`execve`/`openat`. **The gate on Plan 02's verdict.** Unblocked 2026-11-05 (image exists; docker reachable). |
 | 04 | Basalt audit, engine bulk line-by-line: `src/kernels` + `src/core` + `include/` | 02 | pending | The deferred half of "line by line" (~92k lines, 20–30 sessions). Plan 02 gives each file a census result + triage reason; none is read. |
 | 05 | Tune Basalt past the owner's defaults on this card | 01 | pending | Measured A/Bs: `basalt-probe` suggestions, `expert-profile-save`, `prefill-cpu-share`, `spec` depth, `kv` q4_0/k8v4; 4 slots vs `--single` under load. |
 | 06 | `sm_120a` build A/B | 01 | pending | Basalt accepts `120a` but tests only `120`; build both, compare decode/prefill and output identity. |
@@ -80,6 +62,7 @@ completed/01_flashnext_container ──(builds the image Plan 03 observes; feeds
 02_basalt_vendor_audit ──(manifest + census + verdict)────────┤
                                                               └── 04_audit_engine_bulk
 ```
+*Re-scope 2026-11-05:* 03 now depends on **01** (it needs the image, not the audit) and runs alongside 02; it still gates 02's verdict.
 
 ## Backlog Rationale <!-- hp:backlog -->
 
@@ -91,6 +74,7 @@ completed/01_flashnext_container ──(builds the image Plan 03 observes; feeds
   `syscall()`, venv C extensions opening their own sockets); only observed syscalls and network
   state close it. Split from 02 deliberately: Standing Constraints make it owner-run and Plan 01 is
   already stalled on owner boots, so the code verdict must land without inheriting that stall.
+  *2026-11-05 re-scope:* pulled forward. The stall it was split off to avoid is gone — the image for the pin exists and docker is reachable from an agent shell — and it is the most direct answer to "phones home" and "keylogs".
 - **04 — Engine bulk.** 125k lines of C++/CUDA cannot be read line-by-line in one plan at honest
   adversarial speed. Owner chose boundary-first now, this later (Plan 02 § Scope, dated 2026-11-05),
   so the deferral is a numbered plan rather than an invisible gap.
