@@ -9,6 +9,18 @@ Subject: `context/audit/scripts/t3-census.sh`, `GENERATOR_SHA256=1bab1ec5e7933c9
 this work are **§ 3** (my own batch ate its own evidence) and **§ 4** (a control run under `tag=real`
 destroyed the real run's artifacts). Read those two before trusting any green thing here.
 
+**Transcription note, 2026-11-05 (read before trusting any `GENERATOR_SHA=` below).** Unlike
+`t3-sentinels-real.txt`, which is a machine paste, the `mutate:` and `GENERATOR_SHA=` lines in this
+file were **typed by a human from terminal output** — and the terminal truncated some of them. Four
+tokens shipped in `dd94598` as 16-hex-character prefixes followed by `…`, which defeats the reason the
+file records them at all ("the only thing identifying which program emitted that stdout"). They are
+full 64-hex values now, each re-checked against its own transcript at `/tmp/opencode/neg-<name>.txt`
+— which is **scratch, so it will not exist for you**: what survives is the printed `GENERATOR_SHA256=`
+line of any re-run of the corresponding mutation, and the `sha256sum` of a re-made mutant copy. If you cannot reproduce a token here, treat that control's
+*identification* as unverified even though its FAIL is real.
+`pitfalls.md` § *A commit is the index, not the file I was looking at* is how the truncated version
+got past a check that appeared to catch it.
+
 ## Why this file exists
 
 RULES.md: a tool's clean output is worthless until it has been shown to report something. `34/34 PASS`
@@ -149,7 +161,7 @@ still a liveness proof, but it is not a claim about the tree.
 ### C7 — the sort-order comparator fed reverse-C order  ·  tag=negctl  exit=1  fails=2  ·  comparator only
 
     mutate:   SORT_DFLT=$(printf 'a\nB\nb\n' | sort | tr -d '\n')   →   SORT_DFLT=$(printf 'b\nB\na\n' | tr -d '\n')
-    GENERATOR_SHA=5a609c12b6642ce0…
+    GENERATOR_SHA=5a609c12b6642ce054e826830ac19ca0a3322a058534374651f7ca422309ce1b
     FIRED:    actual=bBa     eq Bab    : FAIL
     SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: SORT_DEFAULT_ORDER_EQ_C GENERATOR_SHA_SAME_AS_REAL
 
@@ -179,7 +191,7 @@ must not be able to produce a blank that a comparison shrugs past.
 
     mutate:   chk PREDICATE_SHA_SAME_AS_REAL    eq "$(cat "$T3/run-real/predicate.sha256")" "$PRED_SHA"
               →   chk PREDICATE_SHA_SAME_AS_REAL    ne …
-    GENERATOR_SHA=4ce1604a4396c5be…
+    GENERATOR_SHA=4ce1604a4396c5be5b3d61fe62423fdbd7f2f1063470cd1184d82a955a75e162
     FIRED:    SENT PREDICATE_SHA_SAME_AS_REAL    actual=ededb1159f5477dfb02764f47514e3cd8832fa8d10eede1d00f922164cd137a3
                                                 ne     ededb1159f5477dfb02764f47514e3cd8832fa8d10eede1d00f922164cd137a3  : FAIL
 
@@ -194,7 +206,7 @@ equality the same process guarantees, so the failure this assertion exists to ca
 ### C10 — the inputs compare fed a real difference  ·  tag=negctl  exit=1  fails=2  ·  discriminating
 
     mutate:   cmp -s "$T3/run-real/inputs.sha256" "$RUN/inputs.sha256"; INPUTS_DIFF=$?   →   INPUTS_DIFF=1
-    GENERATOR_SHA=0b8a9e9664d3add2…
+    GENERATOR_SHA=0b8a9e9664d3add20d8b97fdb37a4cd515ecec468bb5037fab05b127a56c9582
     FIRED:    SENT INPUTS_SHA_SAME_AS_REAL                        actual=1     z     : FAIL
     SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL INPUTS_SHA_SAME_AS_REAL
 
@@ -272,7 +284,8 @@ run from before the restore — is the only block above that reports the unavail
 canary-only compare reads as its reference. **C2's floor assertion is `tag=real`-gated**, so C2 had to
 run under that tag — and it replaced `run-real`'s tokens with a **mutant's**:
 
-    run-real/generator.sha256 became  b75fd2f0fa0c1097…   (= C2's own GENERATOR_SHA256, verified above)
+    run-real/generator.sha256 became  b75fd2f0fa0c1097cf6b67181c8920126f302725dc1f3b737c90d54a5e25e7ad
+      (= C2's own GENERATOR_SHA256, byte-equal to the token printed in C2 above)
 
 That value is the "expected" leg printed in C3–C10's `GENERATOR_SHA_SAME_AS_REAL` failures. **It is a
 contaminated baseline and is quoted as such; it is not a reference.** It does *not* invalidate those

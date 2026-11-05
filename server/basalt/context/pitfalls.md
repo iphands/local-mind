@@ -1013,3 +1013,55 @@ Two related errors from the same five minutes, both about *inference* rather tha
 - the rule this generalises into: `context/AGENTS.md` § *Provenance* — a dated observation scoped to an
   environment you cannot enter is superseded, never replaced
 - observed Plan 02 T3, 2026-11-05, while preparing `wave0/t3-sentinels-real.txt`
+
+---
+
+# A commit is the index, not the file I was looking at
+
+## Problem
+
+**[OBSERVED 2026-11-05]** A `wave0` evidence file was `git add`ed, then edited **four times** to replace
+four truncated hashes with full ones, and never re-staged. The commit therefore shipped the
+**pre-edit** content. `git status` said ` M context/audit/wave0/t3-census-controls.txt` the whole time —
+the index matched `HEAD`, the worktree did not, and that `M` was the entire available signal.
+
+Worse than shipping stale bytes: **the commit message asserted a property of the committed file that
+was only true of the worktree** — "all ten are now byte-equal to their transcripts, verified block by
+block". Each of those verifications had been run as `grep … context/audit/wave0/<file>`, i.e. against
+the worktree. So a genuinely-passing check was supporting a claim about an artifact it had never
+looked at, and the claim was false in the commit. The one check that *did* read the commit object
+(`git cat-file blob HEAD:… | sha256sum`) happened to cover the script — the single file in the commit I
+had not edited after staging.
+
+The shape: staging is a **snapshot**, and every subsequent green check on the path says nothing about
+what is being committed. A review cycle that ends in edits — which is what a review cycle *is* — is
+exactly the sequence that produces this.
+
+## How to avoid
+
+- Grep anchors: `git add`, `git status --porcelain`, ` M `, `git diff --cached`, `git show HEAD:`,
+  `git cat-file blob`.
+- **`git add` is the last thing before `git commit`, not the first.** Re-stage after the final edit;
+  then `git diff --stat` (worktree vs index) must print **nothing** for every path the commit claims.
+  A non-empty output there means you are about to commit something other than what you reviewed.
+- **Verify claims against the commit object, not the worktree.** `git show HEAD:<path>` /
+  `git cat-file blob HEAD:<path>`. If a sentence says "the committed X does Y", the measurement has to
+  name `HEAD:` or it is measuring the wrong file — the pairing checks in
+  `wave0/t3-gate-and-checks.txt` § 5 are written that way for this reason.
+- **After committing, `git status --porcelain` must be empty.** A leftover ` M` on a path that is
+  inside the commit you just made is not untidiness, it is proof the commit holds different bytes.
+- Fix it **forward**: append-only history means a new commit plus a dated transcription note *inside*
+  the file, stating which commit shipped the stale form and what can no longer be re-derived from
+  scratch (`/tmp` transcripts do not survive). Never amend.
+- Related trap in the same family: `git commit <path>` commits the **worktree** content for that path
+  while leaving everything else from the index, so it silently mixes two states of the tree.
+  Stage-and-`git commit` with no pathspec keeps the two states identical by construction.
+
+## Sources
+
+- the commit that shipped the stale copy: `dd94598` (`[basalt][P2][T3][census-tooling]`), whose message
+  carries the over-claim; the correction is the immediately following commit in this plan's history,
+  which also inserts the transcription note into `wave0/t3-census-controls.txt`
+- the same family as § *Shell idioms that report green on the thing they did not check*: a check whose
+  input is not the thing under test — here the input was the worktree and the subject was the commit
+- observed Plan 02 T3, 2026-11-05
