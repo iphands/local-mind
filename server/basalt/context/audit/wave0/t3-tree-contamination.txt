@@ -125,15 +125,31 @@ session's harness runs rather than to the clone.
 > cause, and a sixth is coming.** 27 vs 34 is **program identity**: different cuts. **28 vs 34 is not**: the
 > 28s come from the *same* program run under a different **tag** (`t3-census-controls.txt` § 2, "What the
 > `28` is actually worth" — retitled 2026-11-05), because a block of assertions sits inside
-> `[ "$TAG" = real ]` — 11 of them exist only under `real`, 5 only under other tags, so 28 − 5 + 11 = 34. If
+> `[ "$TAG" = real ]` — **in the pre-fill state**, 11 of them exist only under `real`, 5 only under other
+> tags, so 28 − 5 + 11 = 34. That partition is not my transcription of a source walk: the generator has 40
+> label-emitting sites, 39 labels appear in some run, and set-arithmetic on the two name lists gives every
+> total — see [`t3-negctl-rechecks.txt`](t3-negctl-rechecks.txt) § *The producer census*. If
 > you take the "different programs, different dates" rule to that 28 you will go looking for a second
 > producer that does not exist, which is precisely the wrong I made and corrected in that § 2. **And the
-> third kind is run STATE**: one further assertion
-> (`MANIFEST_COL6_RESIDUE_EQ_BINARIES`) is real-gated *and* state-gated — a `DISP` while column 6 is
-> unassigned, a `chk` after T3's fill — so a post-fill `real` run will print **35** from the same program on
-> the same tag. Both 34 and 28 quoted here are **pre-fill** numbers. Three coordinates fix a census total:
+> third kind is run STATE — six names by two mechanisms, not one name by one:**
+> **(i)** one `DISP`↔`chk` **gate** at `t3-census.sh:1448`, which switches between **two different names**:
+> `printf 'DISP MANIFEST_COL6_STATE'` at `:1449` (uncounted) while column 6 is unassigned, and
+> `chk MANIFEST_COL6_RESIDUE_EQ_BINARIES` at `:1451` (counted) after T3's fill. An earlier cut of this
+> paragraph called it one name flipping, which is not what the file does and is the reason the counted
+> name's absence is informative at all. So a post-fill `real` run prints **35** from the same
+> program on the same tag; **(ii)** all **five** non-`real` names are gated on `run-real` *artifacts* as well
+> as on the tag (`:259` carries `&& [ -f "$T3/run-real/universe.txt" ]`, with legs at `:277`, `:285`,
+> `:402`) — so **a run made while `run-real` is entirely absent prints `TOTAL=23 FAILS=2` and exits 1**.
+> Corrected 2026-11-05: three files used to say this state "prints 23 and still exits 0", which is false in
+> both halves (§ 2's `TREE_DIFF_AVAILABLE` and `PREDICATE_SHA_AVAILABLE` legs raise `FAILS_SENT`, and
+> `:1589-1591` exits 1 on any), and it also conflated **two different 23s** — this one is the
+> **degraded-`negctl` 23** of `1bab1ec5…`; the `23` in the controls file's C1 block belongs to the
+> pre-freeze program. Measured: `t3-negctl-rechecks.txt` § *State legs*. Rule it out first in the canary
+> batch, by leg names rather than by exit code. Both 34 and 28 quoted here are **pre-fill**
+> numbers. Three coordinates fix a census total:
 > program, tag, state. The other two values are labelled artifacts of known defects: C1's `23` (pre-restore,
-> marked at its own block in the controls file) and `31` (the guessed floor, § 2 of that file). The PoC
+> marked at its own block in the controls file — a *different* 23, see above) and `31` (the guessed floor,
+> § 2 of that file). The PoC
 > harness — the other script in this story — emits `POC_VERDICT`/`POC_*` and has **never** printed
 > `SENTINEL_TOTAL`, so no value here comes from it. Annotated at the line rather than renamed: 27 is this
 > section's own evidence.

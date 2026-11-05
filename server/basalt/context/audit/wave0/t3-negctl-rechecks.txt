@@ -1,0 +1,640 @@
+Target dc047a77beeddf1e91234d983a91d6bf929e9619 / tree 3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4 — if that is not the tree you are looking at, you are in the wrong checkout.
+
+# Plan 02 T3 · the ten controls re-fired against the FROZEN generator — 2026-11-05
+
+Raw output. **Never hand-edit this file: replace it whole, or leave it.** Commentary is marked `>`;
+every unmarked line is either copied out of a saved run output by the generating script or derived
+from such lines by arithmetic stated in place. **Which is which, section by section: § 1, § 2, § 4
+and § 5 are pasted transcripts; § 0, § 3 and § 6 are tables and derivations over them, and
+§ 7 mixes both.** **Three kinds of block, distinguishable by layout alone:** an indented block is raw
+output or a derived figure presented as one; a triple-backtick fence is a command to run, never output;
+and a `>` block is commentary. An earlier cut put a shell recipe and two sentences of prose in
+indented blocks, which is the one thing a reader must never have to guess about.
+
+**And one rule about machine-format values in prose** — a `KEY=value`, a hash: in prose or
+commentary such a value appears **exactly once, in the form it is asserted in**. A claim this file
+refutes is quoted with typographic marks and refuted on the line beneath it, never restated in
+machine form, because grep returns lines and cannot tell an asserted figure from a repudiated one
+(`context/pitfalls.md` § *Provenance that cannot contradict its own claim*).
+**Exempt: everything copied, and coordinates.** Indented transcript blocks and the per-control rows of
+the tables are outputs, and outputs repeat themselves — twelve runs in the blocks below print the
+verdict line, which is why it appears twelve times there and three times above them. A `path:NNN` is a
+*pointer*, not a claim: a table and the prose under it naming the same line is what a table is for
+(measured 2026-11-05: 10 of this file’s 20 coordinates recur that way, all of them the § 7 mechanism
+table naming a site its bullets then discuss). **Never de-duplicate a raw block to satisfy the rule
+above — fidelity outranks uniqueness there, and the damage is invisible.** Coordinates are held to the
+inverse instead: **no site gets two coordinates in this file.**
+
+**Provenance stamp.** The script that emitted this file (`/tmp/opencode/rederive/emit_paste_v2.py`,
+with its checker) read batch bytes under `/tmp/opencode/` that will not survive; the *runs* are
+re-fireable from the tree, the *transcription* is not re-runnable from them. Treat this as
+**machine-emitted once, 2026-11-05, from bytes that no longer exist** — which is why § 3 carries the
+digests a later reader can actually recompute. The one tool this file depends on *is* in the tree:
+`context/audit/scripts/t3-make-mutant.py`, the recipe applier § *Re-fire* runs through.
+
+This file exists because `wave0/t3-census-controls.txt` § *Method* rule 4 claimed the controls could
+be re-fired against the frozen generator and, when first written, had **no witness in the tree** — nine
+runs described in prose and backed by nothing durable. neckbeard, 2026-11-05: *"these nine are new
+mutant programs (recut from `1bab1ec5…`), so their identities appear nowhere."* Right, at the time.
+Here they are, and the headline is better than a witness: **the ten recut programs are reproducible**
+(see § *Reproducibility*), which is more than the original pre-freeze mutants ever were.
+
+## How each block was produced
+
+Base: `context/audit/scripts/t3-census.sh`, `sha256 = 1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106` — re-read by the emitter at
+generation time and required to equal the frozen token, or nothing is written.
+
+1. Copy the generator to `context/audit/scripts/.neg-recheck-<Cn>.sh`, **beside the original**, and
+   apply that control's `mutate:` pair from `t3-census-controls.txt`, requiring exactly one occurrence
+   (`context/audit/scripts/t3-make-mutant.py`, exit 3 on VACUOUS or AMBIGUOUS). The recipe is printed in
+   each block below, extracted from the controls file by the same script that then rebuilds the
+   program from it, so the fixture is not a secret and the pairing is checked, not asserted.
+2. `chmod --reference=context/audit/scripts/t3-census.sh` on the copy. Skip it and every run returns
+   **exit 126** (`write_text` yields `644`, the original is `755`): a permission failure is a broken
+   control, not a fired one. That bit the first attempt, 9/9.
+3. Run `./.neg-recheck-<Cn>.sh vendor/basalt negctl` from the project root. **C2 is the exception:
+   `tag=real`**, for the reason in its block, and it runs last in the batch.
+4. Delete the mutant. `ls context/audit/scripts/.neg-* | wc -l` was **0** after the batch.
+
+Each block's `GENERATOR_SHA256=` is **that mutant's own identity**. Ten single-edit mutations, ten
+distinct programs, so ten distinct hashes; none of them is the frozen token. What ties each to the
+frozen parent is § *Parentage*.
+
+### Which copy of the controls file the recipes came from
+
+The recipes live in `t3-census-controls.txt`, a file being edited while this batch ran, so the driver
+copied it first and cut every mutant from the copy. That copy's hash is the one that identifies what
+**ran**; the blocks below are extracted from the **live** file. The two are reconciled here rather
+than assumed. Three lines, and they are this script's own report, not transcript:
+
+    controls file the batch read (snapshot)  1a3baa984f36c3cc011a592a24f5d4fd064453820a7dae576d249697aeefaedf
+    controls file at generation time (live)  a3489e9e1c7035f398596a87e3b3dcb81f1ac09313bbe18b40d2fdad5d919af1
+    the ten `mutate:` pairs                  differs for C9 — see the note in those blocks
+
+> If those two hashes ever differ while the pairs still match, nothing is wrong: it means the file's
+> prose moved and its fixtures did not. A pair that differs is a different matter — the block above
+> would then document a recipe that never ran, which is the defect this paragraph exists to catch.
+
+## § 0 · the panel — ten controls, ten fired, every number below read out of the files
+
+Ten rows, and four facts are the same in all ten, so they are said once here rather than
+forty times: every control **exited 1**, with **0 bytes on stderr**, its target assertion on
+the `SENT` line reading **`FAIL`**, the run's verdict field matching it, and the target
+named in that run's `FAILED:` string. What differs is the comparison that failed — the only
+part of a negative control that shows it *discriminates* rather than merely errored — so
+that is what this table carries.
+
+| C | tag | assertion it protects | the comparison that failed | `TOTAL/FAILS` |
+|---|---|---|---|---|
+| C1 | `negctl` | `GENERATOR_SHA_IS_64_HEX` | `1 z` | 28/2 |
+| C2 | `real` | `SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR` | `34 ge 999` | 34/1 |
+| C3 | `negctl` | `DECLARED_LABELS_EQ_FILES_COLUMN` | `0 eq 62` | 28/2 |
+| C4 | `negctl` | `COLLAPSE_COUNT_MATCHES_HITS_IN_FILE` | `62 z` | 28/2 |
+| C5 | `negctl` | `SITE_ROWS_VERDICT_MATCHES_TN` | `278 z` | 28/2 |
+| C6 | `negctl` | `UNIVERSE_LIST_IS_SORTED` | `NO eq yes` | 28/2 |
+| C7 | `negctl` | `SORT_DEFAULT_ORDER_EQ_C` | `bBa eq Bab` | 28/2 |
+| C8 | `negctl` | `S14_DENOM_PY_FILES_GE_1` | `(empty) ge 1` | 28/2 |
+| C9 | `negctl` | `PREDICATE_SHA_SAME_AS_REAL` | `ededb1159f54… ne ededb1159f54…` | 28/2 |
+| C10 | `negctl` | `INPUTS_SHA_SAME_AS_REAL` | `1 z` | 28/2 |
+
+> **Reading the middle column.** It is the run's own `SENT` line, `<actual> <op> <expected>`, with
+> long values cut to a 12-character prefix plus an ellipsis, and a unary `z` (“expect empty”) left
+> as a single operand.
+> **C9 is the row that looks wrong and is not:** both sides print equal and the operator is `ne`. That
+> *is* the mutation — the compare lost its other leg — so the assertion can now only ever fail. Its
+> block carries the whole story, including why that is a weaker control than C10's.
+
+> All ten exit **1** with `T3_CENSUS_VERDICT=FAIL` and name the target assertion in `FAILED:`.
+> `SENTINEL_TOTAL` is **28** on the nine `negctl` runs and **34** on C2's `real` run — that pair is the
+> *tag* coordinate, and § *The producer census* below is the arithmetic that makes 28 and 34 the same
+> program. `SENTINEL_TOTAL` and `SENTINEL_FAILS` are **not** complementary; never subtract one from the
+> other (`t3-census-controls.txt` § 2).
+
+## § 1 · the ten blocks
+
+### C1 — `GENERATOR_SHA_IS_64_HEX` · the generator token's shape · tag=negctl
+
+    mutate:  SELF_SHA=$(sha256sum "$SELF" | cut -d' ' -f1)   →   SELF_SHA=deadbeef
+
+    GENERATOR_SHA256=deadbeef
+    SENT GENERATOR_SHA_IS_64_HEX                        actual=1              z                  : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_IS_64_HEX GENERATOR_SHA_SAME_AS_REAL
+    T3_CENSUS_VERDICT=FAIL (2 of 28 compared expectations unmet — do not commit this run as evidence)
+    exit=1  stderr=0 bytes
+
+> The token is literally `deadbeef`: C1's mutation *is* the poisoned token, so this mutant fails
+> its own identity check twice over. It is also the one control whose identification is prose — no
+> table can fix a token that names the poison rather than the program.
+### C2 — `SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR` · the assertion-count floor · tag=real
+
+    mutate:  SENT_TOTAL_FLOOR_REAL=34   →   SENT_TOTAL_FLOOR_REAL=999
+
+    GENERATOR_SHA256=83b5724074f6a948305392afd25290b115634004d670b7f4198d07024f289f7f
+    SENT SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR               actual=34             ge  999            : FAIL
+    SENTINEL_TOTAL=34 SENTINEL_FAILS=1 FAILED: SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR
+    T3_CENSUS_VERDICT=FAIL (1 of 34 compared expectations unmet — do not commit this run as evidence)
+    exit=1  stderr=0 bytes
+
+> **Why it ran under `tag=real`, and what licenses that:** § 4 of the controls file, which owns
+> both the argument and the procedure (last in the batch, output discarded, `run-real`
+> bracketed and restored). This file contributes the transcript and the measurement in
+> § *C2's § 4 compliance*, not a second telling of it — an earlier cut of this file told the same
+> argument three times over. It is also the control the column-6 fill needs: `34 ge 999` shows
+> the floor line responding to the number it compares, which is what a fill that only raises a
+> constant has to be demonstrably able to do.
+### C3 — `DECLARED_LABELS_EQ_FILES_COLUMN` · the label pattern that counts declared-file rows · tag=negctl
+
+    mutate:  $8 ~ /\(declared\): /{c++}   →   $8 ~ /IMPOSSIBLE-TOKEN/{c++}
+
+    GENERATOR_SHA256=205259f6d91b6af52478450c3457c7015b14a940c0ff268e4c34864ab1362528
+    SENT DECLARED_LABELS_EQ_FILES_COLUMN                actual=0              eq  62             : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL DECLARED_LABELS_EQ_FILES_COLUMN
+    T3_CENSUS_VERDICT=FAIL (2 of 28 compared expectations unmet — do not commit this run as evidence)
+    exit=1  stderr=0 bytes
+
+### C4 — `COLLAPSE_COUNT_MATCHES_HITS_IN_FILE` · the collapse-count ↔ column-6 equality · tag=negctl
+
+    mutate:  if (n + 0 != $6 + 0) bad++   →   if (n + 0 == $6 + 0) bad++
+
+    GENERATOR_SHA256=cde74a45346598ff0e057b42571a4293fa8e7487ab75a88bb189f4d46787e8b6
+    SENT COLLAPSE_COUNT_MATCHES_HITS_IN_FILE            actual=62             z                  : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL COLLAPSE_COUNT_MATCHES_HITS_IN_FILE
+    T3_CENSUS_VERDICT=FAIL (2 of 28 compared expectations unmet — do not commit this run as evidence)
+    exit=1  stderr=0 bytes
+
+### C5 — `SITE_ROWS_VERDICT_MATCHES_TN` · the row-verdict ↔ TN equality · tag=negctl
+
+    mutate:  $3 != ("needs-" $4)   →   $3 == ("needs-" $4)
+
+    GENERATOR_SHA256=51da43896c11c13a650c085b26901cb13e0ec459fae72c47598cfe708a4d9baa
+    SENT SITE_ROWS_VERDICT_MATCHES_TN                   actual=278            z                  : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL SITE_ROWS_VERDICT_MATCHES_TN
+    T3_CENSUS_VERDICT=FAIL (2 of 28 compared expectations unmet — do not commit this run as evidence)
+    exit=1  stderr=0 bytes
+
+### C6 — `UNIVERSE_LIST_IS_SORTED` · the universe list's sortedness · tag=negctl
+
+    mutate:  SORT_OK=$(LC_ALL=C sort -c "$UNIV" 2>/dev/null && echo yes || echo NO)   →   SORT_OK=$(false && echo yes || echo NO)
+
+    GENERATOR_SHA256=edc734cfecfe96de07bbd0bf1df05754b5331d29b28617d0f351d7e470696235
+    SENT UNIVERSE_LIST_IS_SORTED                        actual=NO             eq  yes            : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL UNIVERSE_LIST_IS_SORTED
+    T3_CENSUS_VERDICT=FAIL (2 of 28 compared expectations unmet — do not commit this run as evidence)
+    exit=1  stderr=0 bytes
+
+### C7 — `SORT_DEFAULT_ORDER_EQ_C` · the comparator that checks sort order · tag=negctl
+
+    mutate:  SORT_DFLT=$(printf 'a\nB\nb\n' | sort | tr -d '\n')   →   SORT_DFLT=$(printf 'b\nB\na\n' | tr -d '\n')
+
+    GENERATOR_SHA256=811575be64d1b244d28f98f11191e4a6713f44dbce3e0b8d3d15443e2994d09c
+    SENT SORT_DEFAULT_ORDER_EQ_C                        actual=bBa            eq  Bab            : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: SORT_DEFAULT_ORDER_EQ_C GENERATOR_SHA_SAME_AS_REAL
+    T3_CENSUS_VERDICT=FAIL (2 of 28 compared expectations unmet — do not commit this run as evidence)
+    exit=1  stderr=0 bytes
+
+> C7's *locale* arm is still unfireable on this host (controls § 2): this is the `LC_ALL=C` leg,
+> not proof that a dropped `export` would be caught.
+### C8 — `S14_DENOM_PY_FILES_GE_1` · a python half that stopped printing · tag=negctl
+
+    mutate:  S14DPY=$(grab S14_PROCEDURE_REAL S14_DENOMINATOR_PY_FILES_WITH_ADD_ARGUMENT_OUTSIDE_CONFIG)   →   S14DPY=
+
+    GENERATOR_SHA256=3c62f607516e82e17cbf147f068fba9c0a4578bcb5c4a0027c314df4e00bf808
+    SENT S14_DENOM_PY_FILES_GE_1                        actual=(empty)        ge  1              : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL S14_DENOM_PY_FILES_GE_1
+    T3_CENSUS_VERDICT=FAIL (2 of 28 compared expectations unmet — do not commit this run as evidence)
+    exit=1  stderr=0 bytes
+
+### C9 — `PREDICATE_SHA_SAME_AS_REAL` · the predicate cross-run compare · tag=negctl
+
+    mutate:  chk PREDICATE_SHA_SAME_AS_REAL    eq "$(cat "$T3/run-real/predicate.sha256")" "$PRED_SHA"   →   chk PREDICATE_SHA_SAME_AS_REAL    ne "$(cat "$T3/run-real/predicate.sha256")" "$PRED_SHA"
+
+    GENERATOR_SHA256=ef9c34e253fde9df0a4699eea3e45aa5b2843f8f9bb49b5daf3d6714938fe00b
+    SENT PREDICATE_SHA_SAME_AS_REAL                     actual=ededb1159f5477dfb02764f47514e3cd8832fa8d10eede1d00f922164cd137a3 ne  ededb1159f5477dfb02764f47514e3cd8832fa8d10eede1d00f922164cd137a3 : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL PREDICATE_SHA_SAME_AS_REAL
+    T3_CENSUS_VERDICT=FAIL (2 of 28 compared expectations unmet — do not commit this run as evidence)
+    exit=1  stderr=0 bytes
+
+> **C9 and C10 are the two controls whose expected side comes from `run-real`, and they are not
+> equal as controls.** Here both legs of the compare are the same expression and the operator was
+> flipped to `ne`, so the assertion is unsatisfiable by construction and the failure this
+> assertion exists to catch — two genuinely *different* predicates meeting an intact `eq` — is
+> never exercised. The controls file records that as `wiring-only` and names C10 as the better
+> shape. What *is* shown is narrower and still worth having: this run's `SENT` line is
+> **identical** to the pre-freeze batch's, compared as strings by this script, so the recipe the
+> controls file now holds is the program that ran then and runs now.
+### C10 — `INPUTS_SHA_SAME_AS_REAL` · the inputs cross-run compare · tag=negctl
+
+    mutate:  cmp -s "$T3/run-real/inputs.sha256" "$RUN/inputs.sha256"; INPUTS_DIFF=$?   →   INPUTS_DIFF=1
+
+    GENERATOR_SHA256=d6eb98c2b2edf5ded54f4d9a4faa9def0630fe0b9175b7f757563209bb5e69fd
+    SENT INPUTS_SHA_SAME_AS_REAL                        actual=1              z                  : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL INPUTS_SHA_SAME_AS_REAL
+    T3_CENSUS_VERDICT=FAIL (2 of 28 compared expectations unmet — do not commit this run as evidence)
+    exit=1  stderr=0 bytes
+
+> The inputs compare, sibling of C9's, and it is the second of the two cross-run legs whose
+> expected side comes from `run-real`.
+
+## § 2 · Parentage — what proves all ten were cut from `1bab1ec5…`
+
+Each mutant's **own** `GENERATOR_SHA_SAME_AS_REAL` line, verbatim, expected leg on the right. This
+assertion is one of the 5 non-`real` names, so it runs for the nine `negctl` controls and **not** for C2.
+
+    C1   SENT GENERATOR_SHA_SAME_AS_REAL                     actual=deadbeef       eq  1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106 : FAIL
+    C3   SENT GENERATOR_SHA_SAME_AS_REAL                     actual=205259f6d91b6af52478450c3457c7015b14a940c0ff268e4c34864ab1362528 eq  1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106 : FAIL
+    C4   SENT GENERATOR_SHA_SAME_AS_REAL                     actual=cde74a45346598ff0e057b42571a4293fa8e7487ab75a88bb189f4d46787e8b6 eq  1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106 : FAIL
+    C5   SENT GENERATOR_SHA_SAME_AS_REAL                     actual=51da43896c11c13a650c085b26901cb13e0ec459fae72c47598cfe708a4d9baa eq  1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106 : FAIL
+    C6   SENT GENERATOR_SHA_SAME_AS_REAL                     actual=edc734cfecfe96de07bbd0bf1df05754b5331d29b28617d0f351d7e470696235 eq  1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106 : FAIL
+    C7   SENT GENERATOR_SHA_SAME_AS_REAL                     actual=811575be64d1b244d28f98f11191e4a6713f44dbce3e0b8d3d15443e2994d09c eq  1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106 : FAIL
+    C8   SENT GENERATOR_SHA_SAME_AS_REAL                     actual=3c62f607516e82e17cbf147f068fba9c0a4578bcb5c4a0027c314df4e00bf808 eq  1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106 : FAIL
+    C9   SENT GENERATOR_SHA_SAME_AS_REAL                     actual=ef9c34e253fde9df0a4699eea3e45aa5b2843f8f9bb49b5daf3d6714938fe00b eq  1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106 : FAIL
+    C10  SENT GENERATOR_SHA_SAME_AS_REAL                     actual=d6eb98c2b2edf5ded54f4d9a4faa9def0630fe0b9175b7f757563209bb5e69fd eq  1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106 : FAIL
+
+This script's count over the nine lines above — a derived figure, not program output, so it is
+indented and labelled rather than sitting in a sentence where a grep cannot tell it from a transcript:
+
+    PARENT-EXPECTED-LEG-OK=9/9
+
+(the test is `eq` followed by `1bab1ec5` and 64 hex on each line). C1 is inside that count but reads
+`actual=deadbeef`, because its own identity print is the poisoned input — see § 1.
+
+> **C2 has no parentage leg of its own.** `GENERATOR_SHA_SAME_AS_REAL` does not execute under
+> `tag=real`. Its parentage rests on weaker, stated grounds: the driver refuses to copy anything unless
+> the base is `1bab1ec5…` (checked before *each* of the ten, and again at generation time), the
+> printed one-line diff at `:75`, and `SENTINEL_TOTAL=34` matching the pristine `real` total. Weaker
+> because it is: this file does not pretend otherwise.
+
+## § 3 · Reproducibility — the finding that was not asked for
+
+Two independent batches of the same ten recipes against the same frozen base (the first at 07:02-07:04,
+the second at generation time). Per control: same program, and same stdout modulo the two lines that
+are timestamps by construction (`== t3-census.sh started=…`, `== finished=…`). **The exclusion is
+self-checking: each transcript must shed exactly those two lines, or the emitter refuses to write.**
+The first version of this filter looked for `== t3-census.sh finished=`, which is not a line the
+generator emits; it shed one line instead of two and published a reproducibility count of **zero**
+over ten byte-identical transcripts. Caught by the checker, not by reading it — and the wrong value
+is deliberately not written out in `KEY=value` form anywhere in this file, per the convention in
+`pitfalls.md` § *Provenance that cannot contradict its own claim*.
+
+| C | same `GENERATOR_SHA256` | same stdout (`started=`/`finished=` excluded) |
+|---|---|---|
+| C1 | yes | yes |
+| C2 | yes | yes |
+| C3 | yes | yes |
+| C4 | yes | yes |
+| C5 | yes | yes |
+| C6 | yes | yes |
+| C7 | yes | yes |
+| C8 | yes | yes |
+| C9 | yes | yes |
+| C10 | yes | yes |
+
+Both figures are this script's counts, not the programs' output:
+
+    REPRODUCIBLE_PROGRAMS=10/10
+    REPRODUCIBLE_STDOUT=10/10
+
+## § 3b · Re-fire — the rebuilt-program column needs nothing but the tree
+
+Reproducibility above compares two batches, both of which live in scratch that is going away. This
+subsection is the claim a reader can recompute alone: rebuild each control program from the recipe
+**as the repo currently holds it** and hash it. Scope, precisely: **the rebuilt-program column is**
+reproducible from files in this repo and nothing else. **The normalized-stdout column is not** —
+reproducing it means *running* the ten mutants against `vendor/basalt` at `dc047a77` with a `run-real`
+baseline present, including C2 under `tag=real`, which **writes `run-real`**. Follow
+`t3-census-controls.txt` § 4’s aside-copy-and-restore procedure first, or do not run them.
+
+Run from the project root. Four things in this loop are deliberate, and three of them are defects
+earlier versions of it actually had; the `>` note under the table carries all four. The expected
+base hash is a **pinned literal**, not derived from the file under test: deriving it from
+`t3-census.sh` and comparing it against `t3-census.sh` is a hash compared against itself, which is
+what the first version did, so the gate could never fire on a moved generator. The **preflight**
+counts the rows the selection pattern finds and refuses to compare at all unless it is exactly ten,
+because a per-row check inherits the emptiness of its own extraction. Each row **tests** its own
+hash against column 2 below, so the fence fails by itself instead of printing ten numbers for a
+human to compare. And the expected hash is read from **this file**, not from
+`t3-census-controls.txt` — the controls file is machine-enforced by the applier, so checking a build
+against it would be a tautology. The value here is the cross-check against the one document that is
+*not* enforced, which is the table below. The scratch directory goes with the `trap`.
+
+```bash
+set -euo pipefail
+out=$(mktemp -d); trap 'rm -rf "$out"' EXIT
+FROZEN=1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106
+SRC=context/audit/wave0/t3-negctl-rechecks.txt
+rows=$(grep -c '^| C[0-9]\{1,2\} | .*`[0-9a-f]\{64\}`' "$SRC" 2>/dev/null || true)
+rows=${rows:-0}
+[ "$rows" = 10 ] || { printf '§ 3b rows selected: %s (expected 10) — refusing to compare\n' "$rows" >&2; exit 1; }
+ok=0; fail=0
+for c in C1 C2 C3 C4 C5 C6 C7 C8 C9 C10; do
+  python3 context/audit/scripts/t3-make-mutant.py \
+      context/audit/wave0/t3-census-controls.txt \
+      context/audit/scripts/t3-census.sh "$out/$c.sh" "$c" \
+          "--expect-sha=$FROZEN" > /dev/null
+  got=$(sha256sum "$out/$c.sh" | cut -d' ' -f1)
+  pat='^\| '"$c"' \| `[0-9a-f]{64}` \| '
+  want=$(grep -E "$pat" "$SRC" | sed -E 's/^\| [^|]+ \| `([0-9a-f]{64})`.*$/\1/' || true)
+  nwant=$(printf '%s\n' "$want" | grep -cxE '[0-9a-f]{64}' || true)
+  if [ "$nwant" != 1 ]; then
+    printf '%s  selection found %s rows for %s: refusing to compare\n' "$c" "$nwant" "$pat"; fail=1
+  elif [ "$got" = "$want" ]; then ok=$((ok+1))
+  else printf '%s  MISMATCH got=%s want=%s\n' "$c" "$got" "$want"; fail=1; fi
+done
+[ "$fail" = 0 ] || exit 1
+printf '§ 3b rebuilt programs: %s/10 hashes match column 2 of this file\n' "$ok"
+```
+
+The middle column is what the rebuilt file hashes to. The right column is the identity that control's
+run printed; `stdout` is the saved transcript with its two timestamp lines removed, which is the only
+form of it a later run can reproduce.
+
+| C | rebuilt program `sha256` | = printed identity? | normalized `stdout` `sha256` |
+|---|---|---|---|
+| C1 | `7be65ffa0a75aad13fa29fa3f3468c34d44366d75283d06fd0a3f9a6a1bb204e` | **no — see note** | `f0236c0d2b4496f71771c6af5c2927fad98489eed928a1bda75266d8d17f1647` |
+| C2 | `83b5724074f6a948305392afd25290b115634004d670b7f4198d07024f289f7f` | yes | `d5a94c75f63024ccf3550c311fbfa35ab3a795c2064a723ded40d55a9aa43081` |
+| C3 | `205259f6d91b6af52478450c3457c7015b14a940c0ff268e4c34864ab1362528` | yes | `30633223f91087705408c99ef9e369a0282ec660d59101ea5afe46543de71e1c` |
+| C4 | `cde74a45346598ff0e057b42571a4293fa8e7487ab75a88bb189f4d46787e8b6` | yes | `abc6091d5983a71f661f897c9f797cbab8e03a9a338887b97cee9f4ba0a0a67b` |
+| C5 | `51da43896c11c13a650c085b26901cb13e0ec459fae72c47598cfe708a4d9baa` | yes | `ee89b2e76dc9a94c6b16190511738300f31f97438b218ed7a8970859fb1514a9` |
+| C6 | `edc734cfecfe96de07bbd0bf1df05754b5331d29b28617d0f351d7e470696235` | yes | `69e1919db6d3a7035dd02fa11da673cc98ad03c2ab4343cfaa0beb5f1f0c4bc5` |
+| C7 | `811575be64d1b244d28f98f11191e4a6713f44dbce3e0b8d3d15443e2994d09c` | yes | `51aa238583147dfcba091da44a57885ae97bc99240da30d5fdd0f4498d91495c` |
+| C8 | `3c62f607516e82e17cbf147f068fba9c0a4578bcb5c4a0027c314df4e00bf808` | yes | `8dc08a8406227e0ea56f5f9a6bb8f1a7deaca923448b6e36f4dffda393c7af75` |
+| C9 | `ef9c34e253fde9df0a4699eea3e45aa5b2843f8f9bb49b5daf3d6714938fe00b` | yes | `83c5e07f04da86c90fc1a1ebb2733338a0b31a84d34242f0d21d2f9e07565a31` |
+| C10 | `d6eb98c2b2edf5ded54f4d9a4faa9def0630fe0b9175b7f757563209bb5e69fd` | yes | `dd8090dc224ef475b9dde114080510b171ff3b43a616ba04648374d6213c779c` |
+
+> **Measured, not promised.** An earlier version of this note said this fence had been run verbatim and
+> that “10 of 10 rows match column 2”. That sentence is **withdrawn as attributed**: the ten hashes
+> really did agree — an external comparison established it — but the fence printed above could not
+> have established it, and the version carrying that sentence was measured on 2026-11-05 doing
+> something else. Four defects, each green when it shipped. **(1)** The loop ignored the applier’s
+> exit status, so an aborted build hashed whatever stale `$out/$c.sh` an earlier run had left. **(2)**
+> It derived the expected base hash from the very file it was rebuilding, so the base gate could not
+> fire. **(3)** The equality test lived outside the artifact, in a checker someone had to remember to
+> run. **(4)** The fix for (3) selected its expected hash with `grep -m1 "^| $c | "` — and **three**
+> tables in this file begin rows with `| C1 | `: § 0’s panel, § 2’s parentage table, and this one.
+> It read the panel, which carries no hashes, so every expectation came back empty and all ten rows
+> printed a confident `NO EXPECTED HASH`. Clean input and deliberately-corrupted input then produced
+> **byte-identical output**: a check that cannot fail. It now selects on the shape of the column it
+> wants rather than on a row label, captures by position rather than taking the leftmost hex — every
+> row here carries a **second** 64-hex in column 4 — and refuses to compare when the selection
+> returns any count but one.
+>
+> **Negative control, five cases, 2026-11-05**, each against a copy of this file: as-is → the summary
+> line, exit 0. One column-2 digit flipped → `C5 MISMATCH`, exit 1. A duplicated `| C1 |` row → the
+> preflight counts 11 and refuses, exit 1. The table deleted → the preflight counts 0 and refuses,
+> exit 1. Column 2 swapped with column 3 → the preflight still counts 10 but C5’s selection finds 0,
+> exit 1. **All five outputs pairwise distinct**, and the `trap` leaves no scratch directory behind.
+> Re-measured after the fix: **10 of 10 rebuilt programs match column 2**, from repo files alone.
+>
+> **C1 is the row that says no, and it is the reason that column exists.** Its mutation replaces the
+> generator’s own identity print with `deadbeef`, so the program reports the poison instead of a hash
+> of itself, and its file hash appears in no transcript. For one commit the value in its row was the
+> *only* record of what C1’s program is — held in a file stamped “machine-emitted once” whose own
+> header says to replace it whole, using a generator that no longer exists. That is fixed where it
+> belongs. Every block in `t3-census-controls.txt` now carries `REBUILT_SHA=`, the sha256 of what the
+> applier builds from that block’s own `mutate:` pair, and the applier **requires the key** (exit 3
+> without it), **asserts it on every build** (exit 7 if the build disagrees) and refuses a block that
+> states it twice (exit 4). So column 2 is checked by machinery rather than compared by eye against
+> column 3, and a copied block that keeps the poison but drops the identity is refused instead of
+> walking through with a warning. The other nine rows are redundant by design: rebuilt hash equal to
+> printed hash is what a correct recipe looks like.
+>
+> **What this does and does not buy.** The pre-freeze mutants stay unrecoverable — their base was a
+> working-tree state that was never committed, which is what *Method* rule 4 withdraws, and nothing
+> here restores it. What **is** re-derivable is stated by this table: the recipes in the controls file,
+> applied to `1bab1ec5…`, are the ten programs in § 1, byte for byte. That is the property rule 4
+> wanted and could not have — and unlike the batch above, it survives the deletion of `/tmp`.
+
+## § 4 · C2's § 4 compliance — measured, because § 4 exists because someone asserted a restore
+
+`run-real` is the baseline every cross-run assertion reads, and the census `rm -rf`s `run-$TAG` as its
+first statement. So the `real` run was bracketed:
+
+    files in run-real           232 in 11 directories (209 top-level entries)
+    path-relative digest before b209ba002cc8e87a9494ce345150f123294fb15d243838381def8d1df0d75a4e
+    path-relative digest after  b209ba002cc8e87a9494ce345150f123294fb15d243838381def8d1df0d75a4e
+    diff -r backup vs restored  exit 0, 0 bytes of output
+    generator token after restore 1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106
+
+> Equal digests, empty diff. Two notes, both of them this audit's own defects:
+> **the digest must be taken over relative paths.** The first restore check digested `sha256sum` output
+> built from two *different absolute* directories, so its hashed text could not match whatever the bytes
+> did, and it reported a mismatch on a clean restore. `diff -r` — an independent method — is what said
+> otherwise. Re-run as `cd <dir> && find . -type f | sort | xargs sha256sum | sha256sum`.
+> **The digest is identical across the two batches** (`b209ba00…` on 2026-11-05 both times), i.e.
+> `run-real` round-trips from a copy, and the mutation genuinely overwrote `generator.sha256` with
+> `83b57240…` on the way through while leaving `predicate`/`inputs` byte-identical. That is § 4's
+> contamination, reproduced on demand — which is why controls § 4's rule requires the aside-copy.
+
+## § 5 · The clean run — `tag=negctl`, unmutated, the run that licenses 28
+
+    $ PYTHONDONTWRITEBYTECODE=1 LC_ALL=C context/audit/scripts/t3-census.sh vendor/basalt negctl
+    GENERATOR_SHA256=1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106
+    TREE_DIFF_VS_REAL=+0/-0  added_list=tree-added.txt removed_list=tree-removed.txt
+    FIND SENTINEL_TOTAL_FLOOR_NOT_MEASURED tag=negctl total=28 — no measured floor exists for a canary tag; measure this line on the first canary run and add SENT_TOTAL_FLOOR_negctl beside SENT_TOTAL_FLOOR_REAL, or this tag floors nothing
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=0
+    T3_CENSUS_VERDICT=PASS_PENDING_CANARY (28 assertions compared and passed; 0 of 14 site sections carry a scored canary — this run makes NO claim that any pattern would fire on a planted primitive)
+    exit=0  stderr=0 bytes  FAIL_LINES=0
+
+The 28 names, sorted (`grep '^SENT ' | awk '{print $2}' | sort -u` — the footer only prints names
+that failed, so the set has to be extracted this way):
+
+    COLLAPSE_COUNT_MATCHES_HITS_IN_FILE     COLUMN6_TOKENS_ALL_DECLARED             DECLARED_LABELS_EQ_FILES_COLUMN
+    GENERATOR_SHA_IS_64_HEX                 GENERATOR_SHA_SAME_AS_REAL              GUARD_INVERSION_POPULATION_FROZEN
+    INPUTS_SHA_SAME_AS_REAL                 PREDICATE_SHA_SAME_AS_REAL              S14_CONTROL_FIRED_SET
+    S14_CONTROL_NO_CONSUMER_LEAK            S14_DENOM_CPP_FILES_GE_1                S14_DENOM_PY_FILES_GE_1
+    S14_PROCEDURE_CONTROL                   S14_PROCEDURE_REAL                      S15_CONTROL_VERDICTS
+    S15_IMPORT_EDGES_NONZERO                S15_PROCEDURE_CONTROL                   S15_PROCEDURE_REAL
+    SITES_WITHOUT_A_TN                      SITE_ROWS_BAD_PROVENANCE                SITE_ROWS_BAD_ROUTING_VERDICT
+    SITE_ROWS_VERDICT_MATCHES_TN            SITE_ROWS_WITH_BLANK_PATH_OR_PRIMITIVE  SITE_ROWS_WRONG_FIELD_COUNT
+    SORT_DEFAULT_ORDER_EQ_C                 TREE_DIFF_ADDITIONS_ARE_PLANTED         TREE_DIFF_NO_REMOVED_PATHS
+    UNIVERSE_LIST_IS_SORTED
+
+> `28` names. The nine `negctl` mutants printed a set identical to this one — the emitter
+> compared the sorted lists for all nine, not by eye.
+
+## § 6 · The producer census — the arithmetic behind 34, 28 and what comes next
+
+Both `chk` **and** `runpy` increment `SENT_TOTAL` (`t3-census.sh:82` and `:106`; `runpy` prints its
+`SENT` line at `:119`/`:122`). Counting `chk` alone under-derives every total by four, which is exactly
+the mistake the controls file carried until 2026-11-05 — a reader following its old warrant got 30 and
+24 where the file published 34 and 28.
+
+    source emission sites    40   (35 leading `chk` + 1 inline `|| chk` at `:222` + 4 `runpy`)
+    distinct labels          40   (no label is emitted twice)
+    labels in the real paste 34   labels in the clean negctl run 28
+    labels in some run       39
+    labels in NO run         MANIFEST_COL6_RESIDUE_EQ_BINARIES
+
+The label printed by **no** run is the state gate, and that is the point: the state coordinate of a
+census total is findable by *absence*, by anyone, with two commands. No guard-nesting walk, no
+indentation heuristic.
+
+    partition of the printed names  (derived; scope per note (1) under this table)
+      seen in `real` only        (11)  CENSUS_SITES_ON_UNASSIGNED_ROWS_NONZERO  GRANULARITY_FORCE_IS_FIRED  LOC_EQ_PIN_CONSTANT  LOC_WORKTREE_EQ_MANIFEST  MANIFEST_ROWS_EQ_862  MANIFEST_TIER_UNASSIGNED_NONZERO  SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR  TN_TOKENS_WITHOUT_A_PLAN_TASK  TREE_FREE_OF_BUILD_ARTIFACTS  UNIVERSE_COUNT_EQ_PIN  UNIVERSE_SHA_MATCHES_PIN
+
+      seen in `negctl` only      (5)
+        GENERATOR_SHA_SAME_AS_REAL
+        INPUTS_SHA_SAME_AS_REAL
+        PREDICATE_SHA_SAME_AS_REAL
+        TREE_DIFF_ADDITIONS_ARE_PLANTED
+        TREE_DIFF_NO_REMOVED_PATHS
+
+      in both (the tag-free base) = 28 − 5 = 34 − 11 = 23
+
+      `real`, pre-fill    = 23 + 11 = 34
+      `negctl`            = 23 + 5 = 28
+      `real`, POST-fill   = 23 + 12 = 35   (MANIFEST_COL6_RESIDUE_EQ_BINARIES joins the `real`-only set)
+      after the floor commit, `negctl` = 24 + 5 = 29
+      `degraded negctl`   = 23   measured, not derived — see § *State legs*.
+
+> **Why `negctl` appears twice.** The two lines are true of *different cuts*: the floor commit adds a
+> tag-free assertion, lifting the base from 23 to 24, so 28 belongs to `1bab1ec5…` and 29 to the cut
+> after it. One timeless `negctl` total is the mistake this pair of lines exists to prevent.
+>
+> Two scoping notes, because both readings of this table have been published wrong. **(1)** These are
+> **printed** names, taken from `^SENT ` lines — not labels in the source. `UNIVERSE_SHA_MATCHES_PIN`
+> is a `chk` under `real` and a `printf 'DISP '` elsewhere (`:246`), so it appears in every run's output
+> while belonging to no partition of the counted set. **(2)** One further name, `MANIFEST_COL6_STATE`,
+> appears in output and is counted nowhere: 41 names appear, 40 are counted, and one of those 40 is
+> printed by no run at all. That last one is the state gate; § *State legs* is about it.
+
+> **This block is derived, not pasted**: it is this script's arithmetic over the two name-lists above.
+> Nobody needs my transcription or my arithmetic for it. The name-lists are printed in this file and
+> in [`t3-sentinels-real.txt`](t3-sentinels-real.txt), and the source counts come from two commands:
+>
+> ```bash
+> grep -cE '^[[:space:]]*(chk|runpy) [A-Z][A-Z0-9_]*' context/audit/scripts/t3-census.sh
+> grep -cE '||[[:space:]]+chk[[:space:]]+[A-Z][A-Z0-9_]*' context/audit/scripts/t3-census.sh
+> ```
+>
+> **And these totals are program-scoped.** This is `1bab1ec5…`; the floor commit adds a tag-free
+> content assertion, which lifts the base by one and takes the post-fill `real` total to 36. See the tracker's content-leg follow-up.
+
+## § 7 · State legs, because a partition is state-scoped
+
+Four mechanisms decide which labels a run prints and what its footer says. All four are in the
+generator; none of them is described in this file well enough to be trusted from description, which
+is why the last third of this section is measurements. The table is the whole shape in one screen;
+the bullets after it carry only what the wording has already gotten wrong once. The fifth row is not
+a fifth mechanism — it is a hazard sitting on the first one’s line.
+
+Bare `:NNNN` in this section means `context/audit/scripts/t3-census.sh` at the frozen `1bab1ec5…` cut
+and only that cut; the same file at a later commit has different numbers.
+
+| Mechanism | Where (in `t3-census.sh`) | What it moves | Measured here? |
+|---|---|---|---|
+| Column-6 state gate | `:1448`–`:1451` | which **name** prints, and whether it is counted | no — unobservable until the fill |
+| `tag` coordinate | `:222`, `:259`, `:401` | the **name-set**: 11 real-only, 5 non-`real`-only | § 6 recomputes it |
+| `run-real` artifact legs | `:259`, `:277`, `:285`, `:402` | those same 5 names, **and** the footer count | yes — the two states below |
+| `UNIVERSE_SHA_MATCHES_PIN` | `:246` | **counted vs merely displayed**: prints always, counts once | § 6 note (1) |
+| The hardcoded `862` | `:1448`, against `EXPECTED_UNIVERSE` at `:234` | can flip the gate for an unrelated reason | no — flagged from the source |
+
+- **The column-6 state gate — two *different* names, not one name flipping.** `:1448` tests
+  `[ "$col6un" = "862" ]`; the true branch `printf`s `DISP MANIFEST_COL6_STATE` at `:1449`, which is
+  **not counted**, and the false branch is `chk MANIFEST_COL6_RESIDUE_EQ_BINARIES` at `:1451`, which
+  **is**. Two identifiers, one gated — an earlier cut of this file, and of two others, said one name
+  flipping. The distinction is load-bearing: it is the *only* reason the state coordinate of a census
+  total is discoverable by absence, since the counted name is simply not there until the fill lands.
+- **Two hazards sit on that same line.** The discriminator is a **hardcoded `862`**, not
+  `EXPECTED_UNIVERSE` at `:234`, so an unrelated tree bump can flip it; and a *partial* fill that
+  leaves `col6un = 862` keeps the `DISP` forever. **Which makes the fill commit’s acceptance line
+  “the `real` run prints 35 and `MANIFEST_COL6_STATE` is gone” — not “column 6 is filled”.**
+  That 35 is this cut’s: if the floor commit has landed by then, § 6’s final note makes it 36, and a
+  reader who holds 36 has not failed the test.
+- **The `tag` coordinate** — 11 labels exist only under `tag=real` and 5 only without it (`:222`,
+  `:259`, `:401`). This is the partition in § 6.
+- **`run-real` artifact legs** — those 5 non-`real` names are gated on artifacts as well as on the
+  tag: `:259` `[ "$TAG" != real ] && [ -f "$T3/run-real/universe.txt" ]`, with nested legs at `:277`
+  (`generator.sha256`), `:285` (`inputs.sha256`) and `:402` (`predicate.sha256`). Four artifacts:
+  **three `.sha256` tokens plus the universe path list** — not “four tokens”. These are the legs the
+  two measurements below move.
+- **`UNIVERSE_SHA_MATCHES_PIN`’s dual identity** — a `chk` under `real`, a `printf` of
+  `DISP ` + the name at `:246` otherwise. So it prints on *every* run while being counted on one.
+
+**And the consequence that reaches every count in this file: § 6’s partition is stated over `^SENT `
+lines, not over names appearing anywhere in output.** The two differ by exactly the `DISP ` lines
+above — a partition built by substring-matching a transcript would count a display as an assertion.
+
+### The degraded states, measured
+
+The claim this section exists to make good on is what a run prints when the `run-real` artifacts are
+missing. It cannot be read off the source by a human without re-deriving the guard nesting, and when
+first written this section **asserted it wrongly**: that such a run “prints 23 and still exits 0”.
+It does not exit 0. `:292-294` and `:404-407` increment `FAILS_SENT` on the *unavailable* paths, which
+emit no `SENT` line at all, and `:1589-1591` exits 1 whenever `FAILS_SENT > 0`. So the degraded run
+fails — but **without a failed comparison**, which is a different and easier thing to miss: nothing
+on its face says an assertion was skipped rather than run-and-broken.
+
+Two states, taken 2026-11-05. Lines below are copied from the saved transcripts by this script:
+
+    # state 1 — `tag=negctl`, whole run-real directory absent
+    TREE_DIFF_VS_REAL=unavailable (run-real/universe.txt missing — run the audit tree first; the canary claim is UNSUPPORTED without it)
+    PREDICATE_SHA_SAME_AS_REAL=unavailable (run-real/predicate.sha256 missing — the canary claim cannot prove the same predicate ran)
+    SENTINEL_TOTAL=23 SENTINEL_FAILS=2 FAILED: TREE_DIFF_AVAILABLE PREDICATE_SHA_AVAILABLE
+    SENTINEL_ACCOUNTING=23 compared, 2 failed (an assertion that never ran is absent from BOTH numbers, which is why the floor above exists)
+    T3_CENSUS_VERDICT=FAIL (2 of 23 compared expectations unmet — do not commit this run as evidence)
+
+    # state 2 — `tag=negctl`, generator+predicate+inputs tokens present, universe.txt absent
+    TREE_DIFF_VS_REAL=unavailable (run-real/universe.txt missing — run the audit tree first; the canary claim is UNSUPPORTED without it)
+    SENTINEL_TOTAL=24 SENTINEL_FAILS=1 FAILED: TREE_DIFF_AVAILABLE
+    SENTINEL_ACCOUNTING=24 compared, 1 failed (an assertion that never ran is absent from BOTH numbers, which is why the floor above exists)
+    T3_CENSUS_VERDICT=FAIL (1 of 24 compared expectations unmet — do not commit this run as evidence)
+
+> **What these two runs are, exactly.** Not runs of the frozen file. `RUN` and `T3` are hardcoded
+> (`:131`, `:152`), so creating a degraded state in the real namespace would have meant deleting the
+> baseline this audit depends on. The generator was therefore copied with those two constants
+> rewritten to a scratch namespace — 5 differing lines, each one the namespace or a
+> comment describing it — that **model** was run in the two states, and the model was deleted
+> afterwards. Its hash is the result of re-applying the substitution to the frozen bytes, not a
+> remembered value:
+>
+> ```bash
+> sed 's|/tmp/opencode/basalt-audit/t3|/tmp/opencode/degraded/ns|g' context/audit/scripts/t3-census.sh | sha256sum
+> ```
+>
+> giving `7e96fb90861e3592…`, against the frozen cut's `1bab1ec5e7933c90…`. The model was validated
+> **before** it was trusted: against a clean run of the frozen cut it printed the same 28 names,
+> `comm -3` of the two sorted sets empty, and it failed one extra leg, `GENERATOR_SHA_SAME_AS_REAL`,
+> because a rewritten copy is a different program and cannot match the baseline token. That failure is
+> the control, not a defect. The tree-clean and baseline-pristine claims are made where they are
+> measured — § *How each block was produced* step 4, and the bracket in § 4 — not here.
+>
+> **What that does not buy.** A model is not the file. The 23 and 24 are arithmetic over which legs
+> the guard nesting skips, and the model reproduces that arithmetic — but a reader who needs these
+> numbers for a decision should take them from a real run in a namespace that can afford it, which is
+> what the canary batch will be. § 8 carries the same caveat over every figure in this file.
+
+So the pre-flight line is: **before believing anything about a canary run, confirm that
+`TREE_DIFF_VS_REAL` and the three `*_SAME_AS_REAL` legs printed values rather than `unavailable`, and
+that `SENTINEL_FAILS` is 0.** A degraded run will tell you it failed; what it will not tell you,
+without looking at these two names specifically, is that part of its silence is missing assertions.
+
+## § 8 · What this file does not establish
+
+- **Nothing about canaries.** No canary tag has been run; no `SENT_TOTAL_FLOOR_<canary-tag>` has been
+  measured. `FIND SENTINEL_TOTAL_FLOOR_NOT_MEASURED` in § 5 is the harness saying so.
+- **Nothing about the pre-freeze mutants.** Those ten ran against a base that was never committed.
+  Their tokens stay witnessed, not re-derivable (*Method* rule 4). The ten here are recuts of the
+  frozen blob and are reproducible (§ 3); that is a different, smaller claim.
+- **C7's locale arm**, unfireable on this host. **C2's parentage**, argued not shown (§ 2).
+- **C9's recipe is a reconstruction** (§ 1, and the dated note in the controls file). The hash in
+  § 3b shows the reconstruction reproduces the program that ran; it does not show the ellipsis never
+  happened. The pre-freeze mutants stay where *Method* rule 4 put them.
+- **The degraded-state numbers come from a model**, not from the frozen file, because the real
+  namespace cannot hold that state without destroying the baseline (§ 7). Validated against the clean
+  run's name-set, but a model.
+- The `.out`/`.err`/`.exit` files this was generated from are scratch (`/tmp/opencode/recheck2/`) and
+  will not survive, so **this file is not regenerable** — see the provenance stamp at its head. What a
+  later reader can recompute from the tree alone is § 3b’s rebuilt-program column — the ten rebuilt
+  program hashes, which that section’s fence now tests by itself. The normalized-stdout digests are
+  **not** among them: they need the runs, one of them under `tag=real`, so getting them back means
+  following § 4’s aside-copy procedure, not pasting a loop. If the rebuilt hashes still match, the
+  recipes have not rotted.
+
+> **One more thing, said plainly because it is why this file was rewritten.** An earlier cut of it was
+> hand-typed and four of its ten hashes were fabricated from scrollback; a later cut asserted, in
+> prose, a degraded run's exit status that the generator does not produce. Both defects survived
+> both were caught by machinery rather than by review: the emitter refusing to write on an empty
+> extraction, a filter that must shed exactly two lines, a checker that re-derives every number from a
+> file, and the corruptions it is shown before it is trusted. See `pitfalls.md`.
+

@@ -291,10 +291,13 @@ from noir, defragment it there first (`btrfs filesystem defragment -f -t 128M <f
 *The count is deliberately not in the heading — it grows, and every earlier cross-reference then goes
 stale. Two already have: `audit/wave0/t1-freeze-and-manifest.txt` cites this § as "Four shell idioms…"
 (that artifact is a stamped transcript of a past run and is **not** edited retroactively — this line is
-the reconciliation), and the follow-up commit grew it to seven. Twenty-one entries as of 2026-11-05; items
-10–17 are from Plan 02 T2, and items 18–21 are from Plan 02 T3's security harness — all from the same
+the reconciliation), and the follow-up commit grew it to seven. Twenty-two entries as of 2026-11-05; items
+10–17 are from Plan 02 T2, items 18–21 are from Plan 02 T3's security harness, and item 22 is from
+T3's evidence tooling — all from the same
 week and the same failure family: *the check that reports green because the thing it checks was never
-reached, or was looking somewhere else.* Items 20–21 are the two that a passing audit rested on while
+reached, or was looking somewhere else.* Item 22 is the sharpest form of "somewhere else" in this
+corpus — the right file, the wrong table — and it survived a whole verification round because its
+failure looked like a result. Items 20–21 are the two that a passing audit rested on while
 wrong: a freeze check blind to an ignored directory, and a file listing that contained itself. Items
 11–13 are the same three traps that produced item 9's family.*
 
@@ -542,6 +545,28 @@ docker step looks like in this convention. Two variants of that are worth naming
     error**: this one surfaced only because `git blame --line-porcelain` then hit a non-UTF-8 byte in a
     binary and raised `UnicodeDecodeError`. Had that file been text, the 86-file denominator would have
     gone into a table silently. Never treat a lucky crash as a passing check.
+22. **A row label is not a unique key — `grep -m1` and `head -1` turn a cross-table collision into a
+    clean-looking answer.** [OBSERVED 2026-11-05, T3] A fence that re-checks a table of ten rebuilt
+    program hashes took its *expected* value from the same markdown file it was checking, with
+    `grep -m1 "^| $c | "`. **Three** tables in that file begin rows with `| C1 | ` — a panel, a
+    parentage table, and the re-fire table — so `-m1` returned the panel, which carries no hashes at
+    all. Every expectation came back empty, all ten rows printed a confident `NO EXPECTED HASH`, and
+    the clean run and the deliberately-corrupted run were **byte-identical**: a check that cannot fail.
+    Two idioms did the damage, and neither is the pattern itself — `-m1` converts "three tables match"
+    into "the first one", and `head -1` over a whole line had selected the intended column only
+    because it was leftmost (each row carries a **second** 64-hex blob, so a column reorder silently
+    substitutes a different quantity). The hit was non-empty and plausible, which is exactly why it
+    survived: an empty result would have been caught by the rule above. Three rules. (a) **Anchor on
+    the content of the column you want, not on the row label** — require the control's label *followed
+    by a backticked 64-hex*, so a table without that column cannot match. (b) **Extract with a capture
+    group** so column position is stated rather than assumed. (c) **Never let `-m1` or `head -1` stand
+    between a multi-match and a comparison** — assert the extracted value's shape instead, and mind
+    which assertion actually does that: `grep -cxE '[0-9a-f]{64}'` must equal 1, whereas `grep -qxE`
+    **cannot detect a duplicate**, because it passes when *any* line matches. Assert the selected row
+    count before comparing anything: a per-row check inherits the emptiness of its own extraction, one
+    layer below this §'s own framing. The fix and its five-case battery are in the § 3b fence of
+    `context/audit/wave0/t3-negctl-rechecks.txt`; the checker that guards the file is
+    `context/audit/scripts/t3-paste-check.py`.
 ## How to avoid
 Never let absence-of-output or a trailing `rc` carry a verdict when a **number** can be printed:
 `| wc -l | sed 's/^/PREFIX_DRIFT_COUNT=/'`, `awk 'END{print "ROWS=" NR+0}'`, and assert the expected
@@ -765,6 +790,20 @@ blame output and the all-404 endpoint sweep are the same shape.
   bounds itself.
 - **Never write a bare version number without the command that produced it.** This entire error
   was one un-sourced line range, quoted confidently, twice.
+- **In an evidence file, a machine-format token appears exactly once and in its asserted form.**
+  By machine-format: `KEY=value`, a 64-hex blob, a `PATH:LINE` coordinate. The rule is not style, it
+  is that **grep returns lines and cannot tell the value you assert from the value you quote in order
+  to refute it** — so a second, stale appearance of `SENTINEL_TOTAL=…` is indistinguishable from the
+  live one, and the reader who trusts the grep inherits the wrong figure. Observed at scale
+  **2026-11-05**: one wrong claim about what a degraded census run prints was carried in *five*
+  places across *four* files, and the corrected value had to be propagated to all four. Two
+  corollaries: **(a)** when a refuted claim must stay in the record — it usually must, the wrong
+  claim is the lesson — **quote it with typographic marks and refute it on the adjacent line**, which
+  is the one shape a checker can test mechanically (the paste's checker fails any bare `exits 0`);
+  **(b)** prefer describing a wrong figure in prose ("published zero over ten byte-identical
+  transcripts") to writing it as `KEY=value`, because the prose form cannot be mistaken for a claim.
+  This is the same defect as the version number above, one layer down: the evidence was unable to
+  contradict the sentence attached to it, and now the *file* is unable to hold two readings of a token.
 - **Prefer code markers to comment banners** when a version matters. Comments can be edited;
   `#define STBI_MAX_DIMENSIONS (1 << 24)` at `:796` and `stbi__pnm_is16` at `:7624` are
   introduced-at-2.27 facts that no re-labelled banner can fake.
@@ -778,6 +817,11 @@ blame output and the all-404 endpoint sweep are the same shape.
   the two dated 2026-11-05 stb entries (the second corrects the first)
 - related items in this file: § *Shell idioms that report green…* items 10–11 (the all-404
   endpoint sweep, abbreviated SHAs) and the blame false zero recorded during T2
+- the same shape in this plan's own evidence files, 2026-11-05: a false exit-status claim repeated
+  across `wave0/t3-census-controls.txt`, `wave0/t3-tree-contamination.txt` and the Plan 02 tracker;
+  a controls-file recipe elided to `…` that four documents cited while nothing in the tree could
+  fail on it (`wave0/t3-negctl-rechecks.txt` § *Re-fire* is the check that catches that one, and
+  `context/audit/scripts/t3-make-mutant.py` is the tool that refuses to run on it)
 - observed during Plan 02 T3, 2026-11-05, while correcting a P0 — `vendor/basalt` @ `dc047a7`
 
 ---
@@ -833,8 +877,12 @@ concatenation, say) parses clean and computes something different. That variant 
 
 **[OBSERVED 2026-11-05]** The census harness keeps a per-tag namespace,
 `/tmp/opencode/basalt-audit/t3/run-$TAG`, and **`rm -rf`s it as its first action**. `run-real` is not
-just an output directory: it holds the four freeze tokens (`generator`/`predicate`/`inputs`/`universe`)
-that every cross-run assertion reads as its *expected* leg.
+just an output directory: it holds the freeze artifacts — **three** `.sha256` tokens
+(`generator`/`predicate`/`inputs`) **plus `universe.txt`, a sorted path list and not a hash** — that every
+cross-run assertion reads as its *expected* leg. Fixed 2026-11-05 after the round-4 review: this line said
+"the four freeze tokens", conflating the path list with the tokens, which is precisely the confusion that
+lets someone check three hashes and report the artifact set as verified. It is also **232 files in 11
+directories**, of which 209 are top-level entries — so name which of the two you counted.
 
 Two ways to destroy it, both by running a **control**:
 
@@ -859,7 +907,18 @@ controls after it is not.
 
 - **Controls get their own tag namespace, always.** No control ever runs under the tag whose artifacts
   it compares against. A `real`-gated assertion is executed **last, in a batch whose output is
-  discarded** — or not at all, with the gap disclosed.
+  discarded** — or not at all, with the gap disclosed. That is a *procedure*, not a prohibition, and
+  reading it as one cost a control: on 2026-11-05 the controls file said `SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR`
+  "cannot be re-fired" because reaching it needs `tag=real`, when § 4's own rule above authorizes exactly
+  that shape. Run it that way — `run-real` copied aside first, the run last, the output discarded, the
+  restore verified by `diff -r` *and* a path-relative digest — and the gap closes. See
+  `wave0/t3-negctl-rechecks.txt` § C2.
+- **A restore check that hashes file paths cannot pass.** The first restore proof digested
+  `find … | xargs sha256sum | sha256sum` output built from two *different absolute* directories, so the
+  hashed text differed whatever the bytes did and it reported `*** RESTORE MISMATCH ***` on a restore that
+  `diff -r` called clean. `cd` into each side and hash relative paths, or digest file *contents* only —
+  and prefer a second, independent method (a recursive `diff`) over a second run of the same mistake.
+  **[OBSERVED 2026-11-05]**
 - **A restore is a re-production, not an edit.** `run-$TAG` is regenerable by design, so the claim is
   never "I salvaged it" but *"a pristine re-run reproduces the pasted evidence byte-for-byte"*:
   `diff` the new stdout against the paste, excluding the lines that are timestamps by construction
@@ -881,7 +940,7 @@ controls after it is not.
 ## Sources
 
 - the controls and the two incidents: `context/audit/wave0/t3-census-controls.txt` § 3 and § 4
-  (including the byte-diff restore anchor and the four-token verification)
+  (including the byte-diff restore anchor and the whole-artifact-set verification)
 - observed Plan 02 T3, 2026-11-05, `vendor/basalt` @ `dc047a7`
 
 ---
@@ -1282,7 +1341,18 @@ does not"). Every tree-level assertion inherits that blindness:
 | the stray test at `:271` | `awk '!/CANARY\|SENTINEL\|canary/'` over `tree-added.txt` | everything that was not **added** |
 
 So a file whose path is unchanged and whose bytes differ is **invisible to the whole tree layer** — not
-weakly evidenced, unobserved. Two specific deceptions in that shape:
+weakly evidenced, unobserved. Scope that to *the tree layer*, because the harness is wider than the tree
+layer, and an earlier draft of this entry said "at all" (**corrected 2026-11-05, round-4 review**):
+`LOC_TOTAL` (`:248`) is a `wc -l` over every path in the universe, compared at `:252`/`:253` inside the
+`:251` real-gate, so on `tag=real` a **line-count-changing** edit to a pre-existing path *is* caught,
+twice, against the manifest sum and against `EXPECTED_LOC` (`:235`). The exact statement: invisible to the
+tree layer on **every** tag; invisible to *everything* on a non-`real` tag (both LOC legs are inside that
+gate); caught on `real` **iff the line count moves**; a **line-count-preserving byte edit is invisible
+everywhere**. Two further legs, neither of them a content check: the `ge 1` denominators (`:743-744`)
+surface a body edit only if it zeroes a count, and the manifest already publishes a **per-file sha256 in
+column 3** (plan `:322`'s schema) that **no `chk` in the generator re-derives** — no `sha256sum` call there
+runs over tracked file contents at all. The content leg is therefore one assertion from existing, and that
+assertion is a decision about the total it adds, not a free fix. Two specific deceptions in that shape:
 
 - **A gate that reads like a content check.** `TREE_DIFF_ADDITIONS_ARE_PLANTED` names a property of the
   *planted* files, so it invites the belief that the harness validates what the tree now contains. It
@@ -1330,3 +1400,105 @@ never by the "the tree differs only by the planted files" claim, and the run wou
 - the script lines: `context/audit/scripts/t3-census.sh` `:225` (path-set hash, self-described), `:238-247`
   (the `DISP` branch), `:259-295` (the tree-diff block), `:271` (the stray test)
 - observed Plan 02 T3, 2026-11-05, during the six-canary pre-flight
+
+---
+
+# A hash retyped from scrollback came out as 64 valid hex characters that were not the hash
+
+## Problem
+
+**[OBSERVED 2026-11-05]** A round of negative-control re-firings produced ten `GENERATOR_SHA256` values in
+terminal scrollback. The evidence file was then **composed by hand** rather than emitted, and **four of the
+ten hashes were wrong**:
+
+| | typed | truth | what a check would have caught it |
+|---|---|---|---|
+| C2 | `83b57240…9296afd2…` | `83b57240…92afd2…` | length: 66 hex, not 64 |
+| C8 | `…4df4e004dc72` | `…4df4e00bf808` | **nothing but a comparison to the file** |
+| C9 | `…671493857ba5` | `…6714938fe00b` | nothing but a comparison to the file |
+| C10 | `…3209bb5d2f28` | `…3209bb5e69fd` | nothing but a comparison to the file |
+
+The last three are the frightening ones: 52 correct characters copied from memory, then a **plausible
+fabricated tail** to reach 64. They are well-formed, they grep as hashes, they sort, and they look exactly
+like what they pretend to be. In the same file a `FAILED:` transcript line had its two names silently
+**reordered**, which makes it a sentence I wrote rather than a line the program printed — invisible to a
+prefix match, which is what I used to spot-check it.
+
+The shape: **an evidence file whose own header says "raw output — never hand-edit" was hand-edited into
+existence.** The transcription, not the program, is where the error lived; and every number in the file was
+still *about* the right runs, which is why it reads clean.
+
+## How to avoid
+
+- **Emit the artifact; don't type it.** Keep the script that writes the file. Your prose is commentary and
+  gets typed; every transcript line is copied out of the saved output by the machine. If the emitter is
+  gone, the artifact is not regenerable, which is a defect of the artifact.
+- **Verify a pasted line by exact membership**, not by eye and not by prefix: `quoted_line in
+  output.split("\n")`. Prefix matching is precisely what let the reordered line through. Truncations must
+  carry a marker (`…`) and be *produced by the script*, so an accidental short copy can't masquerade as a
+  deliberate one.
+- **A sha is verified by equality with the run's own output, whole.** "64 hex characters" is a *format*
+  check; format checks on identifiers feel like verification and are not. When three of four bad hashes pass
+  the format check, the format check has a false-negative rate of 75 %.
+- **If a value was not saved to disk, re-run and save it — or label the claim witnessed-only.** Exit codes
+  were never captured in that batch; retyping them from the transcript is how this entry happened. The
+  re-run is cheap, and it is the difference between an assertion and a memory.
+- Ship the checker **with** the evidence: a script that re-extracts every claim from the raw outputs and
+  exits non-zero on drift. The one that caught this was written after the file was committed; write it
+  before.
+- Related: § *A commit is the index, not the file I was looking at* — the same failure one level up, where
+  the description is of a state rather than of the bytes; and `context/audit/wave0/t3-census-controls.txt`
+  § 4's "matches, **as typed**" vs this file's "identical", which is the vocabulary distinction this entry
+  is the argument for.
+
+## Sources
+
+- the file that shipped four wrong hashes, and the run outputs that refute them:
+  `context/audit/wave0/t3-negctl-rechecks.txt` (regenerated from `/tmp/opencode/recheck2/` after this)
+- observed Plan 02 T3, 2026-11-05, caught by `verify_paste.py` (line-membership check), one commit late
+
+# A checker's self-test re-ran the checker unguarded — a fork bomb, and the checker had never once run
+
+## Problem
+
+**[OBSERVED 2026-11-05]** `context/audit/scripts/t3-paste-check.py` ended in `sys.exit(run_selftest())` with
+**no `if SELFTEST:` around it**. The self-test re-executes the file once per corruption case (21 + the clean
+run, 8 at a time), each child hit the same line and did the same, and the fan-out grew until the host ran out
+of memory — some time between the last orphaned write (00:18 PST) and the reboot (03:05 PST). The session
+that wrote it died with its round-4 work uncommitted.
+
+Three things this hid, each found only when the guard went in and the file ran to its end for the first time:
+
+- **Every line below the call was dead code.** No invocation had ever reached families A–L, so the
+  uncommitted note "the checker ships with it" described a checker with **no completed run** — the paste
+  records none.
+- **`--tree-only` was not tree-only.** Family I re-digested the batch transcripts and read the `/tmp`
+  snapshot, so on the rebooted host (`/tmp/opencode` wiped) it printed `PROBLEMS=51`, all
+  `MISSING FILE /tmp/opencode/…`. The docstring said "needs nothing but repo bytes".
+- **The self-test could pass by construction.** It scored a case on *any* output line containing the needle;
+  the three `k-*` needles matched family K's **section header**, printed on every run, and `L-key-removed`
+  matched the applier's `VACUOUS` refusal in the setup loop before L ran. Four of the nine tree-only cases
+  were "FIRED" on lines their own check did not print.
+
+## How to avoid
+
+- **A script that re-executes `__file__` must make the re-entry impossible, not just unlikely**: guard the
+  call site *and* mark children (`T3_PASTE_CHECK_SELFTEST_CHILD=1`) so a child refuses the self-test even if
+  the guard is lost again. Run a new self-test the first time under `ulimit -u <current + small>` and a
+  `timeout`, and watch the process count.
+- **Code after an unconditional `sys.exit` is dead, and nothing warns you.** If a checker has never printed
+  its last line (`PROBLEMS=`), it has never run, whatever the evidence beside it says.
+- **A mode that promises "repo bytes only" is a claim — test it on a machine without the corpus.** Here the
+  test was accidental (the reboot wiped `/tmp`).
+- **Score a self-test on failure lines only** (`BAD …` / `CANNOT CONTINUE`), and pick needles only the owning
+  check prints. A needle that also matches a header or another check's message is a control that cannot
+  miss — the defect this series keeps finding in upstream harnesses.
+- Related: § *A hash retyped from scrollback…* ("ship the checker **with** the evidence") — shipping it is
+  not enough; it has to have *run*, and its record of the run belongs in the evidence.
+
+## Sources
+
+- `context/audit/scripts/t3-paste-check.py` — `run_selftest()` docstring, the `if SELFTEST:` call site, and
+  the `TREE_NEEDLE` table (Plan 02 T3, adopted after the OOM, 2026-11-05)
+- tree-only run `PROBLEMS=0` exit 0; tree-only self-test `fired 9/9`, clean exit 0, `NOT RUN: 13 of 22` —
+  `context/plans/02_basalt_vendor_audit_tracker.md` Evidence, 2026-11-05

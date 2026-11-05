@@ -1,0 +1,422 @@
+Target dc047a77beeddf1e91234d983a91d6bf929e9619 / tree 3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4 — if that is not the tree you are looking at, you are in the wrong checkout.
+
+# Plan 02 T3 · t3-paste-check.py, first completed runs — 2026-11-05
+
+Raw output, emitted by a script that ran each command and indented what it printed; nothing below a
+`bash` fence was typed. Context: the checker's self-test had re-run the checker without a guard and
+fork-bombed the host (`context/pitfalls.md` § *A checker's self-test re-ran the checker unguarded…*);
+these are its first runs to completion. `/tmp/opencode` did not survive the reboot, so only
+`--tree-only` can run — the seven transcript families have **no** completed run, here or anywhere.
+Each run executed under `ulimit -u 502` (the session's thread count + 80) and `timeout 300`.
+
+## Interpreter and identities
+
+```bash
+python3 -VV; command -v python3; sha256sum context/audit/scripts/t3-census.sh context/audit/scripts/t3-make-mutant.py context/audit/scripts/t3-paste-check.py context/audit/wave0/t3-census-controls.txt context/audit/wave0/t3-negctl-rechecks.txt
+```
+
+    Python 3.14.10 (main, Oct 26 2026, 17:39:22) [Clang 17.0.6 (CLANG: AOCC_5.2.0-Build#2035 2026_04_10)]
+    /usr/bin/python3
+    1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106  context/audit/scripts/t3-census.sh
+    cdbb17644a06938b8fccd2d1d90e1dff341b74fde02dba244c87f628de6150ca  context/audit/scripts/t3-make-mutant.py
+    9bb972ab5a7e8cef1006b20d2c4c8ba73cb4ea4a4c220bb0f24064e17d73e168  context/audit/scripts/t3-paste-check.py
+    a3489e9e1c7035f398596a87e3b3dcb81f1ac09313bbe18b40d2fdad5d919af1  context/audit/wave0/t3-census-controls.txt
+    dac51bdb8b6ab27ca3fc1c3683c6aa7c567cff42f917693cf4d026ad18baacd7  context/audit/wave0/t3-negctl-rechecks.txt
+    exit=0
+
+## The corpus the default mode reads
+
+```bash
+uptime -s; ls -d /tmp/opencode 2>&1
+```
+
+    2026-11-05 03:05:50
+    ls: cannot access '/tmp/opencode': No such file or directory
+    exit=2
+
+## Default mode refuses on an absent corpus (exit 2 expected, not a short green)
+
+```bash
+python3 context/audit/scripts/t3-paste-check.py
+```
+
+    the batch transcripts this mode needs are absent:
+      /tmp/opencode/recheck2
+      /tmp/opencode/recheck
+      /tmp/opencode/degraded
+      run with --tree-only for the three families that need only repo bytes,
+      or point VP_BATCH_NEW / VP_BATCH_OLD / VP_DEGRADED at a saved batch
+    exit=2
+
+## Freeze check, three legs (tracker Resume step 1)
+
+```bash
+cd vendor/basalt
+GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 && echo "AUDIT TREE OK (tracked contents)" || echo "AUDIT TREE DRIFTED — STOP"
+N=$(find . -type f -not -path "./.git/*" | wc -l); echo "TREE FILE COUNT=$N"
+echo "UNTRACKED_OR_IGNORED=$(git status --porcelain --ignored | grep -c .)"
+```
+
+    AUDIT TREE OK (tracked contents)
+    TREE FILE COUNT=862
+    UNTRACKED_OR_IGNORED=0
+    exit=0
+
+## Producer census, from the generator source (round-4 claim: 35 + 1 + 4 = 40 sites, 40 labels)
+
+```bash
+G=context/audit/scripts/t3-census.sh
+echo "LEADING_CHK=$(grep -cE "^[[:space:]]*chk[[:space:]]" $G)"
+echo "INLINE_OR_CHK=$(grep -cE "\|\|[[:space:]]*chk[[:space:]]" $G)"
+echo "RUNPY_CALLS=$(grep -cE "^[[:space:]]*runpy[[:space:]]" $G)"
+echo "DISTINCT_LABELS=$(grep -oE "(^[[:space:]]*|\|\|[[:space:]]*)(chk|runpy)[[:space:]]+[A-Z0-9_]+" $G | awk "{print \$NF}" | sort -u | wc -l)"
+```
+
+    LEADING_CHK=35
+    INLINE_OR_CHK=1
+    RUNPY_CALLS=4
+    DISTINCT_LABELS=40
+    exit=0
+
+## --tree-only
+
+```bash
+python3 context/audit/scripts/t3-paste-check.py --tree-only
+```
+
+    
+      (skipped in --tree-only: this family reads the batch transcripts)
+    
+      (skipped in --tree-only: this family reads the batch transcripts)
+    
+      (skipped in --tree-only: this family reads the batch transcripts)
+    
+      (skipped in --tree-only: this family reads the batch transcripts)
+    
+      (skipped in --tree-only: this family reads the batch transcripts)
+    
+      (skipped in --tree-only: this family reads the batch transcripts)
+    
+      (skipped in --tree-only: this family reads the batch transcripts)
+    
+      (skipped in --tree-only: this family reads the batch transcripts)
+    
+      (skipped in --tree-only: this family reads the batch transcripts)
+    
+    ==============================================================================
+    I. the re-fire table: rebuilt programs and normalized-stdout digests, recomputed here
+    ==============================================================================
+      ok  C1 re-fire row's program hash reproduces from the tree (prog=7be65ffa0a75; stdout digest and match column need the transcripts)
+      ok  C2 re-fire row's program hash reproduces from the tree (prog=83b5724074f6; stdout digest and match column need the transcripts)
+      ok  C3 re-fire row's program hash reproduces from the tree (prog=205259f6d91b; stdout digest and match column need the transcripts)
+      ok  C4 re-fire row's program hash reproduces from the tree (prog=cde74a453465; stdout digest and match column need the transcripts)
+      ok  C5 re-fire row's program hash reproduces from the tree (prog=51da43896c11; stdout digest and match column need the transcripts)
+      ok  C6 re-fire row's program hash reproduces from the tree (prog=edc734cfecfe; stdout digest and match column need the transcripts)
+      ok  C7 re-fire row's program hash reproduces from the tree (prog=811575be64d1; stdout digest and match column need the transcripts)
+      ok  C8 re-fire row's program hash reproduces from the tree (prog=3c62f607516e; stdout digest and match column need the transcripts)
+      ok  C9 re-fire row's program hash reproduces from the tree (prog=ef9c34e253fd; stdout digest and match column need the transcripts)
+      ok  C10 re-fire row's program hash reproduces from the tree (prog=d6eb98c2b2ed; stdout digest and match column need the transcripts)
+      ok  the paste's match column reads yes on 9/10 rows, C1 the stated exception -- counted only; comparing it to each printed identity needs the transcripts
+    
+      --- recipe provenance: the paste quotes the LIVE controls file; the batch read a SNAPSHOT ---
+      (snapshot-vs-live comparison skipped in --tree-only: the snapshot is not repo bytes)
+      ok  paste quotes the live controls hash: a3489e9e1c70
+      ok  every paste mutate: line equals the controls-file pair, with no ellipsis left (10 blocks)
+      ok  no truncated mutate: right-hand side survives in the controls file
+      ok  the paste names an applier that is in the tree: t3-make-mutant.py
+    
+      (skipped in --tree-only: this family reads the batch transcripts)
+    
+    ==============================================================================
+    K. machine-format values outside transcript blocks: one apiece
+    ==============================================================================
+      ok  24 distinct machine-format values outside transcript blocks, none stated twice
+      ok  line census: prose=301 commentary=137 table=43 raw=127 fence=6 fencebody=27
+    
+    ==============================================================================
+    L. the controls file's REBUILT_SHA= keys vs this paste's re-fire table
+    ==============================================================================
+      ok  all ten blocks carry a 64-hex REBUILT_SHA= equal to this paste's re-fire table
+    
+    ==============================================================================
+    PROBLEMS=0
+    ==============================================================================
+    exit=0
+
+## --tree-only --self-test
+
+```bash
+python3 context/audit/scripts/t3-paste-check.py --tree-only --self-test
+```
+
+    
+    ==============================================================================
+    SELF-TEST (--tree-only): 9 corruptions, each must exit 1 and name its own family
+    ==============================================================================
+      refire-prog-sha          exit=1    FIRED  BAD C7 re-fire: rebuilt 811575be64d1… != recomputed 811575be64d1…
+      refire-match-col         exit=1    FIRED  BAD re-fire match column reads yes on 10 rows; expected 9 (C1's print is the poison)
+      k-kv-duplicate           exit=1    FIRED  BAD machine-format value 'SENTINEL_TOTAL=34' stated 2 times outside transcript blocks 
+      k-digit-initial-key      exit=1    FIRED  BAD machine-format value 'T3_CENSUS_VERDICT=FAIL' stated 2 times outside transcript bl
+      k-hex-duplicate          exit=1    FIRED  BAD machine-format value '1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f03612
+      L-rebuilt-tampered       exit=1    FIRED  BAD C7: controls block REBUILT_SHA=811575be64d1b244… but this paste's table says 81157
+      L-key-removed            exit=1    FIRED  BAD C3: block states no REBUILT_SHA= — the hand-placed half of the pairing is gone
+      L-key-truncated          exit=1    FIRED  BAD REBUILT_SHA= truncated in blocks: [('C4', 8)]
+      live-controls-sha        exit=1    FIRED  BAD the paste does not quote the live controls hash a3489e9e1c70
+      CLEAN FILE               exit=0    OK
+    
+      fired 9/9 corruptions; clean file clean
+      NOT RUN: 13 of 22 cases own a family --tree-only skips; that is not a pass
+    exit=0
+
+## Fork-bomb backstop: --self-test inside a marked child must refuse (exit 2)
+
+```bash
+T3_PASTE_CHECK_SELFTEST_CHILD=1 python3 context/audit/scripts/t3-paste-check.py --tree-only --self-test
+```
+
+    refusing --self-test inside a self-test child (T3_PASTE_CHECK_SELFTEST_CHILD is set)
+    exit=2
+
+## Residue: no checker processes, no temp dirs, no bytecode in the tree
+
+```bash
+echo "PROCS=$(ps -u "$(id -u)" -o comm=,args= | awk '$1 ~ /^python/ && /t3-(paste-check|make-mutant)/' | wc -l)  (matched on process name: a pattern over args counts the shells that carry it)"; echo "TMPDIRS=$(ls -d /tmp/t3-paste-check-* 2>/dev/null | wc -l)"; echo "PYCACHE=$(find context/audit/scripts -name __pycache__ | wc -l)"
+```
+
+    PROCS=0  (matched on process name: a pattern over args counts the shells that carry it)
+    TMPDIRS=0
+    PYCACHE=0
+    exit=0
+
+## Project gate steps 0/1a/1b/1c — RULES.md lines 293-351 as staged, run after mkdir -p /tmp/opencode, its one cleanup line (rm -f of the two temp files) omitted: a tool safety check refused rm inside bash -c
+
+```bash
+# 0 — name the interpreter this gate just ran. A prerequisite stated as an exact version in prose
+#     fails closed when the environment moves; one the gate ECHOES cannot go stale silently. The
+#     python halves of the audit generators (t3-census.sh's S14/S15 procedures) and every `python3 -c`
+#     compile in 1a below run under this interpreter, so "which python3" is part of the record.
+_py=$(python3 -c 'import sys;print(sys.version.split()[0])' 2>/dev/null || true)
+_at=$(command -v python3 2>/dev/null || true)
+echo "INTERPRETER bash=${BASH_VERSION:-MISSING} python=${_py:-MISSING} at=${_at:-MISSING}"
+# 1a — syntax, over tracked files only (in-memory compile: no __pycache__ written).
+#      NOT narrowed: every tracked file, both sets. See the decision note above.
+git ls-files -z . | while IFS= read -r -d '' f; do
+  case "$(head -n1 "$f" 2>/dev/null)" in   # 2>: a tracked symlink to a directory
+    \#!*bash*|\#!*/sh) bash -n "$f" || echo "FAIL(bash) $f" ;;
+    \#!*python*) python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$f" \
+                   || echo "FAIL(py) $f" ;;
+    *) case "$f" in
+         *.sh)   bash -n "$f" || echo "FAIL(bash) $f" ;;
+         *.py)   python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$f" \
+                   || echo "FAIL(py) $f" ;;
+         *.json) python3 -m json.tool "$f" >/dev/null || echo "FAIL(json) $f" ;;
+       esac ;;
+  esac
+done
+# 1b — the counts, so an empty file list can never read green. Two named sets: the audit
+#      generators are excluded from PRODUCT_B and counted separately, per the decision above.
+classify() { git ls-files -z . | while IFS= read -r -d '' f; do case "$(head -n1 "$f" 2>/dev/null)" in
+  \#!*bash*|\#!*/sh) printf 'b\t%s\n' "$f"; continue ;; \#!*python*) printf 'p\t%s\n' "$f"; continue ;; esac
+  case "$f" in *.sh) printf 'b\t%s\n' "$f" ;; *.py) printf 'p\t%s\n' "$f" ;; *.json) printf 'j\t%s\n' "$f" ;; esac
+  done; }
+TSV=/tmp/opencode/bashset.$$.tsv; AB=/tmp/opencode/auditb.$$.txt
+classify > "$TSV"
+# Each set is SELECTED by (class AND path). Never derive one set by subtracting a class-blind filter
+# from a class-aware total: `AUDIT_B` used to filter on the path alone, so a `context/audit/scripts/gen.py`
+# would have added 1 to AUDIT_B and 0 to TOTAL_B — PRODUCT_B silently under-counts (it can go
+# negative), and the *audit* half goes falsely green, since 2b's set shrinks while its number does not.
+grep $'^b\t' "$TSV" | cut -f2 | grep '^context/audit/scripts/' > "$AB"
+PRODUCT_B=$(grep $'^b\t' "$TSV" | cut -f2 | grep -vc '^context/audit/scripts/')
+AUDIT_B=$(grep -c . "$AB")
+echo "PRODUCT_B=$PRODUCT_B AUDIT_B=$AUDIT_B TOTAL_B=$((PRODUCT_B+AUDIT_B))"
+# IDENTITY GUARD. `git ls-files` prints **cwd-relative** paths, so run this block from
+# context/audit/ and the anchor above matches nothing: AUDIT_B=0 and PRODUCT_B=3 — the expected
+# product number, printed over zero launchers. Reproduced 2026-11-05, not reasoned: from
+# context/audit/ the paths are `scripts/t2-census.sh`, from the project root `context/audit/scripts/…`.
+# No count can detect that; only naming the files can. This is a locally-owned sentinel — do not DRY
+# it into a pointer at the expected-count line, because a sentinel replaced by a citation cannot fail.
+for f in run build lib/common.sh; do
+  awk -F'\t' -v w="$f" '$2==w{g=1} END{exit !g}' "$TSV" || echo "FAIL(1b) missing product bash: $f"
+done
+# enumeration: the printed sets are the sets the two numbers count, per Rule A.4 "look at it"
+echo '  product b:'; grep $'^b\t' "$TSV" | cut -f2 | grep -v '^context/audit/scripts/' | LC_ALL=C sort | sed 's|^|    |'
+echo '  audit b:';   LC_ALL=C sort "$AB" | sed 's|^|    |'
+grep $'^[pj]\t' "$TSV" | cut -f1 | sort | uniq -c
+echo "CLASSIFIED=$(grep -c . "$TSV")"
+# 1c — versions.env stays plain KEY=value: it is `source`d by the scripts and passed to
+#      `docker build --build-arg`; a quoted value or trailing comment breaks one of the readers
+if [ -f versions.env ]; then
+  grep -nvE '^[A-Z][A-Z0-9_]*=[^[:space:]]*$|^[[:space:]]*#|^$' versions.env \
+    && echo 'FAIL(env)' || echo 'env ok'
+else echo 'SKIP(1c: no versions.env yet)'; fi
+```
+
+    INTERPRETER bash=5.3.20(1)-release python=3.14.10 at=/usr/bin/python3
+    PRODUCT_B=3 AUDIT_B=5 TOTAL_B=8
+      product b:
+        build
+        lib/common.sh
+        run
+      audit b:
+        context/audit/scripts/ledger-grid.sh
+        context/audit/scripts/t2-census.sh
+        context/audit/scripts/t3-census.sh
+        context/audit/scripts/t3-inputs.sh
+        context/audit/scripts/t3-model-file-poc.sh
+          2 p
+    CLASSIFIED=10
+    env ok
+    exit=0
+
+## Project gate steps 2/2b — RULES.md lines 372-400 as staged, class-aware 2b
+
+```bash
+# 2 — product bash set: run, build, lib/common.sh (audit generators go to 2b)
+git ls-files -z . | while IFS= read -r -d '' f; do
+  case "$f" in context/audit/scripts/*) continue ;; esac
+  case "$(head -n1 "$f" 2>/dev/null)" in
+    \#!*bash*|\#!*/sh) printf '%s\0' "$f" ;;
+    *) case "$f" in *.sh) printf '%s\0' "$f" ;; esac ;;
+  esac
+done | xargs -0 -r shellcheck -x && echo 'shellcheck ok (product)'
+# 2b — audit generators. The list is named and its size asserted, because `git ls-files <path>` is
+# cwd-dependent: run this from a directory where context/audit/scripts is not a path and it enumerates
+# NOTHING, xargs -r runs nothing, and the step prints "ok" having linted zero files. A guard that only
+# counts would not notice; naming the files does.
+# Selected by CLASS as well as path (the same shebang-then-extension rule as step 2): the directory
+# also holds python helpers, which shellcheck rejects with SC1071 and 1a already compiles.
+AUD=(); NOTB=()
+while IFS= read -r -d '' f; do
+  case "$(head -n1 "$f" 2>/dev/null)" in
+    \#!*bash*|\#!*/sh) AUD+=("$f") ;;
+    \#!*) NOTB+=("$f") ;;
+    *) case "$f" in *.sh) AUD+=("$f") ;; *) NOTB+=("$f") ;; esac ;;
+  esac
+done < <(git ls-files -z context/audit/scripts)
+printf '  audit file: %s\n' "${AUD[@]}"
+[ "${#NOTB[@]}" -ge 1 ] && printf '  not bash (1a compiles it): %s\n' "${NOTB[@]}"
+if [ "${#AUD[@]}" -ge 1 ]; then
+  printf '%s\0' "${AUD[@]}" | xargs -0 -r shellcheck -x && echo 'shellcheck ok (audit)'
+else
+  echo "FAIL(2b) enumerated 0 audit scripts — wrong cwd? (running this with an empty list would print \"ok\")"
+fi
+```
+
+    shellcheck ok (product)
+      audit file: context/audit/scripts/ledger-grid.sh
+      audit file: context/audit/scripts/t2-census.sh
+      audit file: context/audit/scripts/t3-census.sh
+      audit file: context/audit/scripts/t3-inputs.sh
+      audit file: context/audit/scripts/t3-model-file-poc.sh
+      not bash (1a compiles it): context/audit/scripts/t3-make-mutant.py
+      not bash (1a compiles it): context/audit/scripts/t3-paste-check.py
+    shellcheck ok (audit)
+    exit=0
+
+## Carve-out condition (3), scope over the STAGED set — the PRE-COMMIT twin's logic, held in a variable instead of a temp file (same pipeline, same PAT)
+
+```bash
+PAT='^(run|build|Dockerfile|Dockerfile\.dockerignore|versions\.env|lib/|models|\.gitignore)'
+L=$(git diff --cached --name-only | sed -n 's|^server/basalt/||p' | grep -v '^$')
+echo "FILES=$(grep -c . <<<"$L") SCOPE_HITS=$(grep -Ec "$PAT" <<<"$L")"
+echo "PATTERNS=$PAT"
+```
+
+    FILES=10 SCOPE_HITS=0
+    PATTERNS=^(run|build|Dockerfile|Dockerfile\.dockerignore|versions\.env|lib/|models|\.gitignore)
+    exit=0
+
+## Docker reachability — the premise of the owner-only carve-out, re-read in this shell
+
+```bash
+id; stat -c "%U:%G %a" /var/run/docker.sock; getent group docker
+```
+
+    uid=1000(iphands) gid=1000(iphands) groups=1000(iphands),10(wheel),18(audio),20(dialout),27(video),35(games),97(input),100(users),102(plugdev),202(seat),987(realtime),995(docker)
+    root:docker 660
+    docker:x:995:iphands
+    exit=0
+
+## Project gate step 3 — RULES.md block as staged
+
+```bash
+PREFLIGHT_ONLY=1 ./build 2>&1 | tail -1    # → preflight ok
+```
+
+    preflight ok
+    exit=0
+
+## Project gate step 4 — RULES.md block as staged (expects --parallel 3 since 5f0b32d)
+
+```bash
+img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin'); export IMAGE_OVERRIDE=${img:-stub:none}
+d=$(DRY_RUN=1 ./run 2>&1); s=$(DRY_RUN=1 ./run --single 2>&1)
+need() { local where=$1 out=$2 w; shift 2; for w; do [[ $out == *"$w"* ]] || echo "FAIL(dry:$where) missing: $w"; done; }
+both=('-p 0.0.0.0:8700:8700' '--gpus device=0' '--ulimit memlock=-1' ':/models:ro' '--host 0.0.0.0'
+      '--port 8700' '--alias cosmo-6000' '--allowed-host cosmo.lan' '--max-context 262144' '--kv int8'
+      '--vision dynamic' 'serve /models/Qwen3.8-FN-NVFP4-DQ6_K.basalt' '(DRY_RUN) nothing started')
+need default "$d" "${both[@]}" '--parallel 3' '--slot-full-context'
+need single "$s" "${both[@]}" '--parallel 1'
+[[ $s == *--slot-full-context* ]] && echo 'FAIL(dry:single) has --slot-full-context'
+n=$(DRY_RUN=1 ./run /tmp/x.ninfer 2>&1) && echo 'FAIL(dry:ninfer) exit 0'
+[[ $n == *../ninfer* ]] || echo 'FAIL(dry:ninfer) no ../ninfer pointer'
+DRY_RUN=1 ./run /nonexistent/x.basalt >/dev/null 2>&1 && echo 'FAIL(dry:missing) exit 0'
+DRY_RUN=1 ./run README.md >/dev/null 2>&1 && echo 'FAIL(dry:not-a-pack) exit 0'
+k=$(API_KEY=k3y DRY_RUN=1 ./run --single 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(dry:api-key) printed'
+echo "dry-run ok (image: $IMAGE_OVERRIDE)"; unset IMAGE_OVERRIDE
+```
+
+    dry-run ok (image: iphands/basalt-blackwell:cu1343-sm120-dc047a7)
+    exit=0
+
+## Project gate step 5 — RULES.md block as staged
+
+```bash
+img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin')
+if [[ -z $img ]]; then echo 'FAIL(flags) no image for BASALT_SHA — run ./build'; else
+mapfile -t flags < <({ DRY_RUN=1 ./run; DRY_RUN=1 ./run --single; } 2>/dev/null \
+  | grep -o ' serve /models/.*' | tr ' ' '\n' | grep -E '^--[a-z]' | sort -u)
+docker run --rm --network none -w /opt/basalt --entrypoint /opt/basalt/.venv/bin/python "$img" -c '
+import sys
+from serve.config import build_parser, server_options, engine_flags_of
+srv = set(server_options(build_parser())); eng = engine_flags_of("/opt/basalt/bin/basalt") or set()
+fl = sys.argv[1:]; bad = [f for f in fl if f[2:] not in srv and f not in eng]
+ns = sum(f[2:] in srv for f in fl)
+print("\n".join("FAIL(flags) " + f for f in bad) if bad or not fl else
+      f"flags ok ({len(fl) - ns} engine, {ns} server: {len(eng)} engine flags known)")
+if not fl: print("FAIL(flags) ./run emitted no flags")' "${flags[@]}"
+fi
+```
+
+    flags ok (2 engine, 8 server: 142 engine flags known)
+    exit=0
+
+## Project gate step 6 — RULES.md block as staged
+
+```bash
+img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin')
+if [[ -z $img ]]; then echo 'FAIL(imports) no image for BASALT_SHA — run ./build'; else
+docker run --rm --network none -w /opt/basalt --entrypoint /opt/basalt/.venv/bin/python "$img" -c '
+import importlib, pkgutil, serve
+names = [m.name for m in pkgutil.walk_packages(serve.__path__, "serve.") if ".tests" not in m.name]
+bad = []
+for n in names:
+    try: importlib.import_module(n)
+    except Exception as e: bad.append(f"FAIL(imports) {n}: {type(e).__name__}: {e}")
+print("\n".join(bad) if bad else f"imports ok ({len(names)} serve modules)")'
+fi
+```
+
+    imports ok (32 serve modules)
+    exit=0
+
+## Freeze check after step 3 (the preflight manages vendor/basalt)
+
+```bash
+cd vendor/basalt && { GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 && echo "AUDIT TREE OK (tracked contents)" || echo "AUDIT TREE DRIFTED — STOP"; echo "TREE FILE COUNT=$(find . -type f -not -path "./.git/*" | wc -l)"; echo "UNTRACKED_OR_IGNORED=$(git status --porcelain --ignored | grep -c .)"; }
+```
+
+    AUDIT TREE OK (tracked contents)
+    TREE FILE COUNT=862
+    UNTRACKED_OR_IGNORED=0
+    exit=0

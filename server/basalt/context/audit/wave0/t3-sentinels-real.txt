@@ -30,6 +30,29 @@ the 6-canary control does not exist yet, so this run asserts nothing about wheth
 FIRE on a planted primitive. The 10 negative controls that do exist are in
 [`t3-census-controls.txt`](t3-census-controls.txt).
 
+**IDENTITY OF THIS RUN — three coordinates, because a `SENTINEL_TOTAL` means nothing without all three**
+(`t3-census-controls.txt` § 2, bullet "A third kind of cause: the assertion SET is conditional on run STATE,
+not only on program and tag", whose point (3) is the comparability rule):
+
+| coordinate | value |
+|---|---|
+| program | `GENERATOR_SHA256=1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106` — check it against the commit, not against this line: `git cat-file blob <commit>:server/basalt/context/audit/scripts/t3-census.sh \| sha256sum` |
+| tag | `real` |
+| state | **pre-column-6-fill** — manifest column 6 holds 862 `unassigned` |
+
+The state is not decoration, and it works through **two names, not one**: while column 6 is unassigned
+`:1449` `printf`s `DISP MANIFEST_COL6_STATE` — which is not a counted assertion at all — and after T3's
+column-6 fill `:1451` becomes `chk MANIFEST_COL6_RESIDUE_EQ_BINARIES`, which is. In the transcript below
+that counted name is therefore printed by **nothing**, which is how a reader can find the state coordinate
+by absence rather than by reading the guard nesting (`t3-census-controls.txt` § 2). So a post-fill `real`
+run of **this same program on this
+same tag** prints **35**, not the **34** in the transcript below (and **36** for the next cut of the program,
+which also gains a content assertion — the tracker's content-leg follow-up) — and `SENT_TOTAL_FLOOR_REAL=34` would let
+it pass silently. When that run exists it becomes **a new paste that supersedes this one**; this file is not
+edited, because it is the witness for the pre-fill state. (Stamped 2026-11-05 after the round-4 review,
+which noted this file carried program and tag but not state — and this is the paste a post-fill run gets
+diffed against.)
+
 HEADLINE for skimmers: `grep -m1 -E 'T3_CENSUS_VERDICT|^SITES=' ` in this file. Figures not restated here.
 
 PAIRING — three identifiers, each owned elsewhere, none restated as a claim here:

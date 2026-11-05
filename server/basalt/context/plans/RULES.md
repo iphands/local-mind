@@ -381,8 +381,18 @@ done | xargs -0 -r shellcheck -x && echo 'shellcheck ok (product)'
 # cwd-dependent: run this from a directory where context/audit/scripts is not a path and it enumerates
 # NOTHING, xargs -r runs nothing, and the step prints "ok" having linted zero files. A guard that only
 # counts would not notice; naming the files does.
-mapfile -d '' AUD < <(git ls-files -z context/audit/scripts)
+# Selected by CLASS as well as path (the same shebang-then-extension rule as step 2): the directory
+# also holds python helpers, which shellcheck rejects with SC1071 and 1a already compiles.
+AUD=(); NOTB=()
+while IFS= read -r -d '' f; do
+  case "$(head -n1 "$f" 2>/dev/null)" in
+    \#!*bash*|\#!*/sh) AUD+=("$f") ;;
+    \#!*) NOTB+=("$f") ;;
+    *) case "$f" in *.sh) AUD+=("$f") ;; *) NOTB+=("$f") ;; esac ;;
+  esac
+done < <(git ls-files -z context/audit/scripts)
 printf '  audit file: %s\n' "${AUD[@]}"
+[ "${#NOTB[@]}" -ge 1 ] && printf '  not bash (1a compiles it): %s\n' "${NOTB[@]}"
 if [ "${#AUD[@]}" -ge 1 ]; then
   printf '%s\0' "${AUD[@]}" | xargs -0 -r shellcheck -x && echo 'shellcheck ok (audit)'
 else
@@ -390,10 +400,17 @@ else
 fi
 ```
 
-**Three copies of the classifier exist** — 1a's `case`, 1b's `classify`, and step 2's loop — because each
+*(2b selected by path alone until 2026-11-05; the first tracked python helpers under
+`context/audit/scripts/` — `t3-make-mutant.py`, `t3-paste-check.py`, Plan 02 T3 — failed it on SC1071, which is
+a classification error, not a lint finding. It now classifies like step 2 and **names** what it skips, so a
+bash script with a wrong shebang shows up in the `not bash` list instead of vanishing. This is a fourth
+classifier copy: the "three copies" rule below now covers four.)*
+
+**Four copies of the classifier exist** — 1a's `case`, 1b's `classify`, step 2's loop and 2b's loop (added
+2026-11-05) — because each
 gate step is a self-contained block meant to be pasted on its own, and hoisting one function into a
 shared preamble would make step 2 unrunnable without step 1 first. That is a deliberate duplication and
-it will drift if nobody watches: **when you change how a file is classified, change all three in the
+it will drift if nobody watches: **when you change how a file is classified, change all four in the
 same commit**, and say so in the message. The alternative (a sourced helper under `context/audit/`)
 puts gate machinery outside the tracked launchers this gate exists to protect.
 
