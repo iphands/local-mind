@@ -436,7 +436,7 @@ img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin'); export IMAGE_OV
 d=$(DRY_RUN=1 ./run 2>&1); s=$(DRY_RUN=1 ./run --single 2>&1)
 need() { local where=$1 out=$2 w; shift 2; for w; do [[ $out == *"$w"* ]] || echo "FAIL(dry:$where) missing: $w"; done; }
 both=('-p 0.0.0.0:8700:8700' '--gpus device=0' '--ulimit memlock=-1' ':/models:ro' '--host 0.0.0.0'
-      '--port 8700' '--alias cosmo-6000' '--allowed-host cosmo.lan' '--max-context 262144' '--kv int8'
+      '--port 8700' '--alias cosmo-6000' '--allowed-host cosmo.lan' '--max-context 362144' '--kv int8'
       '--vision dynamic' 'serve /models/Qwen3.8-FN-NVFP4-DQ6_K.basalt' '(DRY_RUN) nothing started')
 need default "$d" "${both[@]}" '--parallel 3' '--slot-full-context'
 need single "$s" "${both[@]}" '--parallel 1'
