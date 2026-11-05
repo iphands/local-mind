@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `01`.** <!-- hp:next-free -->
+**Next free plan number: `02`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-11-04):** serve Qwen3.8-Flash-Next through
 > [Basalt](https://github.com/jesdga95/basalt), source-built from a pinned commit in our own
@@ -30,7 +30,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-None yet — start with `/hands-plan new <first piece of work>`.
+None in progress — next up: Plan 01 (`/hands-plan resume 01`).
 
 ## Plans <!-- hp:plans -->
 
@@ -38,6 +38,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
+| 01 | Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700 | — | pending | Pins + Dockerfile + `./build` + `./run` (4×262144 slots; `--single`); owner builds and boots the DQ6_K pack; real reply via `cosmo.lan`. |
 
 <!-- Add these sections when they earn their place:
 

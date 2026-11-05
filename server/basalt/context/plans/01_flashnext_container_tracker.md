@@ -1,0 +1,60 @@
+# Plan 01 — Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700 — Tracker
+
+## Overview
+
+- Status: 0% complete (0/7 tasks)
+- Start date: — (set when T1 starts)
+- Plan: `context/plans/01_flashnext_container.md`
+- Evidence: the table below; build logs in `captures/build_<date>_<sha7>.log` (gitignored); boot
+  start blocks pasted by the owner into the Evidence rows. Test environment: host `cosmo`, RTX PRO
+  6000 (GPU 0), 125 GiB RAM, docker 29.8.1, the pack on NFS (`models/vllm/jesdga/`).
+
+## Resume Instructions
+
+1. Read `AGENTS.md`, `context/plans/RULES.md` (in full), then `01_flashnext_container.md`, then
+   `context/distilled.md` and `context/pitfalls.md`.
+2. Environment: docker as yourself (no `sudo`); `shellcheck` 0.11.0. The reference scripts are
+   `../ninfer/{lib/common.sh,build,run,Dockerfile}` and `../vllmcustom/common/_run-lib.sh` — read,
+   never sourced or edited.
+3. Ordering: Wave 1 (T1 → T2 → T3) is agent work and needs no GPU. T4 needs the owner's `./build`;
+   T5 needs T4's image; T6 needs the owner to boot with `:8700` free (stop `vllm`/ninfer/ignis
+   first); T7 last. Mark a task `blocked` (with the reason) while it waits on the owner.
+4. Commit per task as `[basalt][P1][T<n>][<topic>] <summary>`, with **this tracker's row in the same
+   commit**. Never push.
+
+## Open Unknowns
+
+- Does `bin/basalt --help` run without a GPU? (plan Q4 — T4)
+- Does the RAM tier page-lock inside the container with `--ulimit memlock=-1`? (plan Q2 — T6)
+- VRAM/RAM split and KV size for 4×262144 vs 1×262144 on this card (plan Q1, Q3 — T6)
+- Runtime image's Python version (Key Facts — T2)
+
+## Progress
+
+| # | Task | File / Module | Status | Notes |
+|---|------|---------------|--------|-------|
+| 1 | T1: Pins, shared guards, project skeleton | `versions.env`, `lib/common.sh`, `.gitignore`, `models`, `README.md` | pending | |
+| 2 | T2: Dockerfile + `./build` | `Dockerfile`, `Dockerfile.dockerignore`, `build` | pending | |
+| 3 | T3: `./run` + its dry-run gate step | `run`, `README.md`, RULES gate | pending | |
+| 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | pending | owner runs `./build` |
+| 5 | T5: Check `./run`'s flags against the built image | RULES gate step 5 | pending | needs T4 |
+| 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | pending | owner boots |
+| 7 | T7: Harvest | `context/*.md`, `README.md` | pending | |
+
+**Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
+the last three always carry a reason in the row's Notes cell.
+
+## Evidence
+
+| Date | What ran (command / build / input) | Result | Runs | Spread / notes |
+|------|------------------------------------|--------|------|----------------|
+
+## Notes / Deviations
+
+## Follow-ups
+
+| Follow-up | Why | Lands in |
+|-----------|-----|----------|
+| Tune past the owner's defaults (`basalt-probe` suggestions, `expert-profile-save`, `prefill-cpu-share`, `spec`, `kv` q4_0/k8v4) | Ordering principle: boot before tune | a later plan |
+| `sm_120a` build A/B | Basalt accepts `120a` but tests only `120` (plan *Rejected Claims*) | a later plan |
+| More than one served model name (vLLM's `claude-*` aliases) | `--alias` takes one name (plan Q6) | later, if a client needs it |
