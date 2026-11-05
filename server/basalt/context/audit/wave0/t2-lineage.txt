@@ -1,0 +1,371 @@
+Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.
+
+# T2 · raw evidence: lineage of the pinned tree against `Niko1221/Strata`
+
+Companion to [`t2-provenance.txt`](t2-provenance.txt) (pin identity, whole-tree equivalence, the
+author census) and [`t2-gate-and-checks.txt`](t2-gate-and-checks.txt) (gate and checks). This file
+answers one question: **what is the relationship between the tree we pin and the project Basalt
+declares itself forked from?** Conclusions live in `manifest/index.md § Upstream provenance`; the
+consequences for reading order in [`t2-boundary-authorship.txt`](t2-boundary-authorship.txt).
+
+Scratch, not committed: pristine clones under `/tmp/opencode/basalt-audit/{strata-pristine,basalt-pristine}`.
+Both are `git init` + `git remote add` + `git fetch --filter=tree:0 --no-tags origin main` —
+commits only, **no working tree, no blobs, no trees**, never under `vendor/` (Rule E: a second repo
+there would pollute the T1 freeze and porcelain controls).
+
+## 0 · Refuted hypotheses — do not re-run these methods
+
+Four things were believed mid-session and are false. Each is kept with the control that killed it.
+
+| # | believed | killed by |
+|---|---|---|
+| R1 | "basalt and Strata share history up to ≈2026-10-04", from `GET /repos/Niko1221/Strata/commits/<sha>` returning 200 vs 422 | **GitHub resolves a commit against a repo's object store, not against its default branch.** Those 200s are real objects that are **not on `main`**. Also: the seven OS-seam probes were issued with **8-hex abbreviated** SHAs, and the `422`-is-generic-non-resolution control was a full-SHA nonsense value — so the probe never discriminated. Finally the upstream has rewritten its mainline (§ 5), so "on their main today" is not a stable predicate. |
+| R2 | "Strata's store still serves **710** commits that are on no ref of its `main`, all of them in our clone" | **Artifact of my own inspection.** Store #1 was a *partial* clone; my `git log`/`cat-file` queries over those SHAs **lazy-fetched** them on demand, so a later `--batch-all-objects` counted objects my own commands had caused to be downloaded. A **pristine** clone (verified `in-pack 0` before → `5637` after, no `objects/info/alternates`, main-only refspec) contains **5,637 commit objects and 0 shared SHAs with us**. Never count or test objects inside a partial clone you have already queried. |
+| R3 | "Software Heritage has never archived this project" — every `/api/1/revision/<sha>/get/` returned 404 | **Wrong endpoint form.** `/get/` is not a revision route; `/api/1/revision/<sha>/` is. With the right form and controls (their tip → **200**, zeros → 404) SWH turns out to hold Strata in 9 visits (8 `full`, 1 `failed`) *and our own root commit*. A uniform negative across an entire endpoint family is a **broken-probe signature**, not a finding. |
+| R4 | "0 of 20,111 audited lines sit under AI-trailed commits; 0 of 367 blamed commits" | **Parser bug.** `git log --format='%H%x00%B'` split on `\0` yields `BODY\nNEXT_SHA` chunks, so the "SHA set" was actually commit subjects. Rebuilt with `log -z`. The corrected answer is 329/367 and 19,035/20,111 (§ 6). Caught only because R3 had just taught me to distrust uniform zeros. |
+
+R1 also invalidates the sentence "our history contains Strata's": it is false in both directions (§ 2).
+
+## 1 · What actually works (the sound method)
+
+1. **Pristine partial clone** of the peer: `--filter=tree:0`, no checkout. Commits only, seconds, 2.6 MB.
+2. **Promisor full-OID probe.** Ask the pristine partial clone for a **full 40-hex** SHA. A miss
+   triggers a real fetch from the peer's `upload-pack`; the server's answer is object-level and
+   quota-free: `fatal: remote error: upload-pack: not our ref <sha>` = **not reachable from any ref
+   this remote advertises**. Abbreviated SHAs cannot be requested this way (promisor needs full OIDs)
+   and produce a *local* `Not a valid object name` that looks identical to a negative — R1 again.
+3. **Content key** `(tree, author-date, committer-date, subject)`, and for files the blob SHA.
+   **SHA comparison between these two repositories is meaningless** (§ 3–5): the same work exists
+   under different hashes.
+4. **Patch-id** (`git patch-id --stable`) as a third, ancestry-free join key — registered for T2b,
+   not yet run.
+   Superseded framing, do not reuse: "1,236 of 2,194 commits are after 2026-10-06, therefore
+   basalt-only". Basalt-side-ness is now *no content-key match*, never *a date*.
+
+## 2 · The 2×2 presence matrix (the discriminator, controlled both ways)
+
+Each cell = does that remote serve that exact commit object.
+
+| SHA | `jesdga95/basalt` remote | `Niko1221/Strata` remote |
+|---|---|---|
+| our pin `dc047a77beed…` | HELD | **REFUSED** `not our ref` |
+| our root `f2a08d4b2da9…` | HELD | **HELD** |
+| seam `file.cpp` `64ef0950c36f…` | HELD | **REFUSED** |
+| seam `process.cpp` `76749f056f31…` | HELD | **REFUSED** |
+| Strata tip `ffa80d73133e…` | **REFUSED** | HELD |
+| Strata root `01529aaa82b9…` | **REFUSED** | HELD |
+| Strata `main` @ 2026-10-05 `6f32ec07…` | **REFUSED** | (HELD in store #1) |
+| zeros `0000…` (negative control) | — | REFUSED |
+
+Mirror direction fires, so the probe discriminates. Reading: **the pre-Oct-05 line is served by both
+remotes; everything after is served by ours alone.** Note the scope of the negative — "not reachable
+from any advertised ref", *not* "never in the store" (R2 is the counterexample: objects in a store,
+on no ref).
+
+History sizes: ours 2,194 commits from the pin · theirs 5,637 on `main`.
+**Shared SHAs: 0.** Roots differ.
+
+## 3 · The two roots are the same commit in every field but the hash
+
+```text
+ours   f2a08d4b2da99bb0638dd03dc1d097d132f0af68   592 bytes
+theirs 01529aaa82b9f5c58d2bb87264b7b3f7b823678f   450 bytes   (= their refs/tags/v0.1.0 today)
+
+  tree       4591e4cafcc8cad55fda10593b4bd515c2dd8c20   identical
+  author     Niko1221 <Niko1221@users.noreply.github.com> 1790268117 +0200   identical
+  committer  Niko1221 <Niko1221@users.noreply.github.com> 1790268140 +0200   identical
+  subject    "Strata: Qwen3.8-Flash-Next on a 12-24 GB NVIDIA GPU + 64 GB RAM, one-click install"
+  parent     none (both are roots)      gpgsig     none in either
+  no parent, no signature header, no timezone skew, author==committer ⇒ NOT a graft/rebase signature
+
+  the entire delta:
+  < Co-Authored-By: Claude Opus 5.5 (1M context) <noreply@anthropic.com>
+  < Claude-Session: https://claude.ai/code/session_0154bwiad8gY7wRehCXy27pN
+```
+
+Identical author identity and *both* epochs with only the message changed is **`git filter-repo`'s
+default behaviour** — a mechanical message edit, not a re-dating or a rebase.
+
+## 4 · The content-key corpus
+
+Key = `(tree, author-date, committer-date, subject)`. Adding committer-date did not change the count.
+
+```text
+|ours| = 2194   |theirs| = 5637   |A∩B| = 844
+duplicate keys: ours 0, theirs 0            ⇒ the join is bijective; 844 is a clean count
+
+partition of OUR commits by author date        matched twins in their main
+  cut 2026-10-05:  pre 882 → 844 (95.7 %)     post 1312 → 0 (0.0 %)
+  cut 2026-10-06:  pre 973 → 844 (86.7 %)     post 1221 → 0 (0.0 %)
+  cut 2026-10-04:  pre 811 → 809 (99.8 %)     post 1383 → 35 (2.5 %)
+
+RE-MEASURED 2026-10-05 same day, on a **UTC instant** rather than a date string, in one pass
+(`git log --format=%H\x1f%T\x1f%at\x1f%ct\x1f%s`, key matched against the pristine `origin/main` key set):
+
+```text
+cut 2026-10-05T00:00:00Z   pre=861  with_twin=844 (98.0 %)  unmatched=17
+                           post=1333 with_twin=0   (0.0 %)
+duplicate keys: ours 0 (2194 distinct keys / 2194 commits), theirs 0 (5637/5637)
+```
+
+  **Why the two pre-counts differ (882 vs 861) — a basis error, not an arithmetic one.** The first form
+  compared `--date=iso-strict` output **as a string**, which partitions by the **author's local calendar
+  date**; the second compares `%at` epochs, i.e. a **UTC instant**. 21 commits authored on 2026-10-04 local
+  are already 2026-10-05 in UTC. **The UTC figures are the ones to quote** (98.0 %, 17 unmatched);
+  `pitfalls.md` item 16 records the trap. Quote a partition with its basis or not at all.
+
+  **The 17 unmatched pre-fork commits, listed (all authored 2026-09-27 … 2026-10-04):** one Niko1221
+  housekeeping commit (`89ba2dc54d`, "Record PR #21's rebased head as merged…") and sixteen Jesus Gulfo
+  commits from 2026-10-03/04 — the `STRATA_*` opt-in work (`MMQ tile width`, `PDL`, `PEER_PROMOTE`,
+  `MMVQ_MMA`, `PF_FUSED_V2`, `GDN_REC_WARP`, IQ tensor-core gate/up, faster draft steps, decode kernel
+  variants). So our line carried owner work on the eve of the fork that Strata's *current* `main` does not;
+  whether upstream dropped it or rewrote it out is **not established** here. **None of the 17 is a
+  `src/platform/` seam commit**, and the carried-over line is therefore bounded at **≤ 2026-10-04**.
+
+**Every basalt commit dated before 2026-10-05 UTC but one handful has a content twin in Strata's `main`;
+not one commit after it does.** This is the fork boundary, measured by content rather than by
+sampled status codes. The 844-pair table is *not* a lineage guarantee — it is a match on a 4-field
+key; a rewrite that edited dates or subjects would be missed.
+
+## 5 · What the rewrite actually changed (844 pairs, byte-identical content)
+
+Trailer classes counted across the 844 content-identical pairs — same tree, same author-date, same
+committer-date, same subject:
+
+| trailer class | ours | theirs |
+|---|---|---|
+| `Co-Authored-By: Claude…` / `Claude-Session:` | **1,049** | **0** |
+| human `Co-Authored-By` | 22 | **22** |
+| `Co-Authored-By: Codex` / OpenAI | 3 | **3** |
+
+```text
+pairs where OURS carries a Claude trailer and THEIRS does not : 595
+pairs where THEIRS carries Codex and ours does not            :   0
+pairs where both lines disclose some AI                       :   3   (the Codex ones, identical both sides)
+pairs with no AI trailer either side                          : 246
+```
+
+On byte-identical content, the **only** trailer difference anywhere in the shared corpus is the
+absence of Claude attribution upstream. Human co-authorship and Codex co-authorship are preserved
+*exactly* (22/22, 3/3). That rules out a cosmetic rebase (which preserves all or changes all) and a
+DCO/sign-off sweep (which touches `Signed-off-by`): the edit is **specific to one tool's attribution**.
+Whole-repository trailer counts: **1,881 of our 2,194 commits** carry an AI co-authorship trailer;
+**3 of their 5,637** do.
+
+Reading (inference, not observation): **the ancestor project rewrote its published mainline and the
+effect was to remove Claude co-authorship disclosure, then moved its release tags onto the rewritten
+commits.** Our fork is the pre-edit line.
+
+Why the alternative is worse than the finding. For basalt to have *created* `f2a08d4b`, basalt would
+have had to create that object **and cause Strata's `v0.1.0` tag to point at it by 2026-10-05** (§ 7)
+— i.e. push into the upstream repo, a supply-chain compromise of a widely-starred project, with no
+supporting evidence anywhere and the wrong motive (why compromise upstream in order to *add*
+AI-attribution trailers to it?). The alternative does not survive as a benign explanation.
+
+Not established, and the ceiling of this file: **(i)** who ran the rewrite; **(ii)** that the same
+party controlled that origin URL at both dates; **(iii)** motive. The *action* is deliberate by
+construction (no tool deletes exactly one trailer family by accident); "intent to mislead" is not
+claimed. Four innocent explanations for **basalt** keeping the old line, none requiring motive:
+the fork predates the rewrite (see the ordering in § 7); the fork came off a different ref taken
+before it; it was seeded from a pre-rewrite clone or from SWH's own archive; deliberate dissent by a
+maintainer refusing AI-washing.
+
+## 6 · Line-level share of the audited corpus (lines, not commits)
+
+`git blame --line-porcelain` over the 80 first-party censused files, blamed commit ∩ the AI-trailed
+commit set. Comparator verified non-zero.
+
+```text
+AUDITED_LINES                    = 20111
+LINES_UNDER_AI_TRAILED_COMMITS   = 19035   (94.6 %)
+distinct commits blame credits   = 367      AI-trailed among them: 329  (89.6 %)
+heaviest: serve/tests/test_image_sources.py 1853 · serve/engine/process.py 1419
+          CMakeLists.txt 1325 · serve/service.py 1302 · src/platform/memory.cpp 860
+```
+
+A trailer is **disclosure, not authorship**: it records what the committer claimed. The symmetric
+limit matters more — after an edit whose only known delta is trailer removal, **the trailer-free
+upstream line cannot be read as "human-written"**. AI involvement is established in our line and
+unresolved in theirs, where the disclosure was removed.
+
+## 7 · Software Heritage — the only off-GitHub witness
+
+Endpoint `/api/1/revision/<full-sha>/` (NOT `/get/`). Positive control: their tip
+`ffa80d73133ea5c548aefe57889a16e8085a938f` (from `git ls-remote`, not from memory) → **200**.
+Negative: zeros → 404, and the pin → 404.
+
+```text
+origin https://github.com/Niko1221/Strata  → 9 visits: 8 status "full", 1 "failed"
+  2026-10-05T00:29:46  snapshot 07a728d9…  refs/tags/v0.1.0 → f2a08d4b2da9…  ← OUR ROOT
+                       refs/heads/main     → 6f32ec07…      (527 refs listed)
+  2026-10-12T04:59:13  FAILED
+  2026-10-12T05:59:34 … 2026-11-03T09:58:37   each lists EXACTLY 1000 refs  ← capped listing
+origin https://github.com/jesdga95/basalt → 404  (also 404 for the `.git`, trailing-slash and
+  `git@github.com:` URL variants, so it is not a URL-spelling artefact — but "as of this date", not
+  "never": a point-in-time 404 licenses the former only)
+
+revision f2a08d4b2da9…  → 200   our root is archived, under STRATA's origin, as Strata's own tag
+revision dc047a77beed…  → 404   our PIN is not archived anywhere
+revision 5e1a1ddc… 64ef0950… 76749f05… (seam commits, full SHAs) → 404
+```
+
+  Re-verified 2026-11-05 with the routes stated, because the first draft of this block said "9 visits,
+  **all** status full" and that was wrong: the `full` count is 8, one visit (2026-10-12T04:59:13) is
+  `failed`. Two route facts worth having, both learned here: the visit list is
+  `/api/1/origin/<url>/visits/` — **`/origin/<url>/get/` returns a single metadata dict, not the visit
+  list**, so `len()` of that response is "4" (its key count), which nearly became a published "only 4
+  visits". And `?limit=&page=` do not paginate that visits list here (five pages returned the identical
+  9 rows — deduped on `(date,status,type)` before counting).
+
+SWH's latest snapshot ref `refs/heads/main → ffa80d73133e…` equals `git ls-remote` for Strata today —
+**two independent authorities, one hash**. This is the audit's only genuine cross-authority
+corroboration. SWH witnesses *publication*, never authorship.
+
+Because the post-Oct-05 snapshots are capped at 1,000 refs, they cannot locate the moment the tag
+moved: the rewrite window is bounded only as **[2026-10-05, 2026-11-05]**.
+
+## 8 · Ordering
+
+```text
+2026-09-24  our root / their root content created (author epoch 1790268117)
+2026-10-05  SWH's full visit records Strata's refs/tags/v0.1.0 AT OUR TRAILER-BEARING ROOT
+2026-10-06T22:17:02Z  jesdga95/basalt created_at (GitHub API)   ← the fork's repo did not exist yet
+2026-11-05  Strata's v0.1.0 = 01529aaa (trailer-free); our pin dc047a77 is main's tip
+```
+
+The trailer-bearing line was upstream's published release **before basalt's repository existed**, so
+"we fabricated it" is not available to basalt, and "we preserved it" needs no motive.
+
+## 9 · Version namespaces do not correspond
+
+basalt publishes **3** tags (`v0.1.0 161c02bc→421063f0`, `v0.2.0 87038bdd→f0bb833c`,
+`v0.2.1 4ae7af98→1b3f6964`), all annotated-but-unsigned. Strata publishes **95** tag refs running to
+`v0.2.10`, and its `v0.1.0`/`v0.2.1` point at **different objects**. Same names, different commits:
+**every version string in this audit must name its repository.** Any plan text saying "the nearest
+release is `v0.2.1`" is ambiguous and is being corrected.
+
+## 10 · `(Strata <sha7>)` port markers
+
+21 distinct abbreviated targets in basalt commit subjects. Resolved against each remote at full
+length: **14 resolve in Strata's `main`, 0 in ours, and 0 are present in our object store** — basalt
+ports from upstream and does not carry the upstream commits themselves. Genuine cross-repo port
+records; the 7 unresolved are either not unique in a main-only fetch or not on their main.
+
+## 11 · The audited repository publishes a second, unread branch
+
+```text
+refs (7): main, origin/HEAD, origin/main, origin/multimodel, v0.1.0, v0.2.0, v0.2.1
+multimodel tip 61e26cbbfd5d…  2026-11-04  Jesus Gulfo  "serve: a session model checkpoints a turn…"
+  main..multimodel = 105 commits      multimodel..main = 3      merge-base 1b3f6964 (2026-11-03)
+```
+
+That merge-base is our own `v0.2.1` peel target. Object-store accounting for the audited clone is
+otherwise clean: **2,299 commit objects = reachable from some ref; present-but-unreachable = 0;
+no dangling objects.** The 105-object gap over the pin's 2,194 is exactly `multimodel`.
+
+**Scope limit:** this audit covers one ref at one commit. The same repository publishes another
+branch whose 105 commits are in no manifest row, no tier, and unread. Recorded in `audit/index.md`
+§ Limits and in the verdict's conditions.
+
+## 11b · Both histories in **one** object store — the direct measurement (added same day, 2026-11-05)
+
+Every measurement in §§ 1–5 compared two *separate* clones, so "0 shared SHAs" was an inference across a
+boundary. This closes it. A fresh scratch store fetched **both** projects from GitHub with the same
+command, so there is no cross-repo boundary left to distrust and no query history of ours to contaminate it:
+
+```bash
+T=/tmp/opencode/basalt-audit/mb-probe; rm -rf $T; mkdir -p $T; git -C $T init
+git -C $T remote add basalt https://github.com/jesdga95/basalt
+git -C $T remote add strata https://github.com/Niko1221/Strata
+# fetch 1 and 2 — the two histories
+git -C $T fetch --filter=tree:0 --no-tags basalt main && git -C $T update-ref refs/tmp/a FETCH_HEAD
+git -C $T fetch --filter=tree:0 --no-tags strata main && git -C $T update-ref refs/tmp/b FETCH_HEAD
+# fetch 3 — basalt's tags, for the positive control ONLY (this is what puts the 3 tag objects in the store)
+git -C $T fetch -q --tags --filter=tree:0 --no-tags basalt 'refs/tags/*:refs/tags/basalt/*'
+# (typed with a `|| git -C $T fetch --filter=tree:0 basalt '+refs/tags/*:refs/tags/basalt/*'` fallback; the
+#  first branch returned 0 so the fallback never ran. `--tags` and `--no-tags` do NOT conflict — the explicit
+#  refspec is what decides, `--no-tags` only suppresses the automatic follow. Verified by re-running fetch 3
+#  alone after `update-ref -d` on all three refs: the tags and the composition listing below came back
+#  identical, in-pack 7834, refs 5. Note the side effect of that re-verification: `--tags` *also* writes bare
+#  `refs/tags/*`, so the probe store briefly held 11 refs; deleting both the bare and the prefixed copies is
+#  what restored the 5-ref state reported here.)
+# NOTE the trap I hit here: FETCH_HEAD is overwritten by the *next* fetch. Capturing it into a named
+# ref immediately after each fetch is mandatory; doing both update-refs at the end names two refs at
+# one commit, and the first run had to be thrown away and re-run for exactly that reason (it "found"
+# merge-base = ffa80d73 between a ref and itself). Caught only because for-each-ref printed one SHA twice.
+```
+
+Store hygiene (`refs/remotes/basalt/main` = `dc047a77…`, `refs/remotes/strata/main` = `ffa80d73…`, plus the
+three `refs/tags/basalt/*`): `promisor=true`, `partialclonefilter=tree:0`, **no
+`objects/info/alternates`**, 5 refs — **and note that "5 refs" is the state after the `update-ref -d` cleanup
+described in the fetch-3 note above, not the state during measurement**; `in-pack 7834` was the same before
+and after that cleanup, so the counts below were unaffected by it. Composition, not just the total — which is
+the only thing that could show an unexpected object hiding in a sum that otherwise looks right:
+
+```text
+git cat-file --batch-all-objects --batch-check='%(objecttype)' | sort | uniq -c
+      7831 commit        ← = 2194 (basalt) + 5637 (strata) exactly
+         3 tag           ← basalt's three annotated tags, from fetch 3
+    (zero tree and blob objects: the tree:0 filter held)
+count-objects -v:  count 0 (no loose objects)   in-pack 7834   packs 3
+```
+
+**Three fetches are consistent with every object in the store** — two histories plus three tag objects, no
+unexplained object class, nothing loose, no alternates. (The histogram proves the *type split and totals*, not
+per-object provenance; what it rules out is an object of a kind, or from a source, the procedure does not
+permit.) Every count below was re-run under `GIT_NO_LAZY_FETCH=1` and returned identical numbers with
+`rc=0` and empty stderr; that guard protects the *future*, so the composition listing above is what
+protects the *past* — without it, a lazy-fetched object would have been silently absorbed into a total that
+looked correct.
+
+```text
+commits from each ref, set arithmetic:  |A|=2194  |B|=5637  |A∩B|=0  ONLY_IN_A=2194  ONLY_IN_B=5637
+
+git merge-base  basalt/main strata/main        → rc=1, NO OUTPUT (silent — see the correction below)
+git merge-base --all …                         → rc=1, 0 lines
+git merge-base --is-ancestor pin→strata        → rc=1 (false)
+git merge-base --is-ancestor strata→pin        → rc=1 (false)
+git merge-base --independent …                 → 2 tips   ← NOT a test of relatedness, see the refutation
+git rev-list --count basalt/main..strata/main  → 5637  = |strata|   exactly
+git rev-list --count strata/main..basalt/main  → 2194  = |basalt|   exactly
+
+POSITIVE CONTROL (same store, a pair that IS related) — basalt's own v0.2.1 vs the pin:
+  merge-base        → 1b3f69641c98…  rc=0        is-ancestor → rc=0
+  rev-list --count v0.2.1..pin → 3
+  (merge-base between a ref and itself → rc=0, prints the ref: the empty output above is not a git quirk)
+
+REFUTATION OF MY OWN CONTROL (same session): basalt main vs origin/multimodel —
+  merge-base → 1b3f6964… rc=0  (related!)      merge-base --independent → 2 tips, identically
+  ⇒ --independent answers "does either input reach the other?", which any divergence answers with 2.
+```
+
+**What this fixes about the published record.**
+
+1. **`git merge-base` does not print "no merge base."** It exits **1 and prints nothing**, the dangerous
+   form, because `mb=$(git merge-base A B)` yields an empty string in a script that never checked `$?`.
+   The unrelated-histories test is the **`|A∩B| = 0`** above — a set intersection of two `rev-list` outputs,
+   whose marginal counts are printed alongside it (`|A|`, `|B|`), because an empty intersection is also what
+   a *failed* `rev-list` produces. The marginals are what make the zero mean something.
+2. **`--independent` is not an unrelatedness probe** and I had published it as one in three files. It is
+   git's input-reduction step ("neither input reaches the other"), which is true of *any* divergence — the
+   `main`/`multimodel` pair above returns 2 with a merge-base, from the same command in the same minute.
+   It confirms neither tip contains the other; pair it with the `rc` of plain `merge-base`, never use it
+   alone.
+3. **The `A..B == |B|` rows are a cross-check, not a second measurement.** Given `|A∩B| = 0` measured
+   directly, `A..B = |B|` is arithmetic (B minus nothing); the value of printing it is that a *different
+   implementation* of the same set difference — `rev-list`'s ancestry walker rather than my `comm` — agrees
+   in both directions against independently counted totals.
+4. **Three mechanisms, two sources, for the engine fact.** `v0.2.1..pin = 3` here by local `rev-list`; by
+   GitHub's `compare/v0.2.1...main` (Plan 01); and by local blob identity over the engine paths
+   (`t2-provenance.txt` § 6). The first two both rest on *what `jesdga95/basalt` publishes today*, so if the
+   tag moved they would agree wrongly; the genuinely independent corroboration is § 11's
+   `multimodel..main = 3` with merge-base = the `v0.2.1` peel target, measured in a **different clone from a
+   different ref pair**. Stated as three mechanisms and two sources, not three independent confirmations.
+
+## 12 · What is NOT established
+
+The precise fork commit (no merge-base exists; the fork is bounded by content, not by ancestry).
+Motive, authorship, and controlling party of the upstream rewrite. Whether either project was ever
+audited by anyone. Whether any seam file's *bytes* are original — that needs T2b's blob join, since
+commit absence cannot prove code originality. `jesdga95/basalt` `created_at` came from GitHub while
+the rate-limit counter read 0, so that one field is single-source.

@@ -1,0 +1,257 @@
+Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.
+
+# T2 · who wrote the boundary, and what to read first
+
+Substrate: [`t2-author-census.tsv`](t2-author-census.tsv) (87 rows, schema and sentinels in
+[`t2-provenance.txt`](t2-provenance.txt) § 5). Attribution is by `git blame --line-porcelain` at the
+pin with **no** `-w`/`-M`/`-C` flags, and history breadth by `git log --follow`.
+**Attribution sets reading order for files. It does not rank people.** Nothing on this page is a
+finding; findings are filed in [`../findings.md`](../findings.md) by what code *can do*, never by
+who wrote it.
+
+Two limits that apply to every number here:
+
+- **560 of 20,111** blamed lines (2.78 %) sit on a blame boundary — the root commit `f2a08d4b`
+  (2026-09-24, Niko1221, 219 files / 50,165 insertions: the ancestor project arrived as one bulk
+  commit), 7 files, and **the boundary population and the root population are the same 560 lines**,
+  per-file identical, because blame cannot walk past a parentless commit. So 2.78 % of what follows is
+  credited to whoever imported it, not to whoever wrote it — but it is not noise: those lines are
+  **inherited**, which is why § 1 states its aggregates twice.
+  CORRECTED 2026-11-05: this bullet formerly read "**0 of 20,111** blamed lines sit on a blame
+  boundary". False — an unanchored `grep boundary` over blame output matches source text
+  (`…a prefetch window starts on a page boundary`) as well as the porcelain header. Anchored:
+  `grep -cE '^boundary( [0-9a-f]{40})?$'`. See [`t2-provenance.txt`](t2-provenance.txt) § 6.
+- Git author names and emails are **self-declared and spoofable**. 139 distinct names vs 144
+  distinct emails over 2,194 commits: the two keys disagree, so neither is a person count, and the
+  frequency tables below count *commits*, not contributors.
+- And a third limit T2 discovered after this page was first written: **85.7 % of the commits in this
+  history carry an AI co-authorship trailer** (1,881 of 2,194; 94.6 % of these very 20,111 lines).
+  An author field therefore records who committed and *claimed* how, not who typed. Read every
+  concentration below as a statement about a **commits-and-claims aggregate**, never as one person's
+  fingerprint — including § 2's, which may equally describe one human directing agents.
+  [`t2-provenance.txt`](t2-provenance.txt) § 10.
+
+## 1 · Aggregate attribution — 80 first-party files, 20,111 blamed lines
+
+`src/vision/stb_image.h` (7,988 vendored lines) excluded: blame credits all of it to the maintainer
+who imported it. Reconciles: 20,108 manifest LOC + 3 files with no trailing newline = 20,111.
+53 distinct blamed authors. Regenerate from the census TSV:
+
+```bash
+cut -f1,8,9 context/audit/wave0/t2-author-census.tsv | awk -F'\t' '$1!="src/vision/stb_image.h"'   # per-file top authors
+```
+
+CORRECTED 2026-11-05: this heading said **86** files. The census TSV has **87 rows and no header**
+(row 1 is `CMakeLists.txt`); 6 rows are `BINARY_SKIPPED` and 1 is the vendored `src/vision/stb_image.h`,
+so the blameable first-party denominator is **87 − 6 − 1 = 80**, and that is the denominator of every
+figure on this page. Of the 80: **69 `A-planned` + 11 `unassigned`** (not 75 + 5 — 6 of the manifest's
+75 Tier A paths are binary assets). Three denominators (80 / 86 / 87) had been used interchangeably
+across this task's pages; each figure now names its own.
+
+```text
+Jesus Gulfo   14,558 l   72.4 %      the two core authors together  16,289 l   81.0 %
+Niko1221       1,731 l    8.6 %      everyone else (51 authors)      3,822 l   19.0 %
+jeancmyk       1,306 l    6.5 %
+Giveen           857 l    4.3 %
+xyehya           246 l    1.2 %
+```
+
+Because the corpus mixes two lineages ([`t2-lineage.txt`](t2-lineage.txt) § 4), the same split is
+published **twice** — the whole-tree figure and the figure restricted to lines with no content twin in
+`Niko1221/Strata`. **Provisional pending T2b's blob-level join.**
+
+```text
+  WHOLE TREE       lines=20111  top=Jesus Gulfo 14558 (72.4%)  core-two 81.0%  authors=53
+  BASALT-ERA ONLY  lines=18550  top=Jesus Gulfo 14558 (78.5%)  core-two 85.5%  authors=44
+  INHERITED ONLY   lines= 1561  top=Niko1221       1480 (94.8%) core-two 97.9%  authors=10
+```
+
+Nothing about the concentration changes under the cut — the owner's share *rises* to 78.5 % once the
+ancestor's lines are removed. Regenerate: [`t2-provenance.txt`](t2-provenance.txt) § 6.
+
+Split by language side, which is where the signal is:
+
+```text
+C++/CUDA side (src/ + include/ Tier A, stb excluded)   6,449 l   core two 4,261 (66.1 %)  community 2,188 (33.9 %)
+serve/ Python side                                    10,523 l   core two 10,124 (96.2 %)  community    399  (3.8 %)
+```
+
+**The OS-facing C++ seam is where outside fingerprints are; the Python service layer is essentially
+one person's code.** That is a reading-order fact, not a risk rating.
+
+## 2 · Ownership concentration at the OS-facing boundary
+
+What the bytes show, **per file, not aggregated** (`n/m` where `m` = the file's lines at the pin):
+
+| file | lines | top blame author | their share | commits on file | their commits |
+|---|---|---|---|---|---|
+| `src/platform/direct_file.cpp` | 455 | jeancmyk | **255 (56 %)** | 14 | **1** |
+| `src/platform/file.cpp` | 456 | jeancmyk | **247 (54 %)** | 6 | **1** |
+| `src/platform/process.cpp` | 321 | jeancmyk | **216 (67 %)** | 4 | **1** |
+| `src/platform/memory.cpp` | 865 | Jesus Gulfo 470 · jeancmyk 2nd | 199 (23 %, plurality) | 24 | 2 |
+| `include/basalt/platform/file.hpp` | 157 | jeancmyk | **100 (64 %)** | 5 | 1 |
+| `include/basalt/platform/process.hpp` | 96 | jeancmyk | **72 (75 %)** | 2 | 1 |
+| `include/basalt/platform/memory.hpp` | 274 | Jesus Gulfo 144 · jeancmyk 32 | 12 % | 22 | 1 |
+| `include/basalt/platform/direct_file.hpp` | 67 | Niko1221 (51 of them from the root commit) | 76 % | 10 | 0 |
+
+`jeancmyk` holds **1,156 of 6,449** C++-side Tier A lines and appears with ≤2 commits on **8 of the
+12** boundary files this census covers.
+
+**Why this page flags it:** `src/platform/` is the project's *only* legal home for OS calls — their
+own `AGENTS.md` says so and `tools/check_platform_boundary.sh` enforces it — so it is the one
+directory where `mmap`/`pread`/`fork`/`exec`/`dlopen`/`/proc` may sit without raising a style
+flag. The combination worth reading is not the identity, it is **bulk arriving in single commits**
+(one commit contributed 56 %, 54 % and 67 % of three of those files) **on the highest-privilege
+seam**, which is the least review-pressure shape a change can arrive in.
+
+**And now the stronger half of the flag, measured in T2's lineage work.** The commits that produced
+those shares are **basalt-line only**:
+
+> *basalt-line only* = for that commit object, three probes all come back negative — the ancestor's
+> remote refuses the full 40-hex SHA (`upload-pack: not our ref`), the commit has **no twin** on the
+> content key `(tree, author-date, committer-date, subject)` among Strata's 5,637 `main` commits, and
+> Software Heritage has no record of it (`404`). Three methods, one shared blind spot: a remote serves
+> only what is reachable from its advertised refs, and SWH only what it visited. **Strong
+> absence-of-evidence, not proof of non-existence** — and this annotation may only ever *raise* a
+> reading priority, never lower one. A reader who thinks "only three methods" and demotes item 1 is the
+> failure mode this definition exists to prevent.
+
+Evidence and controls: [`t2-lineage.txt`](t2-lineage.txt) § 2 (the 2×2 remote-presence matrix, whose
+mirror direction fires) and § 4 (the content-key twin test: **0 twins for all seven seam commits and
+the pin**, against a comparator proven non-zero at 844 overall and 1 twin for our root). So this seam
+work has **neither external review nor external existence** — where the inherited half of the tree at
+least has another project's visible history behind it. Note what this does *not* buy: a commit's
+absence cannot make the **bytes** original, since a squashed upstream import reads absent too. Byte
+originality is T2b's blob join, not this page's claim.
+
+**Review existence, which outranks the blame plurality:** `src/platform/memory.cpp`'s outside-authored
+work arrived as **basalt PR #47** (`9a49e6b1 … (#47)`), so its review history is a matter of public
+record in the audited repo. Whether that PR was self-approved — and whether the seam-*creating* commits
+went through a PR at all or landed by direct push — is a far better priority argument than any blame
+share, because it is a census of review, not of authorship. That check is **T3's first action on
+items 1–4**, not a T2 finding.
+
+**Most likely benign explanation, stated so nobody re-litigates it:** a specialist contributing a
+self-contained portability subsystem (POSIX + Win32 file/process/memory abstraction) is the
+ordinary shape of exactly these layers in a six-week-old repository. The audit resolves this by
+reading the code, not by investigating a person. Given § 1's third limit, read "a specialist" as
+possibly "one person and their agents"; the shape that matters — one bulk commit, no revision
+history, highest-privilege directory — is the same either way.
+
+## 3 · Single-commit files at the seam (no revision history to compare against)
+
+```text
+serve/engine/image_source.py   570 l   1 commit   1 blame author (Jesus Gulfo 570/570)
+                                 └─ the audit's "one outbound channel" (T4): an input parser and
+                                    SSRF gate that has never been revised
+src/platform/dynlib.cpp         64 l   1 commit   1 blame author (Jesus Gulfo 64/64)
+                                 └─ the dlopen boundary itself
+serve/security.py              228 l   5 commits  2 authors (Jesus Gulfo 205 · BGonnermann 23)
+serve/service.py             1,337 l  39 commits  6 authors (Jesus Gulfo 1,212)
+```
+
+## 4 · `CMakeLists.txt` — the highest-churn file in the census set
+
+```text
+1,507 l · 287 commits · 18 blame authors · 34 contributors with ≤2 commits on this one file
+top author Jesus Gulfo 1,047/1,507 (70 %) · Giveen 215 · jeancmyk 126 · Niko1221 47
+tier in root.tsv: unassigned
+```
+
+Deliberately **not retiered at T2**: Tier A was seeded from the plan's own `File:` fields precisely
+so a census cannot move the goalposts, and 1,507 l also exceeds the 1,500-l slice cap. Assigned to
+T11 (see [`../manifest/index.md`](../manifest/index.md) § Limits). Note the interaction with Plan
+01: it read `CMakeLists.txt:40,94-117,528,533`, and **287 commits have touched this file since**.
+
+## 5 · Email-domain census — descriptive, non-diagnostic
+
+This table exists so a later reader knows we looked. It is about *accounts*, not people, and no
+domain in it is treated as evidence of anything. `@localhost` and `.local` addresses are the
+standard fingerprint of an unset `user.email` (a macOS default address), i.e. low-signal drive-by
+contributors — not concealment.
+
+```text
+boundary families (CMakeLists.txt src/platform src/vision serve/engine serve/security.py
+                    serve/service.py serve/config.py serve/handler.py)
+  56 distinct author emails · 144 repo-wide
+  297 gmail.com                        1 snu.ac.kr          1 hozak--mac-mini.local
+  136 users.noreply.github.com         1 sali.dnsalias.com  1 hotmail.com
+    9 jeancmyk.users.noreply.github.com 1 localhost          1 digitalwaterworks.com
+    5 putier.fr                        1 local              1 datacore.ch
+    4 code.contractors                 1 jmgao.dev          1 carbit.com.cn
+                                         1 5d6.de
+```
+
+Two rows deserve a sentence for a reason unrelated to exoticism: **`@carbit.com.cn` and
+`@digitalwaterworks.com` are corporate domains**, which is an employer-interest / CLA question
+(who owns the contribution), and `@sali.dnsalias.com` is self-hosted dynamic DNS, which is
+eccentric rather than informative. `jeancmyk`'s address is GitHub's own
+`U_kgDO…@jeancmyk.users.noreply.github.com` form and **resolves to a public GitHub login**, which
+put that contributor inside T2's own "within noise" rule — the flag in § 2 is deliberately about
+line counts and commit shape, not about the address.
+
+Regenerate the two halves of this section:
+
+```bash
+BOUND="CMakeLists.txt src/platform src/vision serve/engine serve/security.py serve/service.py serve/config.py serve/handler.py"
+git -C vendor/basalt log --format='%ae' $BOUND | sed 's/.*@//' | tr 'A-Z' 'a-z' | sort | uniq -c | sort -rn
+# rare contributors (≤2 commits on a single boundary file). Parse with a tab, NOT default FS:
+# `uniq -c` output re-split on whitespace puts a surname where the email belongs.
+for f in $(git -C vendor/basalt ls-tree -r --name-only dc047a77 -- $BOUND); do
+  git -C vendor/basalt log --follow --format='%an%x09%ae' dc047a77 -- "$f" | LC_ALL=C sort | uniq -c \
+    | sed -E 's/^ *([0-9]+)[[:space:]]+([^\t]*)\t(.*)$/\1\t\2\t\3/' \
+    | awk -F'\t' -v f="$f" '$1<=2 {printf "%s\t%s\t%s\t%s\n", f, $1, $2, $3}'
+done   # 104 rows; 29 of them off the gmail/plain-noreply pair
+```
+
+## 6 · Read order this census produces (input to T3 and T8, not a verdict)
+
+The order is **unchanged** by the AI-attribution finding, and it should stay that way: `exec` does not
+care who typed it, and every ground in this list is content-level (seam confinement, basalt-line-only
+creation commits, one-commit landings, checkable PR review). What the finding changes is § 2's
+*interpretation* and three things in T3's brief, listed after the table.
+
+```text
+1  src/platform/process.cpp            fork/exec seam, 67 % from one outside commit, 1-commit bulk
+                                       basalt-line only — no content-key twin in Strata's 5,637 commits;
+                                       their remote refuses the SHA (§ 2, t2-lineage.txt § 2/§ 4)
+2  src/platform/direct_file.cpp        pread/pwrite + direct handles, 56 % from one outside commit
+                                       basalt-line only (same test)
+3  src/platform/file.cpp               path handling + open, 54 % from one outside commit
+                                       basalt-line only (same test)
+4  src/platform/memory.cpp             mmap/mprotect, 865 l, 24 commits, 2 by an outside author
+                                       basalt-line only for both outside commits; **T3 first action:
+                                       open PR #47 and record whether it was self-approved**
+5  serve/engine/image_source.py        the only outbound channel; 570 l that have never been revised
+                                       basalt-line only; its creating commit c487d17f has no twin
+6  src/platform/dynlib.cpp             dlopen boundary, 64 l, never revised
+                                       basalt-line only (7e040829)
+7  serve/security.py                   peer classification, 228 l
+8  CMakeLists.txt                      287 commits; what gets compiled (T11 slice). Also the highest
+                                       AI-trailed file count in the census after the Python service
+9  serve/engine/process.py             1,419 l, 6 blame authors, tier=unassigned — a gap this
+                                       census found: the thing that spawns the engine is untiered
+10 tools/check_platform_boundary.sh    the rule that makes § 2's premise true — read it first, 42 l
+```
+
+Three things this page hands to T3 that are not about any file above:
+
+1. **A calibration rule, written before there is any temptation to use it.** 94.6 % of the lines in the
+   80 first-party census files (19,035 of 20,111 — 9 % of the audited corpus, not all of it) sit under
+   commits that self-declare AI co-authorship, and inside basalt's own repository that share is 95.2 %.
+   Which supplies a plausible innocent story for exactly the
+   pattern T3's orphan-config-key section calls its highest-signal residue. So: **"AI residue" may
+   never be the reason a row goes `benign`.** It may only be the reason a row is ranked *lower* after
+   the key or call site has been traced end-to-end and no sink exists.
+2. **A hard non-action.** Whatever T3 turns up — hallucinated domains, dead package names,
+   token-shaped constants — external identifiers are resolved **by inspection and documentation only.
+   Never connect, never fetch, never install.** A nonsense-looking domain may be a real one that
+   reacts to being probed, and this audit's most valuable property is that nobody on the other end
+   knows it exists. (Reading GitHub *metadata*, e.g. PR review state, is a different act and is fine.)
+3. **A surface the finding legitimises and T3's primitive list cannot see: instructions addressed to
+   a model.** `vendor/basalt/AGENTS.md` and `CONTRIBUTING.md` are in the manifest, as is `.github/`
+   (`manifest/github.tsv`), and their upstream-authored `AGENTS.md` instructs the next agent directly
+   ("End each message with the co-author line your tool's instructions specify", "Don't push or publish
+   anywhere"). We run agents on this tree, so a shipped file an obedient agent will act on is a
+   capability path with no syscall in it — a sink made of prose. Proposed as a T3 section, including
+   source comments phrased as instructions to a model.

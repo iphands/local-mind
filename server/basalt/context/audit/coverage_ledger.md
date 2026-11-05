@@ -71,8 +71,24 @@ not "clean" and not "Tier B" — it is undecided until T3's census assigns it.
   219,247** — do not subtract it. A "readable lines" figure of 215,247 would break the `LOC`/
   `PARTITION_ROWS` pins and is not what this ledger claims. T10 owns those 7 and Tier A there means
   "fully explained by its parser/consumer", not "lines read".
-- **Line coverage is not behavioral coverage.** No canary has run (T3), no file has been read, the
-  pin is not yet proven against public GitHub (T2), and the runtime leg is Plan 03's.
+- **Line coverage is not behavioral coverage.** No canary has run (T3) and no file has been read.
+  The pin **is** now matched to the objects public GitHub serves (T2, 2026-11-05 — 862/862 blob SHAs
+  equal to the tree object GitHub serves; **single-witness**, see
+  [`manifest/index.md`](manifest/index.md) § Attestation limit), and the runtime leg is Plan 03's.
+- **This ledger covers one ref at one commit.** The audited repository also publishes
+  `refs/remotes/origin/multimodel`, **105 commits** ahead of the pin (merge-base `1b3f6964` = basalt's own
+  `v0.2.1`); none of it is in a manifest row, a tier or a read queue, and the clone carries its objects
+  (2,299 commit objects vs the pin's 2,194, present-but-unreachable **0**). Any "the whole repo is
+  accounted for" statement must name the ref it means; this belongs in `verdict.md`'s conditions (T2,
+  2026-11-05).
+- **What a "line of Tier A" is** (added by T2, 2026-11-05; the grid above is unchanged by it): the
+  75 f / 19,659 l Tier A figure is **54 code files / 13,615 l plus 21 non-source files / 6,044 l** —
+  `docs/img/frontend.gif` 2,409, `data/profiles/qwen4exp-48x512.prof` 960,
+  `docs/community/benchmarks.json` 922, plus fonts, PNGs/SVGs, four `.ids` token dumps, `requirements.txt`,
+  a `.jinja`, CSS/HTML and a `.exe.manifest`. **This does not reduce the owed-read count and no row was
+  retiered** (`§ invariants`: an `A-planned` row never becomes `triaged:*` from a census); it says what
+  the 19,659 "lines" of reading debt are actually made of. Re-tiering them, and adding
+  `CMakeLists.txt`, is T11's job.
 - The verdict is **conditional on the hash gap** (unpinned wheels, T12/Risk 5): the audited source is
   not yet provably the built artifact.
 

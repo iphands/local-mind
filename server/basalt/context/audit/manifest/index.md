@@ -363,7 +363,209 @@ Wave 0 gate fails. Waves: 1 = T4–T8, 2 = T9–T11d, 3 = T12–T13, 4 = T14 (tr
 - Our own `run`, `lib/common.sh`, `Dockerfile`, `versions.env` (T13) are **not** in this manifest: it
   describes `vendor/basalt` only.
 
-## Upstream provenance (T2 lands here)
+## Upstream provenance (T2, 2026-11-05)
 
-*Reserved deliberately. T2 records GitHub's tree SHA for `dc047a7`, tag/signature status, and the
-boundary-file author census. Do not restructure the sections above to hold it.*
+**Pin provenance.** Measured with `curl` over TLS to `api.github.com`, unauthenticated, on
+2026-11-05 (`gh` is not installed here). Our `dc047a77^{tree}` = `3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4`
+= the tree GitHub reports for that commit. GitHub's tree object: **942 entries (862 blobs + 80 trees),
+`truncated=false`**. Compared in **both directions**: `INTERSECT=862`, `ONLY_IN_API=0`,
+`ONLY_IN_LOCAL=0`, `BLOB_SHA_MISMATCH=0`; `0` gitlinks, `0` symlinks; modes `858×100644 / 4×100755`.
+Canonical `sha256(path⇥blob⇥…)` over all 862 paths, upstream and local, both
+`a8216c6983f4d6345d1b67751b7242802f03a9a031a45822e9c90290b21bb857`. Sensitivity control: the same
+comparison against the pin's **first parent** returns `BLOB_SHA_MISMATCH=1` — it resolves to one
+changed file (`serve/util/telemetry.py`) out of 862. Raw:
+[`../wave0/t2-provenance.txt`](../wave0/t2-provenance.txt) · the witness pairs:
+[`../wave0/t2-github-tree-paths.txt`](../wave0/t2-github-tree-paths.txt).
+
+**Attestation limit — read this as the ceiling, not as "verified upstream".** Every number above is
+measured against **one witness**: an unauthenticated HTTPS request to GitHub. The commit is signed by
+GitHub (`B5690EEEBB952194`) for a GitHub-created squash-merge; `git log --show-signature` in this
+clone says *"Can't check signature: No public key"*, and the only verification of that signature is
+GitHub's own API. **One authority, attesting itself.** Established: the objects we are auditing are
+exactly the objects GitHub serves for `jesdga95/basalt` `main`. **Not** established: that those
+objects are what the authors intended to publish. Three further holes, all measured rather than
+assumed:
+
+- Basalt's **own** three release tags are annotated **but unsigned** (0 PGP blocks each), so no
+  contributor key anchors any history either. `v0.1.0 421063f0`/`v0.2.0 f0bb833c`/`v0.2.1 1b3f6964`
+  are all ancestors of the pin; **3 commits** sit between basalt's `v0.2.1` and it.
+  CORRECTED 2026-11-05: this bullet previously just said "the three release tags", which reads as
+  *Strata's* — they are not, and they are not comparable. `Niko1221/Strata` publishes **95** tag refs
+  reaching `v0.2.10`, and its `v0.1.0` (`01529aaa…`) and `v0.2.1` (`49ac15cb…`) are **different
+  objects**. The two projects share version *names* and nothing else, so **every version string in
+  this audit must name its repository**; where this corpus says an unqualified `v0.2.1`, it means
+  basalt's. See [`../wave0/t2-lineage.txt`](../wave0/t2-lineage.txt) § 9.
+- **Nothing outside GitHub anchors the pinned commit.** Software Heritage returns `404 NotFound` for
+  both the revision `dc047a77…` and an origin for `https://github.com/jesdga95/basalt`, so a
+  force-push predating our fetch would be undetectable from this clone.
+  CORRECTED 2026-11-05: this bullet previously read "**Software Heritage has never archived this
+  project**", which was false as written — it holds **9 visits of the ancestor `Niko1221/Strata`** (8 `full`, 1
+  and it holds **our root commit**. The word "never" also exceeded the evidence: a point-in-time `404`
+  licenses "as of this date", not "never". Corrected anchor tiers, in the next bullet.
+- **Three anchor tiers, and they are not equally strong** (the audit's only genuine cross-authority
+  corroboration is in the first one):
+  | what is anchored | off-GitHub witness | status |
+  |---|---|---|
+  | **Strata's current `main`** | SWH snapshot 2026-11-03 lists `refs/heads/main → ffa80d73133e…`, equal to `git ls-remote` the same day | **two authorities, one hash** — the strongest provenance statement available here |
+  | **our shared root `f2a08d4b`** | SWH revision `200`; recorded in its 2026-10-05 visit as **Strata's own `refs/tags/v0.1.0`** | anchored, under the ancestor's origin — see the rewrite below |
+  | **our pin `dc047a77` and all post-fork basalt work** | none: absent from Strata's served objects, `404` at SWH, `422` at the API | **anchored nowhere outside GitHub.** Basalt has no off-GitHub witness at all |
+
+  The tiers disagree exactly where it mattered: the five pre-2026-10-05 commits Strata's *object
+  store* serves are `404` at SWH. **The inherited-looking half is the least externally witnessed part
+  of this story.**
+- The pin is the **tip of `main` as fetched that day** and is **untagged**. `v0.3.5` exists only in
+  upstream's own `docs/` and `pyproject.toml`; there is **no upstream release artifact to diff the pin
+  against**, which feeds Risk 5 (unpinned wheels).
+
+**What the pin actually is:** PR #242, `serve: read NVML from nvml.dll on Windows`, author
+`polygizer`, committer `GitHub`, authored **2026-11-05T00:48:24Z — the day we pinned it**. It changes
+exactly one file, `serve/util/telemetry.py` (a Tier A file). We pinned a working `main` hours after it
+landed. No `SECURITY.md`, `.github/SECURITY.md` or `docs/SECURITY.md` exists at this commit — only
+`serve/security.py` and its test — so there is **no declared disclosure channel.**
+
+**The pin is basalt's `v0.2.1` plus documentation and `serve/` only — the C++ engine is byte-identical
+to that tag.** Our own `versions.env` claims *"the engine is identical to v0.2.1"*; measured at the pin,
+that is true. `commits v0.2.1..dc047a77 = 3`, and the 9 changed files are `README.md`, three files under
+`docs/`, and five under `serve/` (`api/responses.py`, `frontend.py`, `service.py`, two tests) —
+**0 changed files under `src/`, `include/`, `cmake/`, `tools/` or `CMakeLists.txt`**. By blob identity
+over those engine paths: `|v0.2.1 engine|=553`, `|pin engine|=553`, `|intersection|=553`, symmetric
+difference **0**. Two consequences: **(i)** what Plan 01 established about the C++ engine at `v0.2.1`
+still holds at this pin, so Plan 02's `src/platform/` reads start from a state Plan 01 partly
+characterised — *except* `CMakeLists.txt` (287 commits), where Plan 01's read is stalest; **(ii)**
+basalt's **own** annotated tag `v0.2.1` (`1b3f6964`, tree `515676c1`) is a usable, unambiguous anchor for
+T2b's content-lineage join — unlike Strata's tags, whose names collide with these and whose targets have
+already moved once.
+
+### What "basalt ← Strata" actually means (T2, measured 2026-11-05)
+
+`AGENTS.md:3`, `CONTRIBUTING.md:56`, `README.md:68` and `THIRD_PARTY_LICENSES:4,9` in the pinned tree
+declare a fork of `Niko1221/Strata` (MIT). GitHub reports `fork=false`, which means **no fork-network
+link**, not that the relationship is false. What the relationship is *not* is the surprise: measured
+against a **pristine** `git fetch --filter=tree:0` of Strata's `main` (5,637 commits, `in-pack 0` → 5,637
+verified, no alternates), **the two repositories share zero commit SHAs, have different root commits,
+and have no merge-base.** Full evidence, controls and four refuted hypotheses:
+[`../wave0/t2-lineage.txt`](../wave0/t2-lineage.txt).
+
+- **They are two rewritten variants of one history.** Their root `01529aaa…` and our root `f2a08d4b…`
+  are identical in tree (`4591e4ca…`), author, committer, **both** epochs and subject; ours additionally
+  carries `Co-Authored-By: Claude Opus 5.5 (1M context)` and a `Claude-Session` link. Over whole
+  histories, **844 commit pairs match on `(tree, author-date, committer-date, subject)`** with **0
+  duplicate keys on either side**, partitioned on a **UTC instant** at 2026-10-05T00:00:00Z: **844 of our
+  861 pre-fork commits have a
+  twin (98.0 %) and 0 of our 1,333 after do.** That is the fork boundary, measured by content. (An earlier
+  draft of this line said 882 / 1,312 at 95.7 %, which is the same history partitioned by the **author's
+  local calendar date**; both bases are recorded in [`../wave0/t2-lineage.txt`](../wave0/t2-lineage.txt) § 4,
+  which also lists the 17 unmatched pre-fork commits — owner work of 2026-10-03/04 that Strata's current
+  `main` does not carry.)
+- **The ancestor rewrote its published mainline, and the only measured delta is AI-attribution
+  metadata.** Across those 844 byte-identical-content pairs: Claude trailers **1,049 ours / 0 theirs**,
+  human co-authors **22 / 22**, Codex **3 / 3** — one tool's attribution removed, every other trailer
+  preserved exactly. Whole-repo: **1,881 of our 2,194 commits (85.7 %)** carry an AI co-authorship
+  trailer vs **3 of their 5,637**. Software Heritage's 2026-10-05 visit records **Strata's
+  `refs/tags/v0.1.0` at our trailer-bearing root**, where today that tag is the trailer-free twin; and
+  `jesdga95/basalt` was created `2026-10-06T22:17:02Z`, **after** that record, so the trailer-bearing
+  line was the ancestor's published release before our fork's repository existed. **Motive is not
+  established**, and four innocent explanations for basalt keeping the old line are listed in § 5 of the
+  lineage file. Preserving both epochs while editing only the message is `git filter-repo`'s *default*
+  behaviour.
+- **Consequences for this audit, stated as method.** (1) **Never diff these two repositories by SHA** —
+  `git log upstream/main..pin`, `git cherry`, cross-repo `bisect` and blame continuity all *run* and
+  return a plausible wrong answer (the first would print our entire history as new work). `git diff A B`
+  is still sound: it is tree-to-tree. Lineage here is the content key `(tree, author-date,
+  committer-date, subject)`, blob SHAs for files, and patch-id for changes. (2) **"Inherited" can only
+  ever mean byte-identical content**, never "same commit", never reviewed, never trusted; `census.md`
+  dispositions stay lineage-independent and a lineage annotation may order reading but **never reduce
+  depth**. (3) Basalt's `AGENTS.md` still instructs contributors to end commits with an AI co-author
+  line, and **0 files** under `src/`, `include/` or `cmake/` mention Strata at all — lineage is
+  invisible in the build and visible only in git metadata.
+- **Not established:** which commit the fork came off (no merge-base exists), who ran the rewrite,
+  whether one party controlled the ancestor's origin URL at both dates, motive, and whether any seam
+  file's *bytes* are original — that last one needs T2b's blob join, because commit absence cannot
+  prove code originality.
+
+### Author census of the boundary (T2's second half)
+
+Substrate [`../wave0/t2-author-census.tsv`](../wave0/t2-author-census.tsv) (87 rows: the 75 Tier A
+rows + the 12 files the plan's T2 names that the manifest leaves unassigned), generator
+[`../scripts/t2-census.sh`](../scripts/t2-census.sh), findings and read order
+[`../wave0/t2-boundary-authorship.txt`](../wave0/t2-boundary-authorship.txt). Headline, all of it
+`git blame` at the pin with **no** `-w`/`-M`/`-C`:
+
+- 20,111 blamed lines over **80** first-party files (vendored `stb_image.h` excluded — blame credits
+  importers, not authors), **53** distinct blamed authors; Jesus Gulfo 72.4 %, the two core authors
+  81.0 %. Reconciles exactly: manifest LOC over those same 80 files is 20,108, and the +3 is 3 files
+  with no trailing newline.
+  CORRECTED 2026-11-05: this said **86** files, and the derivation is worth spelling out because three
+  denominators were in circulation. The census TSV has **87 rows** and **no header line** (row 1 is
+  `CMakeLists.txt`): 81 rows carry `census_status=OK` and 6 are `BINARY_SKIPPED` (the Tier A binary
+  assets). First-party blameable text = **87 − 6 binary − 1 vendored `stb_image.h` = 80**, which is the
+  denominator of every percentage here. Of those 80: **69 are `A-planned` and 11 are `unassigned`** —
+  *not* 75 + 5, because 6 of the manifest's 75 Tier A paths are the binary assets. Completeness of the
+  input does hold against the manifest as source of truth: all **75** Tier A paths are present in the
+  census, `ONLY_IN_TIERA=0`, and the **12** census paths beyond Tier A are `src/vision/stb_image.h`
+  (`B-vendored@T5`) plus the 11 the plan's T2 text names that the manifest leaves `unassigned` —
+  `CMakeLists.txt` and the ten `serve/engine/` modules (`__init__`, `errors`, `flags`, `lifeline`,
+  `mock`, `process`, `progress`, `slots`, `suspend`, `vision`). The tier arithmetic closes both ways:
+  all 87 rows = **75 `A-planned@T<n>` + 1 `B-vendored@T5` + 11 `unassigned`**; of the 75 Tier A, 6 are
+  binary assets (`A-planned@T10`) that blame cannot read, and the 1 `B-vendored` is `stb_image.h` — so
+  the 80 blameable first-party rows = **69 `A-planned` + 11 `unassigned`**.
+- **560 of those 20,111 lines (2.78 %) sit on a blame boundary — the same 560 that are credited to the
+  repository's root commit** (`f2a08d4b`, 2026-09-24, Niko1221, 219 files / 50,165 insertions: the
+  project arrived as one bulk commit under its ancestor's name), across 7 files
+  (`chat_template.jinja` 184, `tools/tokenizer.py` 178, `direct_file.cpp` 72, `direct_file.hpp` 51,
+  `CMakeLists.txt` 44, `memory.hpp` 17, `memory.cpp` 14). Equal totals *and* per-file-identical
+  populations: blame cannot walk past a parentless commit, so root-attributed **is** the boundary
+  population.
+  CORRECTED 2026-11-05: this bullet claimed "**0** of those 20,111 lines sit on a blame boundary, so no
+  share is an artifact of blame stopping early". False — an unanchored `grep boundary` over blame output
+  matches source text, not just the porcelain header. And the framing was wrong too: 2.78 % is not an
+  "irreducible error bar" but a **lineage** quantity — those lines are the ancestor project's bulk
+  import, i.e. the 1,001-line `inherited` bucket, where Niko1221 holds 94.8 %. Command and per-file
+  counts: [`../wave0/t2-provenance.txt`](../wave0/t2-provenance.txt) § 6.
+- **The OS seam is the concentrated one.** C++/CUDA Tier A is 33.9 % non-core vs `serve/`'s 3.8 %.
+  Per file, top blame author: `process.cpp` 216/321 · `file.cpp` 247/456 · `direct_file.cpp` 255/455
+  — one outside contributor (`jeancmyk`), each majority arriving in **a single commit per file**;
+  plus `file.hpp` 100/157 and `process.hpp` 72/96. `memory.cpp` is the maintainer's (470/865) with
+  that contributor second at 199/865 — plurality, not majority. This matters because `src/platform/`
+  is the project's *only* legal home for `fork`/`exec`/`dlopen`/`mmap`/`/proc` (their `AGENTS.md`;
+  enforced by `tools/check_platform_boundary.sh`), so it is where such a call is least likely to look
+  out of place. **Attribution orders the reading; it never ranks people.**
+  Two qualifications this task earned: (i) the commits that created these files **exist in neither
+  repository's published line** — basalt's remote serves them, `Niko1221/Strata`'s refuses each one
+  (`upload-pack: not our ref`) and none has a content-key twin in Strata's 5,637 commits
+  ([`../wave0/t2-lineage.txt`](../wave0/t2-lineage.txt) § 2, § 4) — so "upstream would have caught it"
+  is unavailable as a defence for precisely these files, which is a **review-existence** fact, not a
+  claim about the person, and is what actually carries their rank; (ii) `memory.cpp`'s seam work came
+  in through **basalt PR #47**, so its review history is checkable — that check, not the blame
+  plurality, is the load-bearing question, and it belongs to the read, not to T2.
+- **Never-revised files at the seam:** `serve/engine/image_source.py` 570 l / 1 commit / 1 author
+  (T4's one outbound channel) and `src/platform/dynlib.cpp` 64 l / 1 commit / 1 author (the `dlopen`
+  boundary). `serve/security.py` 228 l / 5 commits / 2 authors.
+- **A tiering gap this census found:** `serve/engine/process.py` (1,419 l, 6 blamed authors — the
+  code that spawns the engine) and `CMakeLists.txt` (1,507 l, **287 commits**, 18 blamed authors, 34
+  contributors at ≤2 commits) are both `unassigned`.
+
+**`CMakeLists.txt` was deliberately not retiered here.** Tier A is seeded from the plan's own `File:`
+fields so that a census can never move the goalposts, and 1,507 l also exceeds the 1,500-l slice cap.
+Assigned forward: **amend plan `### T11`'s `File:` field first**, then retier from it — proposed
+**T11** build-file split `T11a` (toolchain/options/gate) + `T11b` (targets/install). Plan 01 read
+`CMakeLists.txt:40,94-117,528,533`; 287 commits have touched it since, so that reading is stale.
+Same for `serve/engine/process.py`, which belongs in T4's or T6's scope, not in a census's.
+
+### Definition limits this section adds
+
+- **`f4` (LOC) is a newline count from the checkout**, not from the blob. `git status --porcelain` is
+  clean and the two `.gitattributes` rules (`tests/data/native_experts/** -text`,
+  `docs/community/benchmarks.json text eol=lf`) were spot-checked: blob LOC == worktree LOC.
+  Three files have no final newline, so `blame` counts one line more than `f4` does — hence the
+  `no_trailing_nl` column rather than a wrong `f4`.
+- **The clone is no longer blob-empty.** Blame on a `blob:none` clone lazy-fetches: `count-objects`
+  went to 19,352 in-pack across 752 packs. The tree hash still matches and the worktree is clean, but
+  the T1 `GIT_NO_LAZY_FETCH=1` discipline applies to *freeze checks*, not to this census.
+- **Plan § Effort says Tier A is "~34,000 lines"; the manifest says 19,659.** The manifest is the
+  measurement, the plan's estimate predates it, and the 14–19 session figure was derived from the
+  larger number. Recorded, not silently superseded — the plan's effort basis needs revisiting at T13.
+- Tier A's 19,659 l is **54 code files / 13,615 l + 21 non-source files / 6,044 l** (a 2,409-line GIF,
+  a 960-line `.prof`, a 922-line JSON dump, fonts, PNGs, token dumps, a `.jinja`, CSS/HTML, an
+  `.exe.manifest`). This **does not reduce the owed-read count**; it says what "a line of Tier A" is.
+  Re-tiering them is T11's, not the census's (`§ invariants`: no `A-planned` row becomes `triaged:*`).

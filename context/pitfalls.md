@@ -76,3 +76,81 @@ A defrag "yesterday" did not help: the file was written after it.
 - local-mind: `server/basalt/context/distilled.md` § *Basalt loads weights with `O_DIRECT`, and there is no switch*
 - local-mind: `server/basalt/context/pitfalls.md` § *A boot from the NFS copy crawls at 5–10 MB/s*
 - local-mind: `server/basalt/context/plans/completed/01_flashnext_container_tracker.md` (boot 2 rows)
+
+---
+
+# Cross-repo git forensics: five standard commands that run and lie when two histories were rewritten
+
+## Problem
+[OBSERVED 2026-11-05] Attributing a vendored pin to its upstream. `server/basalt`'s pin declares itself a
+fork of another project, and **every conventional way of relating two repositories produced a confident,
+plausible, wrong answer.** They share **0** commit SHAs and have **no merge-base**, because one side
+rewrote its published mainline (the only measured difference between thousands of content-identical commit
+pairs was the removal of AI co-authorship trailers). The failures, each of which looked like evidence:
+
+1. **`git log <upstream>/<branch>..<pin>`** — with no merge-base, `A..B` is *just `B`*. It printed the
+   pin's entire history as "new work not in upstream", which reads as a clean independent fork.
+2. **`git cherry` / cross-repo `bisect` / blame continuity** — same cause, same silence.
+3. **`git merge-base`** — it does **not** tell you "histories were rewritten", and it does not say so: it
+   exits **1 and prints nothing**, which is the dangerous form of silence, because
+   `mb=$(git merge-base A B)` is simply empty in a script that never checked `$?`. The probe that means
+   what you want is the **intersection of two `git rev-list` outputs**, printed with its marginals
+   (`|A|`, `|B|`, `|A∩B|`) — an empty intersection *on its own* is also what a failed `rev-list` gives.
+   **`merge-base --independent` is not an unrelatedness test**: it answers "does either input reach the
+   other", so a branch that shares ancestry returns the same `2` as two unrelated repositories.
+4. **Counting shared objects inside a partial clone you have already queried** — lazy-fetch pulls the
+   peer's objects into *your* store, after which `cat-file -e` says they are present and a shared-object
+   count "found" hundreds of "shared" commits that a pristine clone of the same URL does not contain —
+   they were objects the investigator's own earlier `git log` and `cat-file` calls had pulled on demand.
+5. **Asking the forge's per-repo commit API for our SHAs** — it resolves against the repository's
+   **object store**, not its default branch, so an object reachable only from a stale ref returns `200`.
+   That is what manufactured a false fork boundary.
+
+Two more, off-git: **abbreviated SHAs break promisor probes** (`upload-pack` needs the full 40 hex to
+answer "not our ref"), and an **API route that returns a uniform value for every input** — nine SHAs all
+`404` on `/api/1/revision/<sha>/get/` — is a broken probe, not a finding; the real route is
+`/api/1/revision/<sha>/`, and it holds the ancestor repo and the fork's own root commit.
+
+## How to avoid
+- **Never compare commit SHAs between two repositories whose histories may have been rewritten.** Join
+  them by **content key** — `(tree, author-date, committer-date, subject)` — checking for duplicate keys
+  on *both* sides first so the join is provably bijective. Files join by **blob SHA** (a content address,
+  the one thing that does compare). Individual changes join by **`git patch-id --stable`**.
+- `git diff A B` **across** two repos is sound: it is tree-to-tree and never consults ancestry. It is the
+  exception; keep it.
+- Get a **pristine** history before counting anything: `git fetch --filter=tree:0 --no-tags origin <branch>`
+  into a scratch clone, then prove pristine-ness — `count-objects` goes `in-pack 0 → N` and there is no
+  `objects/info/alternates`. Run object-presence probes **only** there, with **full 40-hex** SHAs; the
+  promisor probe is `git cat-file -e <sha>^{commit}` reading `upload-pack: not our ref`.
+- **Better, when the question is about two repositories: fetch both into ONE scratch store** with the same
+  command and compare inside it. Then `comm -12 <(git rev-list A | sort) <(git rev-list B | sort)` answers
+  "do they share any commit object" **directly**, with no cross-repo boundary to distrust and no query
+  history of yours to contaminate it. Prove the store's hygiene by **composition, not by a sum**:
+  `git cat-file --batch-all-objects --batch-check='%(objecttype)' | sort | uniq -c` should show exactly the
+  two histories' commit counts and nothing unexpected (with a `--filter=tree:0` fetch, zero trees and
+  blobs; any tag objects must be explained by a named fetch, since `--no-tags` cannot produce them), plus
+  `count-objects -v` showing no loose objects. A total that "adds up" can hide an object of the wrong kind.
+  Re-run every count under `GIT_NO_LAZY_FETCH=1` — that guards the *next* run, the composition listing is
+  what audits the run you already did. (`FETCH_HEAD` is overwritten by the next fetch: capture it into a
+  named ref after **each** fetch, or you will compare one repo against itself and get a confident answer
+  about nothing.)
+- Partition a history by date only on **`%at` / `%ct` epochs and an instant with its offset** — comparing
+  `--date=iso-strict` output as a string buckets by the *author's local* calendar day and silently shifts
+  the count (here: 882/1,312 vs the true 861/1,333).
+- State which **ref** a cross-repo figure came from and when it was fetched. Version names collide across
+  forks: `v0.1.0` and `v0.2.1` existed on both sides of this one, at **different objects**.
+- Treat a forge's `fork=false` as "no fork-network link", nothing stronger. Treat commit messages, author
+  fields, trailers and tag targets as **editable narrative**, not evidence; anchor external claims to a
+  named snapshot hash plus a date, and prefer third-party archives over the forge attesting itself —
+  while stating what those archives can and cannot enumerate (ref listings can be silently capped).
+
+## Sources
+- local-mind: `server/basalt/context/audit/wave0/t2-lineage.txt` §§ 0–7 (the four refuted hypotheses R1–R4,
+  the content-key corpus, the 2×2 remote-presence matrix, the Software Heritage record with controls) and
+  **§ 11b**, both histories in one object store — the `|A∩B|=0` measurement, the object-composition proof,
+  and the silent-`merge-base` / `--independent`-is-not-a-test controls, all with raw output
+- local-mind: `server/basalt/context/pitfalls.md` § *Cross-repo git forensics* (the project's fuller
+  version, with the basalt-specific numbers this entry deliberately omits) and items 10–17
+- local-mind: `server/basalt/context/high_level.md` § *Attesting the Basalt pin `dc047a77`* (the options
+  table with each method's verdict); `server/basalt/context/audit/index.md` § *If you are about to run
+  something against upstream* (the commands)

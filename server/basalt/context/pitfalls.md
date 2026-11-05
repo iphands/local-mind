@@ -286,12 +286,19 @@ from noir, defragment it there first (`btrfs filesystem defragment -f -t 128M <f
 
 ---
 
-# Seven shell idioms that report green on the thing they did not check
+# Shell idioms that report green on the thing they did not check
+
+*The count is deliberately not in the heading — it grows, and every earlier cross-reference then goes
+stale. Two already have: `audit/wave0/t1-freeze-and-manifest.txt` cites this § as "Four shell idioms…"
+(that artifact is a stamped transcript of a past run and is **not** edited retroactively — this line is
+the reconciliation), and the follow-up commit grew it to seven. Seventeen entries as of 2026-11-05; items
+10–17 are all from Plan 02 T2, and items 11–13 are the same three traps that produced item 9's family.*
 
 ## Problem
-[OBSERVED 2026-11-05] During Plan 02 T1 (freeze `vendor/basalt`, manifest 862 files) and its coverage
-follow-up the same day, seven commands came back *passing* while the measurement had not happened.
-Each looked like evidence:
+[OBSERVED 2026-11-05] During Plan 02 T1 (freeze `vendor/basalt`, manifest 862 files), its coverage
+follow-up the same day, and **T2 (pin provenance + author census)**, sixteen commands came back *passing*
+while the measurement had not happened, and one transcript line recorded output that no command ever
+produced (item 17 — the mirror image: silence was not the problem, invention was). Each looked like evidence:
 
 1. **`IFS= read -r h p` over a space-separated `git … --format='%(objectname) %(path)'`.** Setting
    `IFS=` disables whitespace splitting, so the whole line lands in `$h` and `$p` is empty. Every one
@@ -332,6 +339,123 @@ docker step looks like in this convention. Two variants of that are worth naming
 7. **`uniq -c | awk 'END{print sum}'` deletes the histogram.** Piping a histogram into a summing awk
    without `{print}` leaves only the total on stdout — the new sentinel survives and the evidence the
    command existed to show is gone. Use `awk '{print; s+=$1} END{print "SUM=" s+0 " (expect 862)"}'`.
+8. **`2>/dev/null` turns a bad flag into an empty column that still prints.** [OBSERVED 2026-11-05,
+   T2] The author census asked each file's history breadth as
+   `git rev-list --count --follow <pin> -- <path>`. **`rev-list` has no `--follow`**: git wrote its
+   usage block to a stderr the script had redirected to `/dev/null` and wrote *nothing* to stdout, so
+   the `commits` column came back **empty for all 75 rows** while every row still printed and the
+   census declared itself validated. It surfaced only because the same column was visibly blank while
+   inspecting a different file set. Same session, same mechanism: a `git blame` probe wrapped in
+   `2>/dev/null` printed `0` for a path that does not exist. Never suppress stderr inside a check —
+   append it to a log and **size it**: `ERR_BYTES=$(wc -c < err.log)` asserted `=0` as part of
+   `VALIDATION` (`context/audit/scripts/t2-census.sh` does exactly this). Correct history form:
+   `git log --follow --format=%H <pin> -- <path> | wc -l`.
+9. **A comparison over two key sets that never overlap reports a perfect score.** [OBSERVED
+   2026-11-05, T2] The provenance comparator builds `{path: blob}` from GitHub's tree object and the
+   same shape from `git ls-tree -r`. One swapped pair of awk fields made the *local* keys blob SHAs, so
+   the intersection was empty and it printed `ONLY_IN_API=862 ONLY_IN_LOCAL=861 BLOB_SHA_MISMATCH=0` —
+   a **zero over nothing**, one step from being pasted as "862/862 verified". Every `comm` / `join` /
+   `diff <(sort a) <(sort b)` / set-minus has this hole, including `audit/index.md`'s own check 6
+   (`comm -3 … | wc -l`, expect 0 — two empty inputs sail through it, guarded only indirectly by check
+   2). Fix: print the cardinalities and assert all four — `SET_A=$(grep -c . a) SET_B=$(grep -c . b)
+   INTER=$(comm -12 a b | grep -c .) DIFF=$(comm -3 a b | grep -c .)` → `862 862 862 0`. Then make the
+   comparator **prove it can fail**: the identical comparison against the pin's first parent returned
+   `BLOB_SHA_MISMATCH=1`, resolving the single changed file out of 862. A mismatch-counter that has
+   never been observed non-zero is not a check.
+   Same species: an **end-anchored pattern against a headerless TSV line** when the field you mean is
+   not the last one. `cut -f1,2 manifest/*.tsv | grep -vE '\.(py|cpp|hpp)$'` matches *nothing*, because
+   each line ends in the LOC digits — a "which Tier A files are not source" classification came back
+   listing all 75. Index the field instead (`awk -F'\t' '$1 ~ /\.[ch](pp)?$/'`); on a headerless file
+   there is no way to eyeball which column is last.
+10. **A uniform negative across an entire endpoint family is a broken probe, not a finding.**
+    [OBSERVED 2026-11-05, T2] Every `GET …/api/1/revision/<sha>/get/` returned `404` — nine SHAs, all
+    `404`, including a value the archive demonstrably holds. That is not "the archive has nothing", it is
+    "the route is wrong": Software Heritage's revision endpoint is `/api/1/revision/<sha>/`, **with no
+    `/get/` suffix**. With the correct form and controls (their tip → `200`, zeros → `404`) the same
+    investigation inverted: the archive holds the ancestor repo in 9 visits (8 `full`, 1 `failed`) *and our own root
+    commit*. The damage was already done — "Software Heritage has never archived this project" had been
+    drafted for the record off the broken run. Rule: **a probe family that never returns a positive has
+    measured itself, not the world.** Put a known-positive beside any new endpoint before believing a
+    single negative from it, and treat an *all-negative* sweep as more suspicious than a mixed one. The
+    same signature appeared twice more in the same task, both as a **uniform zero**: 367 blamed commits
+    none of which "carried an AI trailer" (item 12) and "0 blame boundary lines" (item 13).
+11. **Abbreviated SHAs — three separate incidents in one session.** [OBSERVED 2026-11-05, T2] Local
+    `git` resolves an 8-hex prefix, so probes *appear* to work while sending a different request shape
+    than a full OID does. Where it bit: (a) seven "is this commit upstream?" API probes went out as
+    8-hex, so their `422`s were partly request-form artefacts and could not be read as non-resolution —
+    the control that *did* discriminate was a full-40-hex nonsense SHA; (b) a **partial clone refuses
+    abbreviated OIDs outright** (`Not a valid object name 09ae16000f84…`), which looks identical to a
+    legitimate negative — promisor probes need full OIDs, full stop; (c) a hand-typed root SHA used in a
+    `startswith` comparison was 34 hex chars, not 40, so it matched where `==` would not have and briefly
+    "proved" our root was a snapshot branch-tip. Fix: assert length before use
+    (`[ ${#sha} -eq 40 ] || continue`) and generate probe inputs from `--format='%H'`, never from
+    anything a human or a `--short` touched.
+12. **`git log --format='%H%x00%B'` piped through a `split("\0")` yields `BODY` + `NEXT_SHA` chunks, not
+    records.** [OBSERVED 2026-11-05, T2] The NUL was the *field* separator, so splitting on it glued each
+    SHA to the *previous* commit's body; the "SHA set" that came out contained commit subjects, its
+    intersection with 367 blamed commits was **0**, and that zero nearly entered the record as "no AI
+    trailers in the audited lines". Correct form: `git log -z --format='%H\t%B'` (NUL *between* records,
+    tab inside them), or unit separators like `--format='%H\x1f%ae'`. General shape: **when you pick both
+    the record separator and the field separator, name which is which in the code**, and validate the
+    parse (`malformed_headers=0`, sampled values must look like 40 hex) before the set feeds a comparison.
+13. **Grep for a `git` porcelain *header* must be anchored — porcelain echoes your source lines.**
+    [OBSERVED 2026-11-05, T2] Counting blame boundary lines with `git blame --line-porcelain | grep -c
+    boundary` also matches the word inside the blamed **code**: `a prefetch window starts on a page
+    boundary` in `memory.cpp`, `boundary` in `CMakeLists.txt`. The figure published from an unanchored
+    variant of that expression was **0**; anchored truth is **560 boundary lines across 7 files**, the
+    same population as the 560 lines blamed on the root commit (blame cannot walk past a parentless
+    commit). Use `grep -cE '^boundary( [0-9a-f]{40})?$'`. Same hazard for every porcelain keyword
+    (`parent`, `author`, `summary`, `previous`): the format prints arbitrary user text between headers.
+14. **`tail -n +2` on a headerless TSV deletes a data row — and this one was in the *check* of the row
+    count.** [OBSERVED 2026-11-05, T2, twice in one session] `context/audit/wave0/t2-author-census.tsv`
+    is headerless by manifest convention, so `tail -n +2` discarded `CMakeLists.txt`, the largest row in
+    it. Every figure derived through it was short by one file: a "80 OK + 6 skipped = 86 ≠ 87"
+    *arithmetic anomaly* that took three commands to explain, and a derivation sentence ("87 − 1 vendored
+    = 86") that nearly shipped as the documented denominator. The measurement itself was fine because it
+    had used a field-filter (`$13=="OK"`), which is why the anomaly was visible at all. Rule: **know
+    whether an artifact has a header before you skip a line, and prefer an explicit predicate over a
+    positional skip.** If a header is genuinely present, print it (`head -1`) in the same transcript so
+    the reader can see what was skipped.
+15. **A pathspec-scoped `git grep` cannot support a "does not exist anywhere" claim.** [OBSERVED
+    2026-11-05, T2] To decide whether a shipped binary (`data/profiles/qwen4exp-48x512.prof`) had a
+    generator, I ran `git grep -l -I -E "\.prof…|open\(.*prof|\.save\(.*prof" <pin> -- '*.py' '*.sh'`, got
+    empty, and wrote "no writer/generator for `.prof` exists anywhere in the repo at this commit". **False.**
+    The writer is C++ — `basalt::core::write_expert_profile` (`src/core/expert_cache.cpp:99`), called from
+    `src/program/serve/tier_profile.cpp:16` under `--expert-profile-save` — and `docs/model-file.md:87-89`
+    documents producing one, in the same file I had cited to argue the opposite. The empty result measured
+    my pathspec, not the repository. Rule: **state the pathset in the claim, or drop the claim.** For a
+    negative existence claim either search the whole tree (`git grep -I <pat> <pin>`, no pathspec, then
+    subtract what you deliberately excluded and say why) or downgrade to "no *offline, deterministic*
+    generator in `tools/`, `tests/`, `.github/`". Search for the *thing*, not for a guess at its spelling:
+    searching for the format's writer by symbol name finds what searching for `.prof` in filenames misses.
+16. **A date partition is not defined until you name its basis — `--date=iso-strict` compared as a string
+    partitions by the author's local calendar date.** [OBSERVED 2026-11-05, T2] `git log --format='%ad'
+    --date=iso-strict | awk '$1 < "2026-10-05"'` looks like a UTC cut and is not: the field carries the
+    **author's own UTC offset**, so lexicographic comparison buckets by local wall-clock day. Our
+    pre/post-fork split published as **882 / 1,312**; on `%at` epochs at `2026-10-05T00:00:00Z` the same
+    history is **861 / 1,333** — 21 commits authored on Oct 4 local are Oct 5 in UTC. Both are internally
+    consistent, and the two figures disagreed with each other in three documents before it was caught.
+    Rule: partition on **`%at` / `%ct` epochs** (or `--date=iso-strict` parsed to a tz-aware datetime),
+    never on a formatted date string, and **print the cutoff as an instant with its offset** so the basis
+    travels with the number. Corollary, same family: `--date=short` **inside** a `--format=` string is not
+    an option, it is literal text — the flag silently does nothing and the field format changes under you.
+17. **A transcript line in a stamped artifact is a claim that a command ran — paste it or don't write
+    it.** [OBSERVED 2026-11-05, T2] `audit/wave0/t2-gate-and-checks.txt` recorded gate step 1c as
+    `SKIP(1c: no versions.env yet)` annotated "← SKIP, not pass. Pre-existing state, unchanged by T2."
+    **No run ever printed that line.** `versions.env` has been tracked since `1eafda7` (2026-11-05T01:20Z,
+    Plan 01 T1), so the `else` branch that emits that string is unreachable in this project, and T1's own
+    stamped gate block records `env ok` for the same step. The sentence had been carried in from what the
+    step *would* print in a repo without pins — a prediction of output, typed into a transcript. Cost had it
+    shipped: RULES.md § *The gate* makes "**skip is not pass**" load-bearing for steps 3–6, which genuinely
+    are owner-only; spending that marker on a line that never ran trains the next reader to discount the
+    real SKIPs. The same error appeared one level up, in the tracker note written to
+    explain it: "step 1c **changed state** under this task, and it is a pass, not a regression" — an
+    unobserved *before* state, invented to reconcile a fabricated observation with T1's genuine one.
+    Corollary from the same minute: my chat report of the gate said `env ok` while the artifact said `SKIP`,
+    and neither could be checked against the other — only a fresh run settled it. Rule: **every `text` block
+    in a `wave*/` artifact is pasted bytes, or it is labelled** (`expected` / `template` / `not run`); when a
+    transcript asserts a *precondition* ("no X yet", "X absent"), check X's tracked status before writing the
+    line; and when two records of one step disagree, re-run the step rather than adjudicate from memory.
 
 ## How to avoid
 Never let absence-of-output or a trailing `rc` carry a verdict when a **number** can be printed:
@@ -357,12 +481,111 @@ came from controls that *failed*:
   which `NO_FINAL_NEWLINE=0` and `ROWS=862` cannot. Print the **expected value as a literal**
   (`EXPECTED=862 ACTUAL=$rows`) and derive the actual, never the reverse: a literal `=ok` on an
   aggregation step fires green while the numbers are garbage.
+- **Size stderr, and never let a check own a suppressed stream.** A check that hides stderr cannot
+  tell "nothing to report" from "the command refused to run". Collect it and assert it empty
+  (`ERR_BYTES=0`) — that one term is what would have caught item 8 on its first run.
+- **Show a comparator non-zero at least once.** A `MISMATCH=0` from a comparison nobody has seen fail
+  is decoration. Give every both-directions comparison a control input that must disagree: the pin's
+  **first parent** for the tree check (it returned `BLOB_SHA_MISMATCH=1`, isolating one file —
+  `serve/util/telemetry.py` — out of 862), a perturbed row for a row-level sentinel, an empty input for a row-count
+  gate. And when a control does *not* fire, check what it was aimed at — the first attempt at the
+  census sentinel perturbed row 3, which is a `BINARY_SKIPPED` row the check correctly ignores.
+- **Paste, or label.** A `text` block in a `wave*/` artifact asserts *this ran, this came out*. Item 17's
+  line was **predicted** output wearing a transcript's clothes — it survived because it was plausible and the
+  precondition it asserted ("no `versions.env` yet") was not checkable from inside the artifact. So: write no
+  transcript from memory; when one states a precondition, verify that precondition against the tree first;
+  and when two records of one step disagree, **re-run the step** rather than adjudicate from recall — recall
+  is what manufactured the fabricated "before" state in this task's own tracker note.
 
 ## Sources
 - basalt: `context/audit/manifest/index.md` (the checks, as corrected) and
   `context/audit/wave0/t1-freeze-and-manifest.txt` (the control output)
 - basalt: `context/audit/scripts/ledger-grid.sh` + `context/audit/wave0/t1-grid-controls.txt`
   (items 5–7: the generator and the nine controls that caught them, 2026-11-05)
+- basalt: `context/audit/scripts/t2-census.sh` + `context/audit/wave0/t2-provenance.txt` § 4
+  (items 8–9: the `rev-list --follow` empty column and the disjoint-set zero, plus the five controls
+  that now cover them — C1 parent-tree, C2 empty input, C3 sentinel, C4 empty field, C5 row count)
+- basalt: `context/audit/wave0/t2-provenance.txt` §§ 6, 9, 10 +
+  `context/audit/wave0/t2-lineage.txt` § 0 (items 10–13: the `/get/` endpoint sweep that returned 404
+  for everything, the abbreviated-SHA probes, the `%H%x00%B` record-split that reported 0 AI-trailed
+  commits out of 367, and the unanchored `boundary` grep that published 0 where the anchored count is
+  560 — each refuted by its own control, all four *after* being drafted for the record, 2026-11-05)
 - basalt: `context/plans/02_basalt_vendor_audit_tracker.md` (T1 Notes, 2026-11-05)
 - related: `context/pitfalls.md` § *An empty result from a command that was never allowed to run*
+
+# Cross-repo git forensics: three commands that answer a different question than they look like
+
+## Problem
+[OBSERVED 2026-11-05, Plan 02 T2] Establishing "is this commit also upstream's / where did this fork
+come from" against a second repository. Three methods were run, all three produced confident answers,
+and all three were measuring something else. The stakes: the first two built a headline ("basalt and
+Strata share history to ≈2026-10-04") that was false, and it was false in the direction that would have
+made a fork look better-attested than it is.
+
+1. **Asking a peer repo's commit API for our SHAs.** `GET /repos/<peer>/commits/<sha>` returning `200`
+   for five of our pre-Oct-2026 commits and `422` for others looked like a fork boundary. It is not one:
+   **GitHub resolves that route against the repository's object store, not against its default branch**,
+   so a `200` means "this object exists over there", including on refs nobody looks at. Combined with an
+   upstream that has rewritten its mainline, the predicate "on their `main`" was never evaluated at all.
+2. **Counting or probing objects inside a partial clone you have already queried.** The same session's
+   first Strata fetch (`--filter=tree:0`) showed **6,347** commit objects against `main`'s 5,637, and the
+   710 extras matched our clone exactly — "upstream still serves the deleted line!" They were objects my
+   *own* `git log` and `cat-file` calls had **lazy-fetched on demand** from our side. A pristine clone of
+   the same ref contains **5,637 and 0 shared SHAs with us**. In a promisor repository, the object store
+   is a log of what you asked for.
+3. **`git log <upstream>/<branch>..<our-pin>`, `git cherry`, cross-repo `bisect`, blame continuity.**
+   These *run* on two repositories with no common ancestor and print a confident, wrong answer: with no
+   merge-base, `A..B` is just `B`, so the command reports our entire history as new work and upstream's
+   changes as none. It does not error. (`git diff A B` is the exception worth knowing: it is tree-to-tree
+   and remains sound — our two root commits diff to nothing under it.)
+
+## How to avoid
+- **Best test when the question is about two repos: fetch BOTH into one scratch store** with the same
+  `git fetch --filter=tree:0 --no-tags <remote> main`, then compare inside it —
+  `comm -12 <(git rev-list A|sort) <(git rev-list B|sort)` answers "any shared commit object?" directly
+  (ours: `|A|=2194  |B|=5637  |A∩B|=0`), and the store self-certifies: `in-pack` 7834 = 2194 + 5637 + 3
+  tag objects, nothing else in it. Raw record: `audit/wave0/t2-lineage.txt` § 11b. Two traps inside the
+  method itself: `FETCH_HEAD` is overwritten by the next fetch (name the ref after **each** one — first run
+  here compared Strata against itself that way and had to be discarded), and **`git merge-base` between
+  unrelated histories exits 1 and prints NOTHING**, so `mb=$(git merge-base A B)` is silently empty. The
+  probe that means what it says is the `rev-list` **intersection**, with `|A|` and `|B|` printed next to
+  `|A∩B|` (an empty intersection is also what a *failed* `rev-list` gives, so the marginals are the proof).
+  **Do not use `merge-base --independent` as an unrelatedness test**: it answers "does either input reach
+  the other", and `main` vs a feature branch that plainly shares ancestry returns 2 exactly like two
+  unrelated repos do.
+- **Clone instead of asking.** `git init p && git -C p remote add origin <peer-url> && git -C p fetch
+  --filter=tree:0 --no-tags origin <branch>` is seconds and a few MB, needs no API quota, and gives a
+  real object store. **Verify pristine before believing a count**: `in-pack` before/after
+  (`0` → 5,637), no `objects/info/alternates`, single-branch refspec.
+- **To ask whether a peer serves one specific object, use the promisor as the oracle with a FULL
+  40-hex OID**: `git -C <pristine-partial-clone> cat-file -e <sha>^{commit}`. A miss triggers a real
+  `upload-pack` request, and `fatal: remote error: upload-pack: not our ref <sha>` is an object-level,
+  quota-free answer. Scope what it proves: *"not reachable from any ref this remote advertises"*, **not**
+  "never in the store". Abbreviated OIDs fail locally with a lookalike error (see the item above).
+- **Match content, not hashes, when histories were rewritten.** Join on `(tree, author-date,
+  committer-date, subject)`, and for files on blob SHA; add `git patch-id --stable` for changes. Our two
+  repositories share **0** SHAs and **844** content-key pairs — one history, two variants. Always print
+  `|A|`, `|B|`, `|A∩B|` and the per-side duplicate-key count so the join's shape is visible, and check
+  uniqueness *before* quoting the intersection.
+- **Say which repository a version string belongs to.** Basalt and Strata both publish `v0.1.0`/`v0.2.1`
+  pointing at **different commits**, and Strata publishes 95 tags to basalt's 3. An unqualified `v0.2.1`
+  in any plan or note is ambiguous.
+- **Expect published history to move.** An upstream that force-pushes makes "diff against upstream" an
+  unstable operation; anchor comparisons to a named snapshot hash and a date (ours: Software Heritage's
+  2026-10-05 visit of Strata, whose recorded `refs/tags/v0.1.0` is not the one there today).
+- **And a related trap inside one's own clone:** commit-object counts can exceed `rev-list <pin>` when
+  the repo publishes other refs. Ours: 2,299 objects vs 2,194 commits from the pin — the 105-object gap
+  is `refs/remotes/origin/multimodel`, i.e. **an audited repo can publish a whole branch outside the
+  audited ref**. Enumerate refs (`git for-each-ref`) as part of any freeze, and check
+  present-but-unreachable is 0 (`cat-file --batch-all-objects` set-minus `rev-list --all`).
+
+## Sources
+- basalt: `context/audit/wave0/t2-lineage.txt` (§ 0 refuted hypotheses R1–R2, § 1 sound method, § 2 the
+  2×2 remote-presence matrix, § 4 the content-key corpus, **§ 11b both histories in one object store — the
+  direct `|A∩B|=0` measurement and the silent-`merge-base` record**)
+- basalt: `context/audit/manifest/index.md` § *What "basalt ← Strata" actually means*
+- basalt: `context/pitfalls.md` § *Shell idioms that report green…* items 10–11 (the all-404 endpoint
+  sweep, the abbreviated SHAs)
+- mirrored for reuse across the monorepo: `../../../context/pitfalls.md` § *Cross-repo git forensics*
+- observed during Plan 02 T2, 2026-11-05, against `Niko1221/Strata` and `jesdga95/basalt`
 

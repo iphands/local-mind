@@ -1,0 +1,87 @@
+CMakeLists.txt	1507	unassigned	287	Andy;BlueKingMuch Chanyeong Lim;Daehun Daerdaal;David Dishu(Lester) Lyu;Enky Giveen;Guillaume PUTIER Hozák Martin;Jakub Luwierski JeanP00l;Jeremiah Ritchey Jesus Gulfo;Joey Xiao Johannes Gäßler;Konstantinos Korres Léon Avic Simmons;Matteo Niko1221;Rafa Rafael Grossi;Rhonstin Suoriks;Yun OY bsorensen110;code-martin imanu86;jeancmyk mikicvi;mitalbert orange;pipeob0 ruibeikaa;rwkeyes sergiywith;xyehya yehya;zhedang 野生の男	2026-09-24	2026-11-03	Jesus Gulfo	1047	18	1507	0	OK
+THIRD_PARTY_LICENSES	330	A-planned@T10	10	Jesus Gulfo	2026-10-06	2026-10-23	Jesus Gulfo	330	1	330	0	OK
+assets/basalt-lockup-dark.png	108	A-planned@T10										BINARY_SKIPPED
+assets/basalt-lockup-light.png	99	A-planned@T10										BINARY_SKIPPED
+assets/basalt-mark.svg	17	A-planned@T10	3	Jesus Gulfo	2026-10-06	2026-10-06	Jesus Gulfo	17	1	17	0	OK
+data/bench/conv.ids	1	A-planned@T10	1	Jesus Gulfo	2026-10-09	2026-10-09	Jesus Gulfo	1	1	1	0	OK
+data/bench/prefill.ids	3	A-planned@T10	1	Jesus Gulfo	2026-10-09	2026-10-09	Jesus Gulfo	3	1	3	0	OK
+data/bench/prose.ids	1	A-planned@T10	1	Jesus Gulfo	2026-10-09	2026-10-09	Jesus Gulfo	1	1	1	0	OK
+data/bench/struct.ids	1	A-planned@T10	1	Jesus Gulfo	2026-10-09	2026-10-09	Jesus Gulfo	1	1	1	0	OK
+data/profiles/qwen4exp-48x512.prof	960	A-planned@T10										BINARY_SKIPPED
+docs/community/benchmarks.json	922	A-planned@T12	28	AKCore;Anuruth Lertpiya Calogero Zarbo;Cosmin-Local-Ai Giveen;Hazelhof HenryPDT;Jad El-Khatib Jesus Gulfo;Kim DaeHwan_99 SolettaSolaris;Víctor Martínez azido-azide-azide;beastrobin drakiss79;foolio fukc-gihtub;hronoas lindworm-hermes2026;morrisfamily pyj99-fr	2026-10-21	2026-11-02	Jesus Gulfo	105	21	923	1	OK
+docs/img/frontend.gif	2409	A-planned@T10										BINARY_SKIPPED
+include/basalt/platform/compiler.hpp	103	A-planned@T8	3	Dishu(Lester) Lyu;Jesus Gulfo	2026-10-18	2026-10-29	Jesus Gulfo	95	2	103	0	OK
+include/basalt/platform/cpu.hpp	41	A-planned@T8	3	Jesus Gulfo	2026-10-18	2026-10-24	Jesus Gulfo	41	1	41	0	OK
+include/basalt/platform/direct_file.hpp	67	A-planned@T8	10	Jesus Gulfo;Josh Gao Niko1221;f1zz1ec0ke jeancmyk	2026-10-06	2026-10-31	Niko1221	51	4	67	0	OK
+include/basalt/platform/dynlib.hpp	37	A-planned@T8	1	Jesus Gulfo	2026-10-18	2026-10-18	Jesus Gulfo	37	1	37	0	OK
+include/basalt/platform/file.hpp	157	A-planned@T8	5	Jesus Gulfo;hagudelom jeancmyk;xyehya	2026-10-18	2026-11-03	jeancmyk	100	4	157	0	OK
+include/basalt/platform/format_check.hpp	9	A-planned@T8	1	Jesus Gulfo	2026-10-23	2026-10-23	Jesus Gulfo	9	1	9	0	OK
+include/basalt/platform/mapped_file.hpp	74	A-planned@T8	2	Jesus Gulfo	2026-10-18	2026-10-23	Jesus Gulfo	74	1	74	0	OK
+include/basalt/platform/memory.hpp	274	A-planned@T8	22	Jesus Gulfo;Niko1221 arytek;jeancmyk xyehya	2026-10-06	2026-11-03	Jesus Gulfo	144	5	274	0	OK
+include/basalt/platform/process.hpp	96	A-planned@T8	2	Jesus Gulfo;jeancmyk	2026-10-18	2026-10-18	jeancmyk	72	2	96	0	OK
+include/basalt/platform/system.hpp	81	A-planned@T8	6	Aryan N;Jesus Gulfo hagudelom;xyehya	2026-10-18	2026-10-30	Jesus Gulfo	71	3	81	0	OK
+include/basalt/platform/win.hpp	17	A-planned@T8	1	Jesus Gulfo	2026-10-18	2026-10-18	Jesus Gulfo	17	1	17	0	OK
+requirements.txt	11	A-planned@T12	2	Jesus Gulfo;Niko1221	2026-09-30	2026-10-06	Niko1221	9	2	11	0	OK
+serve/api/__init__.py	1	A-planned@T7	2	Jesus Gulfo	2026-10-07	2026-10-21	Jesus Gulfo	1	1	1	0	OK
+serve/api/anthropic.py	118	A-planned@T7	6	Amir Guindehi;Jesus Gulfo	2026-10-07	2026-10-23	Jesus Gulfo	116	2	118	0	OK
+serve/api/grammar.py	65	A-planned@T7	4	Jesus Gulfo	2026-10-21	2026-11-01	Jesus Gulfo	65	1	65	0	OK
+serve/api/logit_bias.py	57	A-planned@T7	1	David	2026-10-13	2026-10-13	David	57	1	57	0	OK
+serve/api/openai.py	98	A-planned@T7	7	Amir Guindehi;Jesus Gulfo	2026-10-07	2026-10-21	Jesus Gulfo	96	2	98	0	OK
+serve/api/responses.py	514	A-planned@T7	11	Avicennasis;Jesus Gulfo Niko1221	2026-10-07	2026-11-04	Niko1221	475	3	514	0	OK
+serve/api/structured.py	59	A-planned@T7	9	Jesus Gulfo;Niko1221 Ricardo Ambrogi	2026-10-07	2026-10-21	Jesus Gulfo	39	3	59	0	OK
+serve/chat_template.jinja	183	A-planned@T7	1	Niko1221	2026-09-24	2026-09-24	Niko1221	184	1	184	1	OK
+serve/config.py	463	A-planned@T6b	29	Giveen;Jesus Gulfo michmill1970	2026-10-07	2026-11-03	Jesus Gulfo	442	3	463	0	OK
+serve/engine/__init__.py	1	unassigned	1	Jesus Gulfo	2026-10-07	2026-10-07	Jesus Gulfo	1	1	1	0	OK
+serve/engine/errors.py	40	unassigned	4	Jesus Gulfo	2026-10-07	2026-10-30	Jesus Gulfo	40	1	40	0	OK
+serve/engine/flags.py	13	unassigned	1	Jesus Gulfo	2026-10-17	2026-10-17	Jesus Gulfo	13	1	13	0	OK
+serve/engine/image_source.py	570	A-planned@T4	1	Jesus Gulfo	2026-11-03	2026-11-03	Jesus Gulfo	570	1	570	0	OK
+serve/engine/lifeline.py	130	unassigned	1	Jesus Gulfo	2026-10-20	2026-10-20	Jesus Gulfo	130	1	130	0	OK
+serve/engine/mock.py	78	unassigned	3	Jesus Gulfo	2026-10-07	2026-10-08	Jesus Gulfo	78	1	78	0	OK
+serve/engine/modelfile.py	149	A-planned@T6b	19	Damien Vanderhaegen;Jesus Gulfo jeancmyk;michmill1970	2026-10-07	2026-11-03	Jesus Gulfo	144	3	149	0	OK
+serve/engine/process.py	1419	unassigned	42	David;Jesus Gulfo Joey Xiao;Niko1221 hulkbig;jeancmyk	2026-10-07	2026-10-30	Jesus Gulfo	1325	6	1419	0	OK
+serve/engine/progress.py	466	unassigned	12	Jesus Gulfo;lindworm-hermes2026	2026-10-07	2026-10-29	Jesus Gulfo	438	2	466	0	OK
+serve/engine/slots.py	44	unassigned	1	Jesus Gulfo	2026-10-08	2026-10-08	Jesus Gulfo	44	1	44	0	OK
+serve/engine/suspend.py	75	unassigned	1	Jesus Gulfo	2026-10-29	2026-10-29	Jesus Gulfo	75	1	75	0	OK
+serve/engine/vision.py	447	unassigned	17	Giveen;Jesus Gulfo Nick Damiano;Niko1221 jeancmyk;michmill1970	2026-10-07	2026-11-03	Jesus Gulfo	316	6	447	0	OK
+serve/handler.py	772	A-planned@T6a	27	Amir Guindehi;BGonnermann David;Jesus Gulfo Niko1221	2026-10-07	2026-11-03	Jesus Gulfo	663	5	772	0	OK
+serve/prompt.py	128	A-planned@T7	1	Jesus Gulfo	2026-10-23	2026-10-23	Jesus Gulfo	128	1	128	0	OK
+serve/security.py	228	A-planned@T4	5	BGonnermann;Jesus Gulfo	2026-10-07	2026-11-03	Jesus Gulfo	205	2	228	0	OK
+serve/service.py	1337	A-planned@T6a	39	Amir Guindehi;Giveen Hulk;Jesus Gulfo Nick Damiano;Niko1221 yehya	2026-10-07	2026-11-04	Jesus Gulfo	1212	6	1337	0	OK
+serve/tests/test_image_sources.py	1853	A-planned@T4	1	Jesus Gulfo	2026-11-03	2026-11-03	Jesus Gulfo	1853	1	1853	0	OK
+serve/util/logbuf.py	148	A-planned@T6a	5	Jesus Gulfo	2026-10-07	2026-10-23	Jesus Gulfo	148	1	148	0	OK
+serve/util/telemetry.py	281	A-planned@T6a	14	Hendrik Polczynski;Jesus Gulfo Niko1221;maxfridbe polygizer	2026-10-07	2026-11-05	Niko1221	183	3	281	0	OK
+serve/web/app.css	241	A-planned@T10	19	Hendrik Polczynski;Jesus Gulfo Niko1221;maxfridbe yehya	2026-09-27	2026-10-29	Jesus Gulfo	239	2	241	0	OK
+serve/web/app.js	355	A-planned@T10	33	Hendrik Polczynski;Jesus Gulfo Niko1221;code-martin maxfridbe;mikicvi yehya	2026-09-27	2026-10-29	Jesus Gulfo	343	3	355	0	OK
+serve/web/fonts/OFL.txt	92	A-planned@T10	2	Jesus Gulfo;Niko1221	2026-09-27	2026-10-06	Niko1221	90	2	93	1	OK
+serve/web/fonts/geist-latin-wght.woff2	100	A-planned@T10										BINARY_SKIPPED
+serve/web/fonts/geist-mono-latin-wght.woff2	95	A-planned@T10										BINARY_SKIPPED
+serve/web/index.html	79	A-planned@T10	24	Jesus Gulfo;Niko1221 code-martin;maxfridbe mikicvi;yehya	2026-09-27	2026-10-29	Jesus Gulfo	65	3	79	0	OK
+serve/web/mark.svg	17	A-planned@T10	3	Jesus Gulfo	2026-10-06	2026-10-06	Jesus Gulfo	17	1	17	0	OK
+src/platform/affinity_linux.hpp	50	A-planned@T8	5	Jesus Gulfo;野生の男	2026-10-18	2026-10-21	野生の男	48	2	50	0	OK
+src/platform/basalt.exe.manifest	20	A-planned@T8	1	jeancmyk	2026-10-18	2026-10-18	jeancmyk	20	1	20	0	OK
+src/platform/cpu.cpp	321	A-planned@T8	4	Giveen;Jesus Gulfo	2026-10-18	2026-10-24	Jesus Gulfo	314	2	321	0	OK
+src/platform/direct_file.cpp	455	A-planned@T8	14	Jesus Gulfo;Josh Gao Niko1221;f1zz1ec0ke hagudelom;jeancmyk	2026-09-24	2026-10-31	jeancmyk	255	6	455	0	OK
+src/platform/dynlib.cpp	64	A-planned@T8	1	Jesus Gulfo	2026-10-18	2026-10-18	Jesus Gulfo	64	1	64	0	OK
+src/platform/file.cpp	456	A-planned@T8	6	Jesus Gulfo;hagudelom jeancmyk;xyehya	2026-10-18	2026-11-03	jeancmyk	247	4	456	0	OK
+src/platform/mapped_file.cpp	142	A-planned@T8	3	Jesus Gulfo;hagudelom	2026-10-18	2026-10-30	Jesus Gulfo	140	2	142	0	OK
+src/platform/memory.cpp	865	A-planned@T8	24	Jesus Gulfo;Niko1221 arytek;jeancmyk xyehya	2026-09-24	2026-11-03	Jesus Gulfo	470	5	865	0	OK
+src/platform/process.cpp	321	A-planned@T8	4	Jesus Gulfo;hagudelom jeancmyk	2026-10-18	2026-10-30	jeancmyk	216	3	321	0	OK
+src/platform/system.cpp	227	A-planned@T8	7	Aryan N;Jesus Gulfo hagudelom;xyehya	2026-10-18	2026-10-30	Jesus Gulfo	212	3	227	0	OK
+src/program/generate/configure.cpp	326	A-planned@T9	5	Giveen;Jesus Gulfo xyehya	2026-10-30	2026-11-03	Giveen	297	3	326	0	OK
+src/program/image_loan.cpp	37	A-planned@T9	1	Jesus Gulfo	2026-10-26	2026-10-26	Jesus Gulfo	37	1	37	0	OK
+src/program/multi_gpu_plan.cpp	349	A-planned@T9	11	Jesus Gulfo	2026-10-24	2026-10-26	Jesus Gulfo	349	1	349	0	OK
+src/program/serve/loan_moves.cpp	37	A-planned@T9	1	Jesus Gulfo	2026-10-29	2026-10-29	Jesus Gulfo	37	1	37	0	OK
+src/program/serve/loans.cpp	69	A-planned@T9	1	Giveen	2026-10-27	2026-10-27	Giveen	69	1	69	0	OK
+src/program/serve/vision.cpp	170	A-planned@T5	2	Giveen;Jesus Gulfo	2026-10-29	2026-10-29	Giveen	165	2	170	0	OK
+src/vision/encoder_cpu.cpp	266	A-planned@T5	4	Jesus Gulfo;jeancmyk	2026-10-08	2026-10-18	Jesus Gulfo	262	2	266	0	OK
+src/vision/encoder_cuda.cu	351	A-planned@T5	3	Jesus Gulfo;Yun OY	2026-10-08	2026-10-29	Jesus Gulfo	335	2	351	0	OK
+src/vision/gemm_cpu.cpp	98	A-planned@T5	2	Jesus Gulfo	2026-10-08	2026-10-08	Jesus Gulfo	98	1	98	0	OK
+src/vision/gemm_cpu.hpp	16	A-planned@T5	2	Jesus Gulfo	2026-10-08	2026-10-08	Jesus Gulfo	16	1	16	0	OK
+src/vision/gemm_cpu_avx512.cpp	89	A-planned@T5	3	Jesus Gulfo;jeancmyk	2026-10-08	2026-10-18	Jesus Gulfo	89	1	89	0	OK
+src/vision/mmproj.cpp	222	A-planned@T5	5	Jesus Gulfo;jeancmyk	2026-10-08	2026-10-18	Jesus Gulfo	211	2	222	0	OK
+src/vision/preprocess.cpp	225	A-planned@T5	2	Giveen;Jesus Gulfo	2026-10-08	2026-10-27	Jesus Gulfo	209	2	225	0	OK
+src/vision/stb_image.h	7988	B-vendored@T5	1	Jesus Gulfo	2026-10-08	2026-10-08	Jesus Gulfo	7988	1	7988	0	OK
+src/vision/vision_kernels.cu	285	A-planned@T5	1	Jesus Gulfo	2026-10-08	2026-10-08	Jesus Gulfo	285	1	285	0	OK
+src/vision/vision_kernels.cuh	32	A-planned@T5	1	Jesus Gulfo	2026-10-08	2026-10-08	Jesus Gulfo	32	1	32	0	OK
+tools/check_platform_boundary.sh	42	A-planned@T8	3	Jesus Gulfo	2026-10-18	2026-10-18	Jesus Gulfo	42	1	42	0	OK
+tools/tokenizer.py	303	A-planned@T7	15	Jesus Gulfo;Niko1221 arytek	2026-10-06	2026-10-25	Niko1221	253	3	303	0	OK

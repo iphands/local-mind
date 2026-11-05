@@ -1,0 +1,429 @@
+Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.
+
+# T2 · raw evidence: what the pin's history is, and who wrote the boundary
+
+Everything here was run **2026-11-05** in one session from `server/basalt`. Statements about
+upstream (`tip`, `tag list`, `pushed_at`) are about that instant, not permanent facts.
+Plan task: [`../../plans/02_basalt_vendor_audit.md`](../../plans/02_basalt_vendor_audit.md) § T2.
+Conclusions and their limits: [`../manifest/index.md`](../manifest/index.md) § Upstream provenance.
+Companions: [`t2-github-tree-paths.txt`](t2-github-tree-paths.txt) (the 862 upstream path→blob pairs),
+[`t2-author-census.tsv`](t2-author-census.tsv) (87 census rows),
+[`t2-boundary-authorship.txt`](t2-boundary-authorship.txt) (domain table, rarity table, read order),
+[`t2-lineage.txt`](t2-lineage.txt) (**the fork relationship to `Niko1221/Strata`, and four refuted
+hypotheses — read its § 0 before re-running any upstream-comparison command from this file**),
+[`t2-gate-and-checks.txt`](t2-gate-and-checks.txt) (gate steps, the six `audit/index.md` checks,
+negative controls C2–C8).
+
+## 1 · Method, and why it is not `gh`
+
+The plan's Verify block says `gh api …`. **`gh` is not installed in this session**
+(`command -v gh` → nothing); the tracker's environment list claiming it works is wrong and is
+corrected in the plan. Everything upstream below came from `curl` over TLS to
+`https://api.github.com` (API v3), **unauthenticated**.
+Per Rule E the comparison is against GitHub's response, never against our own clone's self-claim.
+
+```bash
+PIN=dc047a77beeddf1e91234d983a91d6bf929e9619
+curl -sS https://api.github.com/repos/jesdga95/basalt                     # repo metadata
+curl -sS "$API/commits/$PIN"                                              # commit + verification
+curl -sS "$API/commits?per_page=1"                                        # is the pin basalt's tip?
+curl -sS "$API/tags?per_page=100"                                         # basalt's OWN tags (95 ≠ Strata's)
+curl -sS "$API/git/trees/3f7b69ae…?recursive=1"  -o tree.json             # THE witness
+```
+
+Two limits on this method, both learned the hard way in this session:
+
+- The unauthenticated quota is **60 requests/hour** and this task consumed it. No further API probing
+  is available from an agent session once exhausted; `git ls-remote` and `git fetch` are **not**
+  rate-limited, which is what made the git-protocol tests in [`t2-lineage.txt`](t2-lineage.txt) possible.
+- **Querying a *peer* repository's commit endpoint for our SHAs is not a valid presence test.** GitHub
+  resolves a commit against a repo's object store, not against its default branch, and this upstream
+  has rewritten its mainline — so a `200`/`422` split proved nothing about shared history. That method
+  is retired; the sound one is a pristine `--filter=tree:0` clone plus the promisor **full-40-hex**
+  probe. See [`t2-lineage.txt`](t2-lineage.txt) § 0 (R1) and § 1, and `../../pitfalls.md`.
+
+## 2 · Upstream and pin identity
+
+```text
+repo            jesdga95/basalt · default_branch main · license MIT · fork=false
+                (fork=false = no GitHub fork-NETWORK link, i.e. two independent object stores. It is
+                NOT GitHub disputing the relationship: the project declares a fork of Niko1221/Strata
+                in-tree. See [`t2-lineage.txt`](t2-lineage.txt) § 5.)
+created_at      2026-10-06T22:17:02Z        pushed_at 2026-11-05T02:55:14Z
+  upstream      Niko1221/Strata (MIT) · GitHub reports 40,068 stars · created 2026-09-24T16:40:20Z
+                · 95 tag refs to v0.2.10 · 5,637 commits on its main · tip ffa80d73133e…
+                The star counter is recorded as an observation and does NO argumentative work here.
+tags BASALT's OWN   v0.1.0 421063f0 · v0.2.0 f0bb833c · v0.2.1 1b3f6964     — NO v0.3.5
+                  CORRECTED 2026-11-05 (this line previously read "tags upstream", implying these are
+                  Strata's releases — they are not): Strata's same-named tags are DIFFERENT objects
+                  (its v0.1.0 = 01529aaa…, its v0.2.1 = 49ac15cb…) and it publishes 95 of them.
+                  The two version namespaces share names and nothing else, so **every version string
+                  in this audit must name its repository.**
+tip of main     dc047a77beeddf1e91234d983a91d6bf929e9619  == our pin
+                (the tip is `GET /commits?per_page=1`, i.e. default branch only. `pushed_at` is a
+                REPO-level timestamp that also covers `multimodel`, so it being 2 h after the pin's
+                author date does NOT mean `main` advanced past the pin)
+other branch    refs/remotes/origin/multimodel 61e26cbb (not pinned, not audited)
+
+pin             dc047a77beeddf1e91234d983a91d6bf929e9619   tree 3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4
+author          polygizer <polygizer@naver.com>            2026-11-05T00:48:24Z
+committer       GitHub  <noreply@github.com>               2026-11-05T00:48:24Z
+parent          bbf2f5bb783adc5ffe5b49043f82c9399313bb46
+subject         serve: read NVML from nvml.dll on Windows so /metrics reports the GPU (#242)
+verification    verified=true reason=valid  PGP RSA B5690EEEBB952194  (GitHub's
+                "created on GitHub.com" key — a web-UI squash merge, signed by GitHub)
+local check     git log --show-signature → "Can't check signature: No public key"  (%G?=E)
+                parents bbf2f5bb and 9ef79757 are %G?=N (unsigned). 58 of 2 194 commits
+                have committer GitHub; only those are signed at all — no signature chain.
+tag objects     for-each-ref --format='%(refname:short) %(objecttype)' → all three `objecttype=tag`,
+                so annotated tag OBJECTS exist (a lightweight tag has no object at all and can never
+                be signed). PGP signature blocks inside each: 0. So the releases are
+                **annotated-but-UNSIGNED**, not lightweight — the tagging was deliberate, and still
+                no contributor key anchors any release
+ancestry        merge-base --is-ancestor: v0.1.0 rc=0 · v0.2.0 rc=0 · v0.2.1 rc=0
+                commits between v0.2.1 and the pin: 3
+                  9ef79757 serve: images in tool results reach the prompt on every API …
+                  bbf2f5bb docs: the Linux build needs GCC 13 or newer
+                  dc047a77 serve: read NVML from nvml.dll on Windows … (#242)  ← our pin
+local repo      refs/heads/main, refs/remotes/origin/{HEAD,main} all = pin; HEAD detached;
+                `git status --porcelain` → 0 entries; partial clone (promisor, blob:none)
+security policy SECURITY.md, .github/SECURITY.md, docs/SECURITY.md all absent at the pin:
+                `for f in …; do git cat-file -e "dc047a77:$f"; done` → all three fail
+                → no upstream disclosure channel is declared at this commit
+```
+
+## 3 · Whole-tree equivalence (the T2 claim)
+
+`tree.json` (942 entries = 862 blobs + 80 trees, **`truncated=false`**) held the path→blob pairs
+GitHub serves for `3f7b69ae…`; the local side is `git ls-tree -r $PIN`. Compared in both directions:
+
+```text
+API_BLOBS=862  LOCAL_BLOBS=862  INTERSECT=862
+ONLY_IN_API=0  ONLY_IN_LOCAL=0  BLOB_SHA_MISMATCH=0     GITLINKS=0
+modes: 858 × 100644 · 4 × 100755 · 0 symlinks
+quotable paths needing git quoting (non-ASCII/space/tab): 0   → the path↔blob join is unambiguous
+CANONICAL_SHA256_UPSTREAM = a8216c6983f4d6345d1b67751b7242802f03a9a031a45822e9c90290b21bb857
+CANONICAL_SHA256_LOCAL    = a8216c6983f4d6345d1b67751b7242802f03a9a031a45822e9c90290b21bb857
+  (canonical = sha256 over the concatenation of "path<TAB>blob-sha<LF>" for all 862 paths, sorted)
+the 4 executable-mode files: tools/check_benchmarks.py · tools/check_platform_boundary.sh
+                             tools/check_stderr_logging.sh · tools/zero_doorbell_check.py
+```
+
+**The committed witness is one transformation away from what GitHub sent**, so the transformation is
+recorded and its output re-hashed against the raw JSON (otherwise `wave0/` holds a hand-writable
+"witness"). Raw response saved to `/tmp/opencode/basalt-audit/t2/tree.json` (scratch, 275,898 bytes,
+`sha256 58c71605a127eac742791a7da53a0a1240af2659ccc2e1eaa7c5a6da754f289b`); the committed
+[`t2-github-tree-paths.txt`](t2-github-tree-paths.txt) (5 `#` stamp lines + 862 data lines,
+`sha256 2446112354432c2c02a903bd2e135b6f4bacda4c7cf5f0cc72c4c78c26bcd8d9`) is derived from it by:
+
+```bash
+python3 -c "import json; d=json.load(open('…/t2/tree.json')); [print(e['path']+'\t'+e['sha'])
+  for e in sorted((e for e in d['tree'] if e['type']=='blob'), key=lambda x: x['path'])]"
+```
+
+and the canonical hash is recomputed over the **committed file's** data lines, not the JSON's:
+
+```text
+DERIVED_FROM_JSON_CANONICAL     = a8216c6983f4d6345d1b67751b7242802f03a9a031a45822e9c90290b21bb857
+COMMITTED_WITNESS_DATA_CANONICAL= a8216c6983f4d6345d1b67751b7242802f03a9a031a45822e9c90290b21bb857
+WITNESS_MATCHES_RAW_JSON=True   DATA_ROWS=862
+```
+
+## 4 · Negative controls — each one had to fire
+
+| # | control | fired with |
+|---|---|---|
+| C1 | **Sensitivity of the comparator.** Run the *same* comparison against the pin's **first parent** (`bbf2f5bb`, tree `c7fbe4ef…`) instead of the pin | `BLOB_SHA_MISMATCH=1` — exactly one blob differs, `serve/util/telemetry.py` (`5b7b4a01` → `36f802a4`), i.e. the check distinguishes one changed file out of 862 |
+| C2 | **Producer refuses a wrong-sized input.** `census.sh rows-empty.tsv … 87` | `ROWS_IN=0 EXPECT_ROWS=87 — INPUT WRONG, refusing to run`, exit **7**. Before the gate was added this printed `VALIDATION=PASS` and exited **0** — an empty census passing |
+| C3 | **Sentinel on the census identity.** `lines_blame` incremented by 1 on row 1 | `FLAGGED: CMakeLists.txt loc=1507 nonl=0 lines_blame=1508` → `LINES_BLAME_NE_LOC_PLUS_NONNL=1` |
+| C4 | **Empty-field check.** col 4 blanked on one row | `EMPTY_FIELD assets/basalt-mark.svg col=4` → `EMPTY_FIELDS=1` |
+| C5 | **Row count.** one row deleted | `ROWS=86 EXPECTED=87` |
+| C6 | **Blame failure reaches the validator.** one well-formed but **non-existent** path, `expect_rows=1` | `EMPTY_FIELD col=5…11`, `NOT_OK … BLAME_FAILED`, `VALIDATION=FAIL_FIELDS`, exit **6**, `ERR_BYTES=213` (`fatal: path 'src/platform/definitely_not_real.cpp' does not exist in 'dc047a77…'`) |
+| C7 | **Line accounting with stderr suppressed** — a mutant of the script that prints `census_status=OK` for that missing file, so nothing reaches stderr and only the accounting can catch it | `EMPTY_FIELDS=9` (cols 4–12 blank), `VALIDATION=FAIL_FIELDS`, exit **6** |
+| C8 | **The `ERR_BYTES=0` assertion itself.** A unit control: one line injected into `$ERRLOG` immediately before the assertion (mutates the script, not the data) | `ERR_BYTES=69`, `VALIDATION=FAIL_STDERR`, exit **9**. Needed because `FAIL_FIELDS` exits 6 first, so no genuinely-failing census ever *reaches* this assertion |
+
+C3's first attempt perturbed **row 3**, which is `assets/basalt-lockup-dark.png`, a
+`BINARY_SKIPPED` row the check correctly ignores — a control that cannot fire is not a control.
+C6–C8 and the gate/checks run are transcribed command-then-output in
+[`t2-gate-and-checks.txt`](t2-gate-and-checks.txt) § 5.
+
+**Two green-but-wrong results found in this task's own tooling, before any of this was written:**
+
+1. `git rev-list --count --follow` — `rev-list` has **no** `--follow`. git's usage text went to a
+   suppressed stderr and stdout came back empty, so the `commits` column was **blank for all 75
+   rows** while every row still printed and the census "passed". Caught only because the column
+   was visibly empty on a different file set.
+2. The first tree comparison had two **swapped awk fields**, so the local keys were blob SHAs and
+   the upstream keys were paths: `ONLY_IN_API=862 ONLY_IN_LOCAL=861 BLOB_SHA_MISMATCH=0` — a
+   **vacuous zero over two disjoint sets**. It printed as a clean pass. Caught only because the
+   comparator prints `|A|`, `|B|` and `|A∩B|` separately. That is why those three counters are
+   part of the check and not just the mismatch count.
+
+## 5 · Census: how it was run, and exactly what `OK` means
+
+Generator (kept in the repo): [`../scripts/t2-census.sh`](../scripts/t2-census.sh).
+Blame flags used: **none** — plain `git blame --line-porcelain $PIN -- <path>`. No `-w`, no `-M`,
+no `-C`, no `--ignore-revs-file`. `-w` would change the question from "whose bytes are these" to
+"whose logic is this"; the numbers below are meaningless without this line, so it is here.
+Blame-affecting config in any scope: **absent**, and that is pasted output, not a prescription:
+
+```bash
+git -C vendor/basalt config --list --show-origin | grep -iE 'blame|quotepath|ignoreRevs'
+```
+```text
+(no output; grep exit 1)   22 config lines read across 7 origins (repo .git/config, repo
+.gitignore/.gitconfig lfs entries, three user .gitconfig files) — none matches blame|quotepath|ignoreRevs
+```
+So no `blame.ignoreRevsFile` is silently re-homing lines off formatting commits in any scope, and
+`core.quotePath` is at its default (which matters for the `path⇥blob` join — see § 3, 0 quotable paths).
+
+```text
+input   87 rows = the 75 Tier A manifest rows + the 12 files the plan's T2 names as boundaries
+        but the manifest leaves unassigned (CMakeLists.txt, the 10 serve/engine/*.py,
+        src/vision/stb_image.h)
+        COMPLETENESS is checked from the manifest, not from this list — `ROWS_IN=87` only proves the
+        list has 87 lines, so a dropped Tier A row plus a slipped-in extra would still pass. Two-way:
+        `TIERA=75 CENSUSED=87 ONLY_IN_TIERA=0 ONLY_IN_CENSUSED=12`, all 12 found in the manifest with
+        a non-A tier, and 0 overlap with Tier A. Full output:
+        [`t2-gate-and-checks.txt`](t2-gate-and-checks.txt) § 4.
+output  ROWS_IN=87 ROWS_OUT=87 BINARY_SKIPPED=6 EMPTY_FIELDS=0 NOT_OK=0 ERR_BYTES=0 VALIDATION=PASS
+        shellcheck -x → clean
+schema  headerless TSV, LC_ALL=C sorted by path, 13 tab-separated columns:
+        1 path · 2 loc · 3 tier · 4 commits_total · 5 authors_log (;-separated, --follow)
+        6 first_commit_date · 7 last_commit_date · 8 top_author · 9 lines_top_author
+        10 authors_blame · 11 lines_blame · 12 no_trailing_nl · 13 census_status
+        (2, 3 are copied from the manifest; 4-7 from `git log --follow`; 8-11 from blame)
+        col 13 is `census_status` (OK | BINARY_SKIPPED | REAL_DRIFT | BLAME_FAILED) and is NOT called
+        `status`: `manifest/*.tsv` col 8 is `status` (pending | read@T<n>), disjoint vocabularies.
+        The committed .tsv is headerless, so these names exist only here and in the generator's line 1.
+sentinels (run them, they are 87 rows and cheap):
+        awk -F'\t' '$13!="BINARY_SKIPPED" && ($2+$12)!=$11{n++} END{print "LINES_BLAME_NE_LOC_PLUS_NONNL="n+0}'
+        awk -F'\t' '$13!="BINARY_SKIPPED"{for(i=1;i<=13;i++) if($i==""){n++}} END{print "EMPTY_FIELDS="n+0}'
+        awk 'END{print "ROWS="NR+0}' context/audit/wave0/t2-author-census.tsv        # 87
+```
+
+**`census_status=OK` certifies line accounting and row survival only.** It means
+`lines_blame == loc + no_trailing_nl`, i.e. blame did not die mid-file and no row lost a field.
+**It cannot see a wrong author.** Identity is a separate claim and it has its own limit, below.
+
+### The one denominator every percentage in T2 uses
+
+Stated once here; every other file points at this block rather than repeating the arithmetic.
+
+```bash
+awk -F'\t' '$13=="OK" && $1!="src/vision/stb_image.h"{n++; L+=$2; BL+=$11; if($12==1) nl++}
+     END{printf "FILES=%d manifest_loc=%d lines_blame=%d no_trailing_nl_files=%d\n", n, L, BL, nl}' \
+  context/audit/wave0/t2-author-census.tsv
+```
+```text
+FILES=80 manifest_loc=20108 lines_blame=20111 no_trailing_nl_files=3
+```
+
+87 rows → **6** `BINARY_SKIPPED` (gif/png/woff2/`.prof`) → **81** files blamed → minus the vendored
+`src/vision/stb_image.h` → **80 first-party files carrying 20,111 blamed lines**. `manifest_loc` plus
+the 3 files that end without a newline equals `lines_blame` exactly, which is the accounting identity
+and nothing more. Files with no final newline: `docs/community/benchmarks.json`,
+`serve/chat_template.jinja`, `serve/web/fonts/OFL.txt`. (With `stb_image.h` included the pair is
+`FILES=81 manifest_loc=28096 lines_blame=28099` — that set is never used.)
+
+**`src/vision/stb_image.h` (7,988 l, `B-vendored@T5`) is excluded from every aggregate.**
+Blame attributes all 7,988 lines to Jesus Gulfo because he imported the file; that is commit
+attribution, not authorship. Including it would inflate the owner's share by ~40 %.
+
+## 6 · Blame-boundary diagnostic (does the 72 % figure rest on blame's stopping points?)
+
+`--line-porcelain` marks a commit it will not walk past with a `boundary` header line. Lines credited
+to a boundary or to the repository's root commit are credited to whoever last *moved* them, not
+whoever wrote them. Measured over the **80** first-party censused files — the denominator defined in
+§ 5 (`87` census rows − `6` `BINARY_SKIPPED` − `1` vendored `stb_image.h`); that list, not any of the
+`86` / `87` variants, is what every figure on this page divides by:
+
+```text
+lines=20111   boundary_lines=560 (2.78%)   root_commit_lines=560 (2.78%)
+files_with_boundary_lines=7 of 80
+```
+
+```text
+  44  CMakeLists.txt
+  51  include/basalt/platform/direct_file.hpp
+  17  include/basalt/platform/memory.hpp
+ 184  serve/chat_template.jinja
+  72  src/platform/direct_file.cpp
+  14  src/platform/memory.cpp
+ 178  tools/tokenizer.py
+```
+
+  CORRECTED 2026-11-05 — **this section first published `boundary_lines=0 (0.00 %)` and the sentence
+  "no blame line in the census sits on a boundary". Both were false.** The figure came from a grep of
+  the blame output for the string `boundary` with no anchor. Blame porcelain *echoes the source line*,
+  so that pattern also matches identifiers and comments (`/// … a prefetch window starts on a page
+  boundary.` in `memory.cpp`, and `boundary` in `CMakeLists.txt`); anchored to the header form
+  `^boundary( <40-hex>)?$` the true count is **560 lines in 7 files**. A fourth green-but-wrong result
+  in this task's own tooling. The exact command, since the naive one is the trap:
+  `git blame --line-porcelain $PIN -- "$f" | grep -cE '^boundary( [0-9a-f]{40})?$'`.
+
+**The 560 boundary lines are exactly the 560 root-commit lines** — not merely equal totals: per-file
+counts match for all 80 files, so it is one population, not two that coincide. `|A|=560 |B|=560`,
+per-file mismatches 0. The cause is the root commit itself: blame cannot walk past a commit with no
+parent, so every line still credited to `f2a08d4b` is *by definition* a boundary line.
+
+So the honest reading is **the opposite of what this section first claimed: 2.78 % of the audited
+lines do rest on blame's stopping point**, and no share below is free of it. But the 2.78 % is not an
+*error bar* — it is a **lineage** quantity, not an uncertainty. Those 560 lines are inherited from
+before the fork (they are the ancestor project's initial bulk import: `f2a08d4b`, 2026-09-24,
+**Niko1221**, "Strata: Qwen3.8-Flash-Next on a 12-24 GB NVIDIA GPU + 64 GB RAM, one-click install",
+219 files / 50,165 insertions). Their author is unknown to blame and knowable another way: they sit in
+the 1,001-line `inherited` bucket below, where the credited author is Niko1221 for 94.8 % of them.
+Attributing them to "whoever imported them" is the correct label, and it is why the § 5 shares are
+published twice. Files where the root dominates: `serve/chat_template.jinja` 184/184,
+`tools/tokenizer.py` 178/303, `include/basalt/platform/direct_file.hpp` 51/67.
+
+### The same 20,111 lines split by lineage rather than by blame's stopping points
+
+Key: a blamed commit is `inherited` iff its `(tree, author-date, committer-date, subject)` has a twin
+in a pristine clone of `Niko1221/Strata`'s `main` ([`t2-lineage.txt`](t2-lineage.txt) § 4). This is
+content membership, **not** provenance, review or trust, and it never changes a `census.md`
+disposition — see § 10.
+
+```text
+  on the root commit f2a08d4b        =   560  (2.78%)   ← the boundary population, identical
+  inherited (content twin upstream)  =  1001  (4.98%)
+  basalt-side (no content twin)      = 18550  (92.24%)
+  blamed commit absent from our log  =     0          sum 20111 = total, exact
+```
+
+Author concentration, published twice because the whole-tree figure mixes two lineages (provisional
+pending T2b's blob-level join):
+
+```text
+  WHOLE TREE       lines=20111  top=Jesus Gulfo 14558 (72.4%)  core-two 81.0%  authors=53
+  BASALT-ERA ONLY  lines=18550  top=Jesus Gulfo 14558 (78.5%)  core-two 85.5%  authors=44
+  INHERITED ONLY   lines= 1561  top=Niko1221       1480 (94.8%) core-two 97.9%  authors=10
+```
+
+Every line of the owner's share survives the lineage cut; the inherited 1,561 are upstream's people.
+Note 560+1001 = 1,561, so `INHERITED ONLY` here includes the root population.
+
+## 7 · History shape (local git over the pin)
+
+```text
+commits 2194 · author NAMES 139 · author EMAILS 144  (the two disagree — neither is a person count)
+merge commits 113 · first commit 2026-09-24 · the strata→basalt namespace rename cluster is 2026-10-06
+  CORRECTED 2026-11-05 (this file's earlier draft said "project renamed strata → basalt", which reads
+  as a self-rename and is wrong): `jesdga95/basalt` is a **fork of `Niko1221/Strata`**, declared
+  in-tree at `AGENTS.md:3`, `CONTRIBUTING.md:56`, `README.md:68`, `THIRD_PARTY_LICENSES:4,9`.
+  7 tracked files still name Strata; **0 in build files** (`CMakeLists.txt *.cmake *.toml *.cfg *.in`)
+  — so lineage cannot be read from build files at all, only from git metadata.
+  Full lineage evidence and four refuted hypotheses: [`t2-lineage.txt`](t2-lineage.txt).
+month buckets under TZ=UTC (--date=format-local, so the buckets are not offset-local):
+  author     2026-09 456 · 2026-10 1661 · 2026-11 77
+  committer  2026-09 428 · 2026-10 1680 · 2026-11 86
+top committers: Jesus Gulfo 1279 · Niko1221 712 · maxfridbe 69 · GitHub 58
+commits in the last 30 days touching src/platform OR src/vision OR CMakeLists.txt: 216
+  (three-path OR count — a commit touching two paths is counted once here but note the
+   overlap before quoting it; the load-bearing conclusion is the RULE it implies: any re-pin
+   must re-run T1 freeze AND T2 provenance as a pair, never just swap the SHA)
+```
+
+## 8 · Side effect the census had on the "frozen" clone
+
+Blame on a `blob:none` partial clone **lazy-fetches blobs**, so T2 wrote to the object store. T1
+ran its checks under `GIT_NO_LAZY_FETCH=1`; this census deliberately did not, and could not.
+
+```text
+git count-objects -v  →  in-pack 19352 · packs 752 · size-pack 53992 KiB · loose 0 · garbage 0
+```
+
+The tree hash still matches (§3) and the worktree is still porcelain-clean, so the pin did not
+move; but the clone is no longer blob-empty, and the census is only re-runnable offline *because*
+it has now run once.
+
+## 9 · Third-party witness — partial, and the first attempt was broken
+
+```text
+GET https://archive.softwareheritage.org/api/1/revision/dc047a77…/
+    → 404 {"exception":"NotFoundExc","reason":"Revision with sha1_git dc047a77… not found."}
+GET https://archive.softwareheritage.org/api/1/origin/https://github.com/jesdga95/basalt/get/
+    → 404 {"exception":"NotFoundExc","reason":"Origin with url … not found!"}
+```
+
+As of **2026-11-05** SWH holds no origin for `jesdga95/basalt` and no revision for the pin. A first
+attempt at the origin search also timed out at 25 s. **Nothing in the archive anchors the pinned
+commit.** Recorded as a limit, not as a pass.
+
+Two corrections to how this section first read, both from re-probing after a control caught a bug:
+
+- The earlier draft said SWH "has **never** archived this project". A point-in-time `404` cannot
+  support "never", and it was also the wrong subject: SWH holds **9 visits of
+  `Niko1221/Strata`** and **our own root commit `f2a08d4b`, archived under Strata's origin as
+  Strata's `refs/tags/v0.1.0`**. So the ancestor line does have an off-GitHub witness; the audited
+  pin does not, and that asymmetry is the point.
+- A whole pass of `…/api/1/revision/<sha>/get/` probes returned 404 for **every** input including a
+  value SWH demonstrably holds. The route is `…/api/1/revision/<sha>/` (no `/get/`). With the correct
+  form the controls pass (their tip → 200, zeros → 404) and the picture inverts. **A uniform negative
+  across an endpoint family is a broken probe, not a finding** — `../../pitfalls.md`.
+
+The corrected witness record, with the two-authority corroboration of Strata's tip:
+[`t2-lineage.txt`](t2-lineage.txt) § 7.
+
+## 10 · What the corpus's own metadata says wrote it (the census's missing second axis)
+
+§ 5 counts the **author** field. That field answers *who committed it*, and this history carries a
+second, self-reported field the census did not read: AI co-authorship trailers. Counts below are
+**commits**, not trailer lines, obtained with `git log -z --format='%H\t%B'` over the pin — the `-z`
+matters, an earlier `\0`-split parse returned 0 for everything (§ 6's trap repeated in a different
+form; [`t2-lineage.txt`](t2-lineage.txt) § 0 R4).
+
+Pattern: `co-authored-by: (claude|openai|chatgpt|copilot)` or `claude-session:` or
+`generated-with: (claude|copilot)`, case-insensitive.
+
+```text
+COMMITS  (author-date basis = UTC epoch, cut 2026-10-05T00:00:00Z)
+  ours   (jesdga95/basalt @ dc047a77)   1881 of 2194  = 85.7%
+    of which the inherited pre-fork line        612 of  861  = 71.1%
+    of which basalt-era work                   1269 of 1333  = 95.2%
+  theirs (Niko1221/Strata refs/remotes/origin/main, pristine fetch of 2026-11-05)
+      3 of 5637  =  0.05%   ← NOT a human-written control: that line was rewritten (t2-lineage.txt § 5)
+
+LINES  (git blame --line-porcelain over the 80 first-party censused files, blamed commit ∩ the set above)
+  lines in those 80 files                      20111   (9% of the 219,247 audited lines — NOT the audit's
+                                                          whole corpus; say "the 80 census files", never
+                                                          "the audited codebase")
+  under an AI-trailed commit                   19035  = 94.6%
+  distinct commits blame credits                 367
+  of which AI-trailed                            329  = 89.6%
+  heaviest: serve/tests/test_image_sources.py 1853 · serve/engine/process.py 1419
+            CMakeLists.txt 1325 · serve/service.py 1302 · src/platform/memory.cpp 860
+```
+
+The comparator was verified non-zero before being believed: `|AI-trailed ∩ blamed| = 329`.
+
+Two limits that bound what this can be used for, both load-bearing:
+
+1. **A trailer is disclosure, not authorship.** It records what the committer claimed about how the
+   commit was made. The defensible sentence is *"the audited history self-identifies as substantially
+   AI co-authored"*, never "AI-authored the code". `85.7 %` is a share of commits, `94.6 %` a share of
+   blamed lines; neither is a share of *code originality*.
+2. **The upstream `3 of 5637` is not evidence that upstream is human-written.** That line of history
+   was rewritten, and the only measured delta of the rewrite is the removal of exactly this trailer
+   family ([`t2-lineage.txt`](t2-lineage.txt) § 5: on 844 byte-identical commit pairs, Claude trailers
+   1,049 ours vs 0 theirs, human co-authors 22 vs 22, Codex 3 vs 3). Post-edit, upstream's trailer
+   corpus is not a disclosure record at all. AI involvement is **established in our line** and
+   **unresolved in theirs, where the disclosure was removed**.
+
+Consequences for Plan 02, recorded here in advance so the triager is not surprised into either panic
+or complacency later:
+
+- **Base rates change.** A substantially AI-generated codebase produces *inadvertent* sinks —
+  hallucinated URLs, copied examples carrying a debug endpoint, dead config plumbing — and dead code
+  at volume. Two predictions, stated before T3/T8 run: **the orphan-config-key section (currently
+  billed as the highest-signal malice residue) will return a large volume of benign AI residue**, and
+  **T3's canaries 4–6 (cross-file assembly, side channel, second hop) are the discriminating ones**,
+  because they test structure rather than presence.
+- **Calibration rule, written down now, while there is no temptation to use it:** "AI residue" may
+  **never** be the reason a row goes `benign`. It may only be the reason a row is *ranked lower* after
+  the key or call site has been traced end-to-end and no sink exists.
+- **Capability rank is unchanged by this section.** Metadata is not executable; this finding has no
+  capability dot. It is recorded for **evidential weight** — it is why narrative history cannot be
+  used as evidence in this supply chain, and why the audit's method is hashes, trees, blobs and
+  patch-ids.

@@ -1,0 +1,349 @@
+Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.
+
+> **Corrections inside this file, read before the transcripts.** Two blocks were rewritten after being
+> written, each with its dated note at the place it happens: **§ 1 step 1c** (a `SKIP` line that no command
+> ever printed) and **§ 6** (a reproduction that cited a scratch file predating the column-13 rename,
+> concealed by a `cmp` whose expected value was prose). **No other block in this file was corrected** — the
+> rest is the transcript as produced. `context/pitfalls.md` item 17.
+
+# T2 · the gate and every documented check, run as pasted, 2026-11-05
+
+Companion to [`t2-provenance.txt`](t2-provenance.txt) (which answers "is this pin upstream's?"; this
+file answers "did this commit pass the gate?"). Commands are from `server/basalt`, in the order given,
+**with the command printed above its own output** — an output-only transcript is not evidence.
+Precedent: `t1-freeze-and-manifest.txt` holds T1's checks the same way.
+
+## 1 · Project gate (`plans/RULES.md` § The gate)
+
+```bash
+# 1a — syntax, tracked files only
+git ls-files -z . | while IFS= read -r -d '' f; do
+  case "$(head -n1 "$f" 2>/dev/null)" in
+    \#!*bash*|\#!*/sh) bash -n "$f" || echo "FAIL(bash) $f" ;;
+    \#!*python*) python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$f" || echo "FAIL(py) $f" ;;
+    *) case "$f" in
+         *.sh) bash -n "$f" || echo "FAIL(bash) $f" ;;
+         *.py) python3 -c 'import sys; compile(open(sys.argv[1]).read(), sys.argv[1], "exec")' "$f" || echo "FAIL(py) $f" ;;
+         *.json) python3 -m json.tool "$f" >/dev/null || echo "FAIL(json) $f" ;;
+       esac ;;
+  esac
+done
+```
+```text
+(no output) → 1a PASS. Guard against "empty output = green" is 1b's count, below.
+```
+
+```bash
+# 1b — the counts
+git ls-files -z . | while IFS= read -r -d '' f; do case "$(head -n1 "$f" 2>/dev/null)" in
+  \#!*bash*|\#!*/sh) echo b; continue ;; \#!*python*) echo p; continue ;; esac
+  case "$f" in *.sh) echo b ;; *.py) echo p ;; *.json) echo j ;; esac; done | sort | uniq -c
+```
+```text
+      5 b        EXPECTED 5 b   → PASS
+```
+**`5 b` is this commit's own bump.** `RULES.md` § 1 was amended in the same commit `4 b` → `5 b` for
+`context/audit/scripts/t2-census.sh` (second use of the plan's "if a helper is unavoidable" clause,
+after `ledger-grid.sh`). `git ls-files` reads the **index**, so 1b is green only because the new
+script is staged; re-run 1b after any `git reset`.
+
+```bash
+# 1c — versions.env shape
+if [ -f versions.env ]; then grep -nvE '^[A-Z][A-Z0-9_]*=[^[:space:]]*$|^[[:space:]]*#|^$' versions.env && echo 'FAIL(env)' || echo 'env ok'; else echo 'SKIP(1c: no versions.env yet)'; fi
+```
+```text
+  env ok
+```
+
+**CORRECTED 2026-11-05, before this file was committed.** The first draft of this block recorded
+`SKIP(1c: no versions.env yet)` and labelled it "SKIP, not pass". That transcript line described no run
+that ever happened: `versions.env` has been tracked since `1eafda7` (2026-11-05T01:20Z, Plan 01 T1), so the
+`else` branch is unreachable in this project, and T1's own stamped gate block
+([`t1-freeze-and-manifest.txt`](t1-freeze-and-manifest.txt), § gate) records `env ok` for the same step.
+The sentence was carried in from what the step prints in a repo *without* pins, not from an observed run —
+which makes it the same family as item 17: **a transcript line is a claim about a run; paste it or don't
+write it.** `env ok` above is a re-run from this session, and the check's own failure mode is exercised by
+step 1b's `5 b`, which would have caught a missing file only if the file were part of the syntax set — it
+is not, so 1c is the sole guard on `versions.env` and its output must be the real one.
+
+```bash
+# the same step with its success condition named, because grep's rc=1 here IS the pass
+if [ -f versions.env ]; then
+  bad=$(grep -cvE '^[A-Z][A-Z0-9_]*=[^[:space:]]*$|^[[:space:]]*#|^$' versions.env); rc=$?
+  echo "1c lines=$(wc -l < versions.env) BAD_LINES=$bad (expect 0)  shell_rc=$rc (grep -c prints 0 and returns 1 when nothing is bad)"
+else echo "1c ABSENT — file not found, not a pass"; fi
+```
+```text
+  1c lines=16 BAD_LINES=0 (expect 0)  shell_rc=1 (grep -c prints 0 and returns 1 when nothing is bad)
+```
+
+The `shell_rc=1` is `grep -c`'s documented "no lines selected" status, printed rather than hidden so the
+next reader does not read a non-zero rc as a failure — the sentinel is **`BAD_LINES=0`**.
+
+> Gate steps 3–6 (docker / image / runtime) are **owner-run** and are **SKIP, not pass**, for this commit:
+> the agent session cannot open `/var/run/docker.sock`. Nothing in this task changes them, and no claim in
+> T2 depends on them.
+
+```bash
+# 2 — shellcheck -x over the bash set
+git ls-files -z . | while IFS= read -r -d '' f; do
+  case "$(head -n1 "$f" 2>/dev/null)" in
+    \#!*bash*|\#!*/sh) printf '%s\0' "$f" ;;
+    *) case "$f" in *.sh) printf '%s\0' "$f" ;; esac ;;
+  esac
+done | xargs -0 -r shellcheck -x && echo 'shellcheck ok'
+```
+```text
+shellcheck ok        → 2 PASS (includes the new t2-census.sh; shellcheck 0.11.0 at ~/.local/bin)
+```
+
+> **What this does NOT certify.** `git ls-files` supplies *names*; `shellcheck` reads the **worktree**, so
+> the pass covers the working-copy bytes of all five files — including `run`, which the owner has uncommitted
+> edits in (`PARALLEL` 4→3, deliberately excluded from this commit). `shellcheck ok` here therefore means
+> "the bash set parses and lints clean as of this checkout", not "the bash set as committed by T2 lints
+> clean". Re-run after staging if a reviewer wants that stronger claim.
+
+```text
+# 3–6 — build preflight, container build, serve, bench: NOT RUN.
+# SKIP: docker is unreachable from the agent session (socket root:rtkit 660, session uid=1000
+# groups=1000,27). Owner-run, exactly as recorded at T0/T1. Never recorded as pass.
+```
+
+## 2 · `audit/index.md` § Six commands, run exactly as printed there
+
+> **Paraphrase slip, same session, recorded rather than dropped.** My first pass at these six commands
+> re-derived them from memory instead of copying them, and used wrong `awk -F'\t'` column indices — it
+> printed `LINES=0` and a "status histogram" of wave values, because `-f7`/`-f8`/`-f9` are not
+> LOC/status/tier. Nothing from that pass was published. The output below is the **printed** commands,
+> verbatim from `audit/index.md`, re-run. Lesson: a check you re-type is a different check.
+>
+> **Only § 1's step 1c block in this file has been corrected; no other block below has been rewritten.**
+
+```bash
+# 1 · the freeze check (printed form, including its `cd ../..` — dropping it is a bug, see the guard below)
+cd vendor/basalt && GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 \
+  && echo "AUDIT TREE OK" || echo "AUDIT TREE DRIFTED — STOP"; echo "— freeze rc=$?"; cd ../..
+# cwd guard: commands 2–6 are relative to the PROJECT ROOT. Run this before each of them; a stale cwd
+# inside vendor/basalt makes #2 print ROWS=0 and #3 print a false-green PREFIX_DRIFT_COUNT=0.
+echo "CWD=$(basename "$PWD") (expect basalt)"
+```
+```text
+AUDIT TREE OK
+— freeze rc=0
+CWD=basalt (expect basalt)
+```
+```bash
+# 1b · the audited tree is also free of local edits — producer named because `diff --quiet` alone cannot
+# see untracked files, so the pair is what makes "frozen" mean something. Subshell: cwd must not move.
+(cd vendor/basalt && git status --porcelain --ignored | wc -l | sed 's/^/VENDOR_DIRTY=/')
+git -C vendor/basalt rev-parse 'HEAD^{tree}' | cut -c1-8 | sed 's/^/tree=/'
+```
+```text
+VENDOR_DIRTY=0
+tree=3f7b69ae
+```
+
+`VENDOR_DIRTY` is `git status --porcelain --ignored | wc -l` **inside `vendor/basalt`** — porcelain, not
+`diff`, so untracked and ignored paths are counted too; `0` is the only acceptable value. Same producer as
+T1's (`t1-freeze-and-manifest.txt`), so the two rows are comparable.
+
+> **The `cd ../..` in command 1 is load-bearing, and the guard above is tested.** Commands 2–6 take their
+> paths relative to the project root, so pasting command 1 without its trailing `cd ../..` leaves the reader
+> in `vendor/basalt`. Measured from that wrong cwd, running 2 and 3 exactly as printed:
+>
+> ```text
+>   2 → awk: fatal: cannot open file `context/audit/manifest/*.tsv' for reading: No such file or directory
+>   3 → cd: context/audit/manifest: No such file or directory
+>       frozen-prefix.sha256: No such file or directory
+>       PREFIX_DRIFT_COUNT=            ← empty, because `drift=0` was never assigned (the `cd` failed)
+> ```
+>
+> Two things worth separating here, because a reviewer's estimate of the damage was worse than the fact. It
+> is **not** a silent `ROWS=0` or a green `PREFIX_DRIFT_COUNT=0`: 2 aborts loudly, and 3's sentinel prints
+> **empty** rather than `0` — the empty is itself the tell (`pitfalls.md` item 1: an unassigned variable in a
+> sentinel line). But an *earlier* hand-run of these commands from the wrong place did produce the junk I
+> described at the top of this section, so the failure mode is real even though this particular shell
+> reported it more honestly than expected. The guard costs one line; run it whenever the six are not pasted
+> as one block.
+```bash
+# 2 · row count
+awk 'END{print "ROWS="NR+0" (expect 862)"}' context/audit/manifest/*.tsv
+# 3 · frozen prefixes
+cd context/audit/manifest && drift=0; while read -r want f; do
+  got=$(LC_ALL=C cut -f1-4 "$f" | sha256sum | cut -d' ' -f1)
+  [ "$want" = "$got" ] || { echo "PREFIX DRIFT $f"; drift=$((drift+1)); }
+done < frozen-prefix.sha256; echo "PREFIX_DRIFT_COUNT=$drift (expect 0)"; cd ../../..
+# 4 · tier histogram  5 · status histogram
+LC_ALL=C cut -f5 context/audit/manifest/*.tsv | LC_ALL=C sort | uniq -c | LC_ALL=C awk '{print; s+=$1} END{print "TIER_HIST_SUM=" s+0 " (expect 862)"}'
+LC_ALL=C cut -f8 context/audit/manifest/*.tsv | LC_ALL=C sort | uniq -c | LC_ALL=C awk '{print; s+=$1} END{print "STATUS_HIST_SUM=" s+0 " (expect 862)"}'
+# 6 · manifest ↔ tree, four cardinalities (the form amended by T2; see § 4 below)
+A=$(mktemp); B=$(mktemp)
+LC_ALL=C cat context/audit/manifest/*.tsv | LC_ALL=C cut -f1 | LC_ALL=C sort > "$A"
+(cd vendor/basalt && GIT_NO_LAZY_FETCH=1 git ls-tree -r dc047a77 --name-only | LC_ALL=C sort) > "$B"
+echo "SET_A=$(grep -c . "$A") SET_B=$(grep -c . "$B") INTER=$(LC_ALL=C comm -12 "$A" "$B" | grep -c .) DIFF=$(LC_ALL=C comm -3 "$A" "$B" | grep -c .) (expect 862 862 862 0)"; rm -f "$A" "$B"
+```
+```text
+ROWS=862 (expect 862)
+PREFIX_DRIFT_COUNT=0 (expect 0)
+     17 A-planned@T10      2 A-planned@T6a     10 A-planned@T7     1 B-vendored@T5
+      2 A-planned@T12      2 A-planned@T6b     22 A-planned@T8    786 unassigned
+      3 A-planned@T4       10 A-planned@T5      5 A-planned@T9
+TIER_HIST_SUM=862 (expect 862)
+    862 pending
+STATUS_HIST_SUM=862 (expect 862)
+SET_A=862 SET_B=862 INTER=862 DIFF=0 (expect 862 862 862 0)
+```
+All 862 rows are still `pending`: **T2 flipped no status**, because a blame-and-history census is
+metadata about commits, not reading. Tier arithmetic checks itself:
+`17+2+3+10+4+2+10+22+5 = 75` `A-planned` `+ 1 B-vendored + 786 unassigned = 862`.
+
+## 3 · The coverage generator, and the census's own sentinels
+
+```bash
+bash context/audit/scripts/ledger-grid.sh > /tmp/opencode/basalt-audit/t2/grid-now.txt 2>&1; echo "exit=$?"
+diff /tmp/opencode/basalt-audit/t2/grid-now.txt context/audit/wave0/t1-ledger-grid.txt && echo IDENTICAL
+```
+```text
+exit=0
+grid output IDENTICAL to the committed t1-ledger-grid.txt
+  unassigned          786 f   191,600 l
+  TOTAL               862 f   219,247 l
+ALL_SENTINELS_PASS=1 (expect 1)
+```
+
+> **Scope of that sentinel.** `ALL_SENTINELS_PASS=1` is printed by
+> [`scripts/ledger-grid.sh`](../scripts/ledger-grid.sh) and certifies the **coverage grid** — that the
+> manifest's rows, tiers, statuses and line totals still reproduce the committed `t1-ledger-grid.txt`. T2
+> moved no manifest row, so this is a **regression check, not a T2 check**. The checks that actually
+> validate what T2 produced are the census sentinels in § 3 (`ROWS=87`; the
+> `lines_blame == LOC + no-trailing-newline` identity and `EMPTY_FIELDS=0`, which cover the **81 non-
+> `BINARY_SKIPPED` rows**, the 6 binary rows being exempt by construction; `MALFORMED_ROWS=0` covers all
+> 87), the Tier-A set comparison in **§ 4** (`TIERA=75 ONLY_IN_TIERA=0`), and the stderr assertion in
+> **§ 6** (`ERR_BYTES=0`). Both groups print a sentinel with its expected value; neither is allowed to
+> substitute for the other.
+Coverage figures are unchanged, because T2 moved no manifest row.
+
+```bash
+awk 'END{print "ROWS="NR+0" (expect 87)"}' context/audit/wave0/t2-author-census.tsv
+awk -F'\t' '$13!="BINARY_SKIPPED" && ($2+$12)!=$11 {n++} END{print "LINES_BLAME_NE_LOC_PLUS_NONNL=" n+0 " (expect 0)"}' context/audit/wave0/t2-author-census.tsv
+awk -F'\t' '$13!="BINARY_SKIPPED"{for(i=1;i<=13;i++) if($i==""){n++}} END{print "EMPTY_FIELDS=" n+0 " (expect 0)"}' context/audit/wave0/t2-author-census.tsv
+awk -F'\t' 'NF!=13{n++} END{print "MALFORMED_ROWS=" n+0 " (expect 0)"}' context/audit/wave0/t2-author-census.tsv
+```
+```text
+ROWS=87 (expect 87)
+LINES_BLAME_NE_LOC_PLUS_NONNL=0 (expect 0)
+EMPTY_FIELDS=0 (expect 0)
+MALFORMED_ROWS=0 (expect 0)
+```
+
+## 4 · Completeness of the census's own input (the check that was missing at first commit)
+
+`ROWS_IN=87` proves the list has 87 lines and `ONLY_IN_CENSUS=0` proves membership; **neither proves
+the list *is* the 75 Tier A rows plus the 12 files T2 names.** A dropped Tier A row and a slipped-in
+extra would still print 87 and pass every other check. Closed by deriving both halves from the
+manifest rather than from the list:
+
+```bash
+LC_ALL=C cat context/audit/manifest/*.tsv | LC_ALL=C awk -F'\t' '$5 ~ /^A-planned/{print $1}' | LC_ALL=C sort > /tmp/a
+LC_ALL=C cut -f1 context/audit/wave0/t2-author-census.tsv | LC_ALL=C sort > /tmp/c
+echo "TIERA=$(grep -c . /tmp/a) CENSUSED=$(grep -c . /tmp/c) ONLY_IN_TIERA=$(LC_ALL=C comm -23 /tmp/a /tmp/c | grep -c .) ONLY_IN_CENSUSED=$(LC_ALL=C comm -13 /tmp/a /tmp/c | grep -c .)"
+LC_ALL=C comm -13 /tmp/a /tmp/c | while read -r p; do
+  t=$(awk -F'\t' -v p="$p" '$1==p{print $5}' context/audit/manifest/*.tsv | head -1); printf '%s=%s ' "$p" "${t:-NOT_IN_MANIFEST}"; done
+```
+```text
+TIERA=75 CENSUSED=87 ONLY_IN_TIERA=0 ONLY_IN_CENSUSED=12  (expect 75 87 0 12)
+CMakeLists.txt=unassigned        serve/engine/lifeline.py=unassigned
+serve/engine/__init__.py=unassigned  serve/engine/mock.py=unassigned
+serve/engine/errors.py=unassigned    serve/engine/process.py=unassigned
+serve/engine/flags.py=unassigned     serve/engine/progress.py=unassigned
+serve/engine/slots.py=unassigned     serve/engine/suspend.py=unassigned
+serve/engine/vision.py=unassigned    src/vision/stb_image.h=B-vendored@T5
+NAMED_FOUND=12 EXPECTED=12 · overlap of the 12 with Tier A = 0
+```
+
+## 5 · Negative controls on the generator — every gate observed failing at least once
+
+| # | what it aims at | command shape | fired with |
+|---|---|---|---|
+| C2 | the row-count gate (`exit 7`) | `… census.sh rows-empty.tsv … 87` | `ROWS_IN=0 EXPECT_ROWS=87 — INPUT WRONG, refusing to run`, **exit 7** |
+| C2b | same gate, wrong-but-nonzero | `… expect_rows=99` on the real 87-row list | **exit 7** |
+| C6 | blame failure + `NOT_OK` + stderr capture | one well-formed but non-existent path, `expect_rows=1` | `EMPTY_FIELD col=5…11`, `NOT_OK … BLAME_FAILED`, `VALIDATION=FAIL_FIELDS`, **exit 6**, `ERR_BYTES=213` (`fatal: path … does not exist in 'dc047a77…'`) |
+| C7 | the line-accounting gate, with **stderr suppressed** (a mutant of the script that prints `status=OK` for a missing file, so nothing reaches stderr) | same script, patched to short-circuit one path | `EMPTY_FIELDS=9` (cols 4–12 blank), `VALIDATION=FAIL_FIELDS`, **exit 6** |
+| C8 | **the `ERR_BYTES=0` assertion itself** | a unit control: inject one line into `$ERRLOG` immediately *before* the assertion (mutates the script, not the data) | `ERR_BYTES=69`, `VALIDATION=FAIL_STDERR`, **exit 9** |
+
+C8 was needed because **the `ERR_BYTES` branch is unreachable on a dirty run**: `VALIDATION=FAIL_FIELDS`
+`exit 6` fires first, so no genuinely-failing census ever reaches the assertion. The shipped script on
+the same single-row input stays at `ERR_BYTES=0 / exit 0`, so the branch is not simply dead code.
+`context/audit/scripts/t2-census.sh` now says so in its own comment above the assertion.
+
+**The C7/C8 mutants are not committed** — they lived in `/tmp/…/t2/{mut.sh,errmut.sh}` for this session, so
+as written those two controls could never re-fire. Each is a **one-line patch** to `scripts/t2-census.sh`,
+recorded here so they can:
+
+```text
+C7 (mut.sh)   after the field-validation loop, before the real blame call, insert:
+                if [ "$path" = "src/platform/definitely_not_real.cpp" ]; then
+                  printf "%s\t%s\t%s\t\t\t\t\t\t\t\t\t\tOK\n" "$path" "$loc" "$tier"; continue; fi
+              — a well-formed OK row with EMPTY fields and nothing on stderr: the only way to reach the
+                line-accounting gate with stderr suppressed. Fires VALIDATION=FAIL_FIELDS, exit 6.
+C8 (errmut.sh) same script WITHOUT that line, plus one line immediately before the ERR_BYTES assertion:
+                echo "injected warning: this line exists to prove the ERR_BYTES gate fires" >> "$ERRLOG"
+              Fires ERR_BYTES=69, VALIDATION=FAIL_ERRLOG. C8 mutates the checker, not the data.
+```
+
+Rebuild recipe: `cp context/audit/scripts/t2-census.sh /tmp/opencode/mut.sh`, apply the line, run it on the
+same single-row input (`/tmp/opencode/basalt-audit/t2/one-row.tsv`, `expect_rows=1`) against `vendor/basalt`
+at the pin. Verified against the surviving scratch copies this session: `diff` of the shipped script against
+`mut.sh` is that one line plus the header-comment/name differences noted in § 6.
+
+## 6 · Reproduction of the committed artifact from the committed generator
+
+```bash
+bash context/audit/scripts/t2-census.sh /tmp/opencode/basalt-audit/t2/rows-plan.tsv \
+     /tmp/opencode/basalt-audit/t2/repro2.tsv /tmp/opencode/basalt-audit/t2/repro2.err 87 \
+     vendor/basalt dc047a77beeddf1e91234d983a91d6bf929e9619
+diff <(tail -n +2 /tmp/opencode/basalt-audit/t2/repro2.tsv | LC_ALL=C sort) context/audit/wave0/t2-author-census.tsv
+# the header, compared for real (the generator emits it at line 47; the committed artifact is headerless)
+cmp <(head -1 /tmp/opencode/basalt-audit/t2/repro2.tsv) \
+    <(printf 'path\tloc\ttier\tcommits_total\tauthors_log\tfirst_commit\tlast_commit\ttop_author\tlines_top_author\tauthors_blame\tlines_blame\tno_trailing_nl\tcensus_status\n')
+echo "HEADER_CMP_rc=$? (expect 0)"
+```
+```text
+ROWS_IN=87 ROWS_OUT=87 BINARY_SKIPPED=6 / EMPTY_FIELDS=0 NOT_OK=0 / VALIDATION=FIELDS / ERR_BYTES=0
+VALIDATION=PASS — certifies row survival and line accounting ONLY; not author identity, not blame-boundary fidelity.
+exit=0
+diff (data rows, header dropped, LC_ALL=C sorted): IDENTICAL — 87 rows, byte-for-byte (rc=0, diff output 0 bytes)
+HEADER_CMP_rc=0 (expect 0)
+stderr bytes=0
+```
+
+> **Why the scratch file is `repro2.tsv` and not `repro.tsv` (found while making the header check real).**
+> The first reproduction of this task wrote `/tmp/…/t2/repro.tsv`, *before* column 13 was renamed from
+> `status` to `census_status`. That file is still on disk and **fails** the header comparison above
+> (`differ: byte 135, line 1`, its col 13 reads `status`) while its data rows still match. The earlier
+> block in this file used a placeholder `cmp` against a hand-typed header description, which could not fail
+> and therefore concealed the staleness. Re-generated with the committed generator, both comparisons pass.
+> **Cost of the placeholder:** a `cmp` whose expected value is prose is not a check; had the rename been
+> wrong rather than merely later, this block would still have printed green.
+**Stated precisely: the 87 *data rows* are byte-identical.** The committed `.tsv` is headerless by
+convention, so the schema line is *not* in the compared bytes; it lives in `t2-provenance.txt` § 5 and
+is emitted by the generator as line 1. A naive `cmp` of the whole file against the committed artifact
+**will** differ by exactly that header line — that is expected, not drift. Do not "fix" it by deleting
+the header from the generator.
+
+## 7 · Diff shape of this commit, stated so the slice cap is never misread
+
+Reported **per file, excluding this file** — this artifact states its own numbers, and a count that includes
+itself goes stale every time it is edited. Measured with `git diff --cached --numstat` at the final
+`git add` of this commit:
+
+```text
+generated, reproducible from a committed generator      954   t2-github-tree-paths.txt 867 (= 862 path⇥blob
+                                           pairs + 5 header lines) and t2-author-census.tsv 87 rows (§ 6 regenerates both)
+hand-written prose and tables                          1843
+    t2-provenance.txt, t2-lineage.txt, t2-boundary-authorship.txt, audit/index.md, manifest/index.md,
+    coverage_ledger.md, context/pitfalls.md, plans/RULES.md, the tracker row, ../../../context/pitfalls.md
+Tier A source lines read by this task:                    0
+```
+The plan's cap (line 83) is "**≤1,500 lines of Tier A reading** per commit-slice". T2 read no source,
+so the cap is not engaged; the 1,690 is not reading volume and must not later be cited as a breach.

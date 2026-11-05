@@ -2,8 +2,9 @@
 
 ## Overview
 
-- Status: 11% complete (2/19 slices done — T0 ✓, T1 ✓, matching `SERIES.md`; plus one follow-up commit
-  on T1's artifacts, `3c27913`, which moved no manifest row and read nothing. Nothing has been read yet.)
+- Status: 16% complete (3/19 slices done — T0 ✓, T1 ✓, T2 ✓, matching `SERIES.md`; plus one follow-up
+  commit on T1's artifacts, `3c27913`, which moved no manifest row and read nothing. **Still nothing of
+  Basalt's source has been read** — T2 examined git objects and commit metadata, not behavior.)
 - Start date: 2026-11-05 (T0)
 - Plan: `context/plans/02_basalt_vendor_audit.md` — **read its Gate status block and Execution rules first**
 - Evidence: `context/audit/` — `index.md` (entry point), `manifest/` (per-dir TSVs, fixed headerless
@@ -33,9 +34,12 @@
    inside `vendor/basalt/`; sentinel-terminated commands; inline commands not helper scripts; the
    audit-file stamp).
 4. **Environment — what works and what does not in this session:**
-   - Working: `python3` (3.14.10), `git` (≥2.43, `GIT_NO_LAZY_FETCH`), `gh`, `g++` (T5 harness),
+   - Working: `python3` (3.14.10), `git` (≥2.43, `GIT_NO_LAZY_FETCH`), `g++` (T5 harness),
      `shellcheck` 0.11.0 **at `~/.local/bin/shellcheck`** (installed by T0 on 2026-11-05; RULES.md
-     updated).
+     updated), `curl` + `api.github.com` over TLS (unauthenticated, 60 req/h).
+   - **Wrong in this list until T2 (2026-11-05): `gh` is NOT installed** (`command -v gh` → nothing).
+     T2's provenance ran on `curl`; the plan's T2 Verify block is rewritten to match. Do not re-add
+     `gh` to the plan without installing it first.
    - **Broken for the agent: docker.** Socket `root:rtkit 660`, session `uid=1000 groups=1000,27`,
      group `docker` gid 991 with no members. Gate steps 3–6 and every image-inspection command are
      **owner-run**: write the exact command, paste it here, mark the row from their output only.
@@ -74,7 +78,7 @@
 |---|------|---------------|--------|-------|
 | 0 | T0: Restore the gate (shellcheck user-local, RULES.md prerequisite) | `context/plans/RULES.md` | **done** | v0.11.0 at `~/.local/bin`, negative control fired SC2115/SC2086; gate 2 `shellcheck ok`; RULES.md steps 2 + Prerequisites corrected in place, dated. Docker (steps 3–6) recorded owner-run, not fixed |
 | 1 | T1: Freeze the pin, manifest all 862 files | `context/audit/manifest/` | **done** | 862 rows / 12 TSVs / 219,247 l; `MISMATCH_COUNT=0` under `GIT_NO_LAZY_FETCH=1`; tree frozen, `VENDOR_DIRTY=0`; 862 objects all `blob` (858×100644, 4×100755 — no gitlinks, no symlinks); 0 paths outside printable ASCII; worktree `sha256sum` == object sha256 for all 862; pipeline byte-deterministic over two runs and `diff`-equal to the committed TSVs. Tier A pre-seeded 75 f / 19,659 l, `B-vendored@T5` 1 f, **786 f `unassigned` for T3**; **0 lines read**. Gate 1a/1b/1c/2 pass, 3–6 docker-blocked (owner). See `context/audit/wave0/t1-freeze-and-manifest.txt` |
-| 2 | T2: Pin provenance + boundary-author census | `manifest/index.md` | pending | gates Wave 0 |
+| 2 | T2: Pin provenance + boundary-author census | `manifest/index.md` | **done** | **All 862 blob SHAs match GitHub's tree object `3f7b69ae` for the pin** — `INTERSECT=862 ONLY_IN_API=0 ONLY_IN_LOCAL=0 BLOB_SHA_MISMATCH=0`, `GITLINKS=0`, canonical `sha256(path⇥blob)` equal both sides; sensitivity control against the first parent returns `BLOB_SHA_MISMATCH=1` (one file: `serve/util/telemetry.py`). **Limit, recorded as a limit:** the signature is GitHub's own key (`B5690EEEBB952194`) on a GitHub-made squash merge and is unverifiable here (`No public key`); all 3 of **basalt's own** tags are annotated-**unsigned** (Strata's same-named tags are different objects); SWH has no origin for `jesdga95/basalt` and no revision for the pin → **no non-GitHub anchor for the pinned commit** (it *does* hold the ancestor Strata in 9 visits — 8 `full`, 1 `failed` — and our root commit — see `wave0/t2-lineage.txt` § 7; an earlier draft of this row said SWH "has never archived this project", which was true only of the broken `/get/` endpoint form — `pitfalls.md` item 10). **Pin is untagged `main`, not `v0.3.5`** (that tag does not exist upstream; docs/pyproject claim it → no release artifact to diff, feeds Risk 5); 3 commits since `v0.2.1`; no `SECURITY.md` anywhere. Census of **87 rows / 80 blameable first-party files** (`scripts/t2-census.sh`, which reproduces `wave0/t2-author-census.tsv` byte-identically — *the 80*: 87 rows − 6 `BINARY_SKIPPED` − 1 vendored `stb_image.h`; 69 `A-planned` + 11 `unassigned`): 20,111 blamed lines, 53 authors, core two 81 %; **560 lines (2.78 %) sit on a blame boundary and they are the same 560 credited to the root commit**, per-file identical across 7 files (blame cannot walk past a parentless commit), so this is a **lineage** quantity, not an error bar — `wave0/t2-provenance.txt` § 6. *Corrected 2026-11-05: this row first said "**0** blame-boundary lines", which was a false zero from an unanchored `grep boundary` over blame output — `pitfalls.md` item 13. The file denominator also went 86 → 80, and `tail -n +2` on this headerless TSV dropped `CMakeLists.txt` from two of my own verification commands — item 14.* `serve/engine/image_source.py` 570 l = 1 commit/1 author; `dynlib.cpp` 64 l = 1 commit/1 author; **`jeancmyk` holds the plurality of `process.cpp` 216/321, `file.cpp` 247/456, `direct_file.cpp` 255/455, each majority landing in ONE commit** — read first (T8). Tiering gaps found: `CMakeLists.txt` (287 commits) and `serve/engine/process.py` (1,419 l) are `unassigned`. Two plan errors corrected: `src/server/` does not exist; `gh` is not installed. Raw: `wave0/t2-provenance.txt`, `t2-github-tree-paths.txt`, `t2-boundary-authorship.txt`, `t2-gate-and-checks.txt` |
 | 3 | T3: Census + **6-canary** control + orphan-key + diagnostics-shape | `context/audit/census.md` | pending | 6/6 or census is void; also freezes T9's list |
 | 4 | T4: `image_source.py` + `security.py`; **execute** the 9-class bypass list | `serve/engine/image_source.py` | pending | deliverable = delta vs upstream tests |
 | 5 | T5: stb 2.21 decode path; ASan/UBSan + CVE PoC corpus + guard arithmetic | `src/vision/` | pending | P0; harness agent-built, long runs owner-run |
@@ -221,6 +225,76 @@ violation and cannot be cited by a later plan.
      (`ORDER_MISMATCH_TSVS=0`, `SUM_OF_WANTED_SETS=862`) instead of asserted.
   Not drift: nothing in columns 1–4 moved (`PREFIX_DRIFT_COUNT=0`, `ROWS=862`, `LOC=219247` before and
   after). **0 lines read, unchanged.**
+
+- **2026-11-05 · T2 — three things the plan got wrong, corrected by running it, not by reading it.**
+  (1) **`src/server/` does not exist.** T2's boundary definition names `src/platform/*`, `src/vision/*`
+  **and `src/server/*`**; `git ls-tree -d dc047a77:src/server` is fatal. The real C++ seam is
+  `src/platform/` (10 f) + `src/vision/` (10 f) + `include/basalt/platform/`; the serving layer is
+  Python under `serve/`. (2) **`gh` is not installed** — the plan's T2 Verify and this tracker's
+  environment list both assumed it; T2 ran on `curl` against `api.github.com`. (3) **The pin is not
+  tag `v0.3.5`.** No such tag exists upstream (only `v0.1.0/v0.2.0/v0.2.1`, all annotated and all
+  **unsigned**); the pin is untagged `main`, 3 commits past `v0.2.1`, authored **the day we pinned it**.
+  Consequence carried to Risk 5: **there is no upstream release artifact to diff the pin against.**
+- **2026-11-05 · T2 — two files the tier system had wrong, deliberately not retiered.**
+  `CMakeLists.txt` (1,507 l, **287 commits**, 18 blame authors, 34 contributors at ≤2 commits — the
+  highest-churn file in the census set) and `serve/engine/process.py` (1,419 l, 6 blame authors — the
+  code that spawns the engine) are both `unassigned`. Retiering them **from a census** is exactly the
+  goalpost move the `A-planned`-seeded-from-`File:`-fields invariant exists to prevent, and 1,507 l
+  also breaks the 1,500-l slice cap. Assigned forward instead: **amend plan `### T11`'s `File:` field
+  first, then retier from it** — proposed `T11a` (toolchain/options/gate) + `T11b` (targets/install);
+  `serve/engine/process.py` belongs to T4 or T6. Plan 01 read `CMakeLists.txt:40,94-117,528,533` and
+  287 commits have landed since, so that read is stale — it needs redoing whenever T11a runs.
+- **2026-11-05 · T2 — what "a line of Tier A" actually is, and a 1.7× effort discrepancy.** Tier A's
+  75 f / 19,659 l is **54 code files / 13,615 l + 21 non-source files / 6,044 l** (`docs/img/frontend.gif`
+  alone is 2,409 of those "lines", `data/profiles/qwen4exp-48x512.prof` 960,
+  `docs/community/benchmarks.json` 922). The owed-read count is **not** reduced and no row was
+  retiered — invariant holds; re-tiering is T11's. Separately: **plan § Effort says "Tier A is
+  ~34,000 lines" against the manifest's 19,659**, and the 14–19-session figure above was derived from
+  the 34k number. Recorded so the manifest does not silently supersede the estimate; revisit it at
+  T13, not in the middle of a reading slice.
+- **2026-11-05 · T2 — artifact placement, a deliberate deviation.** The plan's T2 `File:` field names
+  only `context/audit/manifest/index.md`, which has no room for an 87-row census, and `census.md` is
+  **T3's** declared artifact (primitive census + canaries) — pre-filling it would collide with the next
+  task. So: conclusions and limits in `manifest/index.md` § Upstream provenance (the declared file),
+  raw substrate in `wave0/t2-*`, generator in `scripts/t2-census.sh` (**RULES.md gate bumped `4 b` →
+  `5 b` in this same commit**, second use of the unavoidable-helper clause). T3 must read
+  `wave0/t2-boundary-authorship.txt` § 6 before assigning dispositions.
+- **2026-11-05 · T2 side effect: the "frozen" clone is no longer blob-empty.** `git blame` on a
+  `blob:none` partial clone lazy-fetches; `count-objects` went to 19,352 in-pack across 752 packs
+  (~53 MiB). Tree hash and `VENDOR_DIRTY=0` unaffected. `GIT_NO_LAZY_FETCH=1` is the freeze-check
+  discipline, not a census constraint — the census cannot run under it.
+- **2026-11-05 · T2 — four green-but-wrong results in this task's own tooling, one of them published.**
+  Recorded because each produced a *plausible* number that survived into a draft: (1) **`boundary_lines=0`
+  shipped into the first drafts of `t2-provenance.txt` § 6 and `t2-boundary-authorship.txt`** — an
+  unanchored `grep boundary` over blame output; anchored truth is **560 lines in 7 files**, and the
+  framing was wrong too (it is a lineage quantity, not an error bar). (2) **File-denominator drift,
+  86 vs 80**: three denominators (80 blameable / 86 minus-vendored / 87 rows) had been used
+  interchangeably across pages until this commit; every figure now names its own. (3) **`tail -n +2` on
+  the headerless census TSV** dropped `CMakeLists.txt` — the largest row — from two verification
+  commands, manufacturing an "80+6 ≠ 87" anomaly that took three commands to explain; the measurement
+  itself had used a field filter, which is the only reason the anomaly was visible at all. (4) The
+  **`/api/1/revision/<sha>/get/` sweep** returned `404` for all nine SHAs, and had been drafted as
+  "Software Heritage has never archived this project" — the route was wrong; corrected, it holds the
+  ancestor repo and our root commit. All four are in `pitfalls.md` items 10–14 with the commands that
+  refuted them. **The process lesson, once:** the two that reached paper did so because the check that
+  would have caught them was written *after* the draft. A probe family that returns one uniform value has
+  measured itself, and an unanchored porcelain keyword grep is not a measurement.
+- **2026-11-05 · T2 — a gate transcript line in this task's own artifact was fabricated, and was caught
+  before the commit.** `t2-gate-and-checks.txt` first recorded step 1c as
+  `SKIP (no versions.env yet)` labelled "SKIP, not pass". No run ever printed that: `versions.env` has been
+  tracked since `1eafda7` (2026-11-05T01:20Z), and T1's stamped gate block records `env ok` for the same
+  step — so the line came from what the step *would* print in a repo without pins, not from an observed
+  run. The artifact now carries the real output with a dated CORRECTED block, and the trap is
+  `pitfalls.md` item 17. Cost if it had shipped: this project's `SKIP, not pass` marker is the signal that
+  steps 3–6 are genuinely owner-only; spending it on a line that never ran teaches a reader to distrust the
+  true SKIPs. An earlier draft of this note said the step had "changed state under this task" — that was the
+  same error one level up, and it is corrected here rather than deleted.
+- **2026-11-05 · T2 landed as two commits — deliberate.** Both reviewers reached the same split
+  independently, for the same reason: the *use* of the provenance evidence (the ancestor-rewrite finding,
+  the AI-attribution corpus, T2b, T3's calibration rules) is separately arguable, and if that framing is
+  later re-argued or partially withdrawn, the measurements must not go with it. Commit 1 = T2 as scoped
+  + corrections to T2's own claims + `t2-lineage.txt` + `t2-gate-and-checks.txt` + pitfalls items 10–14;
+  commit 2 = `[basalt][P2][T2][audit] record the ancestor history rewrite and the AI-attribution corpus`.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every

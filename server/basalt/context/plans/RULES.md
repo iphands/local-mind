@@ -131,12 +131,24 @@ where an applicable step was skipped.
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and launchers have no extension. Pass: no `FAIL` line, the counts
 match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env` exists).
-**Expected counts: `4 b`** (Plan 01 T1: `lib/common.sh`; T2: `build`; T3: `run`; plus
+**Expected counts: `5 b`** (Plan 01 T1: `lib/common.sh`; T2: `build`; T3: `run`; plus
 `context/audit/scripts/ledger-grid.sh`, added by Plan 02 T1's follow-up on 2026-11-05 under plan
-Execution rule 5's "if a helper is unavoidable" clause — it is the only generator permitted under
-`context/audit/`, it is `shellcheck` 0.11.0 clean, and it is the single source of every coverage figure
-in `audit/`). Bump this paragraph when a file is
+Execution rule 5's "if a helper is unavoidable" clause — it is the only generator of **coverage
+figures** under `context/audit/`, it is `shellcheck` 0.11.0 clean, and it is the single source of every coverage figure
+in `audit/` — and `context/audit/scripts/t2-census.sh`, added by Plan 02 T2 the same day under the
+same clause: it takes the repo, the pin, the row list and an **expected row count** as arguments and
+is the only thing that can regenerate `audit/wave0/t2-author-census.tsv`, whose **87 data rows** were
+verified to reproduce byte-identically from it (compared row-wise, header excluded — the header line is
+documentation and is not emitted by the generator). *Not* claimed to reproduce from it: the census's
+aggregate percentages, the blame-boundary counts and the lineage splits, which come from separate
+one-off blame passes recorded in `audit/wave0/t2-provenance.txt` § 6 and
+`audit/wave0/t2-lineage.txt` § 4. A figure with no generator has no reproduction, and claiming
+otherwise here is the overclaim this paragraph exists to prevent.) Bump this paragraph when a file is
 added or removed on purpose — a count that silently drops is the failure this step exists for.
+**The helper clause has now been used twice, in two consecutive tasks.** A third script added to this count
+should not be a third use of the clause: it should trigger the alternative the clause exists to avoid,
+which is narrowing step 1a to the project's own launchers and linting audit helpers in their own task-local
+check. Record the decision either way, in this paragraph.
 
 ```bash
 # 1a — syntax, over tracked files only (in-memory compile: no __pycache__ written)
