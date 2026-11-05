@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 5% complete (1/19 slices: T0–T5, T6a–c, T7–T10, T11a–d, T12–T14)
+- Status: 11% complete (1/19 slices done — T0 ✓, T1 ✓; T1's artifacts are in `context/audit/`, nothing read yet)
 - Start date: 2026-11-05 (T0)
 - Plan: `context/plans/02_basalt_vendor_audit.md` — **read its Gate status block and Execution rules first**
 - Evidence: `context/audit/` — `index.md` (entry point), `manifest/` (per-dir TSVs, fixed headerless
@@ -72,7 +72,7 @@
 | # | Slice | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 0 | T0: Restore the gate (shellcheck user-local, RULES.md prerequisite) | `context/plans/RULES.md` | **done** | v0.11.0 at `~/.local/bin`, negative control fired SC2115/SC2086; gate 2 `shellcheck ok`; RULES.md steps 2 + Prerequisites corrected in place, dated. Docker (steps 3–6) recorded owner-run, not fixed |
-| 1 | T1: Freeze the pin, manifest all 862 files | `context/audit/manifest/` | pending | |
+| 1 | T1: Freeze the pin, manifest all 862 files | `context/audit/manifest/` | **done** | 862 rows / 12 TSVs / 219,247 l; `MISMATCH_COUNT=0` under `GIT_NO_LAZY_FETCH=1`; tree frozen, `VENDOR_DIRTY=0`; 862 objects all `blob` (858×100644, 4×100755 — no gitlinks, no symlinks); 0 paths outside printable ASCII; worktree `sha256sum` == object sha256 for all 862; pipeline byte-deterministic over two runs and `diff`-equal to the committed TSVs. Tier A pre-seeded 75 f / 19,659 l, `B-vendored@T5` 1 f, **786 f `unassigned` for T3**; **0 lines read**. Gate 1a/1b/1c/2 pass, 3–6 docker-blocked (owner). See `context/audit/wave0/t1-freeze-and-manifest.txt` |
 | 2 | T2: Pin provenance + boundary-author census | `manifest/index.md` | pending | gates Wave 0 |
 | 3 | T3: Census + **6-canary** control + orphan-key + diagnostics-shape | `context/audit/census.md` | pending | 6/6 or census is void; also freezes T9's list |
 | 4 | T4: `image_source.py` + `security.py`; **execute** the 9-class bypass list | `serve/engine/image_source.py` | pending | deliverable = delta vs upstream tests |
@@ -106,6 +106,9 @@ violation and cannot be cited by a later plan.
 | 2026-11-05 | Planning recon: per-area `git ls-files \| xargs cat \| wc -l`; primitive / `getenv(` / peer-name / obfuscation / vendored-lib greps; `git diff HEAD` + per-file `cat-file -e`; `sed -n '60,62p' stb_image.h`; `_PinnedConnection.connect` read; stb CVE check against upstream + GHSL advisories | Plan Key Facts table + the P0 decode-path finding, with limits recorded | 1 | Pre-plan baseline: T1 re-checks it, it is not first-pass evidence |
 | 2026-11-05 | Gate steps 1a/1b/1c/2 (after `shellcheck` v0.11.0 install) | `3 b`, `env ok`, `shellcheck ok` | 1 | Steps 3–6 blocked: docker `permission denied`, owner-only |
 | 2026-11-05 | `PREFLIGHT_ONLY=1 ./build` | **exit 1** — `permission denied … /var/run/docker.sock` | 1 | The measurement that exposed a false Key Fact; see Notes |
+| 2026-11-05 | T1 freeze + integrity suite: the one freeze-check; per-path `git hash-object` vs `ls-tree` (printed count); `ls-tree --format='%(objecttype) %(objectmode)' \| uniq -c`; `grep -cvP '^[\x21-\x7e]+$'` on `--name-only`; empty-blob count; `git status --porcelain --ignored \| wc -l`; worktree `sha256sum` pass joined against manifest column 3; `comm -3` manifest↔`ls-tree`; generator run twice + `diff -r`, and `diff -r` vs the committed TSVs | `AUDIT TREE OK` · `MISMATCH_COUNT=0` · 862 × `blob` (858 × `100644`, 4 × `100755`) · non-ASCII/space paths `0` · `EMPTY_BLOBS=0` · `VENDOR_DIRTY=0` · `SHA_MISMATCHES=0` · `comm` = `0` (862 = 862 = 862) · two runs byte-identical and equal to what is committed | 1 (+1 determinism re-run) | Full verbatim: `context/audit/wave0/t1-freeze-and-manifest.txt`. `NO_TRAILING_NL=12` bounds the LOC column |
+| 2026-11-05 | T1 drift-check **negative control**: tamper a LOC digit in a `/tmp` copy of `cmake.tsv`, re-run the `frozen-prefix.sha256` recompute loop | `PREFIX DRIFT cmake.tsv`, `CONTROL_DRIFT_COUNT=1` — the check fires | 1 | Proves the clean `PREFIX_DRIFT_COUNT=0` on the real manifest means something (RULES.md Rule A: a silence that has never been shown to speak is not a pass) |
+| 2026-11-05 | Gate steps 1a/1b/1c/2, re-run **with `context/audit/` present** (3 new `.md`, 12 `.tsv`, 1 `.sha256`) | 1a no `FAIL` · **`3 b`** · `env ok` · `shellcheck ok` | 1 | Rule 5 holds: none of T1's artifacts enters the bash set. Steps 3–6: step 3 re-measured as docker-denied; 4–6 unrun |
 | — | T3 canary capture (target **6/6**, one per planted class) | — | | **Wave 0 gate** |
 | — | T5 ASan/UBSan fuzz, JPEG/PNG/BMP/GIF at request-reachable `max_pixels` | — | | report count, target 0 |
 | — | T11 `LC_ALL=C comm` manifest vs `git ls-files src/ include/` (target 0) | — | | after each directory slice |
@@ -155,6 +158,43 @@ violation and cannot be cited by a later plan.
   #4–#6 (cross-file assembly, token-count/latency side channel, log→`/metrics` second hop), which no
   keyword in the taxonomy would find. If a later session finds the census flagging only files
   already suspected, the census has failed and the verdict is void — say so here, do not proceed.
+- **2026-11-05, T1 — Tier A was seeded from the plan, not from a census, on purpose.** The manifest
+  columns were left blank in the task text. The senior reviewer's objection was accepted after I
+  weighed it: a *directory-level* Tier B default would be an unevidenced claim, and Tier B reasons
+  still wait for T3 — but Tier A membership is already evidenced by this plan's own `File:` fields
+  (§T4/§T5/§T6a-b/§T7/§T8/§T10/§T12), so `A-planned@T<n>` was written for **75 rows / 19,659 l** before
+  any census ran, with the invariant **"an `A-planned` row may only ever become `read@T<n>`, never
+  `triaged:*`"** (`context/audit/manifest/index.md` § Invariants). Without it, T11's mechanical fill
+  would run *after* a negative census, and the census would effectively have chosen what got read —
+  "grep found nothing" laundered into "audited", with the manifest as the laundering vehicle. The 786
+  undecided rows are `unassigned`, **not** Tier B; `unassigned` ≠ `none` is a reserved distinction.
+- **2026-11-05, T1 — four commands reported green on a measurement that had not happened; two of them
+  came from the reviewers.** `IFS= read -r h p` against a space-separated `git --format` (862 × `could
+  not open ''`, and the same loop *had* already printed a correct 0, so the failure read as a
+  regression); a `.github.tsv` that `*.tsv` cannot see (row total read **859**); `diff -r` declaring two
+  empty directories "DETERMINISTIC" after the generator ran from the wrong cwd; and `sha256sum -c`
+  against a sidecar of `cut -f1-4` hashes, which re-hashes whole files and so reported 12 bogus
+  `FAILED`s. What caught each was a **printed number**, not an `rc` — which is why the plan's own T1
+  Verify block is annotated as superseded by printed-count forms and every check here now prints its
+  count inside the producer. Harvested to `context/pitfalls.md` § *Four shell idioms that report green
+  on the thing they did not check*.
+- **2026-11-05, T1 — a reviewer filed a false "missing coverage" finding that my own summary caused.**
+  The junior review's #1 must-fix was "`cmake.tsv` is missing: 11 groups sum to 860 files / 219,185
+  lines, not 862 / 219,247". It is not missing — 12 TSVs were generated and `wc -l` showed
+  `cmake.tsv 2`. The 860 came from **my** per-directory list in chat, which named 11 buckets while
+  quoting the 12-bucket total. Recorded because the failure mode is general and this plan is about it:
+  *an abbreviated evidence table reads as missing coverage*, and a reviewer can only reason from what
+  it is shown. `context/audit/manifest/index.md` now carries all 12 rows unabbreviated, with the
+  `cmake/`+`CMakeLists.txt` 3 f / 1,569 l cross-check trap spelled out (`CMakeLists.txt` is in
+  `root.tsv`).
+- **2026-11-05, T1 — a hole the plan left open, closed in the artifact not the plan text.** T9's scope
+  is "the rows assigned T9 in `census.md`", but the manifest schema has no `assigned-TN` column, so
+  those rows had no home and T9 could have read files while their manifest rows stayed `pending`. The
+  rule now written into `manifest/index.md`: at Wave 0 exit, the commit that freezes T9's file list
+  also flips those rows to `A-planned@T9` / wave `2`, and `census.md`'s `assigned-TN` must agree with
+  this file's `tier` — a row `census.md` owns that still reads `unassigned` here is unowned work and
+  **Wave 0 does not exit**.
+
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every
   "found nothing" names what it does and does not rule out.

@@ -30,7 +30,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 1/19 slices done; next T1 — freeze the pin and manifest all 862 files.
+- **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 2/19 slices done (T0, T1); next T2 — prove the pin against public upstream and census boundary authors. Wave 0 is 2/5 (manifest over 862 files ✓, 0 lines read).
 
 ## Plans <!-- hp:plans -->
 

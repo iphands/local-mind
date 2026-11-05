@@ -24,7 +24,7 @@ the artifact that carries "what the agent could and could not verify."**
 | 1b counts | 2026-11-05 | **pass** (`3 b`, unchanged by this plan's markdown) | agent |
 | 1c `versions.env` | 2026-11-05 | **pass** (`env ok`) | agent |
 | 2 shellcheck | 2026-11-05 | **pass** (`shellcheck ok`) — after T0 re-installed it | agent |
-| 3 build preflight | 2026-11-05 | **BLOCKED** — `PREFLIGHT_ONLY=1 ./build` exit 1: `permission denied … /var/run/docker.sock` | **owner only** |
+| 3 build preflight | 2026-11-05 (re-run at T1) | **BLOCKED** — `PREFLIGHT_ONLY=1 ./build` exit 1: `permission denied … /var/run/docker.sock` | **owner only** |
 | 4 `./run` dry run | — | **BLOCKED** (docker) | owner only |
 | 5 flags vs image | — | **BLOCKED** (docker, and needs an image for the pin) | owner only |
 | 6 server imports | — | **BLOCKED** (docker) | owner only |
@@ -33,6 +33,12 @@ the artifact that carries "what the agent could and could not verify."**
 command and records the pasted output. If a step stays unrunnable for a given commit, that commit's
 message and the tracker say *which* step was skipped and why — a task whose behavior only a blocked
 step can see is **not** `done` (Rule A.6), and this plan expects several such tasks.
+
+**Re-run at T1 (2026-11-05, commit `[basalt][P2][T1][audit] …`)**: steps 1a (no `FAIL`), 1b
+(`3 b` — the plan's `.md`/`.tsv`/`.sha256` artifacts add nothing to the bash set, which is Execution
+rule 5 holding in practice), 1c (`env ok`) and 2 (`shellcheck ok`) all pass with `context/audit/`
+present; verbatim in `context/audit/wave0/t1-freeze-and-manifest.txt`. Step 3 fails identically to the
+row above. Steps 4–6 remain unrun for every T1 commit.
 
 ---
 
@@ -230,6 +236,25 @@ GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77 && echo "AUDIT TREE OK"; echo "—
 cd .. && git status --porcelain --ignored | head; echo "— vendor status rc=$?"
 cd /home/iphands/prog/ai/local-mind/server/basalt && wc -l context/audit/manifest/*.tsv | tail -1; echo "— expect 862 total"
 ```
+**As executed (T1, 2026-11-05)** — two things the task text left open, now decided where a later
+session will look:
+
+1. **Tier A was seeded at T1 from this plan's own `File:` fields** (`A-planned@T<n>`: 75 rows /
+   19,659 l), plus `src/vision/stb_image.h` as `B-vendored@T5` (1 row / 7,988 l) — the one Tier B
+   assignment the plan already justifies. **Everything else (786 rows / 191,600 l) was left
+   `unassigned`** for T3. The
+   asymmetry is deliberate: Tier A membership is already evidenced by `### T4/### T5/…` above, whereas
+   a Tier B reason is not, and a directory-level Tier B default would be an unevidenced claim. Seeding
+   before the census runs is what stops a negative census result from reclassifying a boundary file —
+   hence the invariant, written in `context/audit/manifest/index.md`, that **an `A-planned@T<n>` row
+   may only ever become `read@T<n>`**.
+2. **The Verify commands above report loop rcs, not results.** Run the printed-count forms —
+   `MISMATCH_COUNT=`, `VENDOR_DIRTY=`, `PREFIX_DRIFT_COUNT=`, `awk 'END{print NR+0}'` for the row total
+   (not `wc -l … | tail -1`, which reports a single file's count if the glob ever matches one file, and
+   under-reads by 1 if a TSV loses its final newline). Full set, with a negative control on the
+   hand-edit check: `context/audit/manifest/index.md` § Checks; raw output in
+   `context/audit/wave0/t1-freeze-and-manifest.txt`.
+
 **Expected observation**: **Confirms if** 0 `MISMATCH`, `AUDIT TREE OK`, vendor porcelain-clean, 862 rows. **Refutes if** any mismatch, any file that *fails* under `GIT_NO_LAZY_FETCH=1` (that is the silent skip this exists for), or row count ≠ `git ls-files | wc -l` — blocker, not drift. **Within noise if** nothing. One mismatch is a blocker.
 
 **Commit**: `[basalt][P2][T1][audit] freeze the vendor/basalt pin and manifest all 862 files`
@@ -469,7 +494,7 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 ## Verification Checklist
 
 - [x] T0: `shellcheck --version` → 0.11.0, gate step 2 → `shellcheck ok`, and RULES.md's step-2 prerequisite states the real path *(verified 2026-11-05: `~/.local/bin/shellcheck`, sha256 `8c3be12b…`, negative control fired SC2115+SC2086, gate step 2 passed)*
-- [ ] T1: the one freeze-check prints `AUDIT TREE OK`; 0 `MISMATCH` under `GIT_NO_LAZY_FETCH=1`; 862 manifest rows; vendor porcelain-clean
+- [x] T1: the one freeze-check prints `AUDIT TREE OK`; 0 `MISMATCH` under `GIT_NO_LAZY_FETCH=1`; 862 manifest rows; vendor porcelain-clean *(verified 2026-11-05: `AUDIT TREE OK`, `MISMATCH_COUNT=0`, `awk 'END{print NR+0}'` = **862** across 12 TSVs, `VENDOR_DIRTY=0`, `comm` vs `ls-tree` = 0; all in `context/audit/wave0/t1-freeze-and-manifest.txt`)*
 - [ ] T2: GitHub's tree SHA for `dc047a7` equals `3f7b69ae…`; boundary-author census recorded with any outliers named
 - [ ] T3: **6/6** canaries flagged, including cross-file, side-channel and second-hop, each with its own evidence line
 - [ ] T3: every census row carries a `assigned-TN`; **T9's file list frozen with a line count**

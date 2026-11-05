@@ -1,0 +1,224 @@
+# Plan 02 T1 — freeze the pin + manifest all 862 files
+# captured 2026-11-05 on the agent session (uid 1000); docker unreachable, gate steps 3-6 owner-run
+# project root: /home/iphands/prog/ai/local-mind/server/basalt
+
+$ git rev-parse HEAD; git rev-parse HEAD^{tree}
+dc047a77beeddf1e91234d983a91d6bf929e9619
+3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4
+— rc=0
+
+$ # the plan's ONE freeze-check
+$ GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 && echo "AUDIT TREE OK" || echo "AUDIT TREE DRIFTED — STOP"
+AUDIT TREE OK
+— rc=0
+
+$ git status --porcelain --ignored | wc -l | sed "s/^/VENDOR_DIRTY=/"
+VENDOR_DIRTY=0
+— rc=0
+
+$ git ls-tree -r dc047a77 --format="%o %(objecttype) %(objectmode)" | sort | uniq -c   # gitlinks? symlinks?
+    858 blob 100644
+      4 blob 100755
+— rc=0
+
+$ git ls-tree -r dc047a77 --name-only | LC_ALL=C grep -cvP "^[\x21-\x7e]+$"   # expect 0
+0
+— rc=1 (1 = zero matches, i.e. clean)
+
+$ git ls-tree -r dc047a77 --format="%o %(objectsize)" | awk "\$2==0" | wc -l   # empty blobs
+0
+— rc=0
+
+$ # blob check, printed count (the plan's literal form reports the loop rc; see tracker Notes)
+$ GIT_NO_LAZY_FETCH=1 git ls-tree -r dc047a77 --format="%(objectname)<TAB>%(path)" | while IFS=$'\t' read -r h p; do [ "$(git hash-object -- "$p")" = "$h" ] || echo "MISMATCH $p"; done | wc -l | sed "s/^/MISMATCH_COUNT=/"
+MISMATCH_COUNT=0
+— rc=0
+
+$ # blobs with no trailing newline — od-based (a $()-based count reads 9: bash drops NUL)
+NO_TRAILING_NL=12
+— rc=0
+
+$ # git-free cross-check of column 3: sha256sum over the WORKTREE, compared to object-derived
+worktree sha256sum lines: 862
+SHA_MISMATCHES=0
+— rc=0
+
+$ git config --local --list | grep -E "remote.origin|core.objectsfile|promisor|partialclone"
+remote.origin.url=https://github.com/jesdga95/basalt.git
+remote.origin.fetch=+refs/heads/*:refs/remotes/origin/*
+remote.origin.promisor=true
+remote.origin.partialclonefilter=blob:none
+— rc=0
+$ ls .git/objects/info/
+commit-graphs
+— rc=0
+
+# ------------------------------------------------------------- manifest checks
+$ ls
+assets.tsv
+cmake.tsv
+data.tsv
+docs.tsv
+frozen-prefix.sha256
+github.tsv
+include.tsv
+index.md
+root.tsv
+serve.tsv
+site.tsv
+src.tsv
+tests.tsv
+tools.tsv
+— rc=0
+$ ls -a | grep -c "^\..*\.tsv$"   # dot-prefixed TSVs would be invisible to *.tsv (expect 0)
+0
+— rc=1 (1 = zero matches)
+$ awk "END{print NR+0}" *.tsv
+862
+— rc=0
+$ LC_ALL=C awk -F"\t" "NF!=9{print FILENAME":"FNR" has "NF" fields"}" *.tsv   # expect silent
+— rc=0
+$ # filing assertion — expect only "filing done"
+filing done
+— rc=0
+$ for f in *.tsv; do [ -n "$(tail -c1 "$f")" ] && echo "NO-FINAL-NEWLINE $f"; done   # expect silent
+— rc=1
+
+$ # per-TSV rows and LOC (column sums, not typed)
+assets.tsv        3 rows      224 loc
+cmake.tsv         2 rows       62 loc
+data.tsv          5 rows      966 loc
+docs.tsv         31 rows     6352 loc
+github.tsv        3 rows      231 loc
+include.tsv     161 rows    18224 loc
+root.tsv         10 rows     2049 loc
+serve.tsv        94 rows    24604 loc
+site.tsv          1 rows      544 loc
+src.tsv         353 rows   106928 loc
+tests.tsv       163 rows    51125 loc
+tools.tsv        36 rows     7938 loc
+$ # total
+TOTAL 862 rows 219247 loc
+
+$ # manifest vs the audited TREE
+$ LC_ALL=C comm -3 <(LC_ALL=C cut -f1 *.tsv | LC_ALL=C sort) <(GIT_NO_LAZY_FETCH=1 git -C ../../../vendor/basalt ls-tree -r dc047a77 --name-only | LC_ALL=C sort) | wc -l
+0
+— rc=0 (expect 0)
+$ # corroborating equality with the index (862 == 862 == 862)
+ls-files=862  ls-tree=862  manifest=862
+
+$ LC_ALL=C cut -f5 *.tsv | LC_ALL=C sort | uniq -c   # tier
+     17 A-planned@T10
+      2 A-planned@T12
+      3 A-planned@T4
+     10 A-planned@T5
+      4 A-planned@T6a
+      2 A-planned@T6b
+     10 A-planned@T7
+     22 A-planned@T8
+      5 A-planned@T9
+      1 B-vendored@T5
+    786 unassigned
+$ LC_ALL=C cut -f6 *.tsv | LC_ALL=C sort | uniq -c   # primitives
+    862 unassigned
+$ LC_ALL=C cut -f7 *.tsv | LC_ALL=C sort | uniq -c   # wave
+     52 1
+     22 2
+      2 3
+    786 unassigned
+$ LC_ALL=C cut -f8 *.tsv | LC_ALL=C sort | uniq -c   # status
+    862 pending
+$ LC_ALL=C cut -f9 *.tsv | LC_ALL=C sort | uniq -c   # reviewed-in
+    862 pending
+$ LC_ALL=C cut -f1,5,7 *.tsv | LC_ALL=C awk -F"\t" "(\$2!=\"unassigned\" && \$3==\"unassigned\") || (\$2==\"unassigned\" && \$3!=\"unassigned\")" | wc -l   # tier<->wave coupling, expect 0
+0
+$ LC_ALL=C cat *.tsv | LC_ALL=C awk -F"\t" "{L[\$5]+=\$4; C[\$5]++} END{for(t in L) printf \"%-18s %4d f %8d l\n\", t, C[t], L[t]}"   # coverage ledger seed
+A-planned@T10        17 f     4908 l
+A-planned@T12         2 f      933 l
+A-planned@T4          3 f     2651 l
+A-planned@T5         10 f     1754 l
+A-planned@T6a         4 f     2538 l
+A-planned@T6b         2 f      612 l
+A-planned@T7         10 f     1526 l
+A-planned@T8         22 f     3919 l
+A-planned@T9          5 f      818 l
+B-vendored@T5         1 f     7988 l
+unassigned          786 f   191600 l
+
+$ # frozen-prefix sidecar: verify by recomputing cut -f1-4 (sha256sum -c is WRONG for this file)
+443e4c4d6aa9b53c90dba879388b461c5449ed14184c4bf4d15d02a1595ea91a  assets.tsv
+50177e3e46b60dc2a9e56a6df57172ab53d66eaf8216d97af80a54caf84be05f  cmake.tsv
+f0f5e865118275e77d62b2491014ea6e570b35644b97be1292c79be31297a265  data.tsv
+e746c3a4ad32c8b43c59cd6d2fb62a74152c610a57ff0ec1bca97b18d8d4a15b  docs.tsv
+612f72cade2e38ea66b36b41e374afb3c626d6a849066d75d6dd40e6942fb64b  github.tsv
+1a39734446f8d644707443d049f65b1c637e490b84154a172286c9738e2d0d25  include.tsv
+573a7c693ff5f8ce952670b684581e47525a3534d7e81cc5db9e30d8b4956092  root.tsv
+4e8f0f4f9b3b03711b19c50bc0f3f6ba00bb587ea0caa41294a9d0a4c0766e58  serve.tsv
+785827326fd26cc8bff68b80727db4f55b228660f3a5cec53fe5125e82e260a8  site.tsv
+28079dad1d587e21d70b70dd5186d9c3f70cb5467a84f143f349f5c0184e26d6  src.tsv
+d9bf59ae6cf28dbe717ac16ecfc400bb7fc1b2a0d08091af7032bcd3144473db  tests.tsv
+80fc81c2aaefba15b6b43ce23789828fec37ea9a45ad60cfb2d291299e710a5f  tools.tsv
+PREFIX_DRIFT_COUNT=0 (expect 0)
+— rc=0
+$ LC_ALL=C cut -f1-4 *.tsv | LC_ALL=C sort | sha256sum   # aggregate identity of columns 1-4
+34711ffc30f1ead441beba183190a873fbedd002809723cc264ed4a2e91a0eae  -
+
+$ # NEGATIVE CONTROL on the drift check (scratch copy only, never the repo)
+cmake/git_stamp.cmake	b1c323d2df809f64e5557a3ce1b0b9e311188cc9	47af407be5f452e6d5130e222edf3607d639108b98e4ba0dbceaf2e4fca98bde	999999	unassigned	unassigned	unassigned	pending	pending
+PREFIX DRIFT cmake.tsv
+CONTROL_DRIFT_COUNT=1 (expect exactly 1 — the control fired)
+— control rc=0
+
+$ # LOC column re-derived from the objects, all 862 rows (expect silent)
+— LOC re-derivation done rc=0
+
+# ------------------------------------------------------------- determinism
+$ bash /tmp/opencode/basalt-audit/gen.sh /tmp/opencode/basalt-audit/m1   # full pipeline, twice
+$ diff -r /tmp/opencode/basalt-audit/m1 /tmp/opencode/basalt-audit/m2
+run1: rows=862 assertion passed
+run2: rows=862 assertion passed
+DETERMINISTIC: two runs byte-identical
+— determinism rc=0
+$ diff -r /tmp/opencode/basalt-audit/d1 /home/iphands/prog/ai/local-mind/server/basalt/context/audit/manifest -x index.md -x frozen-prefix.sha256
+COMMITTED TSVs == regenerated TSVs
+— regen-vs-committed rc=0
+
+# ------------------------------------------------------------- gate (RULES.md § Project gate)
+$ # step 1a — syntax over tracked files
+— 1a rc=0 (no FAIL lines above)
+$ # step 1b — counts (expect "3 b")
+      3 b
+$ # step 1c — versions.env shape
+env ok
+$ # step 2 — shellcheck (~/.local/bin, Plan 02 T0)
+shellcheck ok
+— 2 rc=0
+$ # steps 3-6 — docker; owner-run (see plan Gate status block)
+##   permission denied while trying to connect to the docker API at unix:///var/run/docker.sock
+##   permission denied? read who may open the socket: stat -c '%U:%G %a' /var/run/docker.sock
+— 3 rc=0 (expected to fail in the agent session)
+
+# end of T1 capture
+
+# ------------------------------------------------------------- operator notes on this capture
+# appended 2026-11-05 by T1 after the run; the lines above are verbatim stdout+stderr.
+#
+# 1. Where a check's signal is TEXT and not the rc. Three sentinels in this file report a rc that
+#    belongs to something else, and must be read from their printed text instead:
+#      line 26 / line 75   grep -cv … returning 0 matches exits 1  -> the 0 above is the pass.
+#      line 85             the `for f in *.tsv; do [ -n "$(tail -c1 …)" ] … done` loop's last test
+#                          failed because NO file lacked a newline -> rc=1 is the good result;
+#                          the pass is the ABSENCE of a NO-FINAL-NEWLINE line.
+#      line 199            `PREFLIGHT_ONLY=1 ./build 2>&1 | tail -2` reports `tail`'s rc (0) while
+#                          the preflight itself failed: docker.sock permission denied. Steps 3-6 are
+#                          OWNER-RUN for this session (plan Gate status block). Do not read rc=0 here
+#                          as a pass. `context/pitfalls.md` § "Four shell idioms that report green on
+#                          the thing they did not check".
+# 2. Every OTHER check in this file prints its own number (MISMATCH_COUNT=, PREFIX_DRIFT_COUNT=,
+#    CONTROL_DRIFT_COUNT=, NO_TRAILING_NL=, ROWS/862), which is the convention the rest of the audit
+#    should use. The plan's literal T1 verify block predates it and reports loop rcs; see tracker Notes.
+# 3. Freeze re-checked after this capture (./build's preflight manages vendor/basalt, and
+#    versions.env BASALT_SHA == the audited pin, so it cannot move the tree):
+$ cd vendor/basalt && GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 && echo "AUDIT TREE OK (post-capture)"; git status --porcelain --ignored | wc -l
+AUDIT TREE OK (post-capture)
+0

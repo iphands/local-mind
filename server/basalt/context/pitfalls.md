@@ -284,3 +284,51 @@ from noir, defragment it there first (`btrfs filesystem defragment -f -t 128M <f
 - basalt: `context/plans/completed/01_flashnext_container_tracker.md` (boot 2 rows, Notes)
 - basalt: `include/basalt/core/direct_upload.hpp:1-6` at `dc047a77`
 
+---
+
+# Four shell idioms that report green on the thing they did not check
+
+## Problem
+[OBSERVED 2026-11-05] During Plan 02 T1 (freeze `vendor/basalt`, manifest 862 files), four commands
+came back *passing* while the measurement had not happened. Each looked like evidence:
+
+1. **`IFS= read -r h p` over a space-separated `git … --format='%(objectname) %(path)'`.** Setting
+   `IFS=` disables whitespace splitting, so the whole line lands in `$h` and `$p` is empty. Every one
+   of 862 iterations compared against nothing: `fatal: could not open '' for reading` × 862 and
+   `MISMATCH_COUNT=862`. An earlier run of the same loop written as plain `read -r h p` had correctly
+   reported 0 mismatches, so the *correct* answer had already been on screen and the wrong one read as
+   a regression. Only the printed count exposed it.
+2. **A dot-prefixed file invisible to a glob.** The manifest split wrote `.github.tsv` (after the
+   directory). `awk 'END{print NR+0}' manifest/*.tsv` said **859**, not 862 — three rows silently
+   dropped, and `wc -l manifest/*.tsv` never lists the file either. Any count through `*.tsv` is
+   blind to it forever.
+3. **`diff -r a b` over two empty directories → "DETERMINISTIC".** The generator had run from the
+   wrong cwd, printed `fatal: not a git repository`, and produced nothing; the comparison of the two
+   empty outputs succeeded. A *comparing* command inherits the emptiness of what it compares.
+4. **`sha256sum -c` on a sidecar of `cut -f1-4` hashes.** `-c` re-hashes **whole files**, so all 12
+   TSVs reported `FAILED` — the recorded value was never what `-c` recomputes. The design was sound,
+   the verifier was not, and nothing in the tool said so.
+
+Same family, smaller: `— rc=$?` after a `while … done` reports the loop's last test, and after
+`cmd | tail -1` reports `tail`'s — so `— rc=0` beside `permission denied` is exactly what a failed
+docker step looks like in this convention.
+
+## How to avoid
+Never let absence-of-output or a trailing `rc` carry a verdict when a **number** can be printed:
+`| wc -l | sed 's/^/PREFIX_DRIFT_COUNT=/'`, `awk 'END{print "ROWS=" NR+0}'`, and assert the expected
+count *inside* the producer (`[ "$rows" = "862" ] || exit 5`) so the generator itself refuses to
+produce a short artifact. Split `git` field records on a **tab** (`--format='%(objectname)\t%(path)'`
+with `IFS=$'\t'`), never on a default-IFS space, and never with `IFS=`. Name artifact files so no glob
+meant to count them can skip them — no leading dot, no extension collision — and keep a `find . -name
+'.*tsv'` assertion in the check list. For a prefix/derived hash, write the recompute loop
+(`cut -f1-4 | sha256sum` vs the recorded value) and keep it away from `sha256sum -c`. Finally: give
+every new check a **negative control** before trusting its silence — T1's drift loop was only
+believed after a tampered LOC digit made it report exactly one drift
+(`context/audit/wave0/t1-freeze-and-manifest.txt`).
+
+## Sources
+- basalt: `context/audit/manifest/index.md` (the checks, as corrected) and
+  `context/audit/wave0/t1-freeze-and-manifest.txt` (the control output)
+- basalt: `context/plans/02_basalt_vendor_audit_tracker.md` (T1 Notes, 2026-11-05)
+- related: `context/pitfalls.md` § *An empty result from a command that was never allowed to run*
+
