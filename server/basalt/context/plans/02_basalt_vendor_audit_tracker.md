@@ -71,6 +71,9 @@
 | U8 | `.pth` / `sitecustomize.py` / `usercustomize.py` in the built image's venv. **Unreachable from the agent session** (docker); even whether an image for the pin exists is an owner-side fact. | the install-hook claim | Plan 03 / owner |
 | U9 | Did anything from the removed remote-expert tier (`97ff061`) survive as a **plumbed-but-sinkless** `host`/`port`/`url`/`token` key in the config schema or the GGUF/profile key space? | the highest-signal malice-residue check | T3 (census section) + T9 |
 | U10 | Does the server path call `stbi_set_flip_vertically_on_load`? (GHSL-2023-146 / CVE-2023-45662 is in `stbi__vertical_flip`.) | T5's format exposure list | T5 |
+| U11 | Was **basalt PR #47** (`9a49e6b1 … (#47)`, the outside-authored `src/platform/memory.cpp` work) self-approved, and did the seam-*creating* commits go through a PR at all or land by direct push? | a census of **review**, which outranks any blame plurality as a priority argument; public record in the audited repo | **T3 first action** on read-order items 1–4 |
+| U12 | Are the *bytes* of the seven `basalt-line only` seam files original, or a squashed import from a rewritten ancestor? Commit absence proves neither way. | the only open question that could turn the lineage finding into a code-provenance one; needs blob-SHA and `git patch-id --stable` joins against `Niko1221/Strata`, not ancestry | **T2b** (registered in the plan) |
+| U13 | What is in `refs/remotes/origin/multimodel` — 105 commits ahead of the pin (merge-base `1b3f6964`), in no manifest row, no tier, unread? | the audit covers one ref at one commit; a second published branch is a scope hole, and T13's bump path runs through it | T13 at the next pin bump, or a scoped T11e if the owner wants it now |
 
 ## Progress
 

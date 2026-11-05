@@ -167,6 +167,138 @@ section**, which always stays last. Keep it dense.
 
 ---
 
+## Basalt's history cannot be diffed against the project it forked from — the two repos share 0 commit SHAs and have no merge-base [LIVE 2026-11-05]
+
+`jesdga95/basalt` declares itself (in the pinned tree's `AGENTS.md:3`, `CONTRIBUTING.md:56`,
+`README.md:68`) a fork of `Niko1221/Strata`, and GitHub reports `fork=false` — which means **no
+fork-network link**, not that the relationship is false. Measured at `dc047a77` against a pristine
+`git fetch --filter=tree:0 --no-tags origin main` of Strata: **5,637 commits** on
+`refs/remotes/origin/main` (`ffa80d73…`). Pristine-check first: `count-objects` went `in-pack 0` → 5,637
+after the fetch, and there is no `objects/info/alternates`. Result: **0 shared commit SHAs, different
+root commits, no merge-base.** They are two rewritten variants of one history — **844** commit pairs match
+on the content key `(tree, author-date, committer-date, subject)`, with **0 duplicate keys on either side**
+(2,194 distinct keys across our 2,194 commits; 5,637 across their 5,637).
+
+Our 2,194 commits split at **2026-10-05T00:00:00Z** (the Software Heritage visit date, one day before
+`jesdga95/basalt` was created): **861 before, 1,333 after**. **844 of the 861 (98.0 %) have a content twin
+in Strata's `main`; 0 of the 1,333 after do.** That is the fork boundary measured by content, not by a
+merge-base. The **17 unmatched pre-fork commits** are all authored 2026-09-27 … 2026-10-04 — 16 by
+`Jesus Gulfo` (the `STRATA_*` opt-in kernel/serve work) and one Niko1221 housekeeping commit — i.e. work
+in our line on the eve of the fork that Strata's *current* `main` does not carry; whether upstream dropped
+it or rewrote it out is **not established**. None of them is a `src/platform/` seam commit. Two
+consequences: the carried-over line is bounded at **≤ 2026-10-04**, and 17 pre-fork commits join the
+"no external existence" set that § 6's read order rests on.
+
+> ⚠ **A date partition is undefined until its basis is named.** This entry published **882 / 1,312** for
+> months-equivalent of the same history, because the script compared `--date=iso-strict` output as a
+> *string*, which partitions by the **author's local calendar date**; on a **UTC instant** it is
+> **861 / 1,333**. Both are internally consistent; the UTC basis is the one quoted from here on
+> (`98.0 %`, 17 unmatched). `pitfalls.md` item 16.
+
+Canonical figures for this entry: `audit/wave0/t2-lineage.txt` §§ 0–4 (raw output and controls).
+Command-level traps: `pitfalls.md` § *Cross-repo git forensics*.
+
+- **The strongest form of the measurement** (`t2-lineage.txt` § 11b): fetch **both** projects into **one**
+  scratch store with the same command, then `comm -12 <(git rev-list A|sort) <(git rev-list B|sort)` →
+  **`|A|=2194  |B|=5637  |A∩B|=0`**, with the store self-certifying (`in-pack` 7834 = 2194 + 5637 + 3 tag
+  objects) and every count re-run under `GIT_NO_LAZY_FETCH=1`. It also cross-checks the `A..B` arithmetic
+  both directions (`strata..pin` = 2194 = `|pin|`, `pin..strata` = 5637 = `|strata|`) against independently
+  counted totals, and gives `v0.2.1..pin = 3` as a third *mechanism* (second *source*) for the engine fact.
+  Note `git merge-base` between unrelated histories is **silent** (rc=1, no output), and
+  `merge-base --independent` is **not** an unrelatedness test — see `pitfalls.md` § *Cross-repo git
+  forensics*.
+
+- **Consequence for any future work here:** `git log <strata>/main..<pin>`, `git cherry`, cross-repo
+  `bisect` and blame continuity **run and print a confident wrong answer** (with no merge-base, `A..B`
+  is just `B`). `git diff A B` is the exception and stays sound — it is tree-to-tree. Join these
+  histories by **content key**, files by **blob SHA**, changes by **`git patch-id --stable`**.
+  **Never compare SHAs between the two repositories.**
+- **Version names collide.** Basalt publishes 3 tags, Strata 95 (to `v0.2.10`); `v0.1.0` and `v0.2.1`
+  exist on both sides pointing at **different commits**. An unqualified `v0.2.1` is ambiguous —
+  in this project's files it means **basalt's** (`1b3f6964`, tree `515676c1`).
+- The fork's own metadata is intact: 0 files under `src/`, `include/` or `cmake/` mention Strata, so
+  lineage is invisible in the build and visible only in git.
+
+## In this history, 71 % of pre-fork commits and 95 % of basalt-era commits self-declare AI co-authorship — disclosure, not authorship [LIVE 2026-11-05]
+
+**Read the qualifier before the numbers.** Basalt's own `AGENTS.md` **instructs** contributors to end each
+commit message with the co-author line their tool specifies, so these trailers are a **house convention**
+that records what the committer *claimed* about how the commit was made. A trailer is **disclosure, not
+authorship**: the defensible sentence is *"this history self-identifies as substantially AI co-authored"*.
+It is never a statement that AI wrote the code, and it is never a share of *code originality* — 94.6 % is a
+share of lines in 80 files under one blame pass, and code originality has no denominator here.
+
+Method: `git log -z --format='%H\t%B'` (NUL between records, tab inside them — the other form silently
+returns zero, `pitfalls.md` item 12), matched case-insensitively against
+`co-authored-by: (claude|openai|chatgpt|copilot)` / `claude-session:` / `generated-with:`. Every population
+below names itself, because the four counters are similar in magnitude and are not interchangeable.
+
+**The 80**: the 87 rows of `audit/wave0/t2-author-census.tsv` minus the 6 `BINARY_SKIPPED` Tier A assets and
+the 1 vendored `stb_image.h` (`B-vendored@T5`) — 69 `A-planned` + 11 still `unassigned` in the manifest, so
+the set is **census-derived, not tier-derived**, and its provenance is that file, not a tier name.
+
+| Population (each row is a different denominator) | With an AI trailer | Share |
+|---|---|---|
+| Commits reachable from `dc047a77` (whole history) | 1,881 / 2,194 | 85.7 % |
+| … **pre-2026-10-05 UTC** — the inherited pre-fork line | 612 / 861 | **71.1 %** |
+| … **post-2026-10-05 UTC** — work in `jesdga95/basalt`'s own repo | 1,269 / 1,333 | **95.2 %** |
+| Blamed lines in the **80 first-party census files** (9 % of the 219,247 audited lines) | 19,035 / 20,111 | 94.6 % |
+| Distinct commits those blames credit | 329 / 367 | 89.6 % |
+| `Niko1221/Strata refs/remotes/origin/main`, as fetched 2026-11-05 | **3 / 5,637** | 0.05 % |
+
+- **The pre/post split is the point.** 85.7 % is a property of *inherited* history two-thirds of the way
+  through; the share inside basalt's own repository is **95.2 %**, and the ancestor's own pre-rewrite line
+  was already **71.1 %**. So this is not "basalt is 86 % AI-generated", and it is emphatically not "Strata
+  was human-written".
+- **The last row is a trap, not a contrast.** That line was rewritten (next entry), so post-edit it is not
+  a disclosure record at all; the 3 remaining trailers were not individually characterised. Read it as
+  *AI involvement established in our line, unresolved in theirs where the disclosure was removed.*
+- **Capability rank is unaffected** — a metadata finding has no capability dot; it is recorded for
+  **evidential weight**. **Canonical figures, owned by** `audit/wave0/t2-provenance.txt` § 10 (it prints
+  every population above); heaviest files and the read-order consequences are owned by
+  `audit/wave0/t2-boundary-authorship.txt` § 6.
+
+## The ancestor project rewrote its published mainline; the only measured delta is AI-attribution metadata [LIVE 2026-11-05]
+
+Across the 844 byte-identical-content commit pairs described above: Claude trailers **1,049 ours / 0
+theirs**, human co-authors **22 / 22**, Codex trailers **3 / 3** — one tool's attribution removed, every
+other trailer preserved. The two root commits are identical in tree (`4591e4ca…`), author, committer and
+**both** epochs, differing only by our root's extra `Co-Authored-By: Claude Opus 5.5 (1M context)` and
+`Claude-Session` lines. Corroboration: Software Heritage's 2026-10-05 visit records **Strata's own
+`refs/tags/v0.1.0` at *our* trailer-bearing root**, where that tag points at the trailer-free twin today;
+and `jesdga95/basalt` was created `2026-10-06T22:17:02Z`, i.e. **after** that record, so the
+trailer-bearing line was the ancestor's published release before our fork's repository existed.
+
+- **Motive is not established**, and preserving both epochs while editing only the message is
+  `git filter-repo`'s *default* behaviour, which is a weaker claim than concealment. Four innocent
+  explanations for basalt keeping the old line (compliance without erasure, a clean-room re-derivation with
+  no motive at all, a third-party tooling accident, a custody transfer) are at
+  `audit/wave0/t2-lineage.txt` § 5.
+- **The method this forces on the audit: narrative history is editable; hash pins, trees, blobs and
+  patch-ids are not.** Commit messages, author fields and tag targets are **not** evidence in this
+  supply chain. Anchor every external claim to a named snapshot hash and a date, and check the object
+  store before believing any prose — including a forge's metadata and this file's own summaries of it.
+- **Not established:** who ran the rewrite, whether one party controlled the ancestor's origin URL at
+  both dates, and therefore anything about *intent*.
+  Canonical detail, each in `audit/wave0/t2-lineage.txt`: the four innocent explanations **§ 5**, the 2×2
+  remote-presence matrix **§ 2**, the Software Heritage visit record **§ 7**, both-histories-in-one-store
+  controls **§ 11b**.
+
+## The pin's C++ engine is byte-identical to basalt's own `v0.2.1`; only `serve/` and docs moved [LIVE 2026-11-05][REPO]
+
+`versions.env` asserts *"the engine is identical to v0.2.1"*. Measured at `dc047a77`: **3** commits and
+**9** changed files since basalt's `v0.2.1` (`README.md`, three under `docs/`, five under `serve/`), **0**
+under `src/` / `include/` / `cmake/` / `tools/` / `CMakeLists.txt`; over those engine paths
+`|v0.2.1|=553`, `|pin|=553`, `|intersection|=553`, symmetric difference **0**. So Plan 01's Key Facts row
+for this pin — written from GitHub's `compare/v0.2.1...main` on 2026-11-04 — is re-confirmed by local blob
+identity, a stronger mechanism over the same source. **Three mechanisms, two sources**: GitHub's compare API
+and a local `rev-list` at a tag fetched from GitHub both rest on *what `jesdga95/basalt` publishes today*, so
+they would agree wrongly if the tag moved; the only corroboration from a different pair of objects is
+`multimodel..main = 3` with merge-base at the `v0.2.1` peel target, measured in a different clone
+(`audit/wave0/t2-lineage.txt` §§ 11, 11b). Practical effect: Plan 01's characterisation of the C++ engine
+carries to this pin, so Plan 02's `src/platform/` reads start from partly-characterised ground; the stalest
+point is `CMakeLists.txt` (287 commits, `unassigned` in the manifest).
+
 ## Open Questions
 
 - ~~Does an NVFP4 Flash-Next pack fit entirely in 96 GiB VRAM, or which share lands in RAM, and

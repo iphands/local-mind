@@ -30,7 +30,30 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 2/19 slices done (T0, T1); next T2 — prove the pin against public upstream and census boundary authors. Wave 0 is 2/5 (manifest over 862 files ✓, 0 lines read).
+- **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 3/19 slices done
+  (T0, T1, T2 — T2 landed as **two** commits: the task as scoped, then the record of what its evidence
+  means); next **T3** — the primitive census with the 6-canary control, **carrying T2's three scope
+  additions** (the "AI residue is never a reason for `benign`" calibration rule, the never-connect/never-
+  fetch/never-install rule for external identifiers, and agent-directed instructions in shipped files as
+  a census surface). **T2 (2026-11-05):** all 862 blob SHAs equal GitHub's tree object for `dc047a77`,
+  with the comparison shown sensitive against the first parent — but the attestation stops at **one
+  witness** (GitHub's own API: basalt's tags unsigned, the signature unverifiable here, and Software
+  Heritage holds **no** revision for the pin), so **nothing outside GitHub anchors the hash.** The
+  provenance half also established that the pin is **untagged `main`** (`v0.3.5` does not exist upstream),
+  that there is **no `SECURITY.md`**, and that `CMakeLists.txt` (287 commits) plus `serve/engine/process.py`
+  (1,419 l) were sitting `unassigned`. **The finding:** `jesdga95/basalt` and the `Niko1221/Strata` it
+  declares itself forked from share **0** commit SHAs and have **no merge-base**, yet 844 commits match on
+  content — two rewritten variants of one history, and the only measured difference between the identical
+  pairs is that ours carry AI co-authorship trailers (1,049 vs 0) while every other trailer is preserved;
+  **94.6 %** of the audited lines sit under commits that self-declare AI co-authorship. Consequence for
+  every later task: **narrative history in this supply chain is editable and has been edited — trust hash
+  pins, trees, blobs and patch-ids** (`context/audit/wave0/t2-lineage.txt`; `context/distilled.md`).
+  **T2b** is registered for the one question T2 could not answer — whether the `src/platform/` seam's
+  **bytes** are original or squashed-inherited — joinable only by **blob SHA and `patch-id`**, never by
+  commit SHA. Also owed: the repo publishes `refs/remotes/origin/multimodel`, **105 unaudited commits**.
+  Wave 0 exit conditions: **2 of 5 met** — tree frozen + manifest over all 862 files ✓, pin matched to
+  the objects public GitHub serves ✓; still owed: 6/6 canaries, every census row carrying a disposition +
+  assigned-T, and T9's list frozen to a named file list with a line count. **Still 0 lines of Basalt read.**
 
 ## Plans <!-- hp:plans -->
 

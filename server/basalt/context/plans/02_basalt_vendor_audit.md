@@ -170,6 +170,11 @@ Values are as measured; the **How confirmed** column states the method *and its 
 | Fact | Value | How confirmed (and its limit) |
 |---|---|---|
 | Pin under audit | `dc047a77…` = `main` 2026-11-04; tree `3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4` | `git rev-parse HEAD HEAD^{tree}` 2026-11-05 |
+| **The pin = basalt's own `v0.2.1` + docs + `serve/`; the C++ engine is byte-identical to that tag** | 3 commits, 9 changed files, **0** under `src/`/`include/`/`cmake/`/`tools/`/`CMakeLists.txt`; engine blobs 553/553 shared, symmetric diff 0 | T2 2026-11-05, local `ls-tree` blob identity + `comm`; independently confirms Plan 01's row (GitHub `compare`), and a third method agrees (`v0.2.1..pin = 3` by local `rev-list` in the one-store probe, `audit/wave0/t2-lineage.txt` § 11b). **Consequence:** Plan 01's engine characterisation carries to this pin; the stalest read is `CMakeLists.txt` (287 commits) |
+| **The two upstream names are not comparable** | `jesdga95/basalt` and `Niko1221/Strata` share **0** commit SHAs, have **no merge-base**; 844 commits match on `(tree, author-date, committer-date, subject)`. Both publish `v0.1.0`/`v0.2.1` at **different** objects (Strata: 95 tags to `v0.2.10`) | T2 2026-11-05 vs a pristine `--filter=tree:0` fetch. **Never diff these repos by SHA**; unqualified `v0.2.1` in this repo means **basalt's**. `audit/wave0/t2-lineage.txt` |
+| **The audited history self-identifies as substantially AI co-authored** | 1,881 / 2,194 commits (85.7 %) carry an AI co-authorship trailer; **19,035 / 20,111** blamed lines (94.6 %); upstream's rewritten line shows 3 / 5,637 | `git log -z --format='%H\t%B'` + blame ∩ trailer set, T2 2026-11-05. **Disclosure, not authorship**; ranks nothing by itself; the upstream figure is **not** a human-written control (`audit/wave0/t2-provenance.txt` § 10) |
+| **Tier A is not all text, and the plan's T2 file list is not the manifest's** | the census is 87 rows = **80 blameable first-party** (69 `A-planned` + 11 `unassigned`) + 6 binary Tier A assets + 1 vendored `stb_image.h` (`B-vendored@T5`); the 12 census paths beyond the manifest's 75 Tier A are `CMakeLists.txt` + ten `serve/engine/` modules + `stb_image.h` | T2 2026-11-05. `CMakeLists.txt` and the ten `serve/engine/` modules are still **`unassigned` in the manifest** — they need a `File:` amendment to be owned, and until then **T11 owns zero `A-planned` rows** |
+| **The audited repo publishes a second, unaudited branch** | `refs/remotes/origin/multimodel`, 105 commits ahead of the pin (merge-base `1b3f6964`); clone object hygiene otherwise clean: 2,299 commit objects, present-but-unreachable **0** | T2 2026-11-05 `for-each-ref` + `cat-file --batch-all-objects` set-minus `rev-list`. Every "the whole repo is accounted for" claim must name its ref; goes to `verdict.md` conditions and T13 |
 | Working tree matches the commit | `git diff --quiet HEAD` → clean | 2026-11-05. **Limit:** run *without* `GIT_NO_LAZY_FETCH`, so it does not prove blobs were local — only that worktree == index == commit. T1 re-proves both under `GIT_NO_LAZY_FETCH=1`; `git cat-file -e` proves object *existence*, never that the working file matches it (only `git hash-object` does) |
 | No hidden object source | no `.git/objects/info/alternates`, no `core.objectsfile` | 2026-11-05 |
 | Partial clone | `promisor=true`, `partialclonefilter=blob:none` | `git config --local --list` 2026-11-05. A partial clone cannot **corrupt** bytes; the risk is silent skips and mid-audit drift, hence the one freeze-check |
@@ -270,14 +275,124 @@ session will look:
 
 **What to do**: Confirm `dc047a7` is what public `jesdga95/basalt` `main` says it is — checked **against GitHub, never against our own clone** (Rule E) — by comparing GitHub's tree SHA to our `HEAD^{tree}`; check tags (`v0.2.1` is the nearest release per `versions.env`) and whether any are signed, recording "GitHub offers no signature" as a **limit** rather than a clean result; confirm no local commits or untracked files in vendor. **Then the cheap, disproportionate-signal half** (~30 contributors in six weeks — do not treat HEAD as one author): `git log --format='%ae %ad' -- <boundary file>` for `serve/engine/image_source.py`, `serve/security.py`, `serve/service.py`, `src/platform/*`, `src/vision/*`, `data/*`, `serve/web/*`. Flag any boundary file whose history includes a **one- or two-commit contributor** or an email domain off the project's cluster (`gmail`/`users.noreply`/known handles). Attribution is not accusation; it is where a reviewer looks first.
 
-**Verify**:
+**Verify** (what actually ran; `gh` is **not installed** in this environment — the tracker's
+environment list was wrong and is corrected below):
 ```bash
-gh api repos/jesdga95/basalt/commits/dc047a77beeddf1e91234d983a91d6bf929e9619 --jq '.commit.tree.sha'; echo "— must equal 3f7b69ae…"
-cd vendor/basalt && git log --format='%ae' -- serve/engine/image_source.py src/platform src/vision data | sort | uniq -c | sort -rn; echo "— author census rc=$?"
+# 1 · the witness: GitHub's own tree object for the pin, compared against our clone in BOTH directions
+curl -sS https://api.github.com/repos/jesdga95/basalt/commits/dc047a77beeddf1e91234d983a91d6bf929e9619   # .commit.tree.sha
+curl -sS "…/repos/jesdga95/basalt/git/trees/3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4?recursive=1"          # 942 entries, truncated=false
+git -C vendor/basalt ls-tree -r dc047a77 | awk -F'\t' '{split($1,a," "); print a[1]"\t"a[2]"\t"a[3]"\t"$2}'  # mode, type, blob, path
+#   → print API_BLOBS, LOCAL_BLOBS, INTERSECT, ONLY_IN_API, ONLY_IN_LOCAL, BLOB_SHA_MISMATCH separately.
+#     The three cardinalities are NOT optional: a field-swap bug once printed BLOB_SHA_MISMATCH=0 over
+#     two DISJOINT key sets. A zero over an empty intersection is not a pass.
+#     SENSITIVITY CONTROL — run the identical comparison against the first parent (bbf2f5bb, tree
+#     c7fbe4ef…): it must return BLOB_SHA_MISMATCH=1 (serve/util/telemetry.py). 0 would mean the
+#     comparator cannot see a change and every 0 above is meaningless.
+# 2 · tags/ancestry/signature (the plan asked; the answers are: annotated-but-unsigned, and no v0.3.5)
+git -C vendor/basalt for-each-ref refs/tags --format='%(refname:short) %(objecttype)'   # all `tag`, none lightweight
+git -C vendor/basalt merge-base --is-ancestor v0.2.1 dc047a77; echo "rc=$?"            # rc=0; 3 commits since the tag
+git -C vendor/basalt log --show-signature -1 --format='%h %G?'                          # %G?=E, "No public key" → a LIMIT
+# 3 · the author census (87 rows = 75 Tier A + 12 files this task names that the manifest leaves unassigned)
+{ find context/audit/manifest -maxdepth 1 -name '*.tsv' -type f -exec awk -F'\t' '$5 ~ /^A-/ {print $1"\t"$4"\t"$5}' {} +
+  find context/audit/manifest -maxdepth 1 -name '*.tsv' -type f -exec awk -F'\t' '$5 !~ /^A-/ && ($1=="CMakeLists.txt" || $1 ~ /^serve\/engine\// || $1 ~ /^src\/vision\//){print $1"\t"$4"\t"$5}' {} +
+} | LC_ALL=C sort -u > /tmp/opencode/basalt-audit/t2/rows-plan.tsv
+bash context/audit/scripts/t2-census.sh /tmp/opencode/basalt-audit/t2/rows-plan.tsv out.tsv err.log 87 vendor/basalt dc047a77beeddf1e91234d983a91d6bf929e9619
+#   → ROWS_IN=87 ROWS_OUT=87 BINARY_SKIPPED=6 EMPTY_FIELDS=0 NOT_OK=0 ERR_BYTES=0 VALIDATION=PASS
+#     CONTROL: run it with expect_rows=99 → exit 7. It must refuse a wrong-sized input: without that
+#     gate the same producer printed VALIDATION=PASS over an EMPTY row list and exited 0.
+#   → `git log --format='%ae' -- <boundary paths> | sort | uniq -c` for the domain census; parse
+#     `uniq -c` output on a TAB, not the default FS, or a multi-word author name lands in the email column.
 ```
+**Corrections to the task text above, found by running it (do not "fix" the artifacts to match these):**
+`src/server/` **does not exist** in this tree — `git ls-tree -d dc047a77:src/server` is a fatal. The C++
+side of the boundary is `src/platform/` (10 files) + `src/vision/` (10) + `include/basalt/platform/`;
+the serving layer is Python under `serve/`. `gh` is not installed (use `curl` to `api.github.com`).
+`v0.2.1` is the nearest release but the pin is **untagged** `main`; `versions.env` pins
+`BASALT_SHA` and **names `v0.2.1` in a comment only**, asserting *"the engine is identical to v0.2.1"* —
+a claim T2 verified **true**: 3 commits, 9 changed files (all `README.md`, `docs/`, `serve/`), **0** under
+`src/`/`include/`/`cmake/`/`tools/`/`CMakeLists.txt`, and **553/553** engine blobs identical by identity.
+So Plan 01's characterisation of the C++ engine carries to this pin (stalest at `CMakeLists.txt`, 287
+commits) and basalt's own `v0.2.1` (`1b3f6964`) is an unambiguous anchor for T2b — unlike Strata's
+same-named tags, which are different objects whose targets have already moved once.
+The signature exists and GitHub reports it valid — but it is **GitHub's own key on a GitHub-created
+squash merge**, unverifiable in this clone, which is a recorded limit, not the "GitHub offers no
+signature" limit this task predicted.
+
+> ⚠ **Methods corrected 2026-11-05, after T2 ran them — read before re-running anything upstream-shaped
+> here.** (a) **Do not** probe a peer repository's commit API for our SHAs: GitHub resolves that route
+> against the repo's **object store**, not its default branch, and this upstream has rewritten its
+> mainline, so `200`/`422` proves nothing about shared history (it produced a false fork boundary).
+> (b) **Do not** count or test objects inside a **partial clone you have already queried** — lazy-fetch
+> fabricates shared ancestry; one run "found" 710 shared commits that a pristine clone does not contain.
+> (c) The sound tests are: `git fetch --filter=tree:0 --no-tags origin <branch>` into scratch for a
+> pristine history (verify `in-pack 0 → N`, no `objects/info/alternates`); the **promisor full-40-hex
+> probe** (`cat-file -e <full-sha>^{commit}` → `upload-pack: not our ref` = not served on any advertised
+> ref); and matching commits on the **content key `(tree, author-date, committer-date, subject)` — never
+> by SHA between `jesdga95/basalt` and `Niko1221/Strata`, whose SHAs do not correspond at all.** Evidence
+> and controls: `context/audit/wave0/t2-lineage.txt` §§ 0–4; `context/pitfalls.md` items 10–11 and
+> *Cross-repo git forensics*.
 **Expected observation**: **Confirms if** GitHub's tree SHA equals `3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4`, and boundary files are dominated by the project's core authors. **Refutes if** the tree SHAs differ or vendor carries a non-public commit — **stop the plan**, nothing downstream is meaningful. An unusual one-commit author on a boundary file is a **finding to read first**, not a refutation. **Within noise if** missing signatures (documented limit), or a noreply-domain contributor that matches an existing GitHub handle.
 
 **Commit**: `[basalt][P2][T2][audit] prove the pinned commit matches upstream and census boundary authors`
+
+> **Landed 2026-11-05 as two commits** (both reviewers independently, same reason): the first is this
+> task as scoped plus corrections to its own published claims; the second,
+> `[basalt][P2][T2][audit] record the ancestor history rewrite and the AI-attribution corpus`, carries
+> the *finding's use* — `distilled.md`, `high_level.md`, T2b, T3's scope additions and the
+> version-ambiguity fixes — so that a later re-argument of the AI framing cannot take T2's provenance
+> evidence down with it.
+
+### T2b: Content lineage of the boundary — is the seam code *original*, or imported from Strata?
+
+**File**: `context/audit/wave0/t2b-content-lineage.txt` + a `lineage` column in
+`context/audit/wave0/t2-author-census.tsv` (**a sidecar joined by path — never a 5th column in T3's
+contract, never in `ledger-grid.sh`**, whose byte-identity checks cover the manifest)
+
+**Why this exists (the four measurements that made it)**: T2 established that `jesdga95/basalt` and
+`Niko1221/Strata` share **0** commit SHAs, have **no merge-base**, and are nonetheless one history in two
+rewritten variants (**844** content-key pairs). That makes *commit*-level absence a **weak** signal: a
+squashed upstream import reads exactly like original work. T2's seam ranking therefore rests on a
+question it cannot answer — whether `src/platform/`'s bytes are basalt-era originals or inherited code
+whose upstream commits were squashed away.
+
+**What to do**: For each of the **80** first-party censused files, at the pin and at basalt's `v0.2.1`
+(`1b3f6964`, engine-byte-identical to the pin — verified), take `git rev-parse <ref>:<path>` and ask
+whether that **blob SHA** appears anywhere in the pristine Strata history (`git -C <pristine>
+rev-list --objects --all` built once, then a set join; **blob SHAs are content addresses and are the one
+thing that does compare across these repos**). Classify each file `byte-shared` / `byte-unique` /
+`blob-changed-but-lineage-linked`, and record for each of the 7 seam commits from
+`t2-boundary-authorship.txt` § 6 whether its **`git patch-id --stable`** has a twin in Strata.
+
+**Calibration rule that governs the output**: lineage may **order reading and raise priority**; it may
+**never lower it and never reduce depth**. `census.md` dispositions stay **lineage-independent** — a
+`byte-shared` file is not more trusted, only older. Write the join into a sidecar so a later reader can
+delete the annotation without losing a disposition.
+
+**Verify**:
+```bash
+P=/tmp/opencode/basalt-audit/strata-pristine          # re-verify pristine first
+git -C $P cat-file --batch-all-objects --batch-check='%(objecttype) %(objectname)' \
+  | awk '$1=="blob"{print $2}' | LC_ALL=C sort -u > /tmp/opencode/basalt-audit/strata-blobs.txt
+B=$PWD/vendor/basalt
+while read -r f; do
+  h=$(git -C $B rev-parse "dc047a77:$f")
+  printf '%s\t%s\n' "$h" "$f"
+done < /tmp/opencode/basalt-audit/files80c.txt > /tmp/opencode/basalt-audit/pin-blobs80.txt
+echo "PIN_BLOBS=$(grep -c . /tmp/opencode/basalt-audit/pin-blobs80.txt) \
+STRATA_BLOBS=$(grep -c . /tmp/opencode/basalt-audit/strata-blobs.txt) \
+SHARED=$(LC_ALL=C comm -12 <(cut -f1 /tmp/opencode/basalt-audit/pin-blobs80.txt | LC_ALL=C sort) \
+  /tmp/opencode/basalt-audit/strata-blobs.txt | grep -c .)"
+```
+**Expected observation**: **Negative control required, and it must fire**: a **Tier A binary** asset's
+blob and a `docs/` image's blob — those were committed before the fork, so they *should* be shared; if
+they are not, the Strata blob set is wrong (partial-clone or filter artefact) and nothing in this task is
+readable. **Confirms if** the control shares ≥1 blob and the seam files' class is stated per file with
+`|A|`, `|B|`, `|A∩B|` printed. **Refutes if** every seam file is `byte-shared`: then § 6's read order
+loses its "no external existence" argument entirely and T3's priorities must be re-derived from content
+alone. **Within noise if** a seam file is `blob-changed-but-lineage-linked` — expected for any file that
+was edited after the fork.
+
+**Commit**: `[basalt][P2][T2b][lineage] join the boundary files to Strata by blob identity and patch-id`
 
 ### T3: The primitive census, and six canaries that prove it can see
 
@@ -290,6 +405,28 @@ cd vendor/basalt && git log --format='%ae' -- serve/engine/image_source.py src/p
 4. **cross-file assembly** — a URL built from constants spread across **two different top-level directories** (every other plan plants single-file; a real maintainer hiding one would not);
 5. **side-channel, invisible to the taxonomy** — a routine encoding a secret into **response token count or inter-token latency**: no new primitive, no syscall, no import. It tests whether the *category list* is right, which is what the verdict actually rests on;
 6. **second-hop** — data written into a log field that `/metrics` later re-labels and serves: nothing leaves, nothing connects, and the value goes out anyway.
+
+**Three additions to this task's scope, handed over by T2** (`audit/wave0/t2-boundary-authorship.txt` § 6):
+
+1. **A calibration rule, written before there is any temptation to use it.** 94.6 % of the audited lines
+   sit under commits that self-declare AI co-authorship, which supplies a ready innocent story for
+   exactly the pattern this task's orphan-config-key section calls its highest-signal residue. So:
+   **"AI residue" may never be the reason a row goes `benign`.** It may only be the reason a row is
+   *ranked lower* after the key or call site has been traced end-to-end and no sink exists. Expect a
+   large volume of inadvertent residue (hallucinated URLs, copied debug endpoints, dead config plumbing)
+   and treat volume as **base rate, not evidence**; canaries 4–6 are the discriminating ones because they
+   test structure rather than presence.
+2. **A hard non-action.** Whatever the census turns up — implausible domains, dead package names,
+   token-shaped constants — external identifiers are resolved **by inspection and documentation only.
+   Never connect, never fetch, never `pip install`, never `git ls-remote` them.** A nonsense-looking
+   domain may be a real one that reacts to being probed, and this audit's most valuable property is that
+   nobody on the other end knows it exists. (Reading GitHub *metadata*, e.g. whether PR #47 was
+   self-approved, is a different act and is in scope.)
+3. **A surface the primitive taxonomy cannot see: instructions addressed to a model.** `AGENTS.md`,
+   `CONTRIBUTING.md` and `.github/` are in the manifest, and upstream's `AGENTS.md` instructs the next
+   agent directly. We run agents on this tree, so a shipped file an obedient agent will act on is a
+   capability path with no syscall in it. Give it a census section, including **source comments phrased
+   as instructions to a model**, and rank it by what it could make an agent do.
 
 **Verify**:
 ```bash
@@ -396,7 +533,7 @@ grep -rnE 'capture_output|spawn_piped|spawn_and_wait|dlopen|execvp|posix_spawn|o
 
 **File**: `data/profiles/qwen4exp-48x512.prof` (196,628 B, `file` says only "data"), `data/bench/*.ids`, `serve/web/fonts/*.woff2`, `assets/*.png`, `docs/img/frontend.gif`, `serve/chat_template.jinja`, `serve/web/{app.js,app.css,index.html}`, `THIRD_PARTY_LICENSES`
 
-**What to do**: Where a payload actually hides, and cheap. Entropy-scan and hexdump the `.prof`; grep **every** binary asset for embedded literals (`http`, `://`, `/bin/`, `eval`, printable runs > 16 chars) — a WOFF2 or PNG yielding shell literals is the whole game. Then read the `.prof` **parser** and confirm no field is consumed as an offset/length without bounds and nothing in the file can redirect execution. Re-run (do not inherit) the web-asset external-reference check.
+**What to do**: Where a payload actually hides, and cheap. Entropy-scan and hexdump the `.prof`; grep **every** binary asset for embedded literals (`http`, `://`, `/bin/`, `eval`, printable runs > 16 chars) — a WOFF2 or PNG yielding shell literals is the whole game. Then read the `.prof` **parser** and confirm no field is consumed as an offset/length without bounds and nothing in the file can redirect execution. Re-run (do not inherit) the web-asset external-reference check. **T2 raised this file's priority, and the reason is narrower than it first looked.** `qwen4exp-48x512.prof` (960 "lines", 196,628 B, magic `\x01\0\0\0…`, not git-lfs — `.gitattributes` only sets `eol`) sits on the engine's *default lookup path*: `src/program/generate/configure.cpp:40` concatenates `BASALT_SOURCE_DIR + "/data/profiles/" + key + ".prof"`, and `docs/configuration/index.md:153` / `docs/model-file.md:82` name that path as the default — a **path convention, not provenance**. **The only writer of the format in the tree is the running server's adaptive tier**: `basalt::core::write_expert_profile` (`src/core/expert_cache.cpp:99`), called from `src/program/serve/tier_profile.cpp:16` under `--expert-profile-save` (`src/program/cli/arguments.cpp:233`; periodic at `src/program/serve/commands.cpp:217`; guarded at `serve/tiers.cpp:555`; `docs/model-file.md:87-89` documents producing one by serving a representative prompt mix and QUITting), and the probe tool explicitly **compares, never writes** (`src/program/probe_main.cpp:64`). So there is **no offline, in-repo, deterministic generator** — no tool, script, test or CI job under `tools/`, `tests/` or `.github/` emits a `data/profiles/*.prof`. Consequence: the shipped bytes cannot be regenerated deterministically from anything in this tree; reproducing them needs an unpinned server run whose prompt mix, model build and hardware are recorded nowhere. The file is **handed-in**. *(Corrected 2026-11-05: this scope line first asserted "no writer/generator for `.prof` exists anywhere in the repo", which is **false** — my `git grep` was scoped `-- '*.py' '*.sh'`, so a C++ writer was structurally outside the pathset and the empty result measured the pathspec, not the repo. See `pitfalls.md` item 15.)* **T10's pass condition, stated as a falsifier:** the file must be fully accounted for by the same code path that wrote it — the parser consumes **all 196,628 bytes** with none unexplained (the header, the pair array, any trailing region), and the shipped expert pairs are consistent with the layout of the model this pack targets (`qwen4exp-48x512`). "High entropy" is not a pass; an unaccounted byte region is a **finding**, and if the structure is not fully explained, say so rather than defaulting to `benign`.
 
 **Verify**: the entropy one-liner; `git ls-files | grep -E '\.(woff2|png|gif|svg|prof|ids)$' | xargs -I{} sh -c 'strings -a "{}" | grep -iE "http|://|/bin/|eval" && echo "  ^^ IN {}"'; `echo "— asset scan rc=$?"`.
 **Expected observation**: **Confirms if** no asset yields URL/path/`eval` literals and `.prof` structure is fully explained by its parser. **Refutes if** any literal in any binary asset, or an unbounded offset. **Within noise if** high entropy from a genuinely compressed/float table **whose structure the parser confirms** — never accept "high entropy" as benign without the parser reading.
@@ -437,6 +574,17 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 **File**: `run`, `lib/common.sh`, `Dockerfile`, `versions.env` (ours) — **in scope by owner decision 2026-11-05**
 
 **What to do**: Both reviewers independently judged this the audit's highest-value output, because it is where *our* data actually leaves or stays. `--host 0.0.0.0` + `-p 0.0.0.0:8700:8700` with an **optional** API key (`security.exposed_without_key` *flags* a non-loopback bind without a key — determine what `./run` actually **does** about it, and whether `--allowed-host cosmo.lan` widens or restricts); what `/metrics` discloses to a LAN peer; the container's network mode and whether the engine gets egress at all (the cheapest control: **no egress** — which Plan 03 proves); prompt retention in the container's writable layer and whether `--image-dir`/vision cache persists across boots; `--engine-bin`/`--script`/`--config` as trust boundaries we hold.
+>
+> ⚠ **At a bump, `git log <old-pin>..<new-pin>` is the right comparison; `git log Niko1221/Strata/main..<new-pin>`
+> is the trap.** `versions.env`'s comment names `v0.2.1` as the engine anchor — use **basalt's** `v0.2.1`
+> (`1b3f6964`, tree `515676c1`), never Strata's same-named tag (a different object, and its target has moved
+> once), and
+> re-run T2's blob-identity check (`audit/wave0/t2-provenance.txt` § 6's engine-path comparison) rather
+> than any diff against the forked-from project: the two repos share 0 SHAs and have no merge-base, so
+> `A..B` there is just `B` and reads as "all of it is new work" (`audit/index.md` § *If you are about to run
+> something against upstream*). Check the same T13 bump for a **signed** release tag and for Software
+> Heritage holding `jesdga95/basalt` — both are `Revisit if` triggers in `high_level.md` § *Attesting the
+> Basalt pin*.
 
 **Verify**: `img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin'); export IMAGE_OVERRIDE=${img:-stub:none}; DRY_RUN=1 ./run 2>&1 | grep -oE '\-p [^ ]+|--host [^ ]+|--api-key.*|--network [^ ]+'; DRY_RUN=1 ./run 2>&1 | tail -1; echo "— rc=$?"`
 **Expected observation**: **Confirms if** a concrete ordered action list, each item the exact flag and its one-line tradeoff. **Refutes if** nothing to change — then say that, don't manufacture recommendations. **Within noise if** an exposure deliberate and documented in `versions.env`/`README.md` as owner-chosen.
@@ -500,7 +648,7 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 
 - [x] T0: `shellcheck --version` → 0.11.0, gate step 2 → `shellcheck ok`, and RULES.md's step-2 prerequisite states the real path *(verified 2026-11-05: `~/.local/bin/shellcheck`, sha256 `8c3be12b…`, negative control fired SC2115+SC2086, gate step 2 passed)*
 - [x] T1: the one freeze-check prints `AUDIT TREE OK`; 0 `MISMATCH` under `GIT_NO_LAZY_FETCH=1`; 862 manifest rows; vendor porcelain-clean *(verified 2026-11-05: `AUDIT TREE OK`, `MISMATCH_COUNT=0`, `awk 'END{print NR+0}'` = **862** across 12 TSVs, `VENDOR_DIRTY=0`, `comm` vs `ls-tree` = 0; all in `context/audit/wave0/t1-freeze-and-manifest.txt`)*
-- [ ] T2: GitHub's tree SHA for `dc047a7` equals `3f7b69ae…`; boundary-author census recorded with any outliers named
+- [x] T2: GitHub's tree SHA for `dc047a7` equals `3f7b69ae…`; boundary-author census recorded with any outliers named *(verified 2026-11-05: `pin^{tree}` = `3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4` = GitHub's tree for the commit; `API_BLOBS=862 LOCAL_BLOBS=862 INTERSECT=862 ONLY_IN_API=0 ONLY_IN_LOCAL=0 BLOB_SHA_MISMATCH=0`, canonical `sha256(path⇥blob)` `a8216c69…` equal both sides; controls C1–C8 all fired. Census: 87 rows, **80 first-party blameable files / 20,111 lines**, Jesus Gulfo 72.4 %, outliers named in `audit/wave0/t2-boundary-authorship.txt` § 6. Two published figures were **corrected after the first draft** — the blame-boundary count (a false `0`; anchored truth 560) and the file denominator (86 → 80) — see `audit/wave0/t2-provenance.txt` § 6 and `pitfalls.md` items 10–14)*
 - [ ] T3: **6/6** canaries flagged, including cross-file, side-channel and second-hop, each with its own evidence line
 - [ ] T3: every census row carries a `assigned-TN`; **T9's file list frozen with a line count**
 - [ ] T4: all 9 bypass classes **executed** in the scratch copy with observed outcomes; delta vs upstream's test list written

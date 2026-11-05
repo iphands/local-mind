@@ -59,6 +59,43 @@ received (`[server] engine … (from cli)`). One place holds the defaults: `./ru
 
 **Revisit if:** the settings outgrow env knobs.
 
+## Attesting the Basalt pin `dc047a77` — against the object store, never against upstream's narrative
+
+**Audit-method decision taken during Plan 02 T2 (2026-11-05), pending owner ratification** — recorded here
+because this is where decisions are audited for ownership. Made after three plausible attestation methods
+were run and each returned a confident answer to a different question. The constraint: the pin we ship is
+`jesdga95/basalt` `main`'s tip on the day it was pinned, **untagged**; its commit signature is GitHub's own
+key on a **GitHub-created squash merge** and is unverifiable from this clone (`No public key`), basalt's
+three release tags are annotated but **unsigned**, and the project declares a fork of `Niko1221/Strata`
+whose published history has since been **rewritten** — so "diff it against upstream" is not a stable
+operation.
+
+| Option | Pros | Cons | Verdict |
+|---|---|---|---|
+| **GitHub's tree object for the pin, compared to our `pin^{tree}` + per-blob SHA both directions** | One request, no quota dependence beyond it, resolves a single changed file against the first parent | one authority attesting itself; the signature is the forge's, not a contributor's | **Chosen** — establishes "these are the objects GitHub serves", no more |
+| Software Heritage as the third party | Independent of GitHub; holds the ancestor project and **our root commit** | holds no origin and no revision for `jesdga95/basalt` or the pin, so "nothing" is claimed only about what its listings enumerate (its snapshot ref lists cut off at exactly 1,000 refs) | **Partial** — corroborate where it exists |
+| Diff / `log upstream..pin` / `cherry` / shared-object counts against `Niko1221/Strata` | looks like the standard answer | no merge-base exists, so `A..B` is just `B`; and in a *partial* clone, lazy-fetch makes our own objects look like shared ancestry (one run "found" 710 shared commits a pristine clone does not contain) | Rejected — wrong tool, fails plausibly rather than erroring |
+| Asking the peer repo's commit API for our SHAs | cheap, no clone | GitHub resolves it against the repo's **object store**, not its default branch; produced a false fork boundary here | Rejected |
+| Trusting commit messages, author fields, `Co-Authored-By` trailers, tag targets | free | the ancestor's published line **was** rewritten, and the only measured delta across byte-identical commit pairs is the removal of AI co-authorship trailers; GitHub's `fork=false` had already proved a weak signal | Rejected as evidence; kept as **reading-priority** signal only, disclosed as such |
+
+**Before writing the sentence "this commit is upstream's",** read `audit/index.md` § *If you are about to
+run something against upstream*; attest by object identity — `pin^{tree}` and per-blob SHA against the
+forge's tree object for the same commit — and never by `log`/`cherry`/`bisect` against `Niko1221/Strata`,
+nor by anything the forge's *metadata* implies about lineage. Before repeating the history-rewritten
+finding, read `audit/wave0/t2-lineage.txt` § 0: four methods that produced confident wrong answers here.
+
+**Revisit if:** each with the moment someone would actually look — at **every T13 pin bump**, (a)
+`git tag -v` against a published key shows the new pin sitting on a **signed** release (then attestation is
+one command); (b) the recorded Software Heritage origin lookup
+(`audit/wave0/t2-lineage.txt` § 7) returns an origin for `jesdga95/basalt`; (c)
+`git log --show-signature -20` on the new pin shows a non-zero count of contributor signatures rather than
+forge signatures.
+
+**Reuse:** the method — trust hash pins, trees, blobs and patch-ids, and name the anchor (snapshot hash +
+date) beside every external claim — generalises to every vendored pin here; it is recorded for reuse in the
+monorepo's `../../../context/pitfalls.md`. See `audit/index.md` § *If you are about to run something
+against upstream* for the commands.
+
 ## Where the pack lives — local NVMe (`models.local/`), not the NFS share
 
 Basalt uploads weights with `O_DIRECT`; from noir's NFS share boot 2 ran at 5–10 MB/s, from local
