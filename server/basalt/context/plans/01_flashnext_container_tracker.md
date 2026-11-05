@@ -2,8 +2,8 @@
 
 ## Overview
 
-- Status: 0% complete (0/7 tasks)
-- Start date: — (set when T1 starts)
+- Status: 14% complete (1/7 tasks)
+- Start date: 2026-11-04
 - Plan: `context/plans/01_flashnext_container.md`
 - Evidence: the table below; build logs in `captures/build_<date>_<sha7>.log` (gitignored); boot
   start blocks pasted by the owner into the Evidence rows. Test environment: host `cosmo`, RTX PRO
@@ -33,7 +33,7 @@
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
-| 1 | T1: Pins, shared guards, project skeleton | `versions.env`, `lib/common.sh`, `.gitignore`, `models`, `README.md` | pending | |
+| 1 | T1: Pins, shared guards, project skeleton | `versions.env`, `lib/common.sh`, `.gitignore`, `models`, `README.md` | done | Digests unchanged since ../ninfer pinned them; sudo / missing-docker guards refuse (rc=1); gate `1 b`, `env ok`. |
 | 2 | T2: Dockerfile + `./build` | `Dockerfile`, `Dockerfile.dockerignore`, `build` | pending | |
 | 3 | T3: `./run` + its dry-run gate step | `run`, `README.md`, RULES gate | pending | |
 | 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | pending | owner runs `./build` |
@@ -48,6 +48,8 @@ the last three always carry a reason in the row's Notes cell.
 
 | Date | What ran (command / build / input) | Result | Runs | Spread / notes |
 |------|------------------------------------|--------|------|----------------|
+| 2026-11-04 | `docker buildx imagetools inspect` on both `nvidia/cuda:13.4.3-{devel,runtime}-ubuntu24.04` tags | `sha256:5626a7d0…` / `sha256:f58bd7a0…` — identical to `../ninfer/versions.env` (2026-10-27) | 1 | — |
+| 2026-11-04 | T1 guards: `DOCKER='sudo docker'`, `DOCKER=/usr/bin/nonexistent-docker` sourcing `lib/common.sh` | both refuse, rc=1, with the fix line | 1 each | — |
 
 ## Notes / Deviations
 

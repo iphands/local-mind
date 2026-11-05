@@ -30,7 +30,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-None in progress — next up: Plan 01 (`/hands-plan resume 01`).
+- **Plan 01** — Basalt Flash-Next container: in progress, 1/7 tasks done; next T2 (Dockerfile + `./build`).
 
 ## Plans <!-- hp:plans -->
 
@@ -38,7 +38,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
-| 01 | Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700 | — | pending | Pins + Dockerfile + `./build` + `./run` (4×262144 slots; `--single`); owner builds and boots the DQ6_K pack; real reply via `cosmo.lan`. |
+| 01 | Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700 | — | in-progress | Pins + Dockerfile + `./build` + `./run` (4×262144 slots; `--single`); owner builds and boots the DQ6_K pack; real reply via `cosmo.lan`. |
 
 <!-- Add these sections when they earn their place:
 

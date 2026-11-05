@@ -1,6 +1,6 @@
 # Plan 01 — Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-11-04
 > **Depends on**: N/A
 > **Goal**: `./run` boots the owner's `Qwen3.8-FN-NVFP4-DQ6_K.basalt` pack in our own pinned Basalt image on `:8700` — four full-context slots by default, one with `--single` — and a real chat reply comes back through the name clients use (`cosmo.lan:8700`, model `cosmo-6000`).
@@ -428,7 +428,7 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
 
 ## Verification Checklist
 
-- [ ] T1: both CUDA digests resolve; `load_pins` prints `pins ok dc047a77…`; `DOCKER='sudo docker'` → rc=1; gate shows `1 b`, `env ok`
+- [x] T1: both CUDA digests resolve; `load_pins` prints `pins ok dc047a77…`; `DOCKER='sudo docker'` → rc=1; gate shows `1 b`, `env ok`
 - [ ] T2: `PREFLIGHT_ONLY=1 ./build` → `preflight ok`, `vendor/basalt` at `dc047a77…`, a dirty checkout → rc=1, no image built
 - [ ] T3: `DRY_RUN=1 ./run` / `--single` print commands carrying every default; a `.ninfer` path and a missing pack → rc=1 before docker starts anything; nothing created
 - [ ] T4: the built image's `ai.basalt.ref` = `dc047a77…`; `bin/basalt --help` and `serve.server --help` print usage; `data/profiles/qwen4exp-48x512.prof` present
