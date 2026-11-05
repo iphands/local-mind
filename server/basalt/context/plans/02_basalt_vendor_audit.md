@@ -94,7 +94,7 @@ row above. Steps 4–6 remain unrun for every T1 commit.
 2. **Tick unit ≠ commit unit**: flip *all* the manifest rows a slice covers in that slice's commit.
 3. **Never write inside `vendor/basalt/`.** `./build` refuses a dirty checkout, *untracked files included*, so a scratch artifact there breaks gate step 3 for every later commit. Scratch work lives in `/tmp/opencode/basalt-audit/`.
 4. **Commands end with an unconditional sentinel** (`; echo "— done rc=$?"`) so an empty result is distinguishable from a failed command. See `context/pitfalls.md` — this plan already lost one Key Fact to the opposite mistake.
-5. **Audit commands are written inline** (plan/tracker/Evidence), never as helper scripts: gate step 1 classifies by **shebang first**, so even an extensionless `#!/usr/bin/env bash` helper in `context/` counts toward "Expected counts: `3 b`" and fails the gate. If a helper is unavoidable it lands with a bump to that RULES.md paragraph in the same commit.
+5. **Audit commands are written inline** (plan/tracker/Evidence), never as helper scripts: gate step 1 classifies by **shebang first**, so even an extensionless `#!/usr/bin/env bash` helper in `context/` counts toward the gate's "Expected counts" line — whose owner and current value are `RULES.md` § *The gate* — and a count above it without a matching RULES bump fails the gate. If a helper is unavoidable it lands with a bump to that RULES.md paragraph in the same commit.
 6. **Every `context/audit/` file opens with a stamp:** `Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.`
 
 **The one freeze-check** (used by Resume step 1 and by every wave exit — there is deliberately only one):

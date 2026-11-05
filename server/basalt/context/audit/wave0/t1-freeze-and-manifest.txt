@@ -222,3 +222,11 @@ $ # steps 3-6 — docker; owner-run (see plan Gate status block)
 $ cd vendor/basalt && GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 && echo "AUDIT TREE OK (post-capture)"; git status --porcelain --ignored | wc -l
 AUDIT TREE OK (post-capture)
 0
+# 4. Currency note, appended 2026-11-05 by a later Plan-02 maintenance commit; NOT part of this
+#    capture and nothing above is edited. The `# step 1b — counts (expect "3 b")` line records the
+#    expectation HELD AT THAT RUN: 3 b is what step 1b printed on 2026-11-05, and the two audit
+#    helpers that later raised the count (`context/audit/scripts/ledger-grid.sh` at `3c27913`,
+#    `context/audit/scripts/t2-census.sh` at `9a56c8d`) did not exist at T1 — so rewriting that line
+#    would retro-date them into this task. Do NOT read a higher count today as tree drift: the live
+#    expected count and its enumeration are owned by `context/plans/RULES.md` § *The gate*. A copied
+#    transcript cites that owner for an expected value; it does not restate the number.

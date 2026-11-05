@@ -520,6 +520,13 @@ A plan is not done when the code works. It is done when what you learned is on d
    T2b and U12 require. Owner: `audit/index.md` § *If you are about to run something against upstream*, routed
    from `context/AGENTS.md`.) Corollary on hunting such copies: **grep for the claim, not the phrasing** — the
    third instance read "SHA comparison … is meaningless", which no `never compare` pattern would have found.
+   The same applies to a **number a record copies**: cite the owner for an expected value rather than restating
+   it, because a restated count becomes a second authority the moment the number legitimately moves, and an
+   agent who sees it disagree with the live tool concludes drift rather than staleness. (Observed 2026-11-05:
+   four places held `3 b` after the count moved to `5 b`: three live instructions, each fixed by citing
+   the owner rather than restating the number, plus one
+   stamped capture, which was **annotated forward in its own notes section** and never rewritten: rewriting it
+   would retro-date the helpers into the task that captured it.)
 
 ---
 
