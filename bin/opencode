@@ -18,6 +18,9 @@ cd "${ROOT}/opencode"
 CONTAINER_ARGS=(
   --name opencode
   --user 1000:1000
+  # Hard caps: a runaway (e.g. a recursive self-test fork bomb) must die in here, not OOM the host
+  --pids-limit 4096
+  --memory 16g
   -e HOSTNAME=opencode
   -p 0.0.0.0:8080:8080
   -v ${ROOT}/opencode/container_data/config:/home/iphands/.config:rw

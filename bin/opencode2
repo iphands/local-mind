@@ -36,6 +36,9 @@ fi
 CONTAINER_ARGS=(
   --name opencode2
   --user 1000:1000
+  # Hard caps: a runaway (e.g. a recursive self-test fork bomb) must die in here, not OOM the host
+  --pids-limit 4096
+  --memory 16g
   -e HOSTNAME=opencode2
   -e OPENCODE_PASSWORD="$OPENCODE_PASSWORD"
   -p 0.0.0.0:8082:8080
