@@ -208,11 +208,33 @@ k=$(API_KEY=k3y DRY_RUN=1 ./run --single 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(
 echo "dry-run ok (image: $IMAGE_OVERRIDE)"; unset IMAGE_OVERRIDE
 ```
 
-**Blind spots.** Steps 1–4 never build and never boot. They cannot see a compile error in Basalt,
-a flag Basalt does not accept, a container that cannot reach the GPU or lock memory, a pack the
-engine refuses, or a port that is already taken. **Keep the gate current (item 5):** once the image
-exists (Plan 01 T5), a step checks the flags `./run` emits against the built `bin/basalt --help`
-and `serve.server --help`.
+**5. Flags vs the built image** (Plan 01 T5). Every `--flag` the two dry runs pass to `serve` must
+be one the built image accepts, decided by the image's own server code — the check Basalt makes at
+startup: a server option from `serve.config.build_parser()`, or an engine flag found in
+`bin/basalt` by `serve.config.engine_flags_of` (the server stops at start on any other name). No
+GPU, `--network none`. Pass: one line `flags ok (…)`. No image for `BASALT_SHA` is **fail**.
+Negative control (run it when this step changes): `EXTRA_ARGS=--no-such-flag` → `FAIL(flags)`.
+
+```bash
+img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin')
+if [[ -z $img ]]; then echo 'FAIL(flags) no image for BASALT_SHA — run ./build'; else
+mapfile -t flags < <({ DRY_RUN=1 ./run; DRY_RUN=1 ./run --single; } 2>/dev/null \
+  | grep -o ' serve /models/.*' | tr ' ' '\n' | grep -E '^--[a-z]' | sort -u)
+docker run --rm --network none -w /opt/basalt --entrypoint /opt/basalt/.venv/bin/python "$img" -c '
+import sys
+from serve.config import build_parser, server_options, engine_flags_of
+srv = set(server_options(build_parser())); eng = engine_flags_of("/opt/basalt/bin/basalt") or set()
+fl = sys.argv[1:]; bad = [f for f in fl if f[2:] not in srv and f not in eng]
+ns = sum(f[2:] in srv for f in fl)
+print("\n".join("FAIL(flags) " + f for f in bad) if bad or not fl else
+      f"flags ok ({len(fl) - ns} engine, {ns} server: {len(eng)} engine flags known)")
+if not fl: print("FAIL(flags) ./run emitted no flags")' "${flags[@]}"
+fi
+```
+
+**Blind spots.** Steps 1–5 never boot. They cannot see a container that cannot reach the GPU or
+lock memory, a pack the engine refuses, or a port that is already taken. Step 5 checks flag
+*names*, not values: a value Basalt rejects (`--kv fp8`) still shows only at boot.
 
 **Build actually loaded.** Behavior is verified on a boot the owner runs (SERIES *Standing
 Constraints*): the boot log must name the Basalt commit and the pack `./run` was asked for —
