@@ -30,9 +30,19 @@
   `expert_cache_primary_mib 64806`. An earlier phrasing here — "all 24,576 experts in VRAM" — was wrong
   against our own Evidence and is corrected in place. `--single` still to boot.
 - ~~Does `bin/basalt --help` run without a GPU? (plan Q4 — T4)~~ RESOLVED (T4): yes — `docker run --rm --network none … --help` → rc=0, 198 lines, no `--gpus`.
-- ~~Does the RAM tier page-lock inside the container with `--ulimit memlock=-1`? (plan Q2 — T6)~~ RESOLVED (T6 boot 3): the limit is `unlimited` inside the container and Basalt printed no page-lock / mmap-fallback warning; every expert sits in VRAM anyway (`/proc` `VmLck`/`VmPin` do not count CUDA-pinned memory). — still
-  open: boots 1–3 logged no page-lock or mmap-fallback warning, which shows memlock was sufficient but
-  not which tier served expert hits.
+- ~~Does the RAM tier page-lock inside the container with `--ulimit memlock=-1`? (plan Q2 — T6)~~ RESOLVED (T6 boot 3): the limit is `unlimited` inside the container and Basalt printed no page-lock / mmap-fallback warning; every expert sits in VRAM anyway (`/proc` `VmLck`/`VmPin` do not count CUDA-pinned memory).
+  - *[Corrected in place 2026-11-05: two writers edited this bullet inside the same minute and a stray
+    agent clause had been glued onto the end of that sentence. It is removed; the owner's verdict
+    stands as written above. The bullet below is the agent's scope note, kept separate on purpose.]*
+  - **Scope of that RESOLVED (agent, 2026-11-05).** Proven: *nothing failed for want of memlock* —
+    `ulimit -l` unlimited, `Max locked memory unlimited unlimited`, no fallback warning — so
+    `--ulimit memlock=-1` in `./run` is sufficient and stays. **Not** proven: the clause "every expert
+    sits in VRAM". The owner's own row says `VmLck 0`/`VmPin 0` cannot show CUDA-pinned memory, and the
+    RAM copy is real rather than vestigial — `resident RAM: 22.81 GiB of experts in RAM, 0 exchanged
+    with the VRAM tier`, with engine RSS 32,987,960 kB ≈ 31.5 GiB pointing the same way. So: the narrow
+    question is closed; *"which tier answers expert hits, and is the RAM copy page-locked?"* stays open
+    and settles at `--single` (plan Q3, where the residency warning may switch off) or with a lock
+    counter — not on the absence of a warning.
 - VRAM/RAM split and KV size for 4×262144 vs 1×262144 on this card (plan Q1, Q3 — T6)
 - ~~Runtime image's Python version (Key Facts — T2)~~ RESOLVED (T2): the runtime base has no python3; apt candidate `python3`/`python3-venv` 3.12.3-0ubuntu2.1 (Evidence).
 
@@ -107,6 +117,63 @@ the last three always carry a reason in the row's Notes cell.
 - T5 (plan said "appear in `bin/basalt --help` or `serve.server --help`"): the step uses the
   image's own `serve.config.engine_flags_of` + `build_parser()` instead — the exact rule Basalt
   applies at startup (`serve/config.py:25-39`), so it cannot drift from what the server accepts.
+
+- **Environment drift, 2026-11-05.** Two tools the Evidence table used on 2026-11-04 stopped being
+  reachable from the agent session: `shellcheck` (re-installed user-local, v0.11.0 at `~/.local/bin`)
+  and **docker** — the agent now runs inside a container with the GPU nodes but a docker socket it may
+  not open (mode `660`, numeric `0:995`; the session holds groups `1000,27`). Gate steps 3–6 are
+  therefore owner-only; the plan now carries a **Gate status** block saying so, per
+  `context/pitfalls.md` § *A gate prerequisite recorded in RULES.md can silently stop being true*.
+  Nothing in `run`, `build` or `versions.env` changed to cause this.
+
+- **A false measurement, corrected (2026-11-05).** The session that resumed T6 reported *":8700 free
+  (no listener)"* to the owner before drafting the boot block. It was not a measurement: `ss` is not
+  installed in the agent container, and `ss … | grep :8700 || echo ":8700 free"` printed the `||`
+  branch. `curl http://cosmo.lan:8700/v1/models` → 200: the owner's server was live on the port and
+  GPU 0 held 77 GiB. No harm was possible — `./run` refuses a busy port (`run:96`) — but the claim was
+  wrong and the drafted boot block would have been run against it. Full entry:
+  `context/pitfalls.md` § *Empty output from a failed command was recorded as a measurement*; the
+  rule for touching a live server at all is § *A live daily-driver server is not a test bench*.
+
+- **T6's *Confirms if* does not describe this card** (plan T6: "both modes load with experts split
+  between `cuda0` and page-locked RAM"). In three default-mode boots the primary expert cache is
+  **fully resident** — `expert cache 24576 slots, 63.29 GiB of VRAM` with
+  `basalt verify: warning: the device-planned MoE tail is off: every expert is resident`, alongside a
+  `resident RAM: 22.81 GiB of experts in RAM, 0 exchanged with the VRAM tier`. "Split" cannot be
+  satisfied as written. When the `--single` boot runs, record instead: the `loaded … cuda0=…GiB
+  ram=…GiB` line, whether the *same* "every expert is resident" warning appears at `par=1`, any
+  page-lock/mmap-fallback warning (that is Q2), and the KV/expert-cache loan lines. The clause is kept
+  in the plan as written — this note is the record that reality differs, not an edit to the criterion.
+
+- **Boot 3's `engine.log` is no longer on disk** (checked 2026-11-05): the file at
+  `storage/cache/basalt/aefd5d98dc650ed4/engine.log` has birth `2026-11-05 01:35` and contains three
+  later boots. The 2026-11-04 rows above are now the only copy of that boot's log lines — `storage/` is
+  gitignored, so it was never in git.
+
+- **Boot identity of the memlock row — owner to confirm (agent note, 2026-11-05; the row itself is
+  untouched).** The Evidence row `docker exec basalt … ulimit -l` is dated 2026-11-04 and labelled
+  "(boot 3)". Two independent measurements say the container answering requests *today* is a
+  2026-11-05 boot: (1) that `engine.log`'s btrfs birth is `2026-11-05 01:35`, it holds three
+  `basalt: gpus:` markers, and the file grew under observation (231,043 → 232,269 → 255,648 bytes) with
+  its mtime tracking live requests second-for-second — and an open fd never migrates to a replacement
+  inode, so a log that grows with the answering server *is* that server's file; (2) its own `/metrics`
+  still names `r_0022` as its fastest prefill, timestamped `2026-11-05 01:55`, i.e. ~34 requests into
+  its life at 01:55 today. **The conclusion does not depend on this**: `--ulimit memlock=-1` is a
+  property of how `./run` launches the container, identical across boots, so memlock stays
+  `unlimited` whichever boot was exec'd. Only the row's provenance is in question, and the row is the
+  owner's measurement — so it is left exactly as he wrote it. To settle it:
+  `docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' basalt`.
+
+- **Two writers, one worktree (2026-11-05).** While the agent was mid-edit, the owner committed from the
+  host session: `b308244 [basalt][P1][T6][boot] record memlock unlimited inside the container (plan Q2
+  resolved)` carried the agent's then-uncommitted `## Gate status` block (30 lines of
+  `01_flashnext_container.md`) and two tracker edits under *his* subject and authorship, and his edit of
+  the Q2 bullet collided with the agent's, leaving the bullet self-contradicting on disk (now fixed,
+  above). Nothing was amended, reverted or unstashed — Rule B2 forbids it, including `restore` /
+  `checkout --` / `stash` / `clean` on work either side did not make; everything here is a forward
+  commit. Practical lesson recorded in `context/pitfalls.md`: an agent must not leave knowledge files
+  dirty across a window in which the owner is committing, and must name whatever is dirty in its
+  handoff.
 
 ## Follow-ups
 

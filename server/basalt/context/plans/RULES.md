@@ -380,7 +380,19 @@ A plan is not done when the code works. It is done when what you learned is on d
 Project-specific rules, numbered **P1, P2, …**. They may tighten the core rules above, never
 loosen them. This section belongs to the project; `hands-plan resync` never rewrites it.
 
-_None yet — add **P1** when a project-specific rule earns its place._
+- **P1 — One worktree, two writers: the agent keeps the tree clean.** The owner runs the GPU, docker
+  and boot steps **in this same worktree**, so an agent's uncommitted files are always at risk of being
+  swept into his commit (done to us on 2026-11-05 by `b308244`; see
+  `context/pitfalls.md` § *A shared worktree has no such thing as "my uncommitted edits are private"*).
+  Therefore: (a) an agent stages **explicit paths** the moment a logical unit finishes —
+  `git add <paths>`, never `-A`/`-a` — and never ends a turn with `context/` or plan files dirty while
+  the owner is live; (b) every handoff ends with a `dirty: <paths> (mine, in progress)` line naming
+  whatever is still uncommitted; (c) before editing a plan, tracker or `context/` file, re-read the
+  **current** text rather than trusting what the agent last wrote, because a collision is invisible in
+  git and visible only as a sentence that contradicts itself; (d) after a collision, **fix forward** —
+  HEAD is ground truth, the other writer's verdict and measurements stay verbatim, and disagreement is
+  added as a dated, attributed note. Rule B2's bans (`--amend`, `revert`, `restore`, `stash`, `clean`
+  on work you did not make) make every undo-based "fix" worse than the collision.
 
 ---
 

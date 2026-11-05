@@ -20,24 +20,38 @@ Added 2026-11-05 (the shape Plan 02 established, and the fix `context/pitfalls.m
 prerequisite recorded in RULES.md can silently stop being true* prescribes): so a red step is never
 again mistaken for a regression someone caused.
 
-| Step | Last run | State | Who can run it |
+| Step | Last run | State | Runnable from — a capability, not a person |
 |---|---|---|---|
-| 1a syntax | 2026-11-05 | **pass** | agent |
-| 1b counts | 2026-11-05 | **pass** (`3 b`) | agent |
-| 1c `versions.env` | 2026-11-05 | **pass** (`env ok`) | agent |
-| 2 shellcheck | 2026-11-05 | **pass** (`shellcheck ok`, v0.11.0 at `~/.local/bin`) | agent |
-| 3 build preflight | 2026-11-05 | **BLOCKED** — `image_for_pin` exit 1: `permission denied … /var/run/docker.sock` | **owner only** |
-| 4 `./run` dry run | 2026-11-05 | **BLOCKED** — same docker refusal, and it fires in `DRY_RUN` too (`run:96` → `refuse_busy`) | owner only |
-| 5 flags vs image | 2026-11-04 | pass on `cu1343-sm120-dc047a7`; not re-runnable here | owner only |
-| 6 server imports | 2026-11-04 | pass on `63d25a81f328`; not re-runnable here | owner only |
+| 1a syntax | 2026-11-05 | **pass** | any shell |
+| 1b counts | 2026-11-05 | **pass** (`3 b`) | any shell |
+| 1c `versions.env` | 2026-11-05 | **pass** (`env ok`) | any shell |
+| 2 shellcheck | 2026-11-05 | **pass** (`shellcheck ok`, v0.11.0 at `~/.local/bin`) | any shell that has `shellcheck` on `PATH` |
+| 3 build preflight | 2026-11-05 | **BLOCKED here** — `image_for_pin` exit 1: `permission denied … /var/run/docker.sock` | **any shell in the docker group** — true in the owner's host shell on `cosmo`, false in the agent container |
+| 4 `./run` dry run | 2026-11-05 | **BLOCKED here** — same docker refusal, and it fires in `DRY_RUN` too (`run:96` → `refuse_busy`) | as step 3 |
+| 5 flags vs image | 2026-11-04 | **pass** on `cu1343-sm120-dc047a7`; not re-runnable here | as step 3 |
+| 6 server imports | 2026-11-04 | **pass** on `63d25a81f328`; not re-runnable here | as step 3 |
 
-**Why (measured 2026-11-05):** the agent session runs inside a container (Fedora 45 image,
-`/.dockerenv`, hostname `d0b65a91063c`) whose `/run/docker.sock` is mode `660` numeric `0:995` while
-the session is `uid=1000` with supplementary groups `1000,27`. The agent has GPU nodes (`/dev/nvidia0`,
-`nvidia-smi` works) but **no docker control**. On 2026-11-04 the same project's Evidence shows the
-agent running `./build` and `docker run`, so this is environment drift, not a project regression.
-*Do not describe the socket by group name from here:* this sandbox's `/etc/group` resolves gid 995 to
-`rtkit` and `docker` to 991, which is a sandbox fact and says nothing about the host.
+**Gate steps are gated by environment, not by role.** An earlier revision of this table said "owner
+only"; the owner's own commit body for `b308244` is what disproves it — *"Gate steps 1-6 run from the
+host session (shellcheck /usr/local/bin, docker group)"*. He is not privileged, his **shell** is: an
+agent session running on the host may run steps 3–6 itself and must not record them as owner-exclusive.
+A session that cannot run a step records it `blocked` with the probe output below; it asks the owner to
+paste only for work that genuinely needs the GPU. Self-identify before claiming anything about this
+environment:
+
+```bash
+id -nG | tr ' ' '\n' | grep -qx docker && echo "docker: yes" || echo "docker: NO"
+command -v shellcheck || echo "shellcheck: NO"
+```
+
+**Why steps 3–6 are blocked *here* (measured 2026-11-05):** this agent session runs inside a container
+(Fedora 45 image, `/.dockerenv`, hostname `d0b65a91063c`) whose `/run/docker.sock` is mode `660` numeric
+`0:995` while the session is `uid=1000` with supplementary groups `1000,27` — so no group it holds owns
+the socket. The container does have the GPU nodes (`/dev/nvidia0`, `nvidia-smi` works). On 2026-11-04
+this project's Evidence shows an agent session running `./build` and `docker run`, so this is
+environment drift, not a project regression.
+*Do not name the socket's group from inside here:* this sandbox's `/etc/group` resolves gid 995 to
+`rtkit` and `docker` to 991, which is a fact about the sandbox and says nothing about the host.
 
 ---
 

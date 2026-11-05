@@ -118,11 +118,36 @@ section**, which always stays last. Keep it dense.
   nvcc 13.4.92 — all above Basalt's minimums.
 - `PREFLIGHT_ONLY=1 ./build` → `preflight ok` at `dc047a77`; `docker build --check` sends no context.
 
+## This host: one sm_120 card, and one Basalt server per card [LIVE 2026-11-05][REPO]
+
+- Booting a second server on GPU 0 is not possible while one runs, in **any** mode: the load is the
+  expert cache, and `--single` shrinks KV slots, not the cache. Read on the owner's live server:
+  `expert_slots_primary 24576`, `expert_cache_primary_mib 64806`, `arena_mib 23353`, against
+  `vram_free_mib 24435`; `nvidia-smi` showed 77,117 / 97,887 MiB used. Consequence for plans: a
+  comparison of two modes is **sequential** — stop, load, measure, stop, load — never concurrent.
+- `./run` enforces it before docker starts: `refuse_busy "$PORT" vllm ninfer ignis basalt` (`run:96`),
+  so a clashing boot exits 1 with `## busy:` and touches nothing. In `DRY_RUN` it *reports* the clash
+  instead of refusing (`run:92-97`) — which makes `DRY_RUN=1 ./run` the port oracle for this project.
+- Expert residency at 4×262144 is **tiered, not "all in VRAM"**: a 24,576-slot / 63.29 GiB primary cache
+  resident on cuda0 (`expert cache 24576 slots, 63.29 GiB of VRAM`) *and* `resident RAM: 22.81 GiB of
+  experts in RAM, 0 exchanged with the VRAM tier`; `basalt verify: warning: the device-planned MoE tail
+  is off: every expert is resident`. No starvation warning at 4 slots, and the extra slots are cheap:
+  `--batch 4: 0.12 GiB of KV cache and state per slot (262144 tokens), 0.49 GiB in all; the slots beyond
+  the solo one take 0.37 GiB of VRAM on CUDA0 that the expert cache would otherwise hold`.
+- **Provenance limit on the three bullets above**: they were read from the **owner's running
+  daily-driver** on 2026-11-05 (`/metrics` + its `engine.log`), launch provenance unconfirmed — the
+  card held three `--batch 4` boots logged that morning, none `--single`. They corroborate Plan 01's
+  boot 3; they are not a substitute for T6's directed boots, and `--single`'s geometry is still unknown.
+
 ## This host: one sm_120 card, 125 GiB RAM [LIVE 2026-11-04]
 
 - `nvidia-smi`: GPU 0 RTX PRO 6000 Blackwell Workstation, 97,887 MiB, cc 12.0; GPU 1 RTX 4060,
   8,188 MiB, cc 8.9 (not usable by Basalt). `free -g`: 125 GiB total.
 - docker 29.8.1, shellcheck 0.11.0, python3 3.14.10; no `gh`, no `hadolint`.
+- **Tool versions here are the 2026-11-04 shell's view, not a host constant** (checked 2026-11-05 from
+  the agent container, which reports docker client 29.9.2 and keeps `shellcheck` at `~/.local/bin`, and
+  has no `ss`). Re-check in the shell that will use the answer — see
+  `context/pitfalls.md` § *Empty output from a failed command was recorded as a measurement*.
 
 ---
 
