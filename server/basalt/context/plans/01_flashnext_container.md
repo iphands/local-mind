@@ -14,6 +14,33 @@
 
 ---
 
+## Gate status
+
+Added 2026-11-05 (the shape Plan 02 established, and the fix `context/pitfalls.md` § *A gate
+prerequisite recorded in RULES.md can silently stop being true* prescribes): so a red step is never
+again mistaken for a regression someone caused.
+
+| Step | Last run | State | Who can run it |
+|---|---|---|---|
+| 1a syntax | 2026-11-05 | **pass** | agent |
+| 1b counts | 2026-11-05 | **pass** (`3 b`) | agent |
+| 1c `versions.env` | 2026-11-05 | **pass** (`env ok`) | agent |
+| 2 shellcheck | 2026-11-05 | **pass** (`shellcheck ok`, v0.11.0 at `~/.local/bin`) | agent |
+| 3 build preflight | 2026-11-05 | **BLOCKED** — `image_for_pin` exit 1: `permission denied … /var/run/docker.sock` | **owner only** |
+| 4 `./run` dry run | 2026-11-05 | **BLOCKED** — same docker refusal, and it fires in `DRY_RUN` too (`run:96` → `refuse_busy`) | owner only |
+| 5 flags vs image | 2026-11-04 | pass on `cu1343-sm120-dc047a7`; not re-runnable here | owner only |
+| 6 server imports | 2026-11-04 | pass on `63d25a81f328`; not re-runnable here | owner only |
+
+**Why (measured 2026-11-05):** the agent session runs inside a container (Fedora 45 image,
+`/.dockerenv`, hostname `d0b65a91063c`) whose `/run/docker.sock` is mode `660` numeric `0:995` while
+the session is `uid=1000` with supplementary groups `1000,27`. The agent has GPU nodes (`/dev/nvidia0`,
+`nvidia-smi` works) but **no docker control**. On 2026-11-04 the same project's Evidence shows the
+agent running `./build` and `docker run`, so this is environment drift, not a project regression.
+*Do not describe the socket by group name from here:* this sandbox's `/etc/group` resolves gid 995 to
+`rtkit` and `docker` to 991, which is a sandbox fact and says nothing about the host.
+
+---
+
 ## TL;DR
 
 **What**: Build Basalt from a pinned commit in our own two-stage CUDA 13.4.3 image, and write
@@ -401,8 +428,9 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
    experts, which then run from RAM over PCIe on a DDR4 host. *Mitigation*: elastic KV backs only
    what requests use; T6 records the `kv` line and any starvation warning; `--single` is one word
    away. The default stays the owner's decision (2026-11-04).
-2. **Risk: the resident RAM copy cannot page-lock inside the container.** *Mitigation*:
-   `--ulimit memlock=-1` (as vllmcustom); T6 looks for the fallback/warning lines.
+2. ~~**Risk: the resident RAM copy cannot page-lock inside the container.** *Mitigation*:
+   `--ulimit memlock=-1` (as vllmcustom); T6 looks for the fallback/warning lines.~~
+   RESOLVED (T6 boot 3): `ulimit -l` is `unlimited` inside the container; no fallback warning.
 3. **Risk: host RAM.** 122.6 GiB pack; what VRAM does not hold goes to page-locked RAM on a 125 GiB
    host, plus checkpoints (`--prompt-cache` 6 × ~118 MB per slot + 1), vision's 0.85 GiB pinned,
    and the OS. *Mitigation*: Basalt sizes `resident` from free RAM above its floor and falls back to

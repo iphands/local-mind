@@ -24,9 +24,15 @@
 
 ## Open Unknowns
 
-- VRAM/RAM split — RESOLVED for the default mode (T6 boot 3): all 24,576 experts in VRAM (63.29 GiB), KV elastic 1.5/15.2 GiB; `--single` still to boot.
+- VRAM/RAM expert split at 4×262144 — **measured, and tiered** (2026-11-05: boot 3's own lines plus the
+  owner's live server): a 24,576-slot / 63.29 GiB primary expert cache resident on cuda0 *plus* a
+  `resident RAM: 22.81 GiB of experts in RAM, 0 exchanged with the VRAM tier`; KV elastic 1.5/15.2 GiB,
+  `expert_cache_primary_mib 64806`. An earlier phrasing here — "all 24,576 experts in VRAM" — was wrong
+  against our own Evidence and is corrected in place. `--single` still to boot.
 - ~~Does `bin/basalt --help` run without a GPU? (plan Q4 — T4)~~ RESOLVED (T4): yes — `docker run --rm --network none … --help` → rc=0, 198 lines, no `--gpus`.
-- Does the RAM tier page-lock inside the container with `--ulimit memlock=-1`? (plan Q2 — T6)
+- ~~Does the RAM tier page-lock inside the container with `--ulimit memlock=-1`? (plan Q2 — T6)~~ RESOLVED (T6 boot 3): the limit is `unlimited` inside the container and Basalt printed no page-lock / mmap-fallback warning; every expert sits in VRAM anyway (`/proc` `VmLck`/`VmPin` do not count CUDA-pinned memory). — still
+  open: boots 1–3 logged no page-lock or mmap-fallback warning, which shows memlock was sufficient but
+  not which tier served expert hits.
 - VRAM/RAM split and KV size for 4×262144 vs 1×262144 on this card (plan Q1, Q3 — T6)
 - ~~Runtime image's Python version (Key Facts — T2)~~ RESOLVED (T2): the runtime base has no python3; apt candidate `python3`/`python3-venv` 3.12.3-0ubuntu2.1 (Evidence).
 
@@ -39,7 +45,7 @@
 | 3 | T3: `./run` + its dry-run gate step | `run`, `README.md`, RULES gate | done | Gate step 4 added and passing with `image: stub:none` (no image yet); negative control `KV=fp16` → 2 FAIL lines; busy/ninfer/missing/not-a-pack all rc=1. |
 | 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | done | Owner built `cu1343-sm120-dc047a7` (420 s compile, 0 warnings); label = pin; `--help` runs without a GPU; mock-engine serve proves layout, Host check (403 for unknown names) and alias (404). |
 | 5 | T5: Check `./run`'s flags against the built image | RULES gate step 5 | done | Uses the image's own `serve.config` (the startup check), not `--help` text; `flags ok (2 engine, 8 server)`, 9 with `API_KEY`; `--no-such-flag` → FAIL. `./run` needed no change. |
-| 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | in-progress | Boot 1: missing `tools/` (fixed). Boot 2: NFS `O_DIRECT` crawl, stopped. **Boot 3 (default, local pack): loaded in 40.1 s, all checks pass, 320.7 t/s.** Left: `./run --single` boot and a timed `docker stop`. |
+| 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | in-progress | Boot 1: missing `tools/` (fixed). Boot 2: NFS `O_DIRECT` crawl, stopped. **Boot 3 (default, local pack): loaded in 40.1 s, all checks pass, 320.7 t/s.** Left: `./run --single` and a timed `docker stop` — **needs a stop-the-world window the owner schedules**: one card holds one server (`expert_cache_primary_mib 64806` vs `vram_free_mib 24435`, and `--single` shrinks KV slots, not the expert cache), and the owner's live server is on it. `./run` would refuse a busy port either way (`run:96`). |
 | 7 | T7: Harvest | `context/*.md`, `README.md` | pending | |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
@@ -76,7 +82,9 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-11-04 | boot 3 engine log (`storage/cache/basalt/aefd5d98dc650ed4/engine.log`) | `expert cache auto: 87.44 GiB free, 700 MiB reserved … -> 24576 slots`; `expert cache 24576 slots, 63.29 GiB of VRAM` (= 48 × 512: every expert in VRAM); `elastic KV: 4096 cells backed per session, the other 13.73 GiB of KV are the expert cache's last 5334 slots until a request needs them`; MTP draft layer 1317 MiB; hc8 copies 680 MiB; image encoder 862 MiB pinned | 1 | — |
 | 2026-11-04 | boot 3 requests: `curl http://cosmo.lan:8700/v1/models`; chat `cosmo-6000` "Say hi in five words." `max_tokens 512`; model `claude-heavy`; `Host: evil.example:8700` | 200 (`cosmo-6000`, `n_ctx 262144`, text+image); reply `Hi, how are you today?`, `finish stop`, 196 tokens, 0.75 s wall, server `s1 done pp=58/0c 0.1s tg=196 320.7t/s acc=74% ttft=0.1s end=stop`; 404; 403 + `error: refused Host 'evil.example:8700' from 172.17.0.1` | 1 each | single short reply — not a benchmark |
 | 2026-11-04 | `nvidia-smi` with boot 3 idle | GPU 0: 73,091 / 97,887 MiB used, 73 W of a 475 W limit | 1 | — |
+| 2026-11-04 | `docker exec basalt` (boot 3): `ulimit -l`, `/proc/1/limits`, engine `/proc/<pid>/status` | `ulimit -l: unlimited`; `Max locked memory unlimited unlimited`; uid 1000 (ubuntu); engine RSS 32,987,960 kB, `VmLck 0`, `VmPin 0` — CUDA-pinned host memory is not counted there, so the evidence for page-locking is the absence of Basalt's fallback warning | 1 | — |
 | 2026-11-04 | T1 guards: `DOCKER='sudo docker'`, `DOCKER=/usr/bin/nonexistent-docker` sourcing `lib/common.sh` | both refuse, rc=1, with the fix line | 1 each | — |
+| 2026-11-05 | `curl http://cosmo.lan:8700/v1/models` + `/metrics` against the **owner's live server**; `nvidia-smi`; `stat` and `grep -c '^basalt: gpus:'` on `storage/cache/basalt/aefd5d98dc650ed4/engine.log` | 200 `cosmo-6000`, `n_ctx 262144`; geometry `kv int8`, `batch_slots 4`, `expert_slots_primary 24576`, `expert_cache_primary_mib 64806`, `arena_mib 23353`, `vram_free_mib 24435`, version 0.2.1; GPU 0 77,117 / 97,887 MiB used; that log file born **2026-11-05 01:35** holding **3 `--batch 4` boots, no `--single`** | 1 each | **Corroboration, not T6 Evidence**: owner-started server, launch provenance unconfirmed. Its `requests[]` and prompt lines are the owner's traffic and are deliberately not recorded here. |
 
 ## Notes / Deviations
 
