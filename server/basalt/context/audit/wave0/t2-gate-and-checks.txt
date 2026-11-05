@@ -1,12 +1,13 @@
 Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.
 
-> **Corrections inside this file, read before the transcripts.** Three blocks were written, found wrong, and
-> rewritten — each with its dated note at the place it happens: **§ 1 step 1c** (a `SKIP` line that no command
-> ever printed), **§ 6** (a reproduction that cited a scratch file predating the column-13 rename, concealed by
-> a `cmp` whose expected value was prose), and **§ 7** (a diff-shape figure short by one file because the
-> measuring command's pathspec did not match it; corrected after `9a56c8d`, so that commit's own artifact
-> carries the wrong number and this one carries the right one). **No other block in this file was corrected** —
-> the rest is the transcript as produced. `context/pitfalls.md` items 15 and 17.
+> **Corrections inside this file, read before the transcripts.** Four were made, each with its dated note at
+> the place it happens: **§ 1 step 1c** (a `SKIP` line that no command ever printed), **§ 6** (a reproduction
+> that cited a scratch file predating the column-13 rename, concealed by a `cmp` whose expected value was
+> prose), and **§ 7 — twice**: a diff-shape figure short by one file because the measuring command's pathspec
+> did not match it (fixed in `7822c1e`), and then a *second* stale figure in the same section's closing
+> sentence which `7822c1e` itself missed because it was looking at the number it had already found. The last
+> one is the instructive pair: **correcting a figure is not the same as sweeping a section.** **No other block
+> in this file was corrected** — the rest is the transcript as produced. `context/pitfalls.md` items 15 and 17.
 
 # T2 · the gate and every documented check, run as pasted, 2026-11-05
 
@@ -365,5 +366,40 @@ GENERATED=954  HAND=1861  ARTIFACT_SELF=349   ALL=3164   (954 + 1861 + 349 = 316
                                                          not three independent counts)
 ```
 
-The plan's cap (line 83) is "**≤1,500 lines of Tier A reading** per commit-slice". T2 read no source,
-so the cap is not engaged; the 1,690 is not reading volume and must not later be cited as a breach.
+The cap is `plans/02_basalt_vendor_audit.md` § **Execution rules that bind every task**, rule 1:
+"**≤1,500 lines of Tier A reading per commit-slice**". T2 read **no** Tier A source, so the cap is not
+engaged; the 3,164 lines of artifact above are not reading volume and must not later be cited as a breach.
+This commit is **14 files** (+3,164/−31); commit 2 is 6 files (+352/−9) and carries no generated data at all.
+
+**SECOND CORRECTION TO THIS SECTION, same day, found by review after `7822c1e` shipped.** The sentence above
+this one used to read *"the 1,690 is not reading volume"*, and the cap used to be cited as a bare
+"(line 83)". Both were carried down from this artifact's own first draft, which had asserted
+"1,690 added / 33 deleted across 13 files" for a 13-file slice that the two-commit split replaced. Whether
+1,690 was ever true of a real index is **not recoverable** — that staging area is long gone — which is the
+point: **the figure was not wrong, it was unreferenced**, right about a state nobody can re-enter.
+`7822c1e` corrected the number *it* had noticed (1,843 → 1,861) and left this one standing three lines below
+its own correction block. **The lesson is about how to sweep, not about typing:** after retiring a figure,
+ask of every numeral in the section *"which command reproduces this at this commit?"* — grepping for the
+value you know is wrong (`1,843`) cannot find the one you do not know about (`1,690`), because a stale figure
+has no distinctive syntax. Re-derived per commit from the commit objects:
+
+```bash
+for c in 9a56c8d 93b6bd5 7822c1e; do
+  git show --numstat --format= "$c" | awk -v c="$c" '
+    /t2-github-tree-paths\.txt|t2-author-census\.tsv|t1-.*\.tsv/ { g+=$1; next }
+    /t2-gate-and-checks\.txt|t1-freeze-and-manifest\.txt/         { a+=$1; next }
+                                                                  { h+=$1 }
+    END { printf "%s  files?  GENERATED=%d ARTIFACT_SELF=%d HAND=%d  SUM=%d\n", c, g, a, h, g+a+h }'
+  git show --numstat --format= "$c" | awk '{s+=$1; d+=$2; n++} END{printf "    total: files=%d add=%d del=%d\n", n, s, d}'
+done
+```
+```text
+9a56c8d  GENERATED=954 ARTIFACT_SELF=349 HAND=1861  SUM=3164      total: files=14 add=3164 del=31
+93b6bd5  GENERATED=0   ARTIFACT_SELF=0   HAND=352   SUM=352       total: files=6  add=352  del=9
+7822c1e  GENERATED=0   ARTIFACT_SELF=26  HAND=20    SUM=46        total: files=3  add=46   del=9
+```
+Each `SUM` equals its own `total add` — a partition per commit, so a class sum cannot drift from the commit
+without this firing. The table lists the three commits that existed when it was written; the loop takes any
+commit id, which is the point — run it over a later one rather than editing this table, because this file
+cannot measure its own commit. (`7822c1e`'s `ARTIFACT_SELF=26` is that commit's total additions to *this file*
+across § 1/§ 5/§ 6/§ 7, read from the commit object rather than the worktree.)

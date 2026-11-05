@@ -236,6 +236,104 @@ creation commits, one-commit landings, checkable PR review). What the finding ch
 
 Three things this page hands to T3 that are not about any file above:
 
+### 6a · Pre-flight: run these two before T3 opens a single file
+
+Added 2026-11-05 because the error that bit this task *after* its commits were made was **a path that matches
+nothing contributes nothing silently** (`pitfalls.md` item 15), and this read order is consumed downstream as a
+work list of hand-transcribed paths. Both commands print **marginals**, never bare zeros: an empty set
+difference is also what a failed producer prints (`t2-lineage.txt` § 11b).
+
+**1 · Path, tier and LOC assertion on the ten rows above.** Ground truth is `git ls-tree` at the pin and
+`manifest/*.tsv`; the read order's own per-row claims (`865 l`, `570 l`, `tier=unassigned`) are inputs, not
+assumptions.
+
+```bash
+# readorder.tsv: path <TAB> claimed_loc (0 if none) <TAB> claimed_tier (empty if none) — the 10 rows above
+# Build it from the 10 rows above, then:
+[ -s readorder.tsv ] || { echo "INPUT MISSING/EMPTY — refusing to report"; exit 1; }
+git -C vendor/basalt ls-tree -r --name-only dc047a77beeddf1e91234d983a91d6bf929e9619 > /tmp/opencode/paths-at-pin.txt
+awk -F'\t' '{print $1"\t"$5"\t"$4}' context/audit/manifest/*.tsv > /tmp/opencode/man-tier-loc.txt
+[ "$(wc -l < /tmp/opencode/paths-at-pin.txt)" -eq 862 ] || echo "NOTE: pin tree has $(wc -l < /tmp/opencode/paths-at-pin.txt) paths, expected 862"
+n=0; missing=0; notin=0; tiermis=0; locmis=0
+while IFS=$'\t' read -r p cloc ctier; do
+  n=$((n+1))
+  grep -qxF -- "$p" /tmp/opencode/paths-at-pin.txt || { echo "  MISSING_AT_PIN $p"; missing=$((missing+1)); continue; }
+  m=$(awk -F'\t' -v p="$p" '$1==p{print $2"\t"$3; exit}' /tmp/opencode/man-tier-loc.txt)
+  [ -z "$m" ] && { echo "  NOT_IN_MANIFEST $p"; notin=$((notin+1)); continue; }
+  mt=${m%%$'\t'*}; ml=${m##*$'\t'}
+  [ -n "$ctier" ] && [ "$ctier" != "$mt" ] && { echo "  TIER_MISMATCH $p claims=$ctier manifest=$mt"; tiermis=$((tiermis+1)); }
+  [ "${cloc:-0}" -gt 0 ] 2>/dev/null && [ "$cloc" != "$ml" ] && { echo "  LOC_MISMATCH $p claims=$cloc manifest=$ml"; locmis=$((locmis+1)); }
+done < readorder.tsv
+echo "PATHS=$n MISSING=$missing NOT_IN_MANIFEST=$notin TIER_MISMATCH=$tiermis LOC_MISMATCH=$locmis"
+[ "$n" -eq 10 ] || echo "INPUT WRONG: read $n rows, this read order has 10 — the result above is vacuous"
+```
+```text
+PATHS=10 MISSING=0 NOT_IN_MANIFEST=0 TIER_MISMATCH=0 LOC_MISMATCH=0
+```
+**Both guards exist because the block was broken when first published.** Re-running it in a fresh directory,
+the input was absent and the loop body never executed, so it printed
+`PATHS=0 MISSING=0 NOT_IN_MANIFEST=0 TIER_MISMATCH=0 LOC_MISMATCH=0` — **every counter green, nothing
+checked.** That is this section's own subject matter, reproduced by its own checker. `PATHS=` is the marginal
+that makes the zeros readable, and the `n -eq 10` line is what turns a vacuous pass into a failure.
+
+Negative control — three defects injected, one per branch; all three fired:
+```text
+  MISSING_AT_PIN  src/platform/definitely_not_real.cpp
+  TIER_MISMATCH   serve/security.py  claims=A-wrongtier manifest=A-planned@T4
+  LOC_MISMATCH    serve/security.py  claims=99999 manifest=228
+PATHS=13 MISSING=1 NOT_IN_MANIFEST=0 TIER_MISMATCH=1 LOC_MISMATCH=1
+```
+**The control's own first version was broken and had to be re-run.** Its third injected row was
+`serve/api/app.py` with a false LOC, which did **not** fire `LOC_MISMATCH`: that path does not exist at the
+pin, so the loop exited at `MISSING_AT_PIN` before reaching the LOC test. A "control that fired" which fired
+on the wrong branch is how a checker earns trust it has not bought. Rebuilt with three defects on paths that
+all exist; the output above is the rebuild.
+
+**2 · Local PR-reference census — the cheap half of U11, zero API calls.** U11's second half ("did the
+seam-*creating* commits go through a PR at all, or land by direct push") looked like GitHub-API walking over
+2,194 commits, which this session cannot do: the **unauthenticated quota is exhausted** and
+`created_at 2026-10-06T22:17:02Z` is still single-source for that reason. It is computable locally, because
+basalt's squash merges leave a `(#<n>)` suffix in the subject.
+
+```bash
+git -C vendor/basalt log --format='%H%x09%ad%x09%s' --date=format-local:%Y-%m-%dT%H:%M:%S \
+     dc047a77beeddf1e91234d983a91d6bf929e9619 > /tmp/opencode/hist.tsv     # TZ=UTC
+awk -F'\t' '{tot++; if ($3 ~ /\(#[0-9]+\)[ \t]*$/) r++} END{printf "COMMITS_TOTAL=%d WITH_PR_SUFFIX=%d WITHOUT=%d\n", tot, r, tot-r}' \
+    /tmp/opencode/hist.tsv
+# same file, split at the published fork cut 2026-10-05T00:00:00Z (author date, UTC) — the partition
+# MUST reproduce 861/1,333 or the split is wrong, not the history:
+awk -F'\t' '{ if ($2 < "2026-10-05T00:00:00") {p++; if ($3 ~ /\(#[0-9]+\)[ \t]*$/) pr++}
+             else                              {q++; if ($3 ~ /\(#[0-9]+\)[ \t]*$/) qr++} }
+     END{printf "pre-fork %d/%d (%.1f%%)   basalt-era %d/%d (%.1f%%)   PARTITION %d+%d=%d\n",
+         pr+0,p+0,100*(pr+0)/p, qr+0,q+0,100*(qr+0)/q, p,q,p+q}' /tmp/opencode/hist.tsv
+```
+```text
+COMMITS_TOTAL=2194 WITH_PR_SUFFIX=178 WITHOUT=2016
+pre-fork 114/861 (13.2%)   basalt-era 64/1333 (4.8%)   PARTITION 861+1333=2194
+```
+Spot checks on the commits this page names: `9a49e6b1` = `(#47)` ✓ (the § 6 row 4 claim, so the PR really is
+basalt's #47); the pin `dc047a77` itself = `(#242)`; `c487d17f` (row 5's creator) and `7e040829` (row 6's)
+carry **no** suffix.
+
+> **Read the base rate before reading the signal.** Only **4.8 %** of basalt-era commits carry the suffix at
+> all, so *absence is the normal case in this repository, not an anomaly* — it is **weak evidence**, and it
+> does **not** establish "direct push". A PR merged without the suffix, a merge commit rather than a squash,
+> and a direct push all look identical here. What the census legitimately buys is a **shortlist of 178
+> subjects to reason about** and the knowledge that 2,016 commits cannot be reasoned about this way — which
+> is the opposite of treating a no-suffix seam commit as suspicious. The `PARTITION` line above is the
+> control on the derivation itself: if the era split does not reproduce **861 / 1,333**, the cut is wrong.
+> (Mine was wrong on the first attempt: I used the repo's `created_at` instant and got 1,157/1,037, which
+> contradicts § 4 and provenance § 10 — caught by the control, not by reading.) U11's *first* half — whether
+> PR #47 was **self-approved** — still needs the PR page or the API, and stays U11.
+
+**Scratch provenance for § 5 and § 6.** `/tmp/opencode/basalt-audit/t2/` is **session scratch**, not evidence:
+`repro2.tsv`, `readorder*.tsv`, `hist.tsv`, `subjects.tsv`, `one-row.tsv`, and the `mut.sh`/`errmut.sh`
+mutants all die with the machine. Everything in them is regenerable from commands in this file and from
+`scripts/t2-census.sh`; § 5 now records the C7/C8 mutations as patches rather than files. Cite a scratch path
+as **scratch-with-known-regeneration**, never as a retained artifact — the committed record is
+`t2-author-census.tsv`, not the copy that reproduced it.
+
+
 1. **A calibration rule, written before there is any temptation to use it.** 94.6 % of the lines in the
    80 first-party census files (19,035 of 20,111 — 9 % of the audited corpus, not all of it) sit under
    commits that self-declare AI co-authorship, and inside basalt's own repository that share is 95.2 %.

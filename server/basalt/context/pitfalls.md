@@ -433,7 +433,13 @@ docker step looks like in this convention. Two variants of that are worth naming
     hand-assembled path list silently under-counts — my § 7 diff-shape figure was 18 lines short because one
     path omitted an `audit/` segment. Any sum taken over an explicit path list must be reconciled against the
     same sum with **no** pathspec (`954 + 1861 + 349 = 3164` against `git show --numstat` of the commit), which
-    is a partition check, not a second opinion.
+    is a partition check, not a second opinion. **Its sibling, same section one commit later:** the fix for
+    that under-count corrected the number it had *looked at* and left a second stale figure standing three
+    lines below it, because a value-search for the wrong number cannot find a number you do not know about.
+    Sweep by asking what reproduces each numeral; `RULES.md` Rule E.6. Two naming notes from the same incident,
+    both about that file: it is **`context/audit/coverage_ledger.md`** — the mispath that caused the under-count
+    dropped the `audit/` segment — and its tier roll-ups are **derived**, so `context/audit/manifest/index.md`
+    is the owner of the grid and the thing to cite for a tier count; the ledger is the commentary beside it.
 16. **A date partition is not defined until you name its basis — `--date=iso-strict` compared as a string
     partitions by the author's local calendar date.** [OBSERVED 2026-11-05, T2] `git log --format='%ad'
     --date=iso-strict | awk '$1 < "2026-10-05"'` looks like a UTC cut and is not: the field carries the

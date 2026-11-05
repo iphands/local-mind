@@ -212,7 +212,10 @@ Command-level traps: `pitfalls.md` § *Cross-repo git forensics*.
   `bisect` and blame continuity **run and print a confident wrong answer** (with no merge-base, `A..B`
   is just `B`). `git diff A B` is the exception and stays sound — it is tree-to-tree. Join these
   histories by **content key**, files by **blob SHA**, changes by **`git patch-id --stable`**.
-  **Never compare SHAs between the two repositories.**
+  **Never compare *commit* SHAs between the two repositories** — they share none, which is what makes the
+  tools above necessary rather than merely tidier. The ban covers commit identity only: the blob-SHA and
+  patch-id joins named one clause earlier are the intended method, and `plans/02_basalt_vendor_audit.md`
+  § **T2b** (U12) requires them.
 - **Version names collide.** Basalt publishes 3 tags, Strata 95 (to `v0.2.10`); `v0.1.0` and `v0.2.1`
   exist on both sides pointing at **different commits**. An unqualified `v0.2.1` is ambiguous —
   in this project's files it means **basalt's** (`1b3f6964`, tree `515676c1`).

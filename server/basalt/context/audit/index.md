@@ -67,8 +67,13 @@ forked from (`Niko1221/Strata`) were run here, gave confident answers, and were 
   `git log upstream/main..pin` runs and returns a plausible wrong answer instead of an error.
 - **Sound method:** a pristine `git fetch --filter=tree:0 --no-tags origin <branch>` into scratch, the
   **promisor full-40-hex** probe (`cat-file -e <full-sha>^{commit}` → `upload-pack: not our ref`) and
-  matching on the content key `(tree, author-date, committer-date, subject)`. **Never compare SHAs
-  between these two repositories.** Details, controls and the refuted hypotheses: that file, § 0–§ 4.
+  matching on the content key `(tree, author-date, committer-date, subject)`. **Never compare *commit* SHAs
+  between these two repositories** — they share none, so every such comparison is a null set that a plausible
+  sentence can dress up as a result. This ban is on **commit** identity only: **blob** SHAs and
+  `git patch-id --stable` are the *legitimate* join keys across the two repos, and
+  `plans/02_basalt_vendor_audit.md` § **T2b: Content lineage of the boundary** (Open Unknown U12) requires
+  them to ask whether the seam files' *bytes* are original. Do not read this line as licence to skip U12.
+  Details, controls and the refuted hypotheses: that file, § 0–§ 4.
 
 ## Where things live
 

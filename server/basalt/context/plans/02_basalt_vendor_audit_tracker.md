@@ -71,7 +71,7 @@
 | U8 | `.pth` / `sitecustomize.py` / `usercustomize.py` in the built image's venv. **Unreachable from the agent session** (docker); even whether an image for the pin exists is an owner-side fact. | the install-hook claim | Plan 03 / owner |
 | U9 | Did anything from the removed remote-expert tier (`97ff061`) survive as a **plumbed-but-sinkless** `host`/`port`/`url`/`token` key in the config schema or the GGUF/profile key space? | the highest-signal malice-residue check | T3 (census section) + T9 |
 | U10 | Does the server path call `stbi_set_flip_vertically_on_load`? (GHSL-2023-146 / CVE-2023-45662 is in `stbi__vertical_flip`.) | T5's format exposure list | T5 |
-| U11 | Was **basalt PR #47** (`9a49e6b1 … (#47)`, the outside-authored `src/platform/memory.cpp` work) self-approved, and did the seam-*creating* commits go through a PR at all or land by direct push? | a census of **review**, which outranks any blame plurality as a priority argument; public record in the audited repo | **T3 first action** on read-order items 1–4 |
+| U11 | Was **basalt PR #47** (`9a49e6b1 … (#47)`, the outside-authored `src/platform/memory.cpp` work) self-approved, and did the seam-*creating* commits go through a PR at all or land by direct push? | a census of **review**, which outranks any blame plurality as a priority argument; public record in the audited repo | **T3 first action** on read-order items 1–4. Half of it is now **local** — `wave0/t2-boundary-authorship.txt` § 6a censuses the `(#<n>)` subject suffix with no API (178/2,194; basalt-era 4.8 %, so *absence is the base rate and proves nothing*); only **self-approval** still needs the PR page. `9a49e6b1` = `(#47)` ✓, pin `dc047a77` = `(#242)`, `c487d17f` and `7e040829` carry no suffix |
 | U12 | Are the *bytes* of the seven `basalt-line only` seam files original, or a squashed import from a rewritten ancestor? Commit absence proves neither way. | the only open question that could turn the lineage finding into a code-provenance one; needs blob-SHA and `git patch-id --stable` joins against `Niko1221/Strata`, not ancestry | **T2b** (registered in the plan) |
 | U13 | What is in `refs/remotes/origin/multimodel` — 105 commits ahead of the pin (merge-base `1b3f6964`), in no manifest row, no tier, unread? | the audit covers one ref at one commit; a second published branch is a scope hole, and T13's bump path runs through it | T13 at the next pin bump, or a scoped T11e if the owner wants it now |
 
@@ -309,6 +309,27 @@ violation and cannot be cited by a later plan.
   partition check (`954 + 1,861 + 349 = 3,164` = the commit's total), and the trap is recorded as a
   corollary inside `pitfalls.md` item 15 rather than a new item. Not amended into `9a56c8d`: history here is
   append-only, so that commit permanently contains the wrong figure and the correcting commit says so.
+- **2026-11-05 · T2 post-commit correction, round two (a fourth commit) — the correction itself was
+  incomplete.** Both reviewers found, independently, that § 7 of the same artifact *still* closed with
+  "the **1,690** is not reading volume" and cited the plan cap as a bare "(line 83)". 1,690 was this
+  artifact's own first-draft figure for a 13-file pre-split slice that the two-commit split replaced — it
+  was never wrong, only unreferenced, and `7822c1e` did not find it because a value-search for the number you
+  know is wrong cannot find one you do not know about. Swept properly this time by asking of every numeral in
+  the section *which command reproduces it at this commit*; `−33` had already died (0 hits repo-wide) and
+  `1,690` / "line 83" had exactly one hit each. The section now carries a per-commit partition loop over
+  `9a56c8d`/`93b6bd5`/`7822c1e` whose class sums must equal each commit's own total. Also from this round:
+  `audit/index.md`'s "Never compare SHAs between these two repositories" was **flat** and contradicted
+  U12/T2b, which require a blob-SHA and `patch-id --stable` join — now scoped to **commit** SHAs with the
+  legitimate join keys named, so a reader who meets the ban first does not skip U12 as out of contract. And
+  `t2-boundary-authorship.txt` gained **§ 6a**, T3's pre-flight: a path/tier/LOC assertion over the read
+  order (`PATHS=10 MISSING=0 TIER_MISMATCH=0 LOC_MISMATCH=0`, all three control branches firing) and the
+  local PR-suffix census that makes U11's second half computable with **zero API calls**
+  (`WITH_PR_SUFFIX=178` of 2,194; pre-fork 13.2 %, basalt-era **4.8 %**) — published *with* its base rate,
+  because at 4.8 % the absence of a suffix is the repository's normal case and proves nothing about direct
+  pushing. Two of my own controls were broken before they were believed: the read-order check's LOC branch
+  never fired (the injected path did not exist at the pin, so it exited at `MISSING_AT_PIN` first), and the
+  published block printed an all-green `PATHS=0 MISSING=0 …` from an empty input, which is why it now refuses
+  to report unless it read 10 rows.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every

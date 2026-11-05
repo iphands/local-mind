@@ -388,6 +388,13 @@ A plan is not done when the code works. It is done when what you learned is on d
    disagreeing gets a Follow-ups row in the tracker, naming this plan or a later one.
 4. "Inconclusive" is a valid, recordable outcome. Never round it up to a win.
 5. Cite the source of a fact as `path:line` or the exact command that showed it.
+6. **A measurement taken over an explicit path list must carry its own total.** A path in
+   `git diff --numstat -- <paths>` (or any `-- <paths>` form) that matches nothing contributes **nothing and
+   reports nothing**, so a hand-assembled list silently under-counts: print the same sum with **no** pathspec
+   beside it, or assert `paths given == paths matched`. And when a figure is retired, **sweep the section, do
+   not grep the value** — ask of each numeral which command reproduces it at this commit, since the stale
+   figure that survives a correction is usually one that was never wrong, only unreferenced. Both failure
+   modes are recorded in `audit/wave0/t2-gate-and-checks.txt` § 7.
 
 ---
 
