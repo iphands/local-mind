@@ -232,9 +232,30 @@ if not fl: print("FAIL(flags) ./run emitted no flags")' "${flags[@]}"
 fi
 ```
 
-**Blind spots.** Steps 1–5 never boot. They cannot see a container that cannot reach the GPU or
-lock memory, a pack the engine refuses, or a port that is already taken. Step 5 checks flag
-*names*, not values: a value Basalt rejects (`--kv fp8`) still shows only at boot.
+**6. Server imports in the image** (Plan 01 T6). Imports every non-test `serve.*` module with the
+image's venv, from `/opt/basalt`: a module that needs a file the image does not ship fails here
+instead of at boot (`serve/engine/modelfile.py` imports `tools/model_file.py` through `sys.path` —
+the 2026-11-04 boot failure, `context/pitfalls.md`). No GPU, `--network none`. Pass: one line
+`imports ok (N serve modules)`. No image for `BASALT_SHA` is **fail**.
+
+```bash
+img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin')
+if [[ -z $img ]]; then echo 'FAIL(imports) no image for BASALT_SHA — run ./build'; else
+docker run --rm --network none -w /opt/basalt --entrypoint /opt/basalt/.venv/bin/python "$img" -c '
+import importlib, pkgutil, serve
+names = [m.name for m in pkgutil.walk_packages(serve.__path__, "serve.") if ".tests" not in m.name]
+bad = []
+for n in names:
+    try: importlib.import_module(n)
+    except Exception as e: bad.append(f"FAIL(imports) {n}: {type(e).__name__}: {e}")
+print("\n".join(bad) if bad else f"imports ok ({len(names)} serve modules)")'
+fi
+```
+
+**Blind spots.** Steps 1–6 never boot. They cannot see a code path only a loaded model reaches, a
+container that cannot reach the GPU or lock memory, a pack the engine refuses, or a port that is
+already taken. Step 5 checks flag *names*, not values: a value Basalt rejects (`--kv fp8`) still
+shows only at boot.
 
 **Build actually loaded.** Behavior is verified on a boot the owner runs (SERIES *Standing
 Constraints*): the boot log must name the Basalt commit and the pack `./run` was asked for —

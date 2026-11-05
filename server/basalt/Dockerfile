@@ -9,8 +9,10 @@
 #
 # Layout: `basalt serve` chdirs into the source dir compiled into the binary (BASALT_SOURCE_DIR =
 # CMAKE_SOURCE_DIR) and runs `python -m serve.server` there, with <source>/.venv/bin/python as the
-# default interpreter; the default expert profile is <source>/data/profiles/. So the build runs in
-# /opt/basalt and the runtime stage puts bin/, serve/, data/ and .venv/ back at /opt/basalt.
+# default interpreter; the default expert profile is <source>/data/profiles/; serve/ imports
+# tools/model_file.py through sys.path (serve/engine/modelfile.py). So the build runs in /opt/basalt
+# and the runtime stage puts bin/, serve/, tools/, data/ and .venv/ back at /opt/basalt — what
+# upstream's docs/building.md says an install or container image ships.
 # (context/plans/01_flashnext_container.md § Why a source-built two-stage image.)
 
 ARG CUDA_DEVEL_IMAGE=
@@ -52,6 +54,7 @@ RUN apt-get update \
 
 COPY --from=build /opt/basalt/bin /opt/basalt/bin
 COPY --from=build /opt/basalt/serve /opt/basalt/serve
+COPY --from=build /opt/basalt/tools /opt/basalt/tools
 COPY --from=build /opt/basalt/data /opt/basalt/data
 COPY --from=build /opt/basalt/requirements.txt /opt/basalt/LICENSE /opt/basalt/THIRD_PARTY_LICENSES /opt/basalt/
 

@@ -38,7 +38,7 @@
 | 3 | T3: `./run` + its dry-run gate step | `run`, `README.md`, RULES gate | done | Gate step 4 added and passing with `image: stub:none` (no image yet); negative control `KV=fp16` → 2 FAIL lines; busy/ninfer/missing/not-a-pack all rc=1. |
 | 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | done | Owner built `cu1343-sm120-dc047a7` (420 s compile, 0 warnings); label = pin; `--help` runs without a GPU; mock-engine serve proves layout, Host check (403 for unknown names) and alias (404). |
 | 5 | T5: Check `./run`'s flags against the built image | RULES gate step 5 | done | Uses the image's own `serve.config` (the startup check), not `--help` text; `flags ok (2 engine, 8 server)`, 9 with `API_KEY`; `--no-such-flag` → FAIL. `./run` needed no change. |
-| 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | blocked | Waiting on the owner's boots (SERIES Standing Constraints). Image, flags, Host check and alias already verified without a GPU (T4, T5). T7 depends on it. |
+| 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | in-progress | Boot 1 (default) died before loading: `No module named 'model_file'` — the image lacked `tools/`. Dockerfile fixed + gate step 6; waiting on the owner's rebuild, then boots again. |
 | 7 | T7: Harvest | `context/*.md`, `README.md` | pending | |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
@@ -62,9 +62,20 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-11-04 | `docker image inspect` labels; `docker run --rm --network none` → `bin/basalt --help`, `.venv/bin/python -m serve.server --help`, `ls -A /opt/basalt /opt/basalt/data/profiles`, `id` | `ai.basalt.ref=dc047a77…`; both `--help` rc=0 (no GPU); `.venv bin data serve LICENSE THIRD_PARTY_LICENSES requirements.txt`; `qwen4exp-48x512.prof`; uid 1000 (ubuntu), HOME=/home/ubuntu, Python 3.12.3 | 1 | — |
 | 2026-11-04 | mock engine: `docker run -d … -p 127.0.0.1:18700:8700 <img> serve --mock-engine --host 0.0.0.0 --port 8700 --alias cosmo-6000 --allowed-host cosmo.lan --allowed-host cosmo`; curl with `Host:` headers; `docker stop` | start lines `[server] hosts cosmo.lan,cosmo`, `ready http://127.0.0.1:8700/v1`, `warning no api key, open to the network`; `/v1/models` → `cosmo-6000`; Host `cosmo.lan`/`cosmo`/`localhost` → 200, `evil.example` → 403; chat as `cosmo-6000` via `cosmo.lan` → a reply; model `claude-heavy` → 404; `docker stop` 0.66 s | 1 | the start line prints `127.0.0.1` even when bound to `0.0.0.0` |
 | 2026-11-04 | gate step 5 (RULES verbatim) on `cu1343-sm120-dc047a7`; `API_KEY=k`; `EXTRA_ARGS=--no-such-flag` | `flags ok (2 engine, 8 server: 142 engine flags known)`; with key: 9 server; negative: `FAIL(flags) --no-such-flag` | 1 each | — |
+| 2026-11-04 | owner boot 1: `./run` (default) on `27770926a3f6` | died after `[server] legend`: `serve/engine/modelfile.py:14` `from model_file import ModelFile` → `ModuleNotFoundError: No module named 'model_file'`; nothing loaded | 1 | — |
+| 2026-11-04 | gate step 6 draft on `27770926a3f6` | `FAIL(imports) serve.engine.modelfile: ModuleNotFoundError: No module named 'model_file'` (the only failure) | 1 | reproduces boot 1 without a GPU |
+| 2026-11-04 | owner rebuild with `tools/` → `63d25a81f328` (same tag); gate steps 1–6 | build stage `CACHED`, pip 5.4 s; `3 b`, `env ok`, `shellcheck ok`, `preflight ok`, `dry-run ok`, `flags ok (2 engine, 8 server)`, `imports ok (32 serve modules)` | 1 | — |
 | 2026-11-04 | T1 guards: `DOCKER='sudo docker'`, `DOCKER=/usr/bin/nonexistent-docker` sourcing `lib/common.sh` | both refuse, rc=1, with the fix line | 1 each | — |
 
 ## Notes / Deviations
+
+- **T2 premise wrong** (plan *Why a source-built two-stage image* and T2: "the runtime stage must hold
+  `bin/`, `serve/` and `data/`"): `serve/` also needs `tools/` — `serve/engine/modelfile.py` puts
+  `<source>/tools` on `sys.path` and imports `model_file`. That T2 item is **invalid as written**;
+  the Dockerfile now copies `tools/` too (fixed under T6, where it surfaced). T4's checks and the
+  mock engine all passed on the broken image: none of them imports `serve.engine.modelfile`. Gate
+  step 6 now imports every `serve.*` module. T4's Evidence rows describe image `27770926a3f6`, which
+  the rebuild replaces under the same tag.
 
 - T5 (plan said "appear in `bin/basalt --help` or `serve.server --help`"): the step uses the
   image's own `serve.config.engine_flags_of` + `build_parser()` instead — the exact rule Basalt
