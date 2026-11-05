@@ -34,6 +34,16 @@ command and records the pasted output. If a step stays unrunnable for a given co
 message and the tracker say *which* step was skipped and why — a task whose behavior only a blocked
 step can see is **not** `done` (Rule A.6), and this plan expects several such tasks.
 
+**Carve-out citation (Rule A § *Named carve-out*, condition (2)) — recorded once for this plan.**
+Owner-only listing: `ef79180` (`RULES.md` § *Prerequisites*, T0). First commit using the gate line's
+`3–6 docker-blocked (owner)` form: `3dba113` (T1). The carve-out itself was written in `d388d17`, so T1
+and T2 used the form **before** the rule existed; checked against the rule as written, they are compliant
+rather than retro-fitted, because `ef79180` strictly precedes `3dba113`
+(`git log --oneline -S'owner-run' -- context/plans/RULES.md` → `ef79180`; `-S'docker-blocked'` → `3dba113`).
+First invocation **under** the rule: `aab418e`, whose scope evidence is `FILES=3 SCOPE_HITS=0`. Later
+commits in this plan cite this line instead of re-deriving it; re-verify only if § *Prerequisites* is
+edited.
+
 **Re-run at T1 (2026-11-05, commit `[basalt][P2][T1][audit] …`)**: steps 1a (no `FAIL`), 1b
 (`3 b` — the plan's `.md`/`.tsv`/`.sha256` artifacts add nothing to the bash set, which is Execution
 rule 5 holding in practice), 1c (`env ok`) and 2 (`shellcheck ok`) all pass with `context/audit/`

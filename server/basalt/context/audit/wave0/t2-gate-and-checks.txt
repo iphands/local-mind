@@ -403,3 +403,55 @@ without this firing. The table lists the three commits that existed when it was 
 commit id, which is the point — run it over a later one rather than editing this table, because this file
 cannot measure its own commit. (`7822c1e`'s `ARTIFACT_SELF=26` is that commit's total additions to *this file*
 across § 1/§ 5/§ 6/§ 7, read from the commit object rather than the worktree.)
+
+## 8 · Scope evidence for carve-out invocations (`RULES.md` § *Named carve-out*, condition (3))
+
+This is where the three printed lines go; the commit message and tracker row quote only the
+`FILES=… SCOPE_HITS=…` line. Producer is `RULES.md` itself — the **staged** pre-commit twin, run before
+`git commit`, then re-run against the commit object to confirm staged == landed.
+
+```text
+PATTERNS=^(run|build|Dockerfile|Dockerfile\.dockerignore|versions\.env|lib/|models|\.gitignore)
+```
+
+This literal is the **run output** recorded as evidence, not a copy of the definition in `RULES.md` § *Named
+carve-out*. It is repeated here on purpose: if `PATTERNS` is amended later, this line says which list these
+`SCOPE_HITS` were actually computed against. The definition is `RULES.md`'s; where the two disagree, the
+`RULES.md` code block governs future runs and this one stands as history.
+
+| commit | FILES | SCOPE_HITS | behaviour class (condition (4)) | note |
+|---|---|---|---|---|
+| `aab418e` | 3 | 0 | none | first invocation **under** the rule; measured from the commit object |
+| *(the commit adding this row)* | 4 | 0 | none | 4 files: `RULES.md`, `02_basalt_vendor_audit.md`, the tracker, this file |
+
+**On the second row's namelessness.** It cannot carry its own SHA — it is written before the object exists. It
+is *locatable* instead: `git log -S'Scope evidence for carve-out invocations' -- context/audit/wave0/t2-gate-and-checks.txt`,
+and its **measurement time is stated** because that is the part a reader cannot otherwise recover: the `FILES=4
+SCOPE_HITS=0` below this line was taken against the **index while staged**, immediately before `git commit`,
+and re-checkable afterwards from the commit object with the same strip and the same `PATTERNS`. A self-
+referential row is admissible when it is a *file count* (cannot drift with content) and its producer is
+named; it is the `1,690` defect only when neither is.
+
+All rows are `SCOPE_HITS=0`, so `none` is admissible for condition (4) in each. **The `9a56c8d` row from § 7 is
+not repeated here**: that commit predates the carve-out, and its `FILES=` under this producer is
+**13 (scope-scoped; commit total 14)** — the § 7 figure is the commit's size, this one answers "did it touch
+the gate's scope surface", and the qualifier travels with the number because a bare `13` copied into a tracker
+row would become two figures for one thing. The difference is `git diff --cached --name-only` + the
+`server/basalt/` strip dropping the monorepo's own `context/pitfalls.md`; both counts re-derive from their own
+producer, which is what separates this from a stale figure.
+
+Controls on this section's producer, so the zeros are not decorative. Values are under the `PATTERNS` above;
+`SCOPE_HITS` counts matching **lines**, so it exceeds 1 when a commit touches several surface files.
+
+```text
+  b2e5fa4  "[P1][T3][run] add ./run …"                    SCOPE_HITS=1  ← the class the rule exists to catch
+  4ca31ae  "[P1][T6][docker] ship tools/ in the image"    SCOPE_HITS=1
+  5f8890d  "[P1][T6][run] default PACK to models.local/"  SCOPE_HITS=2   ← run + .gitignore
+  1eafda7  "[P1][T1][pins] add Basalt dc047a…"            SCOPE_HITS=4   ← .gitignore + pins; scored 3 before
+                                                                   `\.gitignore` was added to PATTERNS
+  unstripped paths (no sed -n 's|^server/basalt/||p')     b2e5fa4 → SCOPE_HITS=0  ← the fails-open that made
+                                                                   the strip mandatory
+  diff.relative=true                                     aab418e → FILES=0  ← the strip no-ops; caught ONLY
+                                                                   by the FILES>=1 floor, hence the floor
+  empty input                                            FILES=0 SCOPE_HITS=0  ← FAIL under the floor
+```

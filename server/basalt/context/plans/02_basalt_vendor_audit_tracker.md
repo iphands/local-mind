@@ -385,8 +385,55 @@ violation and cannot be cited by a later plan.
   this project at all** (`git ls-files` → 0), the item-15 phantom path reappearing inside a scope rule.
   Control evidence, all from the commit objects: six T2 commits `SCOPE_HITS=0`; `5f8890d` / `4ca31ae` /
   `b2e5fa4` all `1`; empty input `FILES=0` with `SCOPE_HITS=0`, which is the argument for printing `FILES`.
+  *(Superseded by round seven below: `PATTERNS` gained `\.gitignore`, `5f8890d` is therefore **2** not 1, and
+  the negative set is seven commits. Figures as measured at this point in the round, under the then-list.)*
   Also `FILES=` counts only files inside the project dir, so `9a56c8d` reads 14 in `--stat` and 13 here — the
   monorepo's `context/pitfalls.md` is the difference, stated so the mismatch is not read as drift.
+- **2026-11-05 · T2 round six — one reviewer MUST-fix refuted by measurement, four accepted.** Neckbeard's
+  MUST-fix asserted `vendor/basalt` was a tracked gitlink in no `.gitignore`, so a pin bump would score
+  `SCOPE_HITS=0` while being a class-3/4 change — "your unstripped-`^run` bug again in a different path".
+  **The premise is false here**, and it was checked rather than accepted: `server/basalt/.gitignore` line 1
+  is `/vendor/`, `git check-ignore -v vendor/basalt` resolves to that rule, and the repo contains **zero**
+  mode-`160000` entries (`git ls-files -s | awk '$1==160000' | wc -l` → 0), so no pin state can arrive as a
+  `vendor/basalt` path. The pin is the tracked `BASALT_SHA=` line in `versions.env`, already matched. What
+  the false alarm still earned is the **stated exclusion plus its contingency**: `PATTERNS` documents *why*
+  `vendor/` is absent and says that if `vendor/basalt` is ever converted to a submodule or checked-in
+  gitlink, `PATTERNS` becomes incomplete — and that conversion is itself class-3/4, so it cannot be made
+  under the carve-out. Second reviewer MUST-fix this session found not to hold (the first was hoodie's
+  three `distilled.md`/`§ 6a` items in the pre-commit round); the discipline that catches both is the same:
+  run the command the claim cites before editing against it. hoodie's four items were all real and are
+  applied: **(a)** (3) took a `<sha>` for evidence that must exist in that commit's own message — an
+  unsaved commit cannot be `git show`n — so the block is now the **staged** pre-commit twin, with the
+  commit-object re-run kept as the staged-vs-landed guard; **(b)** the printed `PATTERNS=` is declared the
+  authority and the prose a gloss, since prose-and-literal drift is exactly how `serve/config.py` got in;
+  **(c)** evidence destination named — the three lines go to the plan's `wave<N>/`, commit message and
+  tracker quote only the one `FILES=…/SCOPE_HITS=…` line, matching `context/AGENTS.md`'s routing; the
+  scratch file is per-run-named and self-deleting so two sessions cannot overwrite each other. And (2)
+  became **once-per-plan**: a per-commit date comparison across two `git log -S` lists is the condition an
+  agent recalls instead of running, so the pair is recorded as data in this plan's § *Gate status* (listing
+  `ef79180` · first `docker-blocked` form `3dba113` · first invocation under the rule `aab418e`) and later
+  commits cite it.
+- **2026-11-05 · T2 round seven — the reviewer whose MUST-fix I refuted produced the better one.** Neckbeard
+  retracted the `vendor/basalt` gitlink claim in full, naming his own error precisely (his grep was
+  `^vendor|vendor/basalt`, which cannot match `/vendor/`, and he then inferred "tracked gitlink" from the
+  miss — grepping the phrasing rather than the claim, plus an inference layered on a zero). What replaced it
+  is the sharpest item of the whole carve-out work: **`.gitignore` defines the scope surface but was not in
+  it**, so the realistic way `PATTERNS` becomes incomplete is not a planned submodule conversion but someone
+  editing line 1 of the ignore file, which nothing else catches. `\.gitignore` is now in `PATTERNS`, with
+  controls that fire: `1eafda7` "[P1][T1][pins] add Basalt dc047a…" edits `.gitignore` *and* pins and scored
+  `SCOPE_HITS=3` where it should score `4`; `5f8890d` `1` → `2`. Seven T2 commits still `0` under the new
+  list, re-verified rather than assumed. hoodie's MUST-fix was that `SCOPE_HITS=0` needed a **`FILES>=1`
+  floor**, since the zero is reachable by three ordinary accidents (running after `git commit`, after
+  `git commit -a`, after `git reset`) — and his optional note turned out to be the same defect in a
+  different costume: forcing `diff.relative=true` makes the strip match nothing, which I measured rather than
+  reasoned, and it lands as `aab418e FILES=3 → FILES=0`. So his two items are one fix: **the floor is what
+  turns that misconfiguration from a green into a FAIL**, and it is now stated as
+  `Required: SCOPE_HITS=0 AND FILES>=1`. § 8's self-referential row gained a stated measurement time and a
+  `git log -S` locator in place of the SHA it cannot know. One override, stated rather than silent: hoodie
+  asked me to delete the `PATTERNS` literal from § 8 to avoid two copies, and I did not — § 8's is **run
+  output** and `RULES.md`'s is the **definition**, and if the list is amended later the § 8 line is the only
+  record of which list those `SCOPE_HITS` were computed against, which is exactly the provenance the rest of
+  this file exists to keep. § 8 now says so inline.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every

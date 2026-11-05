@@ -139,31 +139,70 @@ established form: `Gate 1a/1b/1c/2 pass, 3–6 docker-blocked (owner)`.
 **(2) No retroactive reclassification, across commits.** The step must already be listed owner-only in
 § *Prerequisites* in a commit **strictly earlier** than the first commit that invokes this carve-out for
 that step — an edit made minutes earlier in the same session does not count, or the clause defeats itself.
-Checkable after the fact: `git log --oneline -S'owner-run' -- context/plans/RULES.md` must predate the
-first citing commit (`git log --oneline -S'docker-blocked'`).
+This is verified **once per plan, not per commit**, because a per-commit date comparison across two
+`git log -S` lists is the condition agents silently recall instead of run. The plan's § *Gate status* block
+records the pair as data — `owner-only listing: <sha> · first invocation: <sha>` — and every later commit
+cites that line. Re-derive only if the listing line itself is ever edited
+(`git log --oneline -S'owner-run' -- context/plans/RULES.md` must still predate
+`git log --oneline -S'docker-blocked'`).
 
-**(3) Diff scope, pasted.** The commit must touch nothing any blocked step could exercise. Run this and
-paste its output into the artifact:
+**(3) Diff scope, pasted.** The commit must touch nothing any blocked step could exercise; the surface is
+**whatever the printed `PATTERNS=` line names** — that line is the authority for what was checked, and the
+prose here is only a gloss on it. Run it against the **staged** set, because the evidence has to be in the
+commit's own message and an unsaved commit cannot be `git show`n:
 
 ```bash
-PAT='^(run|build|Dockerfile|Dockerfile\.dockerignore|versions\.env|lib/|models)'   # the scope surface
-git show --name-only --format= <sha> | sed -n 's|^server/basalt/||p' | grep -v '^$' > /tmp/opencode/f.txt
-echo "FILES=$(grep -c . /tmp/opencode/f.txt) SCOPE_HITS=$(grep -Ec "$PAT" /tmp/opencode/f.txt)"
+# PRE-COMMIT twin — run staged, this is the block that goes in the evidence file
+# Run from the project root with diff.relative unset/false (see below): the strip assumes
+# monorepo-root-relative output.
+PAT='^(run|build|Dockerfile|Dockerfile\.dockerignore|versions\.env|lib/|models|\.gitignore)'
+W=/tmp/opencode/scope-$$-$(date +%s).txt      # per-run name: a fixed path lets two sessions overwrite
+git diff --cached --name-only | sed -n 's|^server/basalt/||p' | grep -v '^$' > "$W"
+echo "FILES=$(grep -c . "$W") SCOPE_HITS=$(grep -Ec "$PAT" "$W")"
 echo "PATTERNS=$PAT"
+rm -f "$W"                                     # throwaway; the evidence is the printed line, not the file
 ```
-Required: `SCOPE_HITS=0`. **`FILES=` is mandatory beside it** — `SCOPE_HITS=0` over an empty file list is
-all-green-from-absent-input, the failure § 6a caught in its own checker. Two things this producer had to be
-rebuilt over before it was believed, both recorded so nobody re-breaks them: `git show --name-only` prints
-**monorepo-root-relative** paths, so an unanchored-then-stripped `^run` matches nothing and a real
-launcher commit scores `SCOPE_HITS=0` (verified: `b2e5fa4` "[T3][run] add ./run" scored 0 until the
-`sed -n 's|^server/basalt/||p'` was added, then 1); and `PATTERNS` must name **paths that exist here** —
-an earlier draft of this rule listed `serve/config.py`, which is not a tracked path in this project at all
-(`git ls-files | grep -c '^serve/config'` → 0), i.e. the phantom-path trap of `pitfalls.md` item 15 inside
-the very rule meant to police scope. `PATTERNS` is printed so it is a reviewable published constant, not a
-mood; extending it is a RULES amendment. Note `FILES=` counts files **inside `server/basalt/`** and can be
-one less than `git show --stat`: commit `9a56c8d` is 14 files there but `FILES=13` here, the difference
-being the monorepo's own `context/pitfalls.md`. Verified: all six Plan-02 T2 commits score `SCOPE_HITS=0`;
-`5f8890d`, `4ca31ae` and `b2e5fa4` score `1`.
+**Where it goes:** the three printed lines go into the active plan's `wave<N>/` file (raw output belongs
+there, never in a tracker — `context/AGENTS.md`); the commit message and the tracker row quote only the
+single `FILES=… SCOPE_HITS=…` line. After committing, re-run the same check against the **commit object**
+(`git show --name-only --format= <sha>` in place of `git diff --cached --name-only`) and confirm the numbers
+match — that pair is the guard against a staged set that differed from what landed, and this rule's own
+first invocation did exactly that (`aab418e`: `FILES=3 SCOPE_HITS=0` staged, identical from the object).
+
+**Required: `SCOPE_HITS=0` AND `FILES>=1`.** `FILES=0` means nothing was staged — or the producer was
+mis-run — and is a **FAIL, not a pass**: `SCOPE_HITS=0` over an empty file list is all-green-from-absent-input,
+the failure § 6a caught in its own checker. The floor is reachable by accident in three ordinary ways (running
+this *after* committing, running it after `git commit -a`, running it after a `git reset`), and by one
+configuration: **`git config diff.relative` true makes `git show --name-only` print cwd-relative paths, so the
+`sed -n 's|^server/basalt/||p'` matches nothing and the block prints `FILES=0`** — verified, not reasoned:
+forcing `diff.relative=true` turns `aab418e` from `FILES=3` into `FILES=0`. Run from the project root, or
+check the config. Without the floor that misconfiguration would read as a green. Four things this producer had
+to be rebuilt over before it was believed, recorded so nobody re-breaks them: `git show --name-only` prints
+**monorepo-root-relative** paths, so an unanchored-then-stripped `^run` matches nothing and a real launcher
+commit scores `SCOPE_HITS=0` — verified: `b2e5fa4` "[T3][run] add ./run" scored 0 until the
+`sed -n 's|^server/basalt/||p'` was added, then 1, which is a **fails-open** on precisely the class the rule
+exists to catch; `PATTERNS` must name **paths that exist here**, and an earlier draft listed
+`serve/config.py`, not a tracked path in this project at all (`git ls-files | grep -c '^serve/config'` → 0)
+— the phantom-path trap of `pitfalls.md` item 15 inside the scope rule itself; `FILES=` counts files **inside
+`server/basalt/`** and can be one less than `git show --stat` (`9a56c8d` is 14 there, 13 here, the difference
+being the monorepo's own `context/pitfalls.md`); and **`vendor/` is deliberately absent from `PATTERNS`
+because it is untracked, ignored** — `server/basalt/.gitignore` line 1 is `/vendor/`, `git check-ignore -v
+vendor/basalt` resolves to it, and the repo has **zero** mode-`160000` entries (`git ls-files -s | awk
+'$1==160000' | wc -l` → 0), so no pin state can arrive as a `vendor/basalt` path. The pin itself is the
+tracked `BASALT_SHA` line in `versions.env`, which `PATTERNS` does match. That omission is only safe while
+line 1 of `.gitignore` says `/vendor/` — and **`.gitignore` is itself in `PATTERNS` for exactly that reason**:
+the realistic way `PATTERNS` becomes incomplete is not a planned submodule conversion, it is someone editing
+the ignore file, which is a scope-surface definition and therefore scope-relevant. `^\.gitignore` was added to
+`PATTERNS` on 2026-11-05 after the gap was found; before it, `1eafda7` ("[P1][T1][pins] add Basalt dc047a…",
+which edits `.gitignore` *and* pins) scored `SCOPE_HITS=3` where it should score `4`, and `5f8890d` scored
+`1` where it should score `2` — so the addition has firing controls, it is not decorative. Keeping the reason
+for the omission in prose still matters: an unexplained gap in a pattern list is what a later agent
+"helpfully" narrows. **Contingency: if `vendor/basalt` is ever converted to a submodule or checked-in gitlink,
+`PATTERNS` must gain `vendor/`** — and that conversion is itself a class-3/4 change, so it cannot be made
+under this carve-out.
+Verified under this `PATTERNS`: the seven Plan-02 T2 commits (`9a56c8d` `93b6bd5` `7822c1e` `6dbb312`
+`0c7517d` `d388d17` `aab418e`) all score `SCOPE_HITS=0`; `b2e5fa4` and `4ca31ae` score `1`, `5f8890d` `2`,
+`1eafda7` `4`.
 
 **(4) Behaviour class, selected and bound to (3).** Name which of the four classes the task changes —
 **3** vendor management/build preflight, **4** image build, **5** boot and `./run` output and flags,
