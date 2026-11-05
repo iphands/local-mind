@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 71% complete (5/7 tasks)
+- Status: 86% complete (6/7 tasks)
 - Start date: 2026-11-04
 - Plan: `context/plans/01_flashnext_container.md`
 - Evidence: the table below; build logs in `captures/build_<date>_<sha7>.log` (gitignored); boot
@@ -55,7 +55,7 @@
 | 3 | T3: `./run` + its dry-run gate step | `run`, `README.md`, RULES gate | done | Gate step 4 added and passing with `image: stub:none` (no image yet); negative control `KV=fp16` → 2 FAIL lines; busy/ninfer/missing/not-a-pack all rc=1. |
 | 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | done | Owner built `cu1343-sm120-dc047a7` (420 s compile, 0 warnings); label = pin; `--help` runs without a GPU; mock-engine serve proves layout, Host check (403 for unknown names) and alias (404). |
 | 5 | T5: Check `./run`'s flags against the built image | RULES gate step 5 | done | Uses the image's own `serve.config` (the startup check), not `--help` text; `flags ok (2 engine, 8 server)`, 9 with `API_KEY`; `--no-such-flag` → FAIL. `./run` needed no change. |
-| 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | in-progress | Boot 1: missing `tools/` (fixed). Boot 2: NFS `O_DIRECT` crawl, stopped. **Boot 3 (default, local pack): loaded in 40.1 s, all checks pass, 320.7 t/s.** Left: `./run --single` and a timed `docker stop` — **needs a stop-the-world window the owner schedules**: one card holds one server (`expert_cache_primary_mib 64806` vs `vram_free_mib 24435`, and `--single` shrinks KV slots, not the expert cache), and the owner's live server is on it. `./run` would refuse a busy port either way (`run:96`). |
+| 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | done | Boot 3 (default) and boot 4 (`--single`, run by the host agent session on the owner's go) both load from `models.local/` (40.1 s / 34.4 s), reply via `cosmo.lan` as `cosmo-6000`, 404 on a wrong model; `docker stop` 2.3 s. *Confirms if* "experts split between cuda0 and page-locked RAM" is **invalid as written**: every expert is in VRAM in both modes, with a RAM copy beside it (Notes). |
 | 7 | T7: Harvest | `context/*.md`, `README.md` | pending | |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
@@ -93,10 +93,25 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-11-04 | boot 3 requests: `curl http://cosmo.lan:8700/v1/models`; chat `cosmo-6000` "Say hi in five words." `max_tokens 512`; model `claude-heavy`; `Host: evil.example:8700` | 200 (`cosmo-6000`, `n_ctx 262144`, text+image); reply `Hi, how are you today?`, `finish stop`, 196 tokens, 0.75 s wall, server `s1 done pp=58/0c 0.1s tg=196 320.7t/s acc=74% ttft=0.1s end=stop`; 404; 403 + `error: refused Host 'evil.example:8700' from 172.17.0.1` | 1 each | single short reply — not a benchmark |
 | 2026-11-04 | `nvidia-smi` with boot 3 idle | GPU 0: 73,091 / 97,887 MiB used, 73 W of a 475 W limit | 1 | — |
 | 2026-11-04 | `docker exec basalt` (boot 3): `ulimit -l`, `/proc/1/limits`, engine `/proc/<pid>/status` | `ulimit -l: unlimited`; `Max locked memory unlimited unlimited`; uid 1000 (ubuntu); engine RSS 32,987,960 kB, `VmLck 0`, `VmPin 0` — CUDA-pinned host memory is not counted there, so the evidence for page-locking is the absence of Basalt's fallback warning | 1 | — |
+| 2026-11-04 18:31 PST | `time docker stop basalt` (boot 3, default mode, started 01:50:13Z) | `real 0m2.317s`; GPU 0 back to 309 MiB; container removed (`--rm`); engine log's last lines: `resident RAM: 22.81 GiB of experts in RAM, 0 exchanged with the VRAM tier, 0 blob reads from the file`, `since the start RAM 201337 blobs` | 1 | — |
+| 2026-11-04 18:32 PST | boot 4: `./run --single` (host agent session, owner's go), from `models.local/` | `engine ctx=262144 kv=int8 (from cli)` (no batch); `auto resident=12.4GB pool-affinity=auto pool=15`; `warning: the device-planned MoE tail is off: every expert is resident`; `loaded 67.8GiB 34.4s cuda0=67.8GiB`; `kv 0.7/4.0GiB cuda0 elastic`; no `slots` line; engine log: `expert cache auto: 88.77 GiB free … -> 24576 slots`, `expert cache 24576 slots, 63.29 GiB of VRAM`, `elastic KV: 32768 cells backed per session, the other 3.30 GiB of KV are the expert cache's last 1284 slots until a request needs them`; `resident RAM: 12.38 GiB of experts in RAM` | 1 | — |
+| 2026-11-04 18:33 PST | boot 4 requests: `/v1/models` via `cosmo.lan`; chat `cosmo-6000` "Say hi in five words."; model `claude-heavy` | 200 (`cosmo-6000`, `n_ctx 262144`); `Hi there my good friend.`, `finish stop`, 120 tokens (`s1 done pp=58/0c 0.1s tg=120 355.8t/s acc=65%`); 404 | 1 each | — |
+| 2026-11-04 18:32–18:34 PST | boot 4, **client traffic** that arrived on its own (llama-proxy/opencode), from the console `done` lines | `pp=1687 0.4s 4708t/s tg=89 345.6t/s acc=66%`; `pp=26676/0c 2.7s 9842t/s tg=9304 357.2t/s acc=67%`; `pp=27163/0c 2.7s 10174t/s tg=2483 356.2t/s acc=69%`; `pp=1489/0c 0.3s 5774t/s tg=151 380.0t/s acc=67%` | 1 each | real requests, not a controlled benchmark |
 | 2026-11-04 | T1 guards: `DOCKER='sudo docker'`, `DOCKER=/usr/bin/nonexistent-docker` sourcing `lib/common.sh` | both refuse, rc=1, with the fix line | 1 each | — |
 | 2026-11-05 | `curl http://cosmo.lan:8700/v1/models` + `/metrics` against the **owner's live server**; `nvidia-smi`; `stat` and `grep -c '^basalt: gpus:'` on `storage/cache/basalt/aefd5d98dc650ed4/engine.log` | 200 `cosmo-6000`, `n_ctx 262144`; geometry `kv int8`, `batch_slots 4`, `expert_slots_primary 24576`, `expert_cache_primary_mib 64806`, `arena_mib 23353`, `vram_free_mib 24435`, version 0.2.1; GPU 0 77,117 / 97,887 MiB used; that log file born **2026-11-05 01:35** holding **3 `--batch 4` boots, no `--single`** | 1 each | **Corroboration, not T6 Evidence**: owner-started server, launch provenance unconfirmed. Its `requests[]` and prompt lines are the owner's traffic and are deliberately not recorded here. |
 
 ## Notes / Deviations
+
+- **T6 closed (host agent session, 2026-11-04 18:35 PST).** *Confirms if* ("both modes load with
+  experts split between `cuda0` and page-locked RAM") is **invalid as written**, as the container
+  session noted below: in both modes the expert cache holds all 24,576 slots in VRAM (63.29 GiB) and
+  a RAM copy sits beside it (22.81 GiB at 4 slots, 12.38 GiB at `--single`), which serves the slots
+  the elastic KV borrows (`since the start RAM 201337 blobs` on boot 3). Everything else in T6 held:
+  both modes boot, reply through `cosmo.lan` as `cosmo-6000`, refuse wrong names (404) and unknown
+  Hosts (403), and stop cleanly (2.3 s). The KV borrows at most 1,284 expert slots at `--single` and
+  5,334 at 4 × 262144.
+- **`--single` is running now** (boot 4, started by the host agent session from a background shell):
+  the owner may want the default 4-slot mode back — `docker stop basalt && ./run`.
 
 - **Revised (owner, 2026-11-04): default pack → `models.local/` (local NVMe, btrfs `compress-force=zstd:1`).**
   Boot 2 was stopped at 7.4/67.8 GiB. `/models.local/` is gitignored.

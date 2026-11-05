@@ -486,7 +486,7 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
 - [x] T3: `DRY_RUN=1 ./run` / `--single` print commands carrying every default; a `.ninfer` path and a missing pack → rc=1 before docker starts anything; nothing created
 - [x] T4: the built image's `ai.basalt.ref` = `dc047a77…`; `bin/basalt --help` and `serve.server --help` print usage; `data/profiles/qwen4exp-48x512.prof` present
 - [x] T5: gate step 5 → `flags ok`; an injected bogus flag → `FAIL(flags)`
-- [ ] T6: both modes boot; start blocks recorded; `cosmo.lan` chat → reply from `cosmo-6000`; wrong model → 404; `docker stop` clean
+- [x] T6: both modes boot; start blocks recorded; `cosmo.lan` chat → reply from `cosmo-6000`; wrong model → 404; `docker stop` clean
 - [ ] All: the project gate (Rule A) passes on the final commit
 - [ ] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read
 - [ ] All: plan + tracker `git mv`'d to `completed/`, `SERIES.md` marked done (Rule C)
