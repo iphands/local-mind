@@ -130,16 +130,53 @@ where an applicable step was skipped.
 
 **Named carve-out — owner-only steps (the only permitted skip).** Steps **3–6** are owner-run on this
 host, per § *Prerequisites* (an agent session here is not in the `docker` group). A task may be marked
-`done` with 3–6 skipped **only** when all four hold: **(1)** the commit message and the tracker row
-name *which* steps were skipped and why, in the established form —
-`Gate 1a/1b/1c/2 pass, 3–6 docker-blocked (owner)`; **(2)** the step is listed as owner-only in
-§ *Prerequisites* **before** the commit that skips it, never reclassified afterwards; **(3)** the
-commit's own diff scope contains nothing the skipped step could have exercised — no launcher, no
-`Dockerfile`, no `versions.env` pin, no flag change; and **(4)** the task's behaviour is not something
-*only* the blocked step can see, which is Rule A.6 and is not waivable by naming it. Anything outside
-those four conditions is a **fail**, not a skip: write the row as `BLOCKED` and leave the task
-`in_progress`. The carve-out exists because steps 3–6 are genuinely unrunnable here, not because their
-absence is harmless; that is why it is written as a list of conditions rather than a permission.
+`done` with 3–6 skipped **only** when all four hold. Conditions (3) and (4) are **machine-checked and
+pasted, never asserted**, because a condition an agent restates in prose is a condition it grades itself.
+
+**(1) Name them.** The commit message and the tracker row name *which* steps were skipped and why, in the
+established form: `Gate 1a/1b/1c/2 pass, 3–6 docker-blocked (owner)`.
+
+**(2) No retroactive reclassification, across commits.** The step must already be listed owner-only in
+§ *Prerequisites* in a commit **strictly earlier** than the first commit that invokes this carve-out for
+that step — an edit made minutes earlier in the same session does not count, or the clause defeats itself.
+Checkable after the fact: `git log --oneline -S'owner-run' -- context/plans/RULES.md` must predate the
+first citing commit (`git log --oneline -S'docker-blocked'`).
+
+**(3) Diff scope, pasted.** The commit must touch nothing any blocked step could exercise. Run this and
+paste its output into the artifact:
+
+```bash
+PAT='^(run|build|Dockerfile|Dockerfile\.dockerignore|versions\.env|lib/|models)'   # the scope surface
+git show --name-only --format= <sha> | sed -n 's|^server/basalt/||p' | grep -v '^$' > /tmp/opencode/f.txt
+echo "FILES=$(grep -c . /tmp/opencode/f.txt) SCOPE_HITS=$(grep -Ec "$PAT" /tmp/opencode/f.txt)"
+echo "PATTERNS=$PAT"
+```
+Required: `SCOPE_HITS=0`. **`FILES=` is mandatory beside it** — `SCOPE_HITS=0` over an empty file list is
+all-green-from-absent-input, the failure § 6a caught in its own checker. Two things this producer had to be
+rebuilt over before it was believed, both recorded so nobody re-breaks them: `git show --name-only` prints
+**monorepo-root-relative** paths, so an unanchored-then-stripped `^run` matches nothing and a real
+launcher commit scores `SCOPE_HITS=0` (verified: `b2e5fa4` "[T3][run] add ./run" scored 0 until the
+`sed -n 's|^server/basalt/||p'` was added, then 1); and `PATTERNS` must name **paths that exist here** —
+an earlier draft of this rule listed `serve/config.py`, which is not a tracked path in this project at all
+(`git ls-files | grep -c '^serve/config'` → 0), i.e. the phantom-path trap of `pitfalls.md` item 15 inside
+the very rule meant to police scope. `PATTERNS` is printed so it is a reviewable published constant, not a
+mood; extending it is a RULES amendment. Note `FILES=` counts files **inside `server/basalt/`** and can be
+one less than `git show --stat`: commit `9a56c8d` is 14 files there but `FILES=13` here, the difference
+being the monorepo's own `context/pitfalls.md`. Verified: all six Plan-02 T2 commits score `SCOPE_HITS=0`;
+`5f8890d`, `4ca31ae` and `b2e5fa4` score `1`.
+
+**(4) Behaviour class, selected and bound to (3).** Name which of the four classes the task changes —
+**3** vendor management/build preflight, **4** image build, **5** boot and `./run` output and flags,
+**6** `serve.*` imports inside the image — or `none`. **`none` is legal only when (3) printed
+`SCOPE_HITS=0`**, which is what makes this condition checkable: it is a selection from a list RULES already
+defines, tied to another condition's machine output, rather than a claim about what a hypothetical run
+would have revealed. Rule A.6 ("never mark a task `done` on unverified work") is not waived by writing
+`none`; it is the reason `none` requires the (3) evidence.
+
+Anything outside these four conditions is a **fail**, not a skip: write the row as `BLOCKED` and leave the
+task `in_progress`. The carve-out exists because steps 3–6 are genuinely unrunnable here, not because their
+absence is harmless; that is why it is a list of conditions with paste-able evidence rather than a
+permission. First invocation was `d388d17`, whose scope check is the `SCOPE_HITS=0` line above.
 
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and launchers have no extension. Pass: no `FAIL` line, the counts

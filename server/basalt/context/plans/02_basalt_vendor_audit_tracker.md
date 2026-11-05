@@ -365,6 +365,28 @@ violation and cannot be cited by a later plan.
   instruction to read `manifest/index.md` first — two imperatives competing over which file is next. (iv) The
   five-commit slice total is recorded above with its producing command. T2 closes at **five commits**;
   this row's own commit is a sixth and carries only these round-four items.
+- **2026-11-05 · T2 round five — neckbeard's MUST-fix on the carve-out it had just approved.** The
+  four conditions passed as wording but only three had teeth, and the fourth was the self-waiver door: "the
+  task's behaviour is not something only the blocked step can see" is a claim about a counterfactual
+  observation, unfalsifiable from inside the commit, so an optimistic agent walks through it while believing
+  (1)–(3) did the work. Rewritten so (3) and (4) are **pasted, not asserted**: (3) runs a named command over
+  the commit object and prints `FILES=` / `SCOPE_HITS=` / `PATTERNS=`, with `FILES=` mandatory because
+  `SCOPE_HITS=0` over an empty list is all-green-from-absent-input; (4) became a **selection** from the four
+  behaviour classes RULES already defines, and `none` is legal **only** when (3) printed `SCOPE_HITS=0`,
+  binding the one free-floating condition to another condition's machine output. (2) closed a hole neckbeard
+  spotted — "before the commit that skips it" is satisfiable by an edit minutes earlier in the same session,
+  so the listing must now land in a **strictly earlier commit**; verified with `git log -S`, `owner-run`
+  entered RULES at `ef79180` (T0) and the first carve-out use is `3dba113` (T1), so T1's precedent was
+  legitimate under the rule that now formalizes it. **Building (3)'s command caught two live bugs, both in
+  the rule rather than the code:** the pattern list must be applied after stripping the `server/basalt/`
+  prefix, because `git show --name-only` prints monorepo-root-relative paths — unstripped, the real launcher
+  commit `b2e5fa4` "[T3][run] add ./run" scored `SCOPE_HITS=0`, i.e. the check would have waved through the
+  exact change it exists to catch; and the reviewer-suggested pattern `serve/config.py` **is not a path in
+  this project at all** (`git ls-files` → 0), the item-15 phantom path reappearing inside a scope rule.
+  Control evidence, all from the commit objects: six T2 commits `SCOPE_HITS=0`; `5f8890d` / `4ca31ae` /
+  `b2e5fa4` all `1`; empty input `FILES=0` with `SCOPE_HITS=0`, which is the argument for printing `FILES`.
+  Also `FILES=` counts only files inside the project dir, so `9a56c8d` reads 14 in `--stat` and 13 here — the
+  monorepo's `context/pitfalls.md` is the difference, stated so the mismatch is not read as drift.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every
