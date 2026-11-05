@@ -428,6 +428,12 @@ docker step looks like in this convention. Two variants of that are worth naming
     subtract what you deliberately excluded and say why) or downgrade to "no *offline, deterministic*
     generator in `tools/`, `tests/`, `.github/`". Search for the *thing*, not for a guess at its spelling:
     searching for the format's writer by symbol name finds what searching for `.prof` in filenames misses.
+    **Corollary, same trap computing a number instead of a name [OBSERVED 2026-11-05, T2]:** a path in a
+    `git diff --numstat -- <paths>` list that matches nothing contributes **nothing and says nothing**, so a
+    hand-assembled path list silently under-counts — my § 7 diff-shape figure was 18 lines short because one
+    path omitted an `audit/` segment. Any sum taken over an explicit path list must be reconciled against the
+    same sum with **no** pathspec (`954 + 1861 + 349 = 3164` against `git show --numstat` of the commit), which
+    is a partition check, not a second opinion.
 16. **A date partition is not defined until you name its basis — `--date=iso-strict` compared as a string
     partitions by the author's local calendar date.** [OBSERVED 2026-11-05, T2] `git log --format='%ad'
     --date=iso-strict | awk '$1 < "2026-10-05"'` looks like a UTC cut and is not: the field carries the

@@ -295,9 +295,20 @@ violation and cannot be cited by a later plan.
 - **2026-11-05 · T2 landed as two commits — deliberate.** Both reviewers reached the same split
   independently, for the same reason: the *use* of the provenance evidence (the ancestor-rewrite finding,
   the AI-attribution corpus, T2b, T3's calibration rules) is separately arguable, and if that framing is
-  later re-argued or partially withdrawn, the measurements must not go with it. Commit 1 = T2 as scoped
-  + corrections to T2's own claims + `t2-lineage.txt` + `t2-gate-and-checks.txt` + pitfalls items 10–14;
-  commit 2 = `[basalt][P2][T2][audit] record the ancestor history rewrite and the AI-attribution corpus`.
+  later re-argued or partially withdrawn, the measurements must not go with it. **As landed:** commit 1 =
+  `9a56c8d` (the audit record: the six `wave0/t2-*` artifacts + `scripts/t2-census.sh` + the manifest/audit
+  index updates + RULES.md + pitfalls items 10–17 + the monorepo `context/pitfalls.md`), 14 files
+  +3,164/−31; commit 2 = `93b6bd5` (the knowledge layer: `distilled.md`, `high_level.md`, `AGENTS.md`,
+  `SERIES.md`, this plan's Key Facts/T10/T13/T2b/T3 edits, and U11–U13), 6 files +352/−9. Neither commit
+  contains `./run` or `opencode2/bin/opencode-serve`, which are the owner's in-flight edits.
+- **2026-11-05 · T2 post-commit correction (a third commit, `P2/T2`, small).** `9a56c8d`'s own artifact
+  published its diff shape as hand-written **1,843**; the true figure is **1,861**. Cause: the measuring
+  command named `server/basalt/context/coverage_ledger.md` when the file is
+  `…/context/audit/coverage_ledger.md`, and a non-matching pathspec in a `--numstat --` list contributes
+  nothing silently. The artifact now carries the right number **plus the command that derives it** and a
+  partition check (`954 + 1,861 + 349 = 3,164` = the commit's total), and the trap is recorded as a
+  corollary inside `pitfalls.md` item 15 rather than a new item. Not amended into `9a56c8d`: history here is
+  append-only, so that commit permanently contains the wrong figure and the correcting commit says so.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every
