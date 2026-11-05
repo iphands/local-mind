@@ -60,7 +60,10 @@ Tag every new fact with how it is known, and **never upgrade a tag without doing
 - **No full source code** and nothing private or trademarked. Short algorithm explanations,
   formulas, signatures and architecture ideas are fine.
 - Dates are ISO, from `date +%F`.
-- A file past ~40 KB is split: `<name>/` with an `index.md` and one file per topic.
+- A file past ~120 KB is split: `<name>/` with an `index.md` and one file per topic. *(Amended
+  2026-11-05 from ~40 KB, the owner's call: the warrant is `pitfalls.md` § *Item numbering, and what is
+  frozen* → **Size**. A long file stays usable when its front sheet is short; "Dense" above outranks a
+  byte count.)*
 - A file that turns out wrong or stale is **fixed in place**, with a dated note of what changed.
 
 ## Honesty

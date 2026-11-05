@@ -608,7 +608,8 @@ violation and cannot be cited by a later plan.
   **field 13** (`BINARY_SKIPPED`) and got **86 files**, which would have been compared against § 10's 80 as if
   equivalent; and an aggregation wrote `(p.get("comments") or 0) > 0` over an endpoint that does not return
   `comments` at all, turning three absent fields into three confident zeros. Recorded as
-  `context/pitfalls.md` item 19.
+  `context/pitfalls.md` items 20–21 (cited as "item 19" when written, which pointed at the classifier
+  trap rather than the two this sentence describes; corrected with the 2026-11-05 renumber).
 
 - **2026-11-05 (T3, partway) — four findings executed against the `.basalt` parser; `census.md` still
   owed, so row 3 stays `pending`.** `context/audit/findings.md` now carries F-1 🔴 / F-2 🟠 / F-3 🟡 /
@@ -627,7 +628,8 @@ violation and cannot be cited by a later plan.
   Two of *my* errors are recorded in the evidence file rather than quietly fixed: the first harness
   printed `POC_VERDICT=PASS` while asserting nothing, and a probe printed `wrote` while writing nothing
   because **F-2's cache short-circuit silently disables later probes that share its cache key**
-  (`pitfalls.md` items 18–19).
+  (`pitfalls.md` item 23 — numbered 18 when this line was written, before the 2026-11-05 renumber; the
+  `POC_VERDICT=PASS`-while-asserting-nothing half has no item of its own and is the front sheet's R5).
   Still unexamined and said so on the page: `src/`/`include/` — the C++ engine's own reader of the same
   128-byte entry table. Nothing on that page constrains it.
 
@@ -670,7 +672,8 @@ violation and cannot be cited by a later plan.
   `PYTHONDONTWRITEBYTECODE=1`; `t3-census.sh` gained `TREE_FREE_OF_BUILD_ARTIFACTS`; the PoC harness
   exits **3** on `POC_TREE_BYTECODE>0`, with negative control **D** proving the guard fires (exit 3, 8
   artifacts, after 32 assertions had already passed). Tree restored to 862 and re-verified; transcript
-  in `context/audit/wave0/t3-tree-contamination.txt`, `pitfalls.md` items 20–21.
+  in `context/audit/wave0/t3-tree-contamination.txt`, `context/pitfalls.md` items 25–26 (written "20–21",
+  the pre-renumber numbering of the same two traps).
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every
