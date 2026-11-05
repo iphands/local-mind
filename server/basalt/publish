@@ -1,0 +1,319 @@
+#!/usr/bin/env bash
+# Publish the built Basalt image to Docker Hub. Run `docker login` first.
+#
+#   ./publish                              # publish the pinned build (versions.env's BASALT_SHA)
+#   TAG=cu1343-sm120 ./publish             # take the image from another local tag of $IMAGE
+#   DRY_RUN=1 ./publish                    # print the tags, touch nothing
+#
+# OWNER-ONLY, in every mode: the owner publishes images (context/plans/SERIES.md § Standing
+# Constraints; ../vllmcustom/container/push carries the same rule). An agent writes and dry-runs
+# this file and never runs it for real — DRY_RUN=1 is the owner's command too. The hard enforcement
+# is the docker socket, which an agent session here cannot open (RULES.md § Prerequisites); the
+# terminal gate below only refuses the runs nobody can watch (cron, `ssh host ./publish` without
+# -t), so it is stated as "needs a terminal", not as the guard.
+#
+# Tags pushed, for Basalt dc047a7 on CUDA 13.4.3:
+#
+#   cu1343-sm120-dc047a7   immutable — what ./build made; names the Basalt commit compiled in
+#   cu1343-sm120           moving  — newest build of this CUDA variant
+#   latest                 moving  — newest local build of the pinned commit (publish owns :latest;
+#                                    ./build mints no such tag). Pinned-commit-ness is enforced; a
+#                                    CUDA mismatch is a WARN, not a veto, so :latest can move to a
+#                                    new CUDA line — that is what the drift WARN is for.
+#
+# Unlike ../vllmcustom/container/push there is no version-pinned tier: the image carries no Basalt
+# version label (upstream pins none the Dockerfile reads), so the Basalt commit IS the version and
+# ./build already puts it in the tag.
+#
+# The tags minted here come from the IMAGE'S OWN LABELS — ai.basalt.ref, ai.basalt.cuda, stamped by
+# the Dockerfile from what ./build passed — never re-declared and never parsed out of the name we
+# were handed: a script that keeps its own CUDA_VERSION is how a tag ends up claiming a version the
+# image does not contain (../vllmcustom/container/push § header, paid for there).
+#
+# Nothing is built. TAG= only says which local image to take; it never becomes a hub tag, because a
+# moving name typed by hand would bypass the :latest guard below.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=lib/common.sh
+source "$HERE/lib/common.sh"      # guards DOCKER, root and the socket; brings load_pins, image_for_pin
+load_pins
+
+[[ $IMAGE == */* && $IMAGE != *:* ]] \
+  || die "IMAGE ($IMAGE) is not a plain <user>/<repo> name (a registry host or port would be read" \
+         "  as part of the tag, and docker.io is assumed everywhere here) — check versions.env."
+
+# Both spellings, union, fail-safe: a DRY_RUN=0 left in the environment by ./run must not be able to
+# turn PUSH_DRY_RUN=1 into a real push.
+if [[ ${DRY_RUN:-0} == 1 || ${PUSH_DRY_RUN:-0} == 1 ]]; then dry=1; else dry=0; fi
+if (( dry )); then echo "== DRY_RUN"; fi
+if (( ! dry )) && [[ ! -t 0 ]]; then
+  printf '## needs a terminal on stdin (none found) — the owner publishes images by hand.\n' >&2
+  printf '##   ssh one-liner?  add -t:  ssh -t <host> ./publish\n' >&2
+  printf '##   rehearse only:  DRY_RUN=1 ./publish\n' >&2
+  exit 1
+fi
+
+# Helpers never die: a die inside $( ) exits only the command substitution's subshell, so every
+# caller checks the value. Any miss — absent image, absent label, bad reference — becomes empty.
+# The `*:*` test rejects both the empty reference and a bare id, which docker would resolve by
+# prefix against any local image.
+label_of() {                       # label_of <label> <repo:tag> -> stdout
+  local key=${1:-} ref=${2:-} out=
+  if [[ -n $key && $ref == *:* ]]; then
+    out=$("${DOCKER[@]}" image inspect -f "{{index .Config.Labels \"$key\"}}" "$ref" 2>/dev/null) || out=
+  fi
+  # a Go template renders an absent map key as that literal, not as nothing
+  if [[ $out == '<no value>' ]]; then out=; fi
+  printf '%s\n' "$out"
+  return 0
+}
+id_of() {                          # id_of <repo:tag> -> stdout
+  local ref=${1:-} out=
+  if [[ $ref == *:* ]]; then
+    out=$("${DOCKER[@]}" image inspect -f '{{.Id}}' "$ref" 2>/dev/null) || out=
+  fi
+  printf '%s\n' "$out"
+  return 0
+}
+local_digest() {                   # local_digest <repo:tag> -> the manifest digest the hub gave it
+  local ref=${1:-} out=
+  local -a rd
+  if [[ $ref == *:* ]]; then
+    # mapfile, not `| head -n 1`: head closing the pipe can make docker die on SIGPIPE, and pipefail
+    # turns that into a blanked GOOD digest (lib/common.sh's image_for_pin spells this out).
+    # [0] is enough: a single-platform image carries one manifest digest in every RepoDigests entry.
+    mapfile -t rd < <("${DOCKER[@]}" image inspect -f '{{range .RepoDigests}}{{println .}}{{end}}' \
+                        "$ref" 2>/dev/null)
+    out=${rd[0]-}
+  fi
+  printf '%s\n' "${out#*@}"
+  return 0
+}
+# No `*:*` guard here, unlike the three above: the only call site passes "$IMAGE:latest", and IMAGE
+# is colon-checked at the top of this file. Needs the network.
+hub_digest() {                     # hub_digest <repo:tag> -> the digest docker.io reports
+  local ref=${1:-} out=
+  out=$("${DOCKER[@]}" buildx imagetools inspect "docker.io/$ref" --format '{{.Descriptor.Digest}}' \
+          2>/dev/null) || out=
+  printf '%s\n' "$out"
+  return 0
+}
+
+# ------------------------------------------------------------ the pin, for lookup only
+
+# variant_want/pinned_want exist to FIND the image and to REPORT drift. They are never the source of
+# a tag: the tags that get pushed come from the image's labels (below). Swapping one into `variant`
+# to "fix" the drift WARN is the regression this comment exists to prevent.
+want_cuda=${CUDA_RUNTIME_IMAGE#*:}
+want_cuda=${want_cuda%%-*}
+[[ $want_cuda =~ ^[0-9]+(\.[0-9]+)+$ ]] \
+  || die "cannot read a CUDA version from CUDA_RUNTIME_IMAGE ($CUDA_RUNTIME_IMAGE)."
+variant_want="cu${want_cuda//./}-sm120"
+pinned_want="$variant_want-${BASALT_SHA:0:7}"
+
+# image_for_pin matches the label byte-exactly (lib/common.sh), so it can come back empty for an
+# image whose label carries a short sha even though that image passes every check below. It is used
+# for a NAME pointer and an id, never as a verdict on what the pin is.
+newest_ref=$(image_for_pin)
+newest_id=
+if [[ -n $newest_ref ]]; then newest_id=$(id_of "$newest_ref"); fi
+
+# --------------------------------------------------------------- which image
+
+src=$IMAGE:${TAG:-$pinned_want}
+if [[ -n ${TAG:-} ]]; then
+  echo "== TAG=$TAG (from the environment)"
+else
+  echo "== $src (the name ./build gives ${BASALT_SHA:0:7})"
+fi
+src_id=$(id_of "$src")
+if [[ -z $src_id ]]; then
+  {
+    echo "## $src is not a local image."
+    echo "##   $IMAGE locally:"
+    rows=$("${DOCKER[@]}" images --filter dangling=false \
+             --format '{{.Repository}}:{{.Tag}}  {{.Size}}  {{.CreatedSince}}' "$IMAGE" 2>/dev/null) || rows=
+    if [[ -z $rows ]]; then
+      echo "##     none (or docker could not list them) — build it:  ./build"
+    else
+      head -n 6 <<<"$rows" | sed 's/^/##     /'
+      if (( $(grep -c . <<<"$rows") > 6 )); then echo "##     … and more"; fi
+    fi
+    echo "##   the pin builds as: $IMAGE:$pinned_want"
+    if [[ -n $newest_ref ]]; then
+      echo "##   or re-run with:  TAG=${newest_ref##*:} ./publish  (the only local $IMAGE labelled ai.basalt.ref=${BASALT_SHA:0:7})"
+    fi
+  } >&2
+  exit 1
+fi
+
+# ----------------------------------------------------------- what it really is
+
+ref=$(label_of ai.basalt.ref "$src")
+if [[ ! $ref =~ ^[0-9a-fA-F]{7,40}$ ]]; then
+  die "$src carries no usable ai.basalt.ref label (got '${ref:-nothing}')." \
+      "  it predates the Dockerfile's LABEL block, or was built outside ./build — rebuild: ./build"
+fi
+ref=${ref,,}
+repo=$(label_of ai.basalt.repo "$src")
+if [[ -z $repo ]]; then
+  echo "WARN: $src has no ai.basalt.repo label — its origin is unchecked."
+elif [[ $repo != "$BASALT_REPO" ]]; then
+  die "$src was built from $repo;" \
+      "  versions.env pins BASALT_REPO=$BASALT_REPO — this image is not from the repo we build."
+fi
+cuda=$(label_of ai.basalt.cuda "$src")
+if [[ ! $cuda =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
+  die "$src carries no usable ai.basalt.cuda label (got '${cuda:-nothing}') — cannot name its CUDA variant." \
+      "  rebuild: ./build"
+fi
+arch=$(label_of ai.basalt.arch "$src")
+
+src_frag=${src_id##*:}             # 12 hex: two 64-char ids side by side cannot be eyeballed, and
+src_frag=${src_frag:0:12}          # this fragment is only ever a difference indicator, never a citation
+variant="cu${cuda//./}-sm120"
+pinned="$variant-${ref:0:7}"
+echo "== $src is Basalt ${ref:0:7}, CUDA $cuda, ${arch:-arch unlabelled}"
+
+# Deliberately a WARN, not a die: TAG= names last month's build on purpose sometimes, and the pinned
+# and variant tags are still exactly right for it. What it must not do is take :latest.
+if [[ $BASALT_SHA != "$ref"* ]]; then
+  echo "WARN: this publishes Basalt ${ref:0:7}; versions.env pins ${BASALT_SHA:0:7} — :$pinned and :$variant are"
+  echo "      correct for it, and :latest stays put."
+fi
+if [[ $variant != "$variant_want" ]]; then
+  echo "WARN: versions.env pins CUDA $want_cuda ($variant_want) — this build carries $cuda, so :$variant and :latest"
+  echo "      move the image onto a new CUDA line."
+fi
+if [[ "$IMAGE:$pinned" != "$src" ]]; then
+  echo "WARN: $src is not named $pinned, which is what its labels say it is; publishing writes it under $pinned."
+fi
+
+# --------------------------------------------------------------- what to push
+
+names=("$pinned" "$variant")           # immutable first, and that ordering is load-bearing twice over:
+                                       # a moving tag never points at bytes the hub lacks under the
+                                       # immutable name, AND $pinned's push is what populates the
+                                       # RepoDigests the :latest comparison below reads
+
+# :latest = newest local build of the pinned commit. Compared by image id, because one image answers
+# to several names and a name compare would miss that.
+if [[ $BASALT_SHA == "$ref"* && -n $newest_id && $src_id == "$newest_id" ]]; then
+  names+=(latest)
+elif [[ $BASALT_SHA == "$ref"* ]]; then
+  echo "WARN: not publishing :latest — $src is not the newest local build of ${BASALT_SHA:0:7}" \
+       "(${newest_ref:-no local $IMAGE carries the full label ai.basalt.ref=$BASALT_SHA})."
+fi
+
+recipe=(Dockerfile Dockerfile.dockerignore build versions.env lib)
+for p in "${recipe[@]}"; do
+  [[ -e $HERE/$p ]] || echo "WARN: $p is not in the tree — the uncommitted-recipe check cannot see it."
+done
+if ! recipe_dirty=$(git -C "$HERE" status --porcelain -- "${recipe[@]}"); then
+  echo "WARN: git status failed — the uncommitted-recipe check did NOT run for this publish."
+fi
+if [[ -n $recipe_dirty ]]; then
+  echo "WARN: the build recipe is uncommitted — this image may match no commit of this repo:"
+  head -n 10 <<<"$recipe_dirty" | sed 's/^/      /'
+  if (( $(grep -c . <<<"$recipe_dirty") > 10 )); then echo "      … and more"; fi
+fi
+if [[ ! -s ${DOCKER_CONFIG:-$HOME/.docker}/config.json ]]; then
+  echo "WARN: no docker config at ${DOCKER_CONFIG:-$HOME/.docker}/config.json — no credential of record"
+  echo "      for docker.io; a real push fails at the first one. (A read-only token passes this and still fails.)"
+fi
+
+echo "== tags:"
+for t in "${names[@]}"; do echo "==   docker.io/$IMAGE:$t"; done
+
+if (( dry )); then
+  echo "== DRY_RUN — nothing tagged, nothing pushed"
+  exit 0
+fi
+
+# --------------------------------------------------------------- do it
+
+pushed=()
+tagged=()
+
+publish_one() {                        # retag if needed, prove identity, push
+  local t=$1 before now
+  if [[ "$IMAGE:$t" != "$src" ]]; then
+    before=$(id_of "$IMAGE:$t")
+    if [[ -z $before ]]; then
+      echo "== $IMAGE:$t: no local tag yet — this run creates it"
+    elif [[ $before != "$src_id" ]]; then
+      local oldref bf
+      oldref=$(label_of ai.basalt.ref "$IMAGE:$t")
+      bf=${before##*:}
+      echo "WARN: $IMAGE:$t moves Basalt ${oldref:0:7} (${bf:0:12}) -> ${ref:0:7} ($src_frag) locally"
+    fi
+    # this docker tag is deliberately unchecked: the identity proof on the next two lines is what
+    # catches a failed retag, and it is the only check that survives here with errexit off.
+    "${DOCKER[@]}" tag "$src" "$IMAGE:$t"
+    now=$(id_of "$IMAGE:$t")
+    [[ $now == "$src_id" ]] || die "refusing to push $IMAGE:$t — it is ${now:-nothing}, not $src."
+    tagged+=("$t")
+  fi
+  if [[ $t == latest ]]; then          # the one hub state worth reading before it moves
+    local hub ours
+    hub=$(hub_digest "$IMAGE:latest")
+    ours=$(local_digest "$IMAGE:$pinned")
+    if [[ $hub != sha256:* ]]; then    # an empty render and an absent tag are not the same fact
+      echo "== docker.io/$IMAGE:latest is absent or its digest is unreadable — cannot say what this moves"
+    elif [[ -z $ours ]]; then
+      echo "== docker.io/$IMAGE:latest is ${hub:0:19}; this image's own digest is only readable after its push"
+    elif [[ $hub == "$ours" ]]; then
+      echo "== docker.io/$IMAGE:latest already points at this image"
+    else
+      echo "WARN: docker.io/$IMAGE:latest moves ${hub:0:19} -> ${ours:0:19}  (full digest after the push)"
+    fi
+  fi
+  echo "== pushing docker.io/$IMAGE:$t"
+  # errexit is off inside this function: it is called from an `if !` condition. The push status has
+  # to be tested here or a denied credential falls through to a successful return.
+  if ! "${DOCKER[@]}" push "docker.io/$IMAGE:$t"; then
+    echo "## docker push failed: docker.io/$IMAGE:$t" >&2
+    return 1
+  fi
+  return 0
+}
+
+on_stop() {
+  printf '## interrupted — published: %s\n' "${pushed[*]:-nothing}" >&2
+  printf '##   local tags already pointed at this image: %s\n' "${tagged[*]:-none}" >&2
+  printf '##   no hub tag is half-written; a registry moves a tag only when the manifest lands.\n' >&2
+  exit 130
+}
+trap on_stop INT HUP TERM
+
+size=$("${DOCKER[@]}" image inspect -f '{{.Size}}' "$src" 2>/dev/null) || size=0
+echo "== up to $(( ${size:-0} / 1048576 )) MiB new to the hub: the first tag uploads it, the rest reuse those layers"
+
+SECONDS=0
+for t in "${names[@]}"; do
+  if ! publish_one "$t"; then
+    left=()
+    for x in "${names[@]}"; do
+      case " ${pushed[*]-} " in *" $x "*) ;; *) left+=("$x") ;; esac
+    done
+    {
+      echo "## stopped at $IMAGE:$t — the lines above say why."
+      echo "##   published:     ${pushed[*]:-nothing}"
+      echo "##   not published: ${left[*]}"
+      echo "##   denied / unauthorized is a credential problem: docker login, then re-run this."
+    } >&2
+    exit 1
+  fi
+  pushed+=("$t")
+done
+
+published_digest=$(local_digest "$IMAGE:$pinned")
+echo "== published $IMAGE (${pushed[*]}) in $(( SECONDS / 60 ))m$(( SECONDS % 60 ))s"
+if [[ $published_digest == sha256:* ]]; then
+  echo "== manifest digest: $IMAGE@$published_digest  (image id $src_frag is a different thing)"
+else
+  echo "WARN: could not read back the digest for $IMAGE:$pinned — this is the push target check:"
+  echo "      ${DOCKER[*]} buildx imagetools inspect $IMAGE:$pinned"
+fi
+echo "== check it on the hub: ${DOCKER[*]} buildx imagetools inspect $IMAGE:$variant"

@@ -241,7 +241,8 @@ if the line is ever used as a *threshold*, it needs a guard first. **A paste wit
 not a step failure**: it is an incomplete evidence file, and the remedy is to re-paste, not to mark the gate
 red. Do not infer redness from the absence of a `FAIL` that was never written.
 **Expected counts — two sets, split on 2026-11-05 at Plan 02 T3** (decision recorded below):
-**`3 b` product** (`lib/common.sh` from Plan 01 T1, `build` T2, `run` T3 — no `.py`, no `.json`) and
+**`4 b` product** (`lib/common.sh` from Plan 01 T1, `build` T2, `run` T3, `publish` — added
+2026-11-05 outside a plan, the owner's image publisher; no `.py`, no `.json`) and
 **`5 b` audit helpers** (`context/audit/scripts/ledger-grid.sh`, `t2-census.sh`,
 `t3-model-file-poc.sh`, `t3-census.sh`, `t3-inputs.sh`). Bump these when a file is added or removed on
 purpose — a count that silently drops is the failure this step exists for. *(Moved `3 b` → `5 b` on

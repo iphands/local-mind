@@ -39,6 +39,20 @@ a dirty checkout. The image keeps Basalt's source-tree layout at `/opt/basalt` (
 `data/`, and a `.venv` with upstream's pinned server dependencies) because `basalt serve` runs the
 Python server from the source directory compiled into the binary.
 
+## Publish
+
+```bash
+DRY_RUN=1 ./publish        # print the tags, touch nothing (also accepts PUSH_DRY_RUN=1)
+./publish                  # owner-only: publish what versions.env pins
+TAG=cu1343-sm120 ./publish # take the image from another local tag instead of the pin's own name
+```
+
+Three tags go up: the immutable `cu1343-sm120-dc047a7` that `./build` made, the moving
+`cu1343-sm120`, and `latest`. `./build` mints no `:latest`, so `./publish` owns it, and it only ever
+takes it for the newest local build of the pinned commit. Every name is read from the image's own
+`ai.basalt.*` labels, never from the tag it was handed. Needs a terminal on stdin and a
+`docker login`.
+
 ## Run
 
 ```bash
