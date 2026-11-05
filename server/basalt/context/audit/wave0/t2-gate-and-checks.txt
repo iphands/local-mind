@@ -422,32 +422,43 @@ carve-out*. It is repeated here on purpose: if `PATTERNS` is amended later, this
 | commit | FILES | SCOPE_HITS | behaviour class (condition (4)) | note |
 |---|---|---|---|---|
 | `aab418e` | 3 | 0 | none | first invocation **under** the rule; measured from the commit object |
-| `fe5bcdc` | 4 | 0 | none | named after the fact by this section's heading anchor (`git log -S` on its title); measured staged, matched the object |
-| *(the commit adding this row)* | 3 | 0 | none | `RULES.md`, this file, the tracker — **measured before this row was written**, and `FILES` counts files, so adding this row to a file already in the set cannot change it |
+| `fe5bcdc` | 4 | 0 | none | SHA known, so no anchor needed — re-derive with `git show --name-only --format= fe5bcdc` through the strip |
+| `b17c277` | 3 | 0 | none | third commit under the rule; touched exactly the same three paths as the row below |
+| *(the commit adding this row)* | 3 | 0 | none | written while dismantling the locator example above; `FILES` measured before this row existed, same file set as `b17c277` |
 
 **On the newest row always being nameless, and the anchor that fixes it.** A row cannot carry its own SHA — it
 is written before the object exists — and a SHA backfill regenerates the problem one row down, because every
-docs commit in this plan invokes the carve-out and so needs a row. The terminating trick is that **each row's
-`note` is written with a phrase no other row uses**, which makes the row its own pickaxe anchor. So the newest
-row is named by searching for *its own* note rather than the section heading, e.g.
-`git log --format=%h -S'measured before this row was written' -- context/audit/wave0/t2-gate-and-checks.txt`.
-`fe5bcdc` was named this way after it landed, from the heading anchor that introduced it — which is how the
-locator was proven rather than assumed. Each row also carries its **measurement time**: the numbers above were
+docs commit in this plan invokes the carve-out and so needs a row. Split the two cases. **Once a row's commit
+has landed, its SHA is known and no anchor is wanted**: `fe5bcdc` above is named by SHA and re-derived from
+that object. **The anchor is only for the newest row**, and the trick is that each row's `note` is written with
+a phrase no other row uses, so a row is its own pickaxe anchor:
+`git log --format=%h -S'<phrase unique to that row's note>' -- context/audit/wave0/t2-gate-and-checks.txt`.
+No literal is quoted there on purpose: every earlier version of this paragraph carried a copy-paste command
+whose string had to stay in step with the table under it, and it went stale twice — once when a row was
+reworded, once when an unrelated command quoting the anchor was deleted. Taking the literal out is the fix.
+**A locator that has to be maintained alongside the thing it locates is not a locator.** Each row also carries
+its **measurement time**: the numbers were
 taken against the **index while staged**, immediately before `git commit`, and re-derivable from the commit
 object with the same strip and the same `PATTERNS`. A self-referential row is admissible when it is a *file
 count* (cannot drift with content), its producer is named, and its own text names it; it is the `1,690` defect
 only when none of those hold.
 
-> **Anchor strings in those commands are load-bearing.** `git log -S` matches a literal and reports commits
-> where the occurrence **count changed**, so an anchor resolves only while the phrase survives verbatim; a
-> rename silently degrades it from one commit to a set. Measured, not theorised: the § 6a heading in
-> `t2-boundary-authorship.txt` was renamed during this plan, and its old phrase now resolves to **two**
-> commits (`6dbb312` introduced it, `d388d17` deleted it) where each anchor here resolves to exactly one.
-> Two housekeeping facts, checked rather than assumed: this file carries the **heading** anchor once (the § 8
-> heading) and the **row-note** anchor twice (the row itself, and the command above that cites it) — so if a
-> row's note text is ever reworded, its example command must be reworded with it, or that row loses its name.
-> Both anchors appearing in the same commit is harmless: `-S` counts the net change, so it still names one
-> commit. Cite by section name, never by line number: `RULES.md` Rule E.5.
+> **Anchor strings are load-bearing — and this one broke while being documented.** `git log -S` matches a
+> literal and reports commits where the occurrence **count changed**, so an anchor resolves only while the
+> phrase survives verbatim. Measured in this file, not theorised: the § 8 heading phrase
+> `Scope evidence for carve-out invocations` resolved to exactly one commit (`fe5bcdc`) at the moment the
+> sentence warning about this risk was written, and to **two** (`b17c277` + `fe5bcdc`) one commit later —
+> because `b17c277` deleted the command that happened to quote it, which changed the count. No heading was
+> renamed; editing prose a few lines away was enough. Same shape in `t2-boundary-authorship.txt`, where a
+> renamed § 6a heading left its old phrase resolving to a **2-commit** set (`6dbb312` in, `d388d17` out).
+> Current counts, re-measured rather than carried over: the heading phrase appears **twice** in this file now —
+> the § 8 heading and this blockquote quoting it as its own example — which is on its own another reason `-S`
+> on it names a set, and the copy-paste row anchor this paragraph used to print has been **deleted** (it went
+> stale a second time when a row was reworded). That is the real conclusion of the whole exercise: **a locator
+> that has to be maintained alongside the thing it locates is not a locator**, so this paragraph now prints a
+> command *shape* with a placeholder instead of a string it must keep in step. Anchors are a stopgap for the
+> one row that cannot have a SHA yet; **use the SHA as soon as one exists.** Cite prose by section name, never
+> by line number: `RULES.md` Rule E.5.
 
 All rows are `SCOPE_HITS=0`, so `none` is admissible for condition (4) in each. **The `9a56c8d` row from § 7 is
 not repeated here**: that commit predates the carve-out, and its `FILES=` under this producer is

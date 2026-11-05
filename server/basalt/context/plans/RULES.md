@@ -491,8 +491,12 @@ A plan is not done when the code works. It is done when what you learned is on d
    number** — a line citation rots on the next edit. The same holds for a `git log -S<anchor>` locator: it
    resolves only while the anchor string survives verbatim, and measured on 2026-11-05 a heading renamed
    mid-plan turned its own old anchor from one commit into a **2-commit set** (`6dbb312` introduced the
-   phrase, `d388d17` deleted it). When you publish a locator, name the anchor **load-bearing** so that a
-   future rename carries it with you.
+   phrase, `d388d17` deleted it). A locator can also degrade with **no rename at all**: editing unrelated prose
+   that happens to quote the anchor changes its occurrence count, which is exactly `-S`'s trigger — observed
+   the same day in `audit/wave0/t2-gate-and-checks.txt` § 8, where an anchor introduced by one commit resolved
+   to two after the next commit deleted an unrelated command that quoted it. When you publish a locator, name
+   the anchor **load-bearing** so that a rename carries it with you, and treat it as a convenience for
+   something that cannot have a SHA yet rather than as a durable identifier.
 6. **A measurement taken over an explicit path list must carry its own total.** A path in
    `git diff --numstat -- <paths>` (or any `-- <paths>` form) that matches nothing contributes **nothing and
    reports nothing**, so a hand-assembled list silently under-counts: print the same sum with **no** pathspec

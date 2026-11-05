@@ -472,6 +472,18 @@ violation and cannot be cited by a later plan.
   safe case by construction because a committed transcript is append-only and its earlier lines never
   shift. The distinction that makes this a short job rather than a mass edit: a line number is rotting only
   when the document it points into is still being edited.
+- **2026-11-05 · T2 round nine — the anchor warning was false within one commit of being written.** `b17c277`
+  published the § 8 locator and the sentence declaring anchors load-bearing; re-running the published command
+  after that commit showed the § 8 **heading** anchor resolving to **two** commits (`b17c277` + `fe5bcdc`)
+  where it had resolved to exactly one when the warning was typed. Cause: `b17c277` deleted an unrelated
+  command that happened to quote the heading phrase, and `-S` fires on any change in occurrence count — so an
+  anchor degrades with **no rename at all**, just an edit to prose that quotes it. Caught by the standing habit
+  of re-running a published command against the object rather than trusting the paragraph describing it. Fixed
+  here: `fe5bcdc` is named by its SHA (once a commit exists, a SHA beats an anchor and no anchor is wanted),
+  the anchor trick is scoped to **the newest row only**, Rule E.5 gained the no-rename degradation mode, and
+  § 8's blockquote now carries this as its worked example because it is the better one. Occurrence counts
+  restated from measurement: heading anchor 1, row-note anchor 2. Fourth self-authored green-but-wrong claim
+  found after the fact in this task, and the first one inside a sentence whose subject was exactly this defect.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every
