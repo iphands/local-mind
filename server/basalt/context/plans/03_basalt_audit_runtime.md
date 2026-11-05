@@ -94,7 +94,7 @@ changes the thing under test.
 | Docker reachable from an agent shell | yes — group `docker` gid 995, socket `root:docker 660` | `id`; `stat` 2026-11-05 |
 | Capture tools in the image | none (`strace`, `tcpdump`, `ss`, `curl`, `wget` missing) | `docker run --network none … command -v`, 2026-11-05 |
 | Host tools | `tcpdump`, `strace`, `nsenter`, `readelf`, `nm`, `strings` present; `tshark` missing | `command -v`, 2026-11-05 |
-| Container user | `uid=1000(ubuntu)`, same numeric uid as the host user, **in group `sudo` (27)** — whether a `sudo` binary or sudoers entry exists in the image is unconfirmed, **check in T2** | `id` in the image, 2026-11-05 |
+| Container user | `uid=1000(ubuntu)`, same numeric uid as the host user, in group `sudo` (27) — **inert: `sudo` is not installed and there is no `/etc/sudoers.d`** (Plan 02 T13, `wave0/t13-posture.txt`, 2026-11-05); the image has 8 setuid binaries instead, which T2 lists | `id` in the image, 2026-11-05 |
 | Yama ptrace scope | not present on this kernel (`/proc/sys/kernel/yama/ptrace_scope` absent) | 2026-11-05 — **whether host `strace -p` works is unconfirmed, confirm in T1** |
 | Shipped binaries | `/opt/basalt/bin/`: `basalt`, `basalt-bench`, `basalt-probe`, `basalt-vision` | `ls` in the image, 2026-11-05 |
 | GPU and `:8700` | one server at a time; the running `basalt` container must stop for the boot | `CLAUDE.md`, SERIES *Standing Constraints* |

@@ -827,7 +827,7 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 - [ ] ~~T11: `LC_ALL=C comm` → **0** unaccounted files, one commit per directory; 0 bidi/zero-width hits; vendored-library sweep done~~ *re-scope 2026-11-05: one mechanical commit*
 - [ ] T11: bidi/zero-width scan over `src/` `include/` → 0 hits or each explained; every long literal named; one commit
 - [ ] T12: 8 canonical names at published versions; 0 install hooks in the repo; `serve/` never reads `benchmarks.json`; hash gap in the verdict headline
-- [ ] T13: ordered action list with the exact flag per item
+- [x] T13: ordered action list with the exact flag per item *(verified 2026-11-05: `context/audit/posture.md`, 5 ordered items; evidence `wave0/t13-posture.txt`)*
 - [ ] T14: ≥15 matrix rows, fixed cell vocabulary, no row `proved it can't` without evidence, coverage figure pasted not typed, "if you do only one thing" is the last line
 - [ ] All: the gate passes on the final commit for the steps this session can run, and the commit names every step it had to skip and why
 - [ ] All: findings harvested into `context/pitfalls.md` + `distilled.md` (Rule D) — bytes on disk, re-read

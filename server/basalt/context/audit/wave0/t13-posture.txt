@@ -1,0 +1,112 @@
+Target dc047a77beeddf1e91234d983a91d6bf929e9619 / tree 3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4 — if that is not the tree you are looking at, you are in the wrong checkout.
+
+# Plan 02 T13 · our own posture — raw output, emitted by command, 2026-11-05
+
+Read-only probes of our launcher, the image and the live server. `/status` and `/api/logs` were deliberately
+NOT requested: they would copy the owner's conversations into the evidence. `engine.log` was sized, not read.
+
+## T13 Verify, as the plan states it
+
+```bash
+img=$(bash -c "source lib/common.sh; load_pins; image_for_pin"); export IMAGE_OVERRIDE=${img:-stub:none}; DRY_RUN=1 ./run 2>&1 | grep -oE "\-p [^ ]+|--host [^ ]+|--api-key.*|--network [^ ]+"; DRY_RUN=1 ./run 2>&1 | tail -1
+```
+
+    -p 0.0.0.0:8700:8700
+    --host 0.0.0.0
+    == (DRY_RUN) nothing started
+    exit=0
+
+## A key, when given, is masked in the printout
+
+```bash
+API_KEY=k3y DRY_RUN=1 ./run 2>&1 | grep -oE -- "--api-key [^ ]+"
+```
+
+    --api-key REDACTED
+    exit=0
+
+## The live server, by its LAN address, from this host (health only)
+
+```bash
+LAN=$(ip -4 -o addr show scope global | awk "{print \$4}" | cut -d/ -f1 | grep -v "^172\." | head -1); echo "lan_ip=$LAN"; curl -s -m 5 "http://$LAN:8700/health"; echo
+```
+
+    lan_ip=192.168.10.99
+    {"status": "ok", "max_context": 262144, "model": "cosmo-6000", "images": true, "api_key": false, "loaded": true, "loading": false, "service": "basalt"}
+    exit=0
+
+## The live container: network, ports, hardening
+
+```bash
+docker inspect basalt --format "net={{.HostConfig.NetworkMode}} ports={{json .HostConfig.PortBindings}} capdrop={{.HostConfig.CapDrop}} capadd={{.HostConfig.CapAdd}} secopt={{.HostConfig.SecurityOpt}} ro={{.HostConfig.ReadonlyRootfs}} pids={{.HostConfig.PidsLimit}} user={{.Config.User}}"
+```
+
+    net=bridge ports={"8700/tcp":[{"HostIp":"0.0.0.0","HostPort":"8700"}]} capdrop=[] capadd=[] secopt=[] ro=false pids=<nil> user=1000:1000
+    exit=0
+
+## The host sees the container processes' argv (where an --api-key would appear)
+
+```bash
+ps -eo user:10,args | grep -E "serve\.server" | grep -v grep | cut -c1-120
+```
+
+    iphands    /opt/basalt/.venv/bin/python -m serve.server --engine-bin /opt/basalt/bin/basalt --model /models/Qwen3.8-FN-N
+    exit=0
+
+## The image: sudo, setuid binaries, capabilities
+
+```bash
+docker run --rm --network none --entrypoint sh iphands/basalt-blackwell:cu1343-sm120-dc047a7 -c 'command -v sudo || echo "sudo: not installed"; getent group sudo; echo "setuid_count=$(find / -xdev -perm -4000 -type f 2>/dev/null | wc -l)"; find / -xdev -perm -4000 -type f 2>/dev/null | sort | tr "\n" " "; echo; grep -E "^Cap(Prm|Eff|Bnd)" /proc/self/status'
+```
+
+    sudo: not installed
+    sudo:x:27:ubuntu
+    setuid_count=8
+    /usr/bin/chfn /usr/bin/chsh /usr/bin/gpasswd /usr/bin/mount /usr/bin/newgrp /usr/bin/passwd /usr/bin/su /usr/bin/umount 
+    CapPrm:	0000000000000000
+    CapEff:	0000000000000000
+    CapBnd:	00000000a80425fb
+    exit=0
+
+## What persists between boots, and who can read it
+
+```bash
+stat -c "%a %U %n" storage storage/cache storage/cache/basalt storage/cache/basalt/*/engine.log; for d in storage/cache storage/cache/basalt/*/vision storage/cache/basalt/*/tokenizer storage/cache/basalt/*/engine.log; do du -sh "$d"; done
+```
+
+    755 iphands storage
+    755 iphands storage/cache
+    755 iphands storage/cache/basalt
+    644 iphands storage/cache/basalt/aefd5d98dc650ed4/engine.log
+    889M	storage/cache
+    876M	storage/cache/basalt/aefd5d98dc650ed4/vision
+    9.4M	storage/cache/basalt/aefd5d98dc650ed4/tokenizer
+    3.0M	storage/cache/basalt/aefd5d98dc650ed4/engine.log
+    exit=0
+
+## Basalt: what the key gates, and what --allowed-host does (vendor/basalt at the pin)
+
+```bash
+cd vendor/basalt && grep -HnE "def exposed_without_key|return host not in LOOPBACK_NAMES|names.update\(x for x in allowed_hosts|is_ip\(name\)|api-key can.t be set in a config file" serve/security.py serve/config.py; grep -HnE "if svc.api_key or host_allowed|def _authorized|if not svc.api_key:|path == \"/metrics\"|path == \"/api/logs\"|path == \"/status\"|it shows the last answer|path == \"/slots\"|path == \"/props\"|path in \(\"/health\"|if not self._authorized\(\):$|path == \"/unload\"|path == \"/load\"" serve/handler.py; grep -HnE "exposed_without_key\(a.host" serve/server.py
+```
+
+    serve/security.py:21:def exposed_without_key(host: str, api_key: str) -> bool:
+    serve/security.py:23:    return host not in LOOPBACK_NAMES and not api_key
+    serve/security.py:131:    names.update(x for x in allowed_hosts if x != "*")
+    serve/security.py:142:    return bool(name) and (is_ip(name) or name == "localhost" or name.endswith(".localhost")
+    serve/config.py:104:            raise ValueError("api-key can't be set in a config file; pass --api-key on the command line")
+    serve/handler.py:63:            if svc.api_key or host_allowed(host, svc.host_names, "*" in svc.allowed_hosts):
+    serve/handler.py:210:        def _authorized(self) -> bool:
+    serve/handler.py:211:            if not svc.api_key:
+    serve/handler.py:253:            if path == "/metrics":
+    serve/handler.py:256:            elif path == "/api/logs":
+    serve/handler.py:266:            elif path in ("/health", "/api/health"):
+    serve/handler.py:270:            elif path == "/status":
+    serve/handler.py:271:                if not self._authorized():                  # it shows the last answer's tail
+    serve/handler.py:298:            elif path == "/props":
+    serve/handler.py:301:            elif path == "/slots":
+    serve/handler.py:312:            if not self._authorized():
+    serve/handler.py:322:            if path == "/unload":                            # unload between requests
+    serve/handler.py:330:            if path == "/load":                              # load ahead of a request
+    serve/server.py:294:        if exposed_without_key(a.host, svc.api_key):
+    exit=0
