@@ -236,7 +236,11 @@ creation commits, one-commit landings, checkable PR review). What the finding ch
 
 Three things this page hands to T3 that are not about any file above:
 
-### 6a · Pre-flight: run these two before T3 opens a single file
+### 6a · Pre-flight: run these two before T3 opens any **vendor source** file
+
+*(Worded "vendor source" rather than "a single file" on purpose: `manifest/index.md` and the audit pages
+are this project's own artifacts and T3 should read those first — see `audit/index.md` top of file. The
+pre-flight gates the target tree, not our paperwork.)*
 
 Added 2026-11-05 because the error that bit this task *after* its commits were made was **a path that matches
 nothing contributes nothing silently** (`pitfalls.md` item 15), and this read order is consumed downstream as a

@@ -31,8 +31,11 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
 - **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 3/19 slices done
-  (T0, T1, T2 — T2 landed as **two** commits: the task as scoped, then the record of what its evidence
-  means); next **T3** — the primitive census with the 6-canary control, **carrying T2's three scope
+  (T0, T1, T2 — T2 **closed** at five commits, `9a56c8d` `93b6bd5` `7822c1e` `6dbb312` `0c7517d`: the task,
+  the knowledge layer, then three post-review correction rounds — per-commit totals in the tracker);
+  next **T3** — the primitive census with the 6-canary control, **opening with the two zero-API commands in
+  `audit/wave0/t2-boundary-authorship.txt` § 6a** (read-order path/tier/LOC assertion, then the local
+  PR-suffix census whose 4.8 % base rate makes a missing PR reference non-evidence), **carrying T2's three scope
   additions** (the "AI residue is never a reason for `benign`" calibration rule, the never-connect/never-
   fetch/never-install rule for external identifiers, and agent-directed instructions in shipped files as
   a census surface). **T2 (2026-11-05):** all 862 blob SHAs equal GitHub's tree object for `dc047a77`,

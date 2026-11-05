@@ -292,7 +292,7 @@ violation and cannot be cited by a later plan.
   steps 3–6 are genuinely owner-only; spending it on a line that never ran teaches a reader to distrust the
   true SKIPs. An earlier draft of this note said the step had "changed state under this task" — that was the
   same error one level up, and it is corrected here rather than deleted.
-- **2026-11-05 · T2 landed as two commits — deliberate.** Both reviewers reached the same split
+- **2026-11-05 · T2's audit-record / knowledge-layer split — deliberate.** Both reviewers reached the same split
   independently, for the same reason: the *use* of the provenance evidence (the ancestor-rewrite finding,
   the AI-attribution corpus, T2b, T3's calibration rules) is separately arguable, and if that framing is
   later re-argued or partially withdrawn, the measurements must not go with it. **As landed:** commit 1 =
@@ -300,7 +300,13 @@ violation and cannot be cited by a later plan.
   index updates + RULES.md + pitfalls items 10–17 + the monorepo `context/pitfalls.md`), 14 files
   +3,164/−31; commit 2 = `93b6bd5` (the knowledge layer: `distilled.md`, `high_level.md`, `AGENTS.md`,
   `SERIES.md`, this plan's Key Facts/T10/T13/T2b/T3 edits, and U11–U13), 6 files +352/−9. Neither commit
-  contains `./run` or `opencode2/bin/opencode-serve`, which are the owner's in-flight edits.
+  contains `./run` or `opencode2/bin/opencode-serve`, which are the owner's in-flight edits. **T2 grew to
+  five commits**, the last three being post-review corrections: **3** = `7822c1e` (3 files +46/−9, the
+  diff-shape figure), **4** = `6dbb312` (7 files +190/−14, the stale `1,690`, the flat SHA ban, § 6a), **5** =
+  `0c7517d` (4 files +28/−3, Rule E.7 and the owner-file qualifier). Slice total across those five: **19
+  distinct files, +3,754/−40**, re-derivable with `git diff --numstat 94dfa80..HEAD` — printed here as a
+  command as well as a number because this bullet cannot count its own commit: the later corrections to this
+  row are outside the range quoted, so re-run it rather than trusting the figure for a slice still growing.
 - **2026-11-05 · T2 post-commit correction (a third commit, `P2/T2`, small).** `9a56c8d`'s own artifact
   published its diff shape as hand-written **1,843**; the true figure is **1,861**. Cause: the measuring
   command named `server/basalt/context/coverage_ledger.md` when the file is
@@ -344,6 +350,21 @@ violation and cannot be cited by a later plan.
   Generalised from hoodie's point that I searched a **phrasing** rather than a **claim**: `RULES.md` E.7's
   corollary is grep for the claim. `manifest/index.md`'s "never compare them" (git SHA-1 vs sha256 over the
   same bytes) is a different family and was left alone.
+- **2026-11-05 · T2 CLOSED (both reviewers, explicitly).** Round four applied three small handoff fixes and
+  one rule both reviewers had noticed only as a *tension*. (i) **`RULES.md` § Project gate now names the
+  owner-only carve-out.** The gate said "no task is `done` on a run where an applicable step was skipped"
+  while § *Prerequisites* says steps 3–6 are owner-run and "a commit names the gate steps it could not run"
+  — resolved by precedent at T1 and again at T2, never in text, which neckbeard flagged as the setup for the
+  next agent either blocking `done` forever or waiving silently. Written as **four conditions** rather than a
+  permission (name the skipped steps in the established form; the step must have been listed owner-only
+  *before* the commit that skips it; the diff must contain nothing the skipped step could have exercised; and
+  Rule A.6 is not waivable by naming it), anything outside them being `BLOCKED` + `in_progress`. (ii) T3's
+  entry path shortened from three hops to one: `audit/index.md`'s existing resume hook now names § 6a as
+  T3's first action, instead of a new section nobody scrolls to. (iii) § 6a's heading changed from "before
+  T3 opens a single file" to "before any **vendor source** file", which had collided with the same page's
+  instruction to read `manifest/index.md` first — two imperatives competing over which file is next. (iv) The
+  five-commit slice total is recorded above with its producing command. T2 closes at **five commits**;
+  this row's own commit is a sixth and carries only these round-four items.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every

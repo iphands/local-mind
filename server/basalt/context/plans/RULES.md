@@ -128,6 +128,19 @@ root (`server/basalt`).
 Every step reports **pass / fail / skip**, and **skip is not pass**: no task is `done` on a run
 where an applicable step was skipped.
 
+**Named carve-out — owner-only steps (the only permitted skip).** Steps **3–6** are owner-run on this
+host, per § *Prerequisites* (an agent session here is not in the `docker` group). A task may be marked
+`done` with 3–6 skipped **only** when all four hold: **(1)** the commit message and the tracker row
+name *which* steps were skipped and why, in the established form —
+`Gate 1a/1b/1c/2 pass, 3–6 docker-blocked (owner)`; **(2)** the step is listed as owner-only in
+§ *Prerequisites* **before** the commit that skips it, never reclassified afterwards; **(3)** the
+commit's own diff scope contains nothing the skipped step could have exercised — no launcher, no
+`Dockerfile`, no `versions.env` pin, no flag change; and **(4)** the task's behaviour is not something
+*only* the blocked step can see, which is Rule A.6 and is not waivable by naming it. Anything outside
+those four conditions is a **fail**, not a skip: write the row as `BLOCKED` and leave the task
+`in_progress`. The carve-out exists because steps 3–6 are genuinely unrunnable here, not because their
+absence is harmless; that is why it is written as a list of conditions rather than a permission.
+
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and launchers have no extension. Pass: no `FAIL` line, the counts
 match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env` exists).

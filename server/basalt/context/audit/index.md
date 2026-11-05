@@ -9,6 +9,10 @@ frozen 2026-11-05. Plan: [`../plans/02_basalt_vendor_audit.md`](../plans/02_basa
 
 **If you are resuming, read [`manifest/index.md`](manifest/index.md) next** — it holds the schema and
 the `reviewed-in` column state, which is what tells you which *file* to open. This page only routes.
+**If you are starting T3**, its first action is the two commands in
+[`wave0/t2-boundary-authorship.txt`](wave0/t2-boundary-authorship.txt) § 6a — run those before opening
+any **vendor source** file (`manifest/index.md` and the other audit pages are ours, not the target's,
+and you should read those first).
 
 ## Six commands, in this order
 
