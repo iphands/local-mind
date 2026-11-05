@@ -2,8 +2,8 @@
 
 ## Overview
 
-- Status: 0% complete (0/19 slices: T0–T5, T6a–c, T7–T10, T11a–d, T12–T14)
-- Start date: — (set when T0 starts; T0's tooling work was done at plan creation, its commit is pending)
+- Status: 5% complete (1/19 slices: T0–T5, T6a–c, T7–T10, T11a–d, T12–T14)
+- Start date: 2026-11-05 (T0)
 - Plan: `context/plans/02_basalt_vendor_audit.md` — **read its Gate status block and Execution rules first**
 - Evidence: `context/audit/` — `index.md` (entry point), `manifest/` (per-dir TSVs, fixed headerless
   schema), `census.md`, `argv-table.md`, `findings.md`, `coverage_ledger.md`, `verdict.md`, plus
@@ -71,7 +71,7 @@
 
 | # | Slice | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
-| 0 | T0: Restore the gate (shellcheck user-local, RULES.md prerequisite) | `context/plans/RULES.md` | pending | tooling already done at plan creation; commit pending |
+| 0 | T0: Restore the gate (shellcheck user-local, RULES.md prerequisite) | `context/plans/RULES.md` | **done** | v0.11.0 at `~/.local/bin`, negative control fired SC2115/SC2086; gate 2 `shellcheck ok`; RULES.md steps 2 + Prerequisites corrected in place, dated. Docker (steps 3–6) recorded owner-run, not fixed |
 | 1 | T1: Freeze the pin, manifest all 862 files | `context/audit/manifest/` | pending | |
 | 2 | T2: Pin provenance + boundary-author census | `manifest/index.md` | pending | gates Wave 0 |
 | 3 | T3: Census + **6-canary** control + orphan-key + diagnostics-shape | `context/audit/census.md` | pending | 6/6 or census is void; also freezes T9's list |

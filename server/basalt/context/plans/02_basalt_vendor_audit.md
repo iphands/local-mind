@@ -1,6 +1,6 @@
 # Plan 02 — Basalt vendor audit: does `vendor/basalt` leak, steal, keylog, or phone home?
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-11-05
 > **Revised**: 2026-11-05 — same day, before execution: added T0 (gate restoration) and a gate-status block; three Key Facts downgraded after self-check; T5 upgraded from "stale dependency" to a sourced CVE finding; T8 widened to cover the **Python** side of argv assembly; T6 and T11 split against the ≤1,500-line slice rule; canaries 3 → 6 (cross-file, side-channel, second-hop); explicit bypass checklist pre-committed in T4; effort corrected 10–14 → 14–19 sessions.
 > **Depends on**: N/A (shares Plan 01's `BASALT_SHA` pin; no code dependency — a pin bump invalidates this audit, see Risk 1)
@@ -468,7 +468,7 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 
 ## Verification Checklist
 
-- [ ] T0: `shellcheck --version` → 0.11.0, gate step 2 → `shellcheck ok`, and RULES.md's step-2 prerequisite states the real path
+- [x] T0: `shellcheck --version` → 0.11.0, gate step 2 → `shellcheck ok`, and RULES.md's step-2 prerequisite states the real path *(verified 2026-11-05: `~/.local/bin/shellcheck`, sha256 `8c3be12b…`, negative control fired SC2115+SC2086, gate step 2 passed)*
 - [ ] T1: the one freeze-check prints `AUDIT TREE OK`; 0 `MISMATCH` under `GIT_NO_LAZY_FETCH=1`; 862 manifest rows; vendor porcelain-clean
 - [ ] T2: GitHub's tree SHA for `dc047a7` equals `3f7b69ae…`; boundary-author census recorded with any outliers named
 - [ ] T3: **6/6** canaries flagged, including cross-file, side-channel and second-hop, each with its own evidence line

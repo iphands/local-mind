@@ -162,8 +162,12 @@ else echo 'SKIP(1c: no versions.env yet)'; fi
 ```
 
 **2. shellcheck.** Pass: exit 0 and no output over the same bash set. `shellcheck` 0.11.0 is
-installed (`/usr/local/bin/shellcheck`, 2026-11-04); if it is missing the step is **fail**, not
-skip — the bash set is the whole product here.
+installed **user-local at `~/.local/bin/shellcheck`** (Plan 02 T0, 2026-11-05, official release
+tarball sha256 `8c3be12b…`, verified by `--version` and by a negative control that had to fire
+SC2115 — a tool's clean output is worthless until it has been shown to report something). The
+`/usr/local/bin/shellcheck` this line recorded on 2026-11-04 **was gone** by 2026-11-05; see
+`context/pitfalls.md`, "A gate prerequisite recorded in RULES.md can silently stop being true".
+If it is missing the step is **fail**, not skip — the bash set is the whole product here.
 
 ```bash
 git ls-files -z . | while IFS= read -r -d '' f; do
@@ -265,8 +269,11 @@ both. A boot of the wrong image or pack passes every check above.
 **Look at it.** `./run` output, the boot log and one real `/v1/chat/completions` reply on `:8700`
 are read, not inferred, before a launcher task is `done`.
 
-**Prerequisites:** `bash`, `git`, `python3` (3.14.10 here), `shellcheck` 0.11.0. Later steps add
-`docker` (29.8.1 here, used as yourself — no `sudo`).
+**Prerequisites:** `bash`, `git`, `python3` (3.14.10 here), `shellcheck` 0.11.0 (`~/.local/bin`,
+2026-11-05). Later steps add `docker` (29.8.1 here, used as yourself — no `sudo`), which needs the
+user in the `docker` group: **as of 2026-11-05 an agent session here is not** (`uid=1000
+groups=1000,27`, socket `root:rtkit 660`), so steps 3–6 are **owner-run** — the agent writes the
+command and records the pasted output, and a commit names the gate steps it could not run.
 
 **Init baseline (2026-11-04):** step 1 pass over 0 tracked files (no counts printed), 1c
 `SKIP(1c: no versions.env yet)` — not applicable until a task adds the pin file; step 2

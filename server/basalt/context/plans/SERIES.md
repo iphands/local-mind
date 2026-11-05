@@ -31,6 +31,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
 - **Plan 01** — Basalt Flash-Next container: in progress, 5/7 tasks done; next T6 — **blocked on the owner's boots** (`./run`, `./run --single`).
+- **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 1/19 slices done; next T1 — freeze the pin and manifest all 862 files.
 
 ## Plans <!-- hp:plans -->
 
@@ -39,7 +40,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
 | 01 | Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700 | — | in-progress | Pins + Dockerfile + `./build` + `./run` (4×262144 slots; `--single`); owner builds and boots the DQ6_K pack; real reply via `cosmo.lan`. |
-| 02 | Basalt vendor audit: leak / theft / keylog / phone-home in `vendor/basalt` | — | pending | Boundary-first audit of all 862 files at the pin; manifest + canary-proven census; Tier A ≈34k lines read, engine bulk triaged not read. Owner-chosen two-stage depth. |
+| 02 | Basalt vendor audit: leak / theft / keylog / phone-home in `vendor/basalt` | — | in-progress | Boundary-first audit of all 862 files at the pin; manifest + 6-canary-proven census; Tier A ≈34k lines read, engine bulk triaged not read. Owner-chosen two-stage depth. |
 | 03 | Basalt audit, runtime half: observed egress, exec and input capture | 02 | pending | Owner-run: `--network none` vs a monitored netns under strace/tcpdump, plus `strings`/`nm`/`readelf` on the shipped binary. **The gate on Plan 02's verdict.** Blocked on the owner's `./build`. |
 | 04 | Basalt audit, engine bulk line-by-line: `src/kernels` + `src/core` + `include/` | 02 | pending | The deferred half of "line by line" (~92k lines, 20–30 sessions). Plan 02 gives each file a census result + triage reason; none is read. |
 
