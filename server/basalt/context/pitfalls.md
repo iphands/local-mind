@@ -1095,9 +1095,10 @@ compared. On the `real` run it is 34. In the controls evidence it reads **28** u
 I wrote that down as *"`SENTINEL_TOTAL=28` on `negctl`"* — in the evidence file, and again in the
 tracker's canary row, which is the file a future session seeds a floor constant from.
 
-Every one of those 28s came from a **mutated copy of the generator**. Checked directly: of the thirteen
-non-real runs on disk, **all thirteen are mutants** (`GENERATOR_SHA256` ≠ the frozen `1bab1ec5…`), and
-**zero unmutated non-real runs have ever been made**. So "28 on `negctl`" attributes to the *tag* what
+Every one of those 28s came from a **mutated copy of the generator**. Checked directly, from each
+transcript's own `TAG=` and `GENERATOR_SHA256=` lines: of the thirteen mutant runs on disk, **twelve ran
+under `tag=negctl` and one under `tag=real`**, and **no unmutated run of any non-`real` tag has ever been
+made**. So "28 on `negctl`" attributes to the *tag* what
 is a property of *ten different edited programs that happened to be run with that tag on the command
 line*.
 
@@ -1127,15 +1128,23 @@ once before (as 31) already printed a green over the wrong quantity.
 - **A control run measures the mutation, not the environment.** Its tag is plumbing. Anything a control
   prints that is *not* the assertion it was built to fire is a mutant property and gets labelled as
   one at its own block, not promoted to a section-level fact.
-- **State the population, then the count.** "All thirteen non-real runs are mutants; no clean non-real
-  run exists" is the sentence that makes 28 harmless. "28" without it is a seed waiting to happen.
+- **State the population, then the count.** "Thirteen mutant runs, twelve under `negctl` and one under
+  `real`; no clean non-`real` run exists" is the sentence that makes 28 harmless. "28" without it is a
+  seed waiting to happen. **And name the population by the field you actually read** (`TAG=`), not by the
+  field you were reasoning about (`GENERATOR_SHA256=`) — mine conflated the two, which is how "13 non-real
+  runs" got written for 12.
 - **Where a value will seed a threshold, record its provenance in the same place as the threshold.**
   The floor-constant instruction lives in the script; the would-be value lived in two prose files, and
   the two never met. Write "do not seed from this" next to the number, not next to the rule.
 - **Same-identifier collisions are a separate trap in the same grep.** `SENTINEL_TOTAL=` appears in
-  `wave0/` from three producers (the census on real, census mutants, and the PoC harness printing 27)
-  with five distinct values. When two programs reuse an identifier, annotate the line with its owner
-  rather than renaming a committed script — renaming one orphans that script's own evidence.
+  `wave0/` with **five** distinct values — 34, 28, 27, 23, 31 — and they have **two different kinds of
+  cause**, which is the part I got wrong first: 34 vs 27 is **program identity** (the census on two cuts
+  of the generator), while 34 vs 28 is the **tag** (one program, a block of assertions behind
+  `[ "$TAG" = real ]`). All five come from the census; the PoC harness has never printed this identifier,
+  it prints `POC_VERDICT` — my earlier text here said otherwise, and the fix it proposed (renaming the
+  PoC's counter) had no target. When a grep returns several values, sort them by *kind of cause* before
+  naming producers; annotate at the line rather than renaming a committed script, because renaming one
+  orphans that script's own evidence.
 - Cross-references: § *Provenance that cannot contradict its own claim* is the case where the evidence
   cannot refute the claim attached to it; § *A dated fact scoped to a shell I could not enter…* is
   reading a scope qualifier that was there. **This is the case where the qualifier was never recorded at
@@ -1145,10 +1154,93 @@ once before (as 31) already printed a green over the wrong quantity.
 
 - the laundered figure and its correction: `context/audit/wave0/t3-census-controls.txt` § 2 ("Scope of
   that `28`") and the tracker's canary Evidence row, both 2026-11-05
-- the population check: `GENERATOR_SHA256=` compared against the frozen `1bab1ec5…` across all thirteen
-  `/tmp` control transcripts — scratch, so re-derive by re-making a mutant, not by reading my logs
+- the population check: each `/tmp` control transcript's `TAG=` and `GENERATOR_SHA256=` lines — scratch,
+  so re-derive by re-making a mutant, not by reading my logs. The in-tree half of the same check is the
+  assertion-name diff (`negctl` prints 28 names, `real` 34, delta 11 + 5) recorded in
+  `wave0/t3-census-controls.txt` § 2, which establishes the tag half of the gap without any scratch file
 - the instrument's own instruction: `context/audit/scripts/t3-census.sh`, the per-tag
   `SENT_TOTAL_FLOOR_$TAG` comment
 - the earlier sibling in this plan: `SENT_TOTAL_FLOOR_REAL` guessed as 31 and passing over the wrong
   quantity, recorded in `wave0/t3-census-controls.txt` § 2
+- observed Plan 02 T3, 2026-11-05
+
+---
+
+# "You can reproduce this from the file alone" — a re-derivation claim that never names which cut of the program it starts from
+
+## Problem
+
+**[OBSERVED 2026-11-05]** Ten evidence blocks each record a `GENERATOR_SHA=`: the hash of the mutated
+*census script* that produced that block's stdout. Those hashes were typed from truncated terminal output,
+so I wrote an invariant to rescue them: every mutant is *the frozen base plus exactly one exact-string
+replacement applied exactly once*, and the `mutate:` pairs printed in the file are the recipe, so
+`sha256(frozen base + substitution)` reproduces any of the ten without my scratch transcripts.
+
+The sentence was **false the day it was written, and false in the direction that mattered**: it told a
+later reader they could verify identification they cannot verify, which is worse than admitting the
+evidence is provisional. Measured the same session:
+
+- Each recipe's left-hand side **does** occur exactly once in the frozen script — 10 of 10. So the recipes
+  are correctly transcribed and correctly locate. That part of the claim held.
+- Re-deriving from the frozen base reproduces **0 of the 9** re-derivable tokens (the tenth is a
+  deliberately poisoned `deadbeef`).
+- The base was not the frozen script. `t3-census.sh` carries **mtime 06:35:10**; the last control in the
+  batch ran at **06:35:08** and the pasted `real` run started **06:35:14**. The generator was rewritten
+  *between* the controls and the run they are cited beside. The ten mutants were cut from a **pre-freeze
+  cut** whose bytes exist nowhere: exactly one blob of that file has ever been committed, and the mutant
+  copies are deleted after each run by design.
+- The clean case is the one that proves it: one control's mutation is a one-token change on a standalone
+  assignment line, unique in the file. If its base had been the frozen script its hash would follow
+  arithmetically. It does not. **A single such case is disproof**, and it is worth looking for one,
+  because it does not depend on my reconstruction being right about anything else.
+
+Both halves of the bug were in the sentence itself: it named a **recipe** precisely and a **base**
+loosely. "The frozen generator" felt like the obvious base because that is what the file's `Subject:`
+line names — but the Subject line names the program that made the *paste*, and the controls were made
+before the paste. Nothing in the file distinguished those two programs, because until I typed the
+sentence nothing had to.
+
+## How to avoid
+
+- Grep anchors: `re-deriv`, `reproduce`, `from the file alone`, `base`, `plus one`, `any later reader`,
+  `will not exist for you`.
+- **A reproduction claim has two ingredients, and the vague one is where it dies.** Recipe *and* base. If
+  the base is "the version in the commit", say which commit and give the blob oid; if it is "the file as
+  of that run", say how a reader gets those bytes, and if they cannot, **the claim is not a reproduction
+  claim** — say what it is instead (see the last bullet).
+- **Test your own invariant before publishing it, with the cheapest case that could refute it.** Here the
+  test was a fifteen-line script, and it cost less than the paragraph it invalidated. The failure mode
+  this plan has now documented three times is a claim written as apparatus *around* evidence and never
+  run against it.
+- **Watch for a base that moved silently.** An `mtime` later than the runs it documents is the whole
+  finding, and it is one `stat` away. Cross-check against the transcripts' own start stamps rather than
+  against memory of the editing order. The general form: *a program that produced evidence is itself
+  under edit; every batch of runs has a base, and batches do not share bases just because they share a
+  filename.*
+- **Prefer identification that survives its base.** The assertion names a run printed, the verdict, and
+  the argv are reproducible from the output itself and are stable under re-running; a hash of the program
+  is not. When you cite a program hash, also cite something the reader can compare without the program.
+- **Say "witnessed", not "re-derivable", when the bytes are gone.** What survived here is: the recipe, the
+  assertion that fired, its verdict, and the argv. That is enough for anyone to re-make the mutation and
+  watch the same assertion fail — which is the actual purpose of a control. It is not enough to reproduce
+  a hash, and a reader who is told otherwise will mistake their failure to reproduce for an error of
+  theirs. (One salvage: two differently-named runs carrying the **same** program hash independently
+  confirm these hashes index programs, not runs — a property the claim relied on implicitly and that the
+  transcript pair happens to evidence.)
+- Cross-references: § *Provenance that cannot contradict its own claim* (the evidence cannot refute the
+  claim attached to it) and § *A commit is the index, not the file I was looking at* (the check ran
+  against the wrong artifact). **This entry is the third shape: the check ran against the right file at
+  the wrong moment in its history** — and unlike the other two, the claim was discovered by its own
+  author, because it was checked instead of believed.
+
+## Sources
+
+- the withdrawn invariant and its replacement: `context/audit/wave0/t3-census-controls.txt` § *Method*
+  rule 4, 2026-11-05
+- the measurement: recipe occurrences (10/10 unique), re-derivation matches (0/9), `stat` of
+  `context/audit/scripts/t3-census.sh` against the thirteen control transcripts' `started=` stamps — all
+  re-runnable except the transcripts, which are scratch; the in-tree residue of the same fact is the
+  two-cut digest table in `wave0/t3-gate-and-checks.txt` § 2a, where a block that only **moved**
+  (`ba991abf…`, identical at new coordinates) sits beside one that genuinely **changed**
+  (`2ed67035…` → `7a3e901a…`)
 - observed Plan 02 T3, 2026-11-05

@@ -15,31 +15,18 @@ same program that produced them?*
 Nothing here was hand-copied. Steps 0/1a/1b/1c and 2/2b were **extracted from `plans/RULES.md`'s own
 fenced blocks and executed**, so the thing that ran is the thing that is published — not a paraphrase of
 it. Same for the scope producer. Run from the project root (`server/basalt`), `diff.relative` unset,
-`LC_ALL=C`.
-
-The extraction coordinates alone would not survive the commit that used them — this is the pattern
-`pitfalls.md` § *Provenance that cannot contradict its own claim* names ("a range silently relocates
-when the premise is wrong"), and `RULES.md` is a file this plan edits. So the ranges are pinned to the
-blob they were cut from:
-
-```bash
-git cat-file blob 3d2966965cf9414f725188ae347b048f0ad7e51b | sed -n '274,330p' | sha256sum
-# 2ed670357c226a478abdd7ca19dc98d7a7880ab39bf72597b375cf0c480ade1d   ← step 0/1a/1b/1c, ran from this
-git cat-file blob 3d2966965cf9414f725188ae347b048f0ad7e51b | sed -n '351,369p' | sha256sum
-# ba991abfee7220ebf13f9df1dfe5a465f962ac64b158d2ce807e966174772b29   ← steps 2/2b
-```
-
-`3d296696…` **is** `context/plans/RULES.md` as committed in `dd94598`
-(`git rev-parse dd94598:server/basalt/context/plans/RULES.md`). Both commands above were run and printed
-the two digests shown, so § 1 and § 2 are re-derivable from the object store even after `RULES.md`
-moves. § 1 and § 2 paste output only; the block whose output they are is identified by these digests.
+`LC_ALL=C`. Those two blocks are pinned to the `RULES.md` blob they were cut from — **the digests and the
+re-check commands are § 2a**, because a bare line range would not have survived this plan editing
+`RULES.md`.
 
 ---
 
 ## 1 · Steps 0 / 1a / 1b / 1c
 
 `RULES.md` § *Project gate*, block 1 (`# 0` … `# 1c`). The `INTERPRETER=` line is new in this commit;
-see § 6 for why.
+see § 6 for why. The `at=` leg is the **pyenv shim**; `t3-sentinels-real.txt` names the interpreter by
+its resolved path (`…/versions/3.12.16/bin/python3`) — same interpreter, shim versus target, so the two
+files disagree only in which name they print.
 
 ```text
 INTERPRETER bash=5.3.15(1)-release python=3.12.16 at=/home/iphands/.pyenv/shims/python3
@@ -87,6 +74,42 @@ runs nothing, and the step prints `ok` having linted zero files. `t3-inputs.sh` 
 terms** before staging (`shellcheck -x` exit 0, `bash -n` clean) — the census script being clean says
 nothing about its sibling.
 
+## 2a · Provenance of the two extracted blocks (why § 1 and § 2 can be re-checked after `RULES.md` moves)
+
+The extraction coordinates alone would not survive the commit that used them — this is the pattern
+`pitfalls.md` § *Provenance that cannot contradict its own claim* names ("a range silently relocates
+when the premise is wrong"), and `RULES.md` is a file this plan edits. So the ranges are pinned to the
+blob they were cut from:
+
+```bash
+git cat-file blob 3d2966965cf9414f725188ae347b048f0ad7e51b | sed -n '274,330p' | sha256sum
+# 2ed670357c226a478abdd7ca19dc98d7a7880ab39bf72597b375cf0c480ade1d   ← the block § 1 pastes output of
+git cat-file blob 3d2966965cf9414f725188ae347b048f0ad7e51b | sed -n '351,369p' | sha256sum
+# ba991abfee7220ebf13f9df1dfe5a465f962ac64b158d2ce807e966174772b29   ← the block § 2 pastes output of
+```
+
+`3d296696…` **is** `context/plans/RULES.md` as committed in `dd94598`
+(`git rev-parse dd94598:server/basalt/context/plans/RULES.md`). Both commands above were run and printed
+the two digests shown, so § 1 and § 2 are re-derivable from the object store even after `RULES.md` moves.
+§ 1 and § 2 paste output only; the blocks whose output they are are identified by these digests.
+
+**This commit range is the counter-example that justifies the section.** `1e3cc9f` edited `RULES.md`
+inside *and* around these blocks, moving them from `274,330`/`351,369` to `286,344`/`365,383` (its
+`RULES.md` blob is `21dbae606ce12892e45eed9835a187c80377a0ff`, `# 0` sitting at line 286 in it, verified
+with `git cat-file blob 21dbae60… | sed -n '286,344p' | sha256sum`). The two blocks did **not** drift the
+same way, and the difference is the whole point of pinning by content:
+
+| Block | digest cut from `3d296696…` (`dd94598`) | digest cut from `21dbae60…` (`1e3cc9f`) | what happened |
+|---|---|---|---|
+| 1 · steps 0/1a/1b/1c | `2ed67035…` | `7a3e901a…` | **content changed** — the `INTERPRETER=` echo went from one line to three (§ 6) |
+| 2 · steps 2/2b | `ba991abf…` | `ba991abf…` | **moved only** — same bytes, 14 lines lower |
+
+So the output in § 1 above belongs to `2ed67035…` and is *not* the output of the block as it now reads;
+the gate numbers for `1e3cc9f` were produced by `7a3e901a…`. That gap is the widened `MISSING` guard, and
+it is disclosed in § 6 rather than papered over. The ranges published in this file are correct for
+`3d296696…` and **wrong for any later `RULES.md`** — which is why the digests, not the ranges, are the
+locator.
+
 ## 3 · Steps 3–6 — `BLOCKED`, owner-run
 
 | Step | State | Evidence |
@@ -116,7 +139,7 @@ because this file stages after the first reading:
 |---|---|---|---|---|---|
 | 1 | not yet staged | 11 | 12 | 0 | 0 |
 | 2 | staged | 12 | 13 | 0 | 0 |
-| 3 | staged, § 4 then widened | 12 | 13 | 0 | 0 |
+| 3 | re-run, same set (§ 4 widened) | 12 | 13 | 0 | 0 |
 
 ```text
 PATTERNS=^(run|build|Dockerfile|Dockerfile\.dockerignore|versions\.env|lib/|models|\.gitignore)
@@ -172,7 +195,7 @@ Note the shape of that pairing: **it is a pairing, not a proof.** If the two scr
 change together they stay mutually consistent while describing neither the tree nor any run anyone
 watched. What anchors them to the world is the third leg — the tree — in § 6.
 
-## 6 · Three-leg freeze check, run immediately before the commit
+## 6 · Three-leg freeze check, run immediately before the commit — and the `INTERPRETER=` line
 
 ```text
 $ cd vendor/basalt

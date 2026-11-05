@@ -145,7 +145,7 @@ violation and cannot be cited by a later plan.
 | 2026-11-05 | Gate steps 1a/1b/1c/2, re-run **with `context/audit/` present** (3 new `.md`, 12 `.tsv`, 1 `.sha256`) | 1a no `FAIL` · **`3 b`** · `env ok` · `shellcheck ok` | 1 | Rule 5 holds: none of T1's artifacts enters the bash set. Steps 3–6: step 3 re-measured as docker-denied; 4–6 unrun |
 | 2026-11-05 | T3 census, pristine: `PYTHONDONTWRITEBYTECODE=1 LC_ALL=C context/audit/scripts/t3-census.sh vendor/basalt real` | exit 0, stderr 0 bytes; `SENTINEL_TOTAL=34 SENTINEL_FAILS=0`; `T3_CENSUS_VERDICT=PASS_PENDING_CANARY`; the figures belong to `wave0/t3-sentinels-real.txt`, not to this row | 2 | **`tag=real` only — no canary tag has ever been run.** A second run is byte-identical to the pasted one except the two timestamp lines (`diff` empty): that is the `run-real` restore anchor. Three-leg freeze check clean after both |
 | 2026-11-05 | T3 harness negative controls: 10 exact-string-mutated copies run **beside** the original (`context/audit/scripts/.neg-*.sh`, deleted after) | 10/10 fired — each exit 1, `T3_CENSUS_VERDICT=FAIL`, and its own assertion line `FAIL`; each block records its mutant's `GENERATOR_SHA256` | 10 | **Coverage: 10 of 34 assertions, real path only.** Two are **wiring-only** (C2, C9: they exercise a comparison, not the failure it guards); C4/C5 are maximal (whole-set); C7 proves the comparator, **not** collation sensitivity. No control under `tag=real` again — Notes. Detail: `wave0/t3-census-controls.txt` |
-| — | T3 canary capture (target **6/6**, one per planted class) | — | | **Wave 0 gate.** `t3-canary-score.tsv` must reach 6 rows before the census prints plain `PASS`. A canary tag **floors nothing** today — the non-`real` floor line is a `FIND`, not a fail — so a canary run that silently loses assertions still prints PASS. `SENTINEL_TOTAL` reads **28** under `tag=negctl` against **34** on `real`, but **every one of those 28s came from a mutated copy** (C3–C10); no unmutated non-real run exists, so **do not seed `SENT_TOTAL_FLOOR_<tag>` from 28** — seed it from this row's first clean run (`wave0/t3-census-controls.txt` § 2) |
+| — | T3 canary capture (target **6/6**, one per planted class) | — | | **Wave 0 gate.** `t3-canary-score.tsv` must reach 6 rows before the census prints plain `PASS`. A canary tag **floors nothing** today — the non-`real` floor line is a `FIND`, not a fail — so a canary run that silently loses assertions still prints PASS. `SENTINEL_TOTAL` reads **28** on `tag=negctl` against **34** on `real`: the **gap** is the tag (11 assertions real-only, 5 non-real-only, so 28 − 5 + 11 = 34) but the **value** is not — all twelve `negctl` runs were mutants, so **do not seed `SENT_TOTAL_FLOOR_<tag>` from 28**; measure it on this row's first clean run and land the floor line **in the same commit**, because editing the generator mints a new `GENERATOR_SHA256` and `real` must then be re-run (`wave0/t3-census-controls.txt` § 2) |
 | — | T5 ASan/UBSan fuzz, JPEG/PNG/BMP/GIF at request-reachable `max_pixels` | — | | report count, target 0 |
 | — | T11 `LC_ALL=C comm` manifest vs `git ls-files src/ include/` (target 0) | — | | after each directory slice |
 
@@ -751,9 +751,11 @@ violation and cannot be cited by a later plan.
     `2> stderr.txt`, and that draft line was executed: it left a 0-byte `server/basalt/stderr.txt`,
     untracked and not ignored (`.gitignore` here ignores only `/vendor/`), found and removed 2026-11-05.
     Every command block in a `wave0` file is now written with `/tmp/opencode` redirects, because these
-    headers get copy-pasted. And the four hash tokens `dd94598` shipped truncated are now **named by
-    control** (C7/C9/C10 + the § 4 line), so seven of ten controls keep full identification instead of
-    all ten being demoted for my error.
+    headers get copy-pasted. And the hash tokens `dd94598` shipped truncated are now **named by
+    control**. *(Corrected the same day, and this sentence was itself wrong: only **three** controls lost
+    their own token there — C7, C9, C10 — the fourth ellipsis was a cross-reference line, and the count
+    that "seven of ten" implied credited C1, whose token is `deadbeef` and identifies nothing. The controls
+    file now carries the per-control table instead of a count.)*
   - `INTERPRETER=` now prints `MISSING` on **all three** legs (only `python=` was guarded, so a missing
     python would have printed `at=` — indistinguishable from formatting). The three earlier captures that
     lack the line (`t1-freeze-and-manifest.txt` note 5, `t2-gate-and-checks.txt`, RULES' init baseline)
@@ -762,17 +764,86 @@ violation and cannot be cited by a later plan.
   - Gate-block provenance: the `sed` line ranges that cut steps 0/1a/1b/1c and 2/2b out of `RULES.md` are
     pinned to the blob they were cut from (`3d296696…`) plus each block's sha256, because a bare line
     range is this plan's own named defect and `RULES.md` is a file this plan edits.
-- **2026-11-05 — T3's remaining order, fixed.** **Canaries first, then `census.md` once.** The reason is
-  not the numbers but the anchor: a canary that exposes a harness gap forces a generator edit, which mints
-  a new `GENERATOR_SHA256`, and `census.md` is written to be read against a frozen one — every
-  paste-locator in a census drafted now would be orphaned by the first harness fix. So: (1) six canaries +
-  `t3-canary-score.tsv`, seeding each canary tag's floor from a **clean** run (retiring 28) in the same
-  pass; (2) in parallel, as its own commit — the column-6 `unassigned` residue into T9/T10 dispositions,
-  an independent Wave-0 exit condition that depends on nothing the canaries produce; (3) `census.md`
-  **once**, pasting both the real and the canary output. **`tests/` (163 files, 51,125 l) is not separate
-  debt**: census.md's stated job is that every row carries a task number, so an unowned `tests/` is a
-  defect *in* it — it gets a row there, or a named `invalid` with a reason. Same for the C++ reader of the
-  pack's 128-byte entry table: it goes in census.md's routing (T9 or T11c), not in a backlog.
+- **2026-11-05 — review round 2: an apparatus claim of my own, killed by running it.** Both reviewers
+  joined `1e3cc9f`. The finding that mattered was mine, not theirs: I had added an invariant to the controls
+  file — *"every mutant is the frozen base plus exactly one exact-string replacement, so any token is
+  re-derivable from the file alone"* — and **hoodie spotted it was circular for exactly the controls it was
+  meant to rescue** (the `mutate:` lines were typed from the same truncated terminal output). Making that
+  precise required testing it, and it was worse than circular: **false.** Each recipe's left side occurs
+  exactly once in the frozen script (10/10 — transcription fine), but re-deriving reproduces **0 of the 9**
+  re-derivable tokens, because the mutants were cut from a **pre-freeze cut**: `t3-census.sh` mtime is
+  **06:35:10**, the last control ran **06:35:08**, the pasted `real` run started **06:35:14**. The clean
+  disproof is one control whose mutation is a one-token change on a unique standalone line: if its base had
+  been `1bab1ec5…` its hash would follow, and it does not. Those bytes are unrecoverable (one blob of that
+  file has ever been committed; mutant copies are deleted by design), so the tokens are **witnessed, not
+  re-derivable** — the transcripts' `ARGV=` + `GENERATOR_SHA256=` carry them and `/tmp` will not survive.
+  Withdrawn in place at `t3-census-controls.txt` § *Method* rule 4; new pitfalls entry
+  § *"You can reproduce this from the file alone" — a re-derivation claim that never names which cut of the
+  program it starts from*. One salvage, and it is real: two differently-named runs share
+  `GENERATOR_SHA256=9e7af2b8…`, which evidences the hashes index programs, not runs — the property the
+  claim leaned on.
+  - **Two numbers corrected by measurement, both of them mine from yesterday.** (a) *Why* 28 ≠ 34: the
+    gap is the **tag**, and it is now arithmetic — a `negctl` run prints **28** assertion names, `real`
+    prints **34**, the delta is **11 real-only + 5 non-real-only**, so 28 − 5 + 11 = 34; both name sets are
+    listed in controls § 2 and diffed against the measurement. That also caught a third error: my § 2 list
+    had called the **collapse assertions** real-only, and they are not — `COLLAPSE_COUNT_MATCHES_HITS_IN_FILE`
+    fires under `tag=negctl` in C4, in this very file. (b) The **population**: I had written "all 13
+    non-real runs are mutants" in three files; read against the transcripts' `TAG=` lines it is **12
+    `negctl` + 1 `real`**, and that one `real` run is `neg-floor_high` = C2, i.e. the § 4 baseline-wiper —
+    the exception was not incidental, it was the incident. Fixed in place in controls § 2, the canary
+    Evidence row, and the pitfalls entry, with the mis-count's cause named: I stated the population by the
+    field I was reasoning about (`GENERATOR_SHA256`) instead of the field I had read (`TAG`).
+  - **`dd94598`'s damage, per control instead of by summary.** Only **three** controls lost their own token
+    (C7, C9, C10); the fourth ellipsis was a cross-reference line; **C1's token is `deadbeef` and never
+    identified anything**, so it must not sit inside a count of identified controls. A ten-row table in the
+    controls header now carries this, because "seven of the ten" was one of two arithmetics that both reach
+    7 and the number hid which controls were affected.
+  - **Gate file apparatus**: the `RULES.md` block-pinning moved to **§ 2a** so § 1's counts are back above
+    the fold, and § 2a now carries a two-cut digest table that makes the pinning argument concrete — block 2
+    **moved only** (`ba991abf…` identical at new coordinates) while block 1 genuinely **changed**
+    (`2ed67035…` → `7a3e901a…`, the `MISSING`-guard widening), so § 1's paste belongs to the older digest
+    and says so. Landing *this* commit shifted those coordinates a second time (`286,344` → `291,349`) with
+    both blocks byte-unchanged, which is the demonstration repeating itself for free.
+- **2026-11-05 — T3's remaining order, fixed (and corrected the same day by neckbeard's read of the
+  generator).** **Canaries first, then `census.md` once.** The reason is not the numbers but the anchor: a
+  canary that exposes a harness gap forces a generator edit, which mints a new `GENERATOR_SHA256`, and
+  `census.md` is written to be read against a frozen one — every paste-locator in a census drafted now
+  would be orphaned by the first harness fix. **The correction is that the sha churn is not one future
+  event but one I had already scheduled into the wrong place:** `t3-census.sh:1566` demands
+  `SENT_TOTAL_FLOOR_$TAG` be added *beside* `SENT_TOTAL_FLOOR_REAL`, which is an edit to the generator —
+  so seeding a canary tag's floor is itself a sha-minting act. Hence, in order: **(1)** plant and score the
+  six canaries against the generator as it stands, measuring that tag's `SENTINEL_TOTAL` on a **clean**
+  run (which retires the laundered 28); **(2)** land the per-tag floor line **in the same commit as the
+  first canary run's findings**, not afterwards, or a third batch is spent; **(3)** re-run `real` on the
+  post-edit generator and re-paste, because `GENERATOR_SHA_SAME_AS_REAL` will fail every later non-`real`
+  run against a pre-edit `run-real`; **(4)** write `census.md` **once**, against the post-edit sha.
+  `1bab1ec5…` stays the identity of the run already pasted in `t3-sentinels-real.txt` — it is not
+  retro-dated into the successor — but it stops being the sha `census.md` is read against.
+  - **Three pre-flights, from reading the generator, before anything is planted.**
+    `COLUMN6_TOKENS_ALL_DECLARED` runs on **every** tag (`:1531`) and is policed against `manifest/index.md`,
+    so a canary whose column-6 token is not in that declared vocabulary turns the run red for a reason
+    unrelated to the canary — pick primitives whose tokens are already declared, or declare them first,
+    dated, in their owner file. The STRAY gate (`:271`) requires *added* paths to match
+    `CANARY|SENTINEL|canary`, which tempts the whole fixture into six files named `CANARY-*`; but canaries
+    #4–#6 (cross-file assembly, token-count or latency, a log→`/metrics` second hop) must live in
+    **ordinary paths**, because their point is that no keyword in the taxonomy finds them — so the
+    modified-path side of that check has to be confirmed to exist at all, and if it does not, that is a
+    **stated limit of the six-canary control**, not something to hide by renaming files. And `run-real` is
+    load-bearing state in scratch: re-run the pristine `real` census immediately before the canary batch,
+    and refuse to read any canary block whose `TREE_DIFF_VS_REAL` or `*_SAME_AS_REAL` leg prints
+    `unavailable` — those branches print and continue.
+  - **`census.md` discipline, from the same review.** Its numbers will come from at least two invocations
+    running **different assertion sets**, so **no aggregate sentence about "the census" is allowed** ("N
+    assertions", "all sections scored"): every figure carries its own `(tag, generator sha,
+    SENTINEL_TOTAL)`, coverage is the pasted per-section `canary=planted=/fired=` strings rather than prose,
+    and the one permitted aggregate is the machine-printed `CANARY_SCORE_PROGRESS=n/6`.
+  - **`tests/` (163 files, 51,125 l) is not separate debt**: census.md's stated job is that every row
+    carries a task number, so an unowned `tests/` is a defect *in* it — it gets a row there, or a named
+    `invalid` with a reason. Same for the C++ reader of the pack's 128-byte entry table: it goes in
+    census.md's routing (T9 or T11c), not in a backlog. And the parallel column-6 commit moves the
+    `786 f / 191,600 l` roll-up that `audit/index.md` and `coverage_ledger.md` quote verbatim, so
+    `census.md` states that roll-up **as of a named pre-fill run** and points at `ledger-grid.sh` for the
+    live one.
 
 ## Follow-ups
 
