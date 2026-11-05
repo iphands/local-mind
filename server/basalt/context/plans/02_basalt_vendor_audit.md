@@ -229,6 +229,11 @@ Looked like findings, are not — do not re-investigate.
 
 **Verify** (note the two `cd`s — the manifest lives in the *project*, not in `vendor/`):
 ```bash
+# SUPERSEDED IN PART (2026-11-05, T1 follow-up): these commands report loop rcs, not results, and the
+# `wc -l … | tail -1` row count under-reads if a TSV ever loses its final newline. Run instead the
+# counted-sentinel set in `context/audit/manifest/index.md` § Checks plus
+# `context/audit/scripts/ledger-grid.sh` (figures) and `context/audit/wave0/t1-grid-controls.txt`
+# (its negative controls). Kept verbatim below as this task's original wording — do not run it as the check.
 cd /home/iphands/prog/ai/local-mind/server/basalt/vendor/basalt
 GIT_NO_LAZY_FETCH=1 git ls-tree -r dc047a77 --format='%(objectname) %(path)' \
   | while read -r h p; do [ "$(git hash-object -- "$p")" = "$h" ] || echo "MISMATCH $p"; done; echo "— blob check done rc=$?"

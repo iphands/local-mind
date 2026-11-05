@@ -131,7 +131,11 @@ where an applicable step was skipped.
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and launchers have no extension. Pass: no `FAIL` line, the counts
 match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env` exists).
-**Expected counts: `3 b`** (Plan 01 T1: `lib/common.sh`; T2: `build`; T3: `run`). Bump this paragraph when a file is
+**Expected counts: `4 b`** (Plan 01 T1: `lib/common.sh`; T2: `build`; T3: `run`; plus
+`context/audit/scripts/ledger-grid.sh`, added by Plan 02 T1's follow-up on 2026-11-05 under plan
+Execution rule 5's "if a helper is unavoidable" clause — it is the only generator permitted under
+`context/audit/`, it is `shellcheck` 0.11.0 clean, and it is the single source of every coverage figure
+in `audit/`). Bump this paragraph when a file is
 added or removed on purpose — a count that silently drops is the failure this step exists for.
 
 ```bash

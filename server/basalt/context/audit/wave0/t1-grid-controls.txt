@@ -1,0 +1,82 @@
+# Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.
+# Plan 02 T1 — negative controls on context/audit/scripts/ledger-grid.sh (run 2026-11-05)
+# script sha256: 49404b24aad9091cdea0fd97cedb899f9435917a223266a66bd92132ec74dd78
+# harness: /tmp/opencode/basalt-audit/gridtest/controls.sh (scratch, per Execution rule 3); the repo manifest was never touched
+# every control must abort non-zero; the restored copy must be clean
+
+C1 tampered LOC f4                             rc=3 fail_lines=3
+      LOC                    EXPECTED=219247 ACTUAL=1219223 FAIL
+      # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THIS BLOCK
+      SENTINEL_FAILURE — do NOT paste these figures anywhere (exit 3)
+      fence poisoned: yes
+C2 tier matches no family                      rc=3 fail_lines=5
+      TIER_KEYS              EXPECTED=11 ACTUAL=12 FAIL
+      TIER_WAVE_AGREE        EXPECTED=0 ACTUAL=1 FAIL
+      PARTITION_ROWS         EXPECTED=862 ACTUAL=861 FAIL
+      # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THIS BLOCK
+      SENTINEL_FAILURE — do NOT paste these figures anywhere (exit 3)
+      fence poisoned: yes
+C3 short row (2 fields)                        rc=3 fail_lines=7
+      LOC                    EXPECTED=219247 ACTUAL=219224 FAIL
+      BAD_FIELD_ROWS         EXPECTED=0 ACTUAL=1 FAIL
+      BAD_TIER_SHAPE         EXPECTED=0 ACTUAL=1 FAIL
+      TIER_KEYS              EXPECTED=11 ACTUAL=12 FAIL
+      PARTITION_ROWS         EXPECTED=862 ACTUAL=861 FAIL
+      # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THIS BLOCK
+      SENTINEL_FAILURE — do NOT paste these figures anywhere (exit 3)
+      fence poisoned: yes
+C4 dot-prefixed 13th TSV                       rc=3 fail_lines=2
+      TSV_FILES_FIND         EXPECTED=12 ACTUAL=13 FAIL
+      a dot-prefixed, linked or 13th TSV silently changes every count below
+      no fence emitted at all: safe
+C5 row added, no final newline                 rc=3 fail_lines=9
+      ROWS                   EXPECTED=862 ACTUAL=863 FAIL
+      LOC                    EXPECTED=219247 ACTUAL=219248 FAIL
+      NO_FINAL_NEWLINE       EXPECTED=0 ACTUAL=1 FAIL
+      RECORDS_EQ_NEWLINES    EXPECTED=863 ACTUAL=862 FAIL
+      BAD_TIER_SHAPE         EXPECTED=0 ACTUAL=1 FAIL
+      TIER_KEYS              EXPECTED=11 ACTUAL=12 FAIL
+      PARTITION_ROWS         EXPECTED=863 ACTUAL=862 FAIL
+      # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THIS BLOCK
+      SENTINEL_FAILURE — do NOT paste these figures anywhere (exit 3)
+      fence poisoned: yes
+C6 valid-prefix tier typo (T99)                rc=3 fail_lines=4
+      TIER_KEYS              EXPECTED=11 ACTUAL=12 FAIL
+      TIER_WAVE_AGREE        EXPECTED=0 ACTUAL=1 FAIL
+      # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THIS BLOCK
+      SENTINEL_FAILURE — do NOT paste these figures anywhere (exit 3)
+      fence poisoned: yes
+C7 symlinked TSV                               rc=3 fail_lines=2
+      TSV_FILES              EXPECTED=12 ACTUAL=13 FAIL
+      a dot-prefixed, linked or 13th TSV silently changes every count below
+      no fence emitted at all: safe
+C8 trailing space in tier                      rc=3 fail_lines=4
+      BAD_TIER_SHAPE         EXPECTED=0 ACTUAL=1 FAIL
+      TIER_KEYS              EXPECTED=11 ACTUAL=12 FAIL
+      # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THIS BLOCK
+      SENTINEL_FAILURE — do NOT paste these figures anywhere (exit 3)
+      fence poisoned: yes
+C9 final newline stripped, rows intact         rc=3 fail_lines=4
+      NO_FINAL_NEWLINE       EXPECTED=0 ACTUAL=1 FAIL
+      RECORDS_EQ_NEWLINES    EXPECTED=862 ACTUAL=861 FAIL
+      # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THIS BLOCK
+      SENTINEL_FAILURE — do NOT paste these figures anywhere (exit 3)
+      fence poisoned: yes
+RESTORED (want rc=0, fail_lines=0)             rc=0 fail_lines=0 OK (expected clean)
+      ALL_SENTINELS_PASS=1 (expect 1)
+SCRATCH_RESTORED=ok (expect ok)
+
+--- per-file row vector of the clean manifest (names the TSV a row-count change came from)
+     3 context/audit/manifest/assets.tsv
+     2 context/audit/manifest/cmake.tsv
+     5 context/audit/manifest/data.tsv
+    31 context/audit/manifest/docs.tsv
+     3 context/audit/manifest/github.tsv
+   161 context/audit/manifest/include.tsv
+    10 context/audit/manifest/root.tsv
+    94 context/audit/manifest/serve.tsv
+     1 context/audit/manifest/site.tsv
+   353 context/audit/manifest/src.tsv
+   163 context/audit/manifest/tests.tsv
+    36 context/audit/manifest/tools.tsv
+   862 total

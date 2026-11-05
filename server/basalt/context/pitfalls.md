@@ -286,11 +286,12 @@ from noir, defragment it there first (`btrfs filesystem defragment -f -t 128M <f
 
 ---
 
-# Four shell idioms that report green on the thing they did not check
+# Seven shell idioms that report green on the thing they did not check
 
 ## Problem
-[OBSERVED 2026-11-05] During Plan 02 T1 (freeze `vendor/basalt`, manifest 862 files), four commands
-came back *passing* while the measurement had not happened. Each looked like evidence:
+[OBSERVED 2026-11-05] During Plan 02 T1 (freeze `vendor/basalt`, manifest 862 files) and its coverage
+follow-up the same day, seven commands came back *passing* while the measurement had not happened.
+Each looked like evidence:
 
 1. **`IFS= read -r h p` over a space-separated `git … --format='%(objectname) %(path)'`.** Setting
    `IFS=` disables whitespace splitting, so the whole line lands in `$h` and `$p` is empty. Every one
@@ -311,7 +312,26 @@ came back *passing* while the measurement had not happened. Each looked like evi
 
 Same family, smaller: `— rc=$?` after a `while … done` reports the loop's last test, and after
 `cmd | tail -1` reports `tail`'s — so `— rc=0` beside `permission denied` is exactly what a failed
-docker step looks like in this convention.
+docker step looks like in this convention. Two variants of that are worth naming because they were
+*committed* before being caught: `awk 'NF!=9{print …}' *.tsv; echo "— fields rc=$? (silent = ok)"`
+(awk exits **0** after printing its warnings, so the `ok` fires on garbage) and
+`for f in *.tsv; do … || echo "UNSORTED $f"; done; echo "order ok"` (prints `order ok` whether or not
+`UNSORTED` lines appeared).
+
+5. **An assertion that prints `FAIL` and still exits 0.** The partition check was a bare
+   `awk '… END{printf "PARTITION EXPECTED=%s ACTUAL=%d %s\n", …}'` — the verdict was a *string*
+   computed inside awk, so a typo'd tier reported `ACTUAL=861 FAIL` and the script went on to print
+   `ALL_SENTINELS_PASS=1`. A verdict computed in a sublanguage cannot set the shell's exit status: the
+   value must come back (`part=$(awk '…END{print A+B+U+0}')`) and go through the same `check` helper
+   that sets the fail flag.
+6. **A guard written to catch a bug it cannot see.** `M=(*.tsv)` **never matches a dot-prefixed file**,
+   so `check TSV_FILES 12 "${#M[@]}"` could only ever catch a 13th *visible* TSV — while its comment
+   claimed to cover the `.github.tsv` failure in item 2, which had already happened once. Cross-prove
+   the glob against `find . -maxdepth 1 -name '*.tsv' -type f | wc -l`: `find` is dot-aware and
+   `-type f` additionally rejects a symlinked-in substitute (both sentinels see the same 12 otherwise).
+7. **`uniq -c | awk 'END{print sum}'` deletes the histogram.** Piping a histogram into a summing awk
+   without `{print}` leaves only the total on stdout — the new sentinel survives and the evidence the
+   command existed to show is gone. Use `awk '{print; s+=$1} END{print "SUM=" s+0 " (expect 862)"}'`.
 
 ## How to avoid
 Never let absence-of-output or a trailing `rc` carry a verdict when a **number** can be printed:
@@ -324,11 +344,25 @@ meant to count them can skip them — no leading dot, no extension collision —
 (`cut -f1-4 | sha256sum` vs the recorded value) and keep it away from `sha256sum -c`. Finally: give
 every new check a **negative control** before trusting its silence — T1's drift loop was only
 believed after a tampered LOC digit made it report exactly one drift
-(`context/audit/wave0/t1-freeze-and-manifest.txt`).
+(`context/audit/wave0/t1-freeze-and-manifest.txt`). Two refinements from the follow-up, both of which
+came from controls that *failed*:
+
+- **Control the checker, not just the data.** Nine tampers against a scratch copy of the manifest
+  (tampered LOC, typo'd tier, short row, dot-prefixed TSV, symlinked TSV, trailing-space tier, stripped
+  final newline) each had to exit non-zero; two of nine exposed a bug in the script instead. Record
+  the transcript: `context/audit/wave0/t1-grid-controls.txt`.
+- **Tie two zeros together instead of asserting two zeros.** `cat *.tsv | awk 'END{print NR}'` counts
+  *records*, `wc -l` counts newline *bytes*; they can only differ if a file lost its final newline.
+  Printing `RECORDS=862 NEWLINES=862` tells "a row went missing" apart from "a newline went missing",
+  which `NO_FINAL_NEWLINE=0` and `ROWS=862` cannot. Print the **expected value as a literal**
+  (`EXPECTED=862 ACTUAL=$rows`) and derive the actual, never the reverse: a literal `=ok` on an
+  aggregation step fires green while the numbers are garbage.
 
 ## Sources
 - basalt: `context/audit/manifest/index.md` (the checks, as corrected) and
   `context/audit/wave0/t1-freeze-and-manifest.txt` (the control output)
+- basalt: `context/audit/scripts/ledger-grid.sh` + `context/audit/wave0/t1-grid-controls.txt`
+  (items 5–7: the generator and the nine controls that caught them, 2026-11-05)
 - basalt: `context/plans/02_basalt_vendor_audit_tracker.md` (T1 Notes, 2026-11-05)
 - related: `context/pitfalls.md` § *An empty result from a command that was never allowed to run*
 

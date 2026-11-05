@@ -1,0 +1,7 @@
+assets/basalt-lockup-dark.png
+assets/basalt-lockup-light.png
+data/profiles/qwen4exp-48x512.prof
+docs/assets/basalt-format.png
+docs/img/frontend.gif
+serve/web/fonts/geist-latin-wght.woff2
+serve/web/fonts/geist-mono-latin-wght.woff2

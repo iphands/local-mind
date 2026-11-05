@@ -16,6 +16,12 @@ be a clean path set. The stamp lives in this file and in `../index.md`, nowhere 
 TSV by adding a header line** — it silently breaks every count on this page. (Declared by T1,
 2026-11-05; this is the only place a later session will look for it.)
 
+Two more files take the same exemption, for the same reason, and are declared here rather than
+decided silently: **`../wave0/binary-paths.txt`** (one path per line, consumed by `comm`/`diff` against
+`git ls-tree`, so a comment line would read as a missing file) and the `../wave0/*.tsv`-style raw
+captures, whose first line is whatever the command printed. `../wave0/t1-ledger-grid.txt` carries the
+stamp anyway because `ledger-grid.sh` emits it; the hand-captured ones do not.
+
 ## Schema — 9 columns, tab-separated, **no header row**
 
 | # | Column | Contents | Who may write it, and until when |
@@ -139,16 +145,37 @@ $ LC_ALL=C cut -f9 *.tsv | LC_ALL=C sort | uniq -c      # reviewed-in
     862 pending
 ```
 
-Lines per tier — the seed of `coverage_ledger.md`, same command as in `../index.md`:
+### Lines per tier — **this file owns the grid**; `coverage_ledger.md` and `../index.md` cite it
+
+One line per `tier` value (column 5), `LOC` (column 4) summed per bucket, `LC_ALL=C`-sorted. Generated
+by [`../scripts/ledger-grid.sh`](../scripts/ledger-grid.sh); the bytes and their sentinels are at
+[`../wave0/t1-ledger-grid.txt`](../wave0/t1-ledger-grid.txt). The bucket names carry the task that owes
+the reading, and they mutate as tasks seed rows — that is the data, not a formatting choice.
 
 ```text
-A-planned@T4    3 f   2,651 l   A-planned@T8   22 f   3,919 l
-A-planned@T5   10 f   1,754 l   A-planned@T9    5 f     818 l
-A-planned@T6a   4 f   2,538 l   A-planned@T10  17 f   4,908 l
-A-planned@T6b   2 f     612 l   A-planned@T12   2 f     933 l
-A-planned@T7   10 f   1,526 l   B-vendored@T5   1 f   7,988 l
-                                unassigned    786 f 191,600 l
+# audited pin dc047a7 / tree 3f7b69ae · ROWS=862 LOC=219247 · 2026-11-05
+A-planned@T10        17 f     4,908 l
+A-planned@T12         2 f       933 l
+A-planned@T4          3 f     2,651 l
+A-planned@T5         10 f     1,754 l
+A-planned@T6a         4 f     2,538 l
+A-planned@T6b         2 f       612 l
+A-planned@T7         10 f     1,526 l
+A-planned@T8         22 f     3,919 l
+A-planned@T9          5 f       818 l
+B-vendored@T5         1 f     7,988 l
+unassigned          786 f   191,600 l
+
+A-planned            75 f    19,659 l
+B-vendored            1 f     7,988 l
+unassigned          786 f   191,600 l
+TOTAL               862 f   219,247 l
 ```
+
+**`A-planned` is 75 f / 19,659 l and does not include `B-vendored`.** An earlier revision of
+`coverage_ledger.md` totalled the two as "Tier A seeded (76 f) 27,647 l"; that figure is retired — the
+7,988-line `src/vision/stb_image.h` is version-diffed as a dependency and is never first-party reading
+debt. Quote 19,659 or quote the grid, never a sum of the two.
 
 ### Vocabulary — closed, and the two words that must never swap
 
@@ -183,36 +210,54 @@ A-planned@T7   10 f   1,526 l   B-vendored@T5   1 f   7,988 l
 ## Checks — run from `context/audit/manifest/`
 
 ```bash
+# Every check below prints `<NAME>=<actual> (expect <literal>)`. A check that prints nothing, or an
+# `rc=$?` on a loop, is NOT a pass: awk and while-loops exit 0 after reporting problems. `ledger-grid.sh`
+# (in ../scripts/) runs the manifest-shape half of this list and exits 3 on any FAIL.
 # rows present (awk, not wc: a missing final newline makes wc lie)
-awk 'END{print NR+0}' *.tsv; echo "— expect 862 rc=$?"
+awk 'END{print "ROWS="NR+0" (expect 862)"}' *.tsv
 # every row really has 9 fields (a short row makes `cut -f5` emit the WHOLE line and poison every uniq -c)
-LC_ALL=C awk -F'\t' 'NF!=9{print FILENAME":"FNR" has "NF" fields"}' *.tsv; echo "— fields rc=$? (silent = ok)"
+LC_ALL=C awk -F'\t' 'NF!=9{print FILENAME":"FNR" has "NF" fields"; n++} END{print "BAD_FIELD_ROWS="n+0" (expect 0)"}' *.tsv
 # every row filed in the TSV its first path element implies
 LC_ALL=C awk -F'\t' '{n=split($1,a,"/"); want=(n==1?"root":(a[1]==".github"?"github":a[1])) ".tsv"; \
-  f=FILENAME; sub(/.*\//,"",f); if(f!=want) print "MISFILED",$1,FILENAME,want} END{print "filing done"}' *.tsv
-# no dot-prefixed TSV hiding from *.tsv
-find . -maxdepth 1 -name '.*tsv' -print; echo "— dot-tsv rc=$? (silent = ok)"
-# every TSV ends in a newline (a missing one makes a row count lie) — the signal is the printed 0,
-# not the loop's rc
-nl=0; for f in *.tsv; do [ -n "$(tail -c1 "$f")" ] && { echo "NO-FINAL-NEWLINE $f"; nl=$((nl+1)); }; done
+  f=FILENAME; sub(/.*\//,"",f); if(f!=want){print "MISFILED",$1,FILENAME,want; bad++}} \
+  END{print "MISFILED_ROWS="bad+0" (expect 0)"}' *.tsv
+# no dot-prefixed TSV hiding from *.tsv, and nothing linked in: the glob and `find` must agree
+echo "DOT_TSVS=$(find . -maxdepth 1 -name '.*tsv' | wc -l) (expect 0)"
+echo "TSV_GLOB=$(ls *.tsv | wc -l) TSV_FIND=$(find . -maxdepth 1 -name '*.tsv' -type f | wc -l) (expect 12 12)"
+# every TSV ends in a newline (a missing one makes a row count lie). awk counts records, wc counts
+# newline BYTES: they can only differ if a TSV lost its final newline, which tells a lost row apart
+# from a lost newline — two independent zeros cannot.
+nl=0; for f in *.tsv; do if [ -n "$(tail -c1 "$f")" ]; then echo "NO-FINAL-NEWLINE $f"; nl=$((nl+1)); fi; done
 echo "NO_FINAL_NEWLINE_COUNT=$nl (expect 0)"
-# rows are in LC_ALL=C order of column 1 *within each TSV* (= git ls-tree order), so later `comm`s
-# need no re-sort
-for f in *.tsv; do LC_ALL=C cut -f1 "$f" | LC_ALL=C sort -c || echo "UNSORTED $f"; done; echo "order ok"
+echo "RECORDS=$(cat *.tsv | awk 'END{print NR+0}') NEWLINES=$(cat *.tsv | wc -l) (must be equal)"
+# rows are in LC_ALL=C order of column 1 *within each TSV* AND that order is `git ls-tree -r` order
+# restricted to the TSV's set — verified per TSV, not asserted (2026-11-05: 0 mismatches, 862 covered).
+pin=dc047a77beeddf1e91234d983a91d6bf929e9619
+GIT_NO_LAZY_FETCH=1 git -C ../../../vendor/basalt ls-tree -r --name-only "$pin" > /tmp/opencode/basalt-audit/ls.txt
+obad=0; cov=0
+for f in *.tsv; do
+  LC_ALL=C cut -f1 "$f" > /tmp/opencode/basalt-audit/a.txt
+  case "$f" in github.tsv) w='^\.github/';; root.tsv) w='^[^/]*$';; *) w="^${f%.tsv}/";; esac
+  LC_ALL=C grep -E "$w" /tmp/opencode/basalt-audit/ls.txt > /tmp/opencode/basalt-audit/b.txt
+  cov=$((cov + $(wc -l < /tmp/opencode/basalt-audit/b.txt)))
+  LC_ALL=C cmp -s /tmp/opencode/basalt-audit/a.txt /tmp/opencode/basalt-audit/b.txt \
+    || { echo "ORDER-DIVERGES $f"; obad=$((obad+1)); }
+done
+echo "ORDER_MISMATCH_TSVS=$obad (expect 0)  SUM_OF_WANTED_SETS=$cov (expect 862)"
 # manifest vs the audited TREE (not the index) — the completeness claim
-LC_ALL=C comm -3 <(LC_ALL=C cut -f1 *.tsv | LC_ALL=C sort) \
-  <(GIT_NO_LAZY_FETCH=1 git -C ../../../vendor/basalt ls-tree -r dc047a77 --name-only | LC_ALL=C sort) | wc -l
-echo "— tree comm rc=$? (expect 0)"
+echo "TREE_COMM=$(LC_ALL=C comm -3 <(LC_ALL=C cut -f1 *.tsv | LC_ALL=C sort) \
+  <(GIT_NO_LAZY_FETCH=1 git -C ../../../vendor/basalt ls-tree -r dc047a77 --name-only | LC_ALL=C sort) | wc -l) (expect 0)"
 # columns 1–4 unchanged — frozen-prefix.sha256 is NOT `sha256sum -c` material (it hashes cut -f1-4,
 # not whole files; `-c` reports 12 bogus FAILs). Use the loop:
 drift=0; while read -r want f; do got=$(LC_ALL=C cut -f1-4 "$f" | sha256sum | cut -d' ' -f1); \
   [ "$want" = "$got" ] || { echo "PREFIX DRIFT $f"; drift=$((drift+1)); }; done < frozen-prefix.sha256
-echo "PREFIX_DRIFT_COUNT=$drift (expect 0)"; echo "— prefix rc=$?"
+echo "PREFIX_DRIFT_COUNT=$drift (expect 0)"
 # LOC column re-derived from the objects (all 862)
 GIT_NO_LAZY_FETCH=1 git -C ../../../vendor/basalt ls-files >/dev/null   # prove git works, loudly
-cut -f2,4 *.tsv | while IFS=$'\t' read -r h l; do \
+locbad=0; while IFS=$'\t' read -r h l; do \
   [ "$(GIT_NO_LAZY_FETCH=1 git -C ../../../vendor/basalt cat-file blob "$h" | wc -l)" = "$l" ] \
-  || echo "LOC MISMATCH $h"; done; echo "— LOC rc=$? (silent = ok)"
+  || { echo "LOC MISMATCH $h"; locbad=$((locbad+1)); }; done < <(cut -f2,4 *.tsv)
+echo "LOC_MISMATCH_COUNT=$locbad (expect 0)"
 ```
 
 Aggregate identity of columns 1–4 over all 862 rows (re-run and compare; a change means the frozen
@@ -232,6 +277,14 @@ cp -r . /tmp/opencode/basalt-audit/pfxctl && cd /tmp/opencode/basalt-audit/pfxct
 sed -i '1s/\t[0-9]\+\tunassigned\tunassigned\tunassigned\tpending\tpending$/\t999999\tunassigned\tunassigned\tunassigned\tpending\tpending/' cmake.tsv
 # → PREFIX DRIFT cmake.tsv / CONTROL_DRIFT_COUNT=1   (observed 2026-11-05)
 ```
+
+That `sed -i` is the **only** sanctioned in-place edit in this directory, and it is sanctioned because
+the bytes it edits are a scratch copy under `/tmp/opencode/basalt-audit/`. Nothing in
+`context/audit/**` is ever edited with `sed -i`, and the generated grid blocks are replaced by
+re-running the generator and re-pasting, not patched in place. Negative controls for
+`ledger-grid.sh` itself — nine tampers, every one of which had to abort non-zero, two of which initially
+failed the *script* rather than the data — are at
+[`../wave0/t1-grid-controls.txt`](../wave0/t1-grid-controls.txt).
 
 ## How these rows were generated, and how to prove them again
 
@@ -293,8 +346,13 @@ Wave 0 gate fails. Waves: 1 = T4–T8, 2 = T9–T11d, 3 = T12–T13, 4 = T14 (tr
   (measured 2026-11-05, od-based; a `$(…)`-based count reads 9 because bash drops NUL bytes from
   binaries) — each of those undercounts by exactly 1. 0 blobs are empty. A Plan 04 session re-deriving
   LOC with an editor's counter will get different numbers; that is not drift.
-- **LOC is meaningless for the 7 binary files** (`assets/*.png`, `docs/assets/basalt-format.png`,
-  `docs/img/frontend.gif`, `serve/web/fonts/*.woff2`, `data/profiles/qwen4exp-48x512.prof`). T10 owns
+- **LOC is meaningless for the 7 binary files** listed in [`../wave0/binary-paths.txt`](../wave0/binary-paths.txt)
+  (`assets/*.png`, `docs/assets/basalt-format.png`, `docs/img/frontend.gif`, `serve/web/fonts/*.woff2`,
+  `data/profiles/qwen4exp-48x512.prof`). Their `f4` newline counts total **4,000 l** (`BINARY_ROWS 7`,
+  `BINARY_LOC 4000` in `../wave0/t1-ledger-grid.txt`) and **stay inside the 219,247** — subtracting
+  them would break the `LOC` and `PARTITION_ROWS` pins. That list is derived by an `iconv` round-trip
+  over all 862 paths (content test, re-runnable: 7 non-UTF-8 of 862); `ledger-grid.sh` finds the same 7
+  by extension because a script that reads no file content can do nothing else. T10 owns
   them and Tier A there means "fully explained by its parser/consumer", not "lines read".
 - **`blob-id` and `sha256` are different identifiers over the same bytes** — git's SHA-1 over
   `blob <len>\0` framing vs sha256 of the bare bytes. **Never compare them.**

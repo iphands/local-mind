@@ -1,0 +1,37 @@
+# Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.
+# generated 2026-11-05 by context/audit/scripts/ledger-grid.sh from context/audit/manifest/ — do not hand-edit its output
+TSV_FILES              EXPECTED=12 ACTUAL=12 OK
+TSV_FILES_FIND         EXPECTED=12 ACTUAL=12 OK
+ROWS                   EXPECTED=862 ACTUAL=862 OK
+LOC                    EXPECTED=219247 ACTUAL=219247 OK
+BAD_FIELD_ROWS         EXPECTED=0 ACTUAL=0 OK
+CRLF_FILES             EXPECTED=0 ACTUAL=0 OK
+NO_FINAL_NEWLINE       EXPECTED=0 ACTUAL=0 OK
+RECORDS_EQ_NEWLINES    EXPECTED=862 ACTUAL=862 OK
+UNSORTED_TSVS          EXPECTED=0 ACTUAL=0 OK
+BINARY_ROWS            EXPECTED=7 ACTUAL=7 OK
+BINARY_LOC             EXPECTED=4000 ACTUAL=4000 OK
+BAD_TIER_SHAPE         EXPECTED=0 ACTUAL=0 OK
+TIER_KEYS              EXPECTED=11 ACTUAL=11 OK
+TIER_WAVE_AGREE        EXPECTED=0 ACTUAL=0 OK
+PARTITION_ROWS         EXPECTED=862 ACTUAL=862 OK
+```text
+# audited pin dc047a7 / tree 3f7b69ae · ROWS=862 LOC=219247 · 2026-11-05
+A-planned@T10        17 f     4,908 l
+A-planned@T12         2 f       933 l
+A-planned@T4          3 f     2,651 l
+A-planned@T5         10 f     1,754 l
+A-planned@T6a         4 f     2,538 l
+A-planned@T6b         2 f       612 l
+A-planned@T7         10 f     1,526 l
+A-planned@T8         22 f     3,919 l
+A-planned@T9          5 f       818 l
+B-vendored@T5         1 f     7,988 l
+unassigned          786 f   191,600 l
+
+A-planned            75 f    19,659 l
+B-vendored            1 f     7,988 l
+unassigned          786 f   191,600 l
+TOTAL               862 f   219,247 l
+```
+ALL_SENTINELS_PASS=1 (expect 1)

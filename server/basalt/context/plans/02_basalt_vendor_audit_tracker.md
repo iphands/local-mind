@@ -24,7 +24,7 @@
    silent continue. A pin bump by Plan 01 or the owner is exactly how a "clean" verdict becomes false.
 2. **Find where the work actually stands** — two places, in this order: the **last row of
    `context/audit/coverage_ledger.md`** (what was read, how many lines, which commit) and the
-   **`reviewed-in=` column state in `context/audit/manifest/index.md`**. This tracker says which
+   **`reviewed-in` column state in `context/audit/manifest/index.md`**. This tracker says which
    task is next; those two say which *file* the next session should open. Trust both, then read
    `context/audit/census.md` for the assigned-site list.
 3. Read the project `AGENTS.md`, `context/plans/RULES.md` **in full**, then the plan — **its Gate
@@ -194,6 +194,32 @@ violation and cannot be cited by a later plan.
   also flips those rows to `A-planned@T9` / wave `2`, and `census.md`'s `assigned-TN` must agree with
   this file's `tier` — a row `census.md` owns that still reads `unassigned` here is unowned work and
   **Wave 0 does not exit**.
+- **2026-11-05, T1 follow-up — the coverage figures were right, their labelling was not, and the check
+  built to guard them could not fail.** Four things, all inside the audit's own artifacts:
+  1. `coverage_ledger.md` totalled "Tier A seeded (76 f) 27,647 l", folding `B-vendored@T5`
+     (stb_image.h, 7,988 l) into Tier A debt. **Tier A is 75 f / 19,659 l**; the vendored row is
+     version-diffed, never first-party reading. The figure is retired where it appeared and the rule
+     is stated in `coverage_ledger.md` and `manifest/index.md`.
+  2. Every coverage number is now **generated** by `context/audit/scripts/ledger-grid.sh` from the 12
+     TSVs — raw output `wave0/t1-ledger-grid.txt`, nine negative controls (each had to abort non-zero)
+     in `wave0/t1-grid-controls.txt`. `manifest/index.md` owns the per-bucket grid;
+     `coverage_ledger.md` and `audit/index.md` carry roll-ups that cite it, so every number has one
+     owner. Added under Execution rule 5's "unavoidable helper" clause with **RULES.md's gate count
+     bumped `3 b` → `4 b` in the same commit** — the owner chose this over keeping the generator inline
+     after being shown the rule conflict.
+  3. **Two of those controls failed the script, not the data**: an assertion printed by raw `awk` never
+     set the fail flag (a typo'd tier reported `FAIL` while the script exited 0), and `*.tsv` **cannot
+     match a dot-prefixed file**, so the check built to catch T1's own 859-row failure was blind to it.
+     Fixed by routing every check through one `check` helper and pairing the glob with
+     `find -type f`. The manifest-shape checks in `manifest/index.md` § Checks lost their
+     `silent = ok` / `order ok` forms and now print counted sentinels; re-run from the doc exactly as
+     pasted, all eleven pass.
+  4. `A-planned@T6a`/`T6b` exist, so a task-id regex of the form `T[0-9]+$` silently drops six rows —
+     same class as (3). Tier shape and tier↔wave agreement are now checked (`TIER_KEYS`,
+     `TIER_WAVE_AGREE`: 0 violations), and the `(= git ls-tree order)` claim is verified per TSV
+     (`ORDER_MISMATCH_TSVS=0`, `SUM_OF_WANTED_SETS=862`) instead of asserted.
+  Not drift: nothing in columns 1–4 moved (`PREFIX_DRIFT_COUNT=0`, `ROWS=862`, `LOC=219247` before and
+  after). **0 lines read, unchanged.**
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every
