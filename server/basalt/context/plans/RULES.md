@@ -131,7 +131,7 @@ where an applicable step was skipped.
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and launchers have no extension. Pass: no `FAIL` line, the counts
 match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env` exists).
-**Expected counts: `2 b`** (Plan 01 T1: `lib/common.sh`; T2: `build`). Bump this paragraph when a file is
+**Expected counts: `3 b`** (Plan 01 T1: `lib/common.sh`; T2: `build`; T3: `run`). Bump this paragraph when a file is
 added or removed on purpose — a count that silently drops is the failure this step exists for.
 
 ```bash
@@ -184,12 +184,35 @@ network is **fail**, not skip.
 PREFLIGHT_ONLY=1 ./build 2>&1 | tail -1    # → preflight ok
 ```
 
-**Blind spots.** Steps 1–3 never build and never boot. They cannot see a compile error in Basalt,
+**4. `./run` dry run** (Plan 01 T3). `DRY_RUN=1` runs every check `./run` makes and prints the
+docker command; it starts nothing and creates nothing (a busy `:8700` is reported, not refused —
+vLLM is the daily driver). The image is the newest one built for `BASALT_SHA`; before one exists
+the step uses the stub `stub:none` and prints `image: stub:none` — say so in the tracker when it
+did. Pass: no `FAIL` line, last line `dry-run ok`, and `storage/` was not created by it.
+
+```bash
+img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin'); export IMAGE_OVERRIDE=${img:-stub:none}
+d=$(DRY_RUN=1 ./run 2>&1); s=$(DRY_RUN=1 ./run --single 2>&1)
+need() { local where=$1 out=$2 w; shift 2; for w; do [[ $out == *"$w"* ]] || echo "FAIL(dry:$where) missing: $w"; done; }
+both=('-p 0.0.0.0:8700:8700' '--gpus device=0' '--ulimit memlock=-1' ':/models:ro' '--host 0.0.0.0'
+      '--port 8700' '--alias cosmo-6000' '--allowed-host cosmo.lan' '--max-context 262144' '--kv int8'
+      '--vision dynamic' 'serve /models/Qwen3.8-FN-NVFP4-DQ6_K.basalt' '(DRY_RUN) nothing started')
+need default "$d" "${both[@]}" '--parallel 4' '--slot-full-context'
+need single "$s" "${both[@]}" '--parallel 1'
+[[ $s == *--slot-full-context* ]] && echo 'FAIL(dry:single) has --slot-full-context'
+n=$(DRY_RUN=1 ./run /tmp/x.ninfer 2>&1) && echo 'FAIL(dry:ninfer) exit 0'
+[[ $n == *../ninfer* ]] || echo 'FAIL(dry:ninfer) no ../ninfer pointer'
+DRY_RUN=1 ./run /nonexistent/x.basalt >/dev/null 2>&1 && echo 'FAIL(dry:missing) exit 0'
+DRY_RUN=1 ./run README.md >/dev/null 2>&1 && echo 'FAIL(dry:not-a-pack) exit 0'
+k=$(API_KEY=k3y DRY_RUN=1 ./run --single 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(dry:api-key) printed'
+echo "dry-run ok (image: $IMAGE_OVERRIDE)"; unset IMAGE_OVERRIDE
+```
+
+**Blind spots.** Steps 1–4 never build and never boot. They cannot see a compile error in Basalt,
 a flag Basalt does not accept, a container that cannot reach the GPU or lock memory, a pack the
-engine refuses, or a port that is already taken. **Keep the gate current (item 5):** the task that
-adds `./run` adds a dry-run step (print the `docker run` + `basalt serve` command without starting
-anything, checked mechanically). A step that needs the image checks the flags `./run` emits
-against the built `bin/basalt --help` and `serve.server --help`.
+engine refuses, or a port that is already taken. **Keep the gate current (item 5):** once the image
+exists (Plan 01 T5), a step checks the flags `./run` emits against the built `bin/basalt --help`
+and `serve.server --help`.
 
 **Build actually loaded.** Behavior is verified on a boot the owner runs (SERIES *Standing
 Constraints*): the boot log must name the Basalt commit and the pack `./run` was asked for —

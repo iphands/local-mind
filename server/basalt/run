@@ -1,0 +1,163 @@
+#!/usr/bin/env bash
+# Serve a Basalt pack on :8700: ./run [--single] [PACK.basalt]
+#
+#   ./run                 4 slots, each with the whole 262144-token context (--slot-full-context)
+#   ./run --single        1 slot, 262144 tokens (Basalt's single-stream path)
+#   DRY_RUN=1 ./run …     every check, then print the docker command; starts and creates nothing
+#
+# Knobs (env)        default                                    Basalt setting
+#   PACK / $1        models/vllm/jesdga/Qwen3.8-FN-NVFP4-DQ6_K.basalt   serve <pack> (its dir mounted :ro at /models)
+#   PARALLEL         4; 1 with --single                         --parallel (1..8)
+#   SLOT_FULL_CONTEXT 1 (only when PARALLEL > 1)                --slot-full-context (each slot gets MAX_CONTEXT)
+#   MAX_CONTEXT      262144                                     --max-context
+#   KV               int8                                       --kv   (fp16 | int8 | q4_0 | k8v4)
+#   VISION           dynamic                                    --vision   (off | dynamic | cpu | <gpu>)
+#   PORT             8700                                       --port, and -p 0.0.0.0:$PORT:$PORT
+#   ALIAS            cosmo-6000                                 --alias   (the one name requests must use)
+#   ALLOWED_HOSTS    "cosmo.lan <hostname>"                     --allowed-host, one per name (Host-header check)
+#   API_KEY          empty (none; Basalt warns)                 --api-key   (printed as REDACTED)
+#   NAME             basalt                                     docker --name
+#   CACHE_DIR        storage/cache                              mounted at ~/.cache (Basalt's ~/.cache/basalt/)
+#   EXTRA_ARGS       empty                                      appended LAST to the serve flags (last wins)
+#   IMAGE_OVERRIDE   empty = the newest image built for BASALT_SHA
+#
+# Defaults are the owner's choices (Plan 01, 2026-11-04), not measured winners.
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=lib/common.sh
+source "$HERE/lib/common.sh"
+load_pins
+
+usage() { sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "${BASH_SOURCE[0]}"; exit 0; }
+
+# ------------------------------------------------------------- arguments
+
+single=0
+pack_arg=
+for a in "$@"; do
+  case $a in
+    --single) single=1 ;;
+    -h|--help) usage ;;
+    -*) die "unknown option '$a' (./run --help)." ;;
+    *) [[ -z $pack_arg ]] || die "one pack only, got '$pack_arg' and '$a'."
+       pack_arg=$a ;;
+  esac
+done
+
+DRY_RUN=${DRY_RUN:-0}
+PACK=${pack_arg:-${PACK:-$HERE/models/vllm/jesdga/Qwen3.8-FN-NVFP4-DQ6_K.basalt}}
+if (( single )); then def_parallel=1; else def_parallel=4; fi
+PARALLEL=${PARALLEL:-$def_parallel}
+SLOT_FULL_CONTEXT=${SLOT_FULL_CONTEXT:-1}
+MAX_CONTEXT=${MAX_CONTEXT:-262144}
+KV=${KV:-int8}
+VISION=${VISION:-dynamic}
+PORT=${PORT:-8700}
+ALIAS=${ALIAS:-cosmo-6000}
+ALLOWED_HOSTS=${ALLOWED_HOSTS-"cosmo.lan $(hostname)"}
+API_KEY=${API_KEY:-}
+NAME=${NAME:-basalt}
+CACHE_DIR=${CACHE_DIR:-$HERE/storage/cache}
+EXTRA_ARGS=${EXTRA_ARGS:-}
+
+(( single )) && [[ $PARALLEL != 1 ]] && die "--single and PARALLEL=$PARALLEL disagree; drop one."
+[[ $PARALLEL =~ ^[1-8]$ ]] || die "PARALLEL must be 1..8, got '$PARALLEL'."
+[[ $SLOT_FULL_CONTEXT =~ ^[01]$ ]] || die "SLOT_FULL_CONTEXT must be 0 or 1, got '$SLOT_FULL_CONTEXT'."
+[[ $MAX_CONTEXT =~ ^[1-9][0-9]*$ ]] || die "MAX_CONTEXT must be a positive integer, got '$MAX_CONTEXT'."
+if ! [[ $PORT =~ ^[1-9][0-9]*$ ]] || (( PORT > 65535 )); then die "PORT must be 1..65535, got '$PORT'."; fi
+[[ -n $ALIAS ]] || die "ALIAS is empty: every request must name the served model."
+
+# ------------------------------------------------------------------ the pack
+
+# Basalt loads only Flash-Next .basalt packs. A .ninfer artifact is NInfer's (context/pitfalls.md):
+# refuse it by name before anything else, so the pointer is the first thing the owner reads.
+case $PACK in
+  *.ninfer) die "$PACK is a NInfer artifact; Basalt loads only .basalt packs." \
+                "  serve it from ../ninfer instead." ;;
+esac
+[[ -f $PACK ]] || die "pack not found: $PACK"
+[[ -r $PACK ]] || die "pack not readable: $PACK"
+magic=$(LC_ALL=C head -c 8 -- "$PACK" | tr -d '\0')
+[[ $magic == BASALTMF ]] || die "$PACK is not a .basalt pack (first bytes '$magic', want 'BASALTMF')."
+pack_real=$(realpath -e -- "$PACK")
+pack_dir=$(dirname -- "$pack_real")
+pack_file=$(basename -- "$pack_real")
+pack_bytes=$(stat -c '%s' -- "$pack_real")
+
+# --------------------------------------------------------------- host checks
+
+if [[ $DRY_RUN == 1 ]]; then
+  # report, don't refuse: the dry run is a gate step, and vLLM on :8700 is the daily driver
+  ( refuse_busy "$PORT" vllm ninfer ignis "$NAME" ) || echo "== (DRY_RUN) a real run would refuse: :$PORT or the GPU is busy"
+else
+  refuse_busy "$PORT" vllm ninfer ignis "$NAME"
+fi
+
+RUN_IMAGE=${IMAGE_OVERRIDE:-$(image_for_pin)}
+[[ -n $RUN_IMAGE ]] || die "no $IMAGE image is labelled ai.basalt.ref=$BASALT_SHA; run ./build first."
+
+ensure_dir "$CACHE_DIR"
+
+# ------------------------------------------------------------- the command
+
+serve_args=(
+  serve "/models/$pack_file"
+  --host 0.0.0.0 --port "$PORT"
+  --alias "$ALIAS"
+)
+read -r -a hosts <<<"$ALLOWED_HOSTS"
+for h in "${hosts[@]}"; do serve_args+=(--allowed-host "$h"); done
+serve_args+=(
+  --gpu 0
+  --max-context "$MAX_CONTEXT"
+  --kv "$KV"
+  --parallel "$PARALLEL"
+)
+slots="1 slot × $MAX_CONTEXT"
+if (( PARALLEL > 1 )); then
+  if [[ $SLOT_FULL_CONTEXT == 1 ]]; then
+    serve_args+=(--slot-full-context)
+    slots="$PARALLEL slots × $MAX_CONTEXT (slot-full-context)"
+  else
+    slots="$PARALLEL slots × $(( MAX_CONTEXT / PARALLEL )) (shared)"
+  fi
+fi
+serve_args+=(--vision "$VISION")
+[[ -n $API_KEY ]] && serve_args+=(--api-key "$API_KEY")
+read -r -a extra <<<"$EXTRA_ARGS"
+serve_args+=("${extra[@]}")
+
+docker_args=(
+  run --rm --name "$NAME"
+  --user "$RUN_UID:$RUN_GID"
+  -e HOME=/home/ubuntu
+  --gpus device=0                                  # the RTX PRO 6000 only, never the 4060
+  -p "0.0.0.0:$PORT:$PORT"
+  --ulimit memlock=-1                              # resident experts are page-locked RAM
+  -v "$pack_dir:/models:ro"
+  -v "$CACHE_DIR:/home/ubuntu/.cache:rw"
+  "$RUN_IMAGE"
+)
+
+# the printed copy hides the api key
+shown=()
+mask=0
+for w in "${DOCKER[@]}" "${docker_args[@]}" "${serve_args[@]}"; do
+  if (( mask )); then shown+=(REDACTED); mask=0; continue; fi
+  [[ $w == --api-key ]] && mask=1
+  shown+=("$w")
+done
+
+echo "== image: $RUN_IMAGE"
+echo "== pack:  $pack_real ($pack_bytes bytes, $(( pack_bytes / 1073741824 )) GiB)"
+echo "== mode:  $slots, kv=$KV, vision=$VISION, http://0.0.0.0:$PORT/v1 as '$ALIAS'"
+echo "== cache: $CACHE_DIR"
+printf '%q ' "${shown[@]}"
+echo
+
+if [[ $DRY_RUN == 1 ]]; then
+  echo "== (DRY_RUN) nothing started"
+  exit 0
+fi
+exec "${DOCKER[@]}" "${docker_args[@]}" "${serve_args[@]}"

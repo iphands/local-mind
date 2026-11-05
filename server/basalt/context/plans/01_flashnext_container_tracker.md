@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 29% complete (2/7 tasks)
+- Status: 43% complete (3/7 tasks)
 - Start date: 2026-11-04
 - Plan: `context/plans/01_flashnext_container.md`
 - Evidence: the table below; build logs in `captures/build_<date>_<sha7>.log` (gitignored); boot
@@ -35,7 +35,7 @@
 |---|------|---------------|--------|-------|
 | 1 | T1: Pins, shared guards, project skeleton | `versions.env`, `lib/common.sh`, `.gitignore`, `models`, `README.md` | done | Digests unchanged since ../ninfer pinned them; sudo / missing-docker guards refuse (rc=1); gate `1 b`, `env ok`. |
 | 2 | T2: Dockerfile + `./build` | `Dockerfile`, `Dockerfile.dockerignore`, `build` | done | Preflight ok at `dc047a77`; dirty (untracked) checkout refused; context probe: 11.75 MB, no `.git`; no image built. Gate step 3 added. |
-| 3 | T3: `./run` + its dry-run gate step | `run`, `README.md`, RULES gate | pending | |
+| 3 | T3: `./run` + its dry-run gate step | `run`, `README.md`, RULES gate | done | Gate step 4 added and passing with `image: stub:none` (no image yet); negative control `KV=fp16` → 2 FAIL lines; busy/ninfer/missing/not-a-pack all rc=1. |
 | 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | pending | owner runs `./build` |
 | 5 | T5: Check `./run`'s flags against the built image | RULES gate step 5 | pending | needs T4 |
 | 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | pending | owner boots |
@@ -54,6 +54,10 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-11-04 | `PREFLIGHT_ONLY=1 ./build` (fresh clone) | `vendor/basalt` at `dc047a77…`, both bases resolve, `Check complete, no warnings found.`, `preflight ok`, rc=0 | 2 | identical |
 | 2026-11-04 | `touch vendor/basalt/.dirty-probe && PREFLIGHT_ONLY=1 ./build` | `## vendor/basalt is dirty … ?? .dirty-probe`, rc=1; probe file removed after | 1 | — |
 | 2026-11-04 | context probe: scratchpad `Probe.Dockerfile` + a copy of `Dockerfile.dockerignore`, context `vendor/basalt`, untagged | `transferring context: 11.75MB`; `/c` lists no `.git`, 13M | 1 | — |
+| 2026-11-04 | `DRY_RUN=1 IMAGE_OVERRIDE=x:y ./run` / `--single` | default: `--parallel 4 --slot-full-context`; single: `--parallel 1`, no `--slot-full-context`; pack 131681979197 bytes; `storage/` not created | 1 each | — |
+| 2026-11-04 | `./run` refusals: the QUASAR `.ninfer` path, `/nonexistent/x.basalt`, `README.md`, no image, `PORT=99999`, `--single` + `PARALLEL=2` | each rc=1 with its message (`.ninfer` names `../ninfer`; `README.md`: first bytes `# basalt`, want `BASALTMF`) | 1 each | — |
+| 2026-11-04 | sleeper container named `basalt` (`--network none`, `sleep 60`), then `DRY_RUN=1 ./run` and `./run` | dry: "a real run would refuse", rc=0; real: `## busy: … basalt …`, rc=1, nothing created | 1 | — |
+| 2026-11-04 | project gate steps 1–4 (step 4 from RULES verbatim) | `3 b`, `env ok`, `shellcheck ok`, `preflight ok`, `dry-run ok (image: stub:none)`; `KV=fp16` → `FAIL(dry:default)`/`FAIL(dry:single) missing: --kv int8` | 1 (+1 negative) | — |
 | 2026-11-04 | T1 guards: `DOCKER='sudo docker'`, `DOCKER=/usr/bin/nonexistent-docker` sourcing `lib/common.sh` | both refuse, rc=1, with the fix line | 1 each | — |
 
 ## Notes / Deviations
