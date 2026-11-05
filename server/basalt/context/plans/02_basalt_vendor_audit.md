@@ -21,7 +21,7 @@ the artifact that carries "what the agent could and could not verify."**
 | Step | Last run | State | Who can run it |
 |---|---|---|---|
 | 1a syntax | 2026-11-05 | **pass** (no `FAIL`) | agent |
-| 1b counts | 2026-11-05 | **pass** (`3 b`, unchanged by this plan's markdown) | agent |
+| 1b counts | 2026-11-05 | **pass** (`5 b`; the number's owner is `RULES.md` § *The gate*, which enumerates all five) | agent |
 | 1c `versions.env` | 2026-11-05 | **pass** (`env ok`) | agent |
 | 2 shellcheck | 2026-11-05 | **pass** (`shellcheck ok`) — after T0 re-installed it | agent |
 | 3 build preflight | 2026-11-05 (re-run at T1) | **BLOCKED** — `PREFLIGHT_ONLY=1 ./build` exit 1: `permission denied … /var/run/docker.sock` | **owner only** |
@@ -648,7 +648,7 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 8. **Question: can a model pack alter server behaviour?** Its metadata already reaches request defaults via `modelfile.py`; the chat template is the dangerous version. *How we'll settle it*: T7; if a pack can override the template, the model-pack scope exclusion is revisited.
 9. **Risk: T9 is unsizable at plan time.** *Mitigation*: its file list freezes at Wave 0 exit with a line count; >3,000 lines splits into numbered subtasks in SERIES before reading starts. *How we'll settle it*: the frozen list is a Wave 0 exit artifact.
 10. **Risk: tasks larger than a session die mid-flight with nothing committed.** *Mitigation*: the ≤1,500-line commit-slice rule; T6 and T11 pre-split. *How we'll settle it*: one commit per slice, each carrying its manifest rows.
-11. **Risk: audit helpers break the gate** (shebang-first counting vs "Expected counts: `3 b`"). *Mitigation*: inline commands; any unavoidable helper lands with the RULES counts bump in the same commit. *How we'll settle it*: gate step 1b in each commit's Evidence.
+11. **Risk: audit helpers break the gate** (shebang-first counting vs the "Expected counts" line — owned by `RULES.md` § *The gate*, `5 b` as of 2026-11-05, up from `3 b` as each unavoidable helper landed). *Mitigation*: inline commands; any unavoidable helper lands with the RULES counts bump in the same commit. *How we'll settle it*: gate step 1b in each commit's Evidence.
 12. **Risk: blocked docker steps become silent passes.** *Mitigation*: the Gate status block names which steps are owner-only; a task whose only verifier is blocked is not `done`. *How we'll settle it*: commit messages that name skipped steps.
 13. **Risk: effort overrun (14–19 sessions, T5 on the critical path behind an owner-run build).** *Mitigation*: T11's mechanical pass is command-generated; the verdict can be issued at Tier-B completeness with the depth table explicit, and Plan 04 picked up later. *How we'll settle it*: the coverage ledger's time series.
 

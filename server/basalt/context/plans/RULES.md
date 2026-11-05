@@ -437,6 +437,15 @@ asks, in that moment:
    claims it worked: `edit_files.sh && git commit -m "…"`.
 4. **A commit message is a factual claim about the tree.** If it says a file was updated,
    re-read that file before writing the message.
+5. **Append-only protects claims about the world, not scaffolding about the document.** A false
+   assertion — a wrong figure, a transcript line a command never printed, a rule stated too flatly —
+   can only be answered by a correction commit, because the assertion is the evidence. A broken
+   **instrument** — a locator, a check, a scheme for naming rows — gets **deleted**, not annotated in
+   perpetuity: keeping it with a warning attached leaves a thing nobody can trust and cannot remove.
+   Delete the instrument and record what killed it as a measured case in `context/pitfalls.md`. Tell
+   the two apart before you reach for a correction commit; mistaking the second for the first is how
+   an artifact accretes defensive prose until it buries its own payload
+   (`context/pitfalls.md` item 18).
 
 > **Why this rule exists** (the incident behind it, in the project this skill came from,
 > 2026-07-18): a scripted edit hit an assertion and wrote nothing, but the unchained `git commit`
@@ -489,14 +498,12 @@ A plan is not done when the code works. It is done when what you learned is on d
 5. **Cite the source of a fact by the exact command that showed it**, or by `path:line` for code. In prose
    this project keeps editing (plans, artifacts, knowledge pages) cite the **section name, never a line
    number** — a line citation rots on the next edit. The same holds for a `git log -S<anchor>` locator: it
-   resolves only while the anchor string survives verbatim, and measured on 2026-11-05 a heading renamed
-   mid-plan turned its own old anchor from one commit into a **2-commit set** (`6dbb312` introduced the
-   phrase, `d388d17` deleted it). A locator can also degrade with **no rename at all**: editing unrelated prose
-   that happens to quote the anchor changes its occurrence count, which is exactly `-S`'s trigger — observed
-   the same day in `audit/wave0/t2-gate-and-checks.txt` § 8, where an anchor introduced by one commit resolved
-   to two after the next commit deleted an unrelated command that quoted it. When you publish a locator, name
-   the anchor **load-bearing** so that a rename carries it with you, and treat it as a convenience for
-   something that cannot have a SHA yet rather than as a durable identifier.
+   resolves only while the anchor string survives verbatim, and it can degrade with **no rename at all**,
+   because `-S` fires on any change in the phrase's **occurrence count** — deleting an unrelated line that
+   happened to quote the anchor is enough. So **prefer an identifier you already have** (a SHA, a path, a
+   section name) over a locator, and never quote verbatim the literal whose count or match-set a check
+   reports: that is editing the world to fix the instrument. Two measured cases, including one that broke
+   one commit after being documented, are `context/pitfalls.md` item 18.
 6. **A measurement taken over an explicit path list must carry its own total.** A path in
    `git diff --numstat -- <paths>` (or any `-- <paths>` form) that matches nothing contributes **nothing and
    reports nothing**, so a hand-assembled list silently under-counts: print the same sum with **no** pathspec

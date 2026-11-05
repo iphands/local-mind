@@ -468,6 +468,27 @@ docker step looks like in this convention. Two variants of that are worth naming
     in a `wave*/` artifact is pasted bytes, or it is labelled** (`expected` / `template` / `not run`); when a
     transcript asserts a *precondition* ("no X yet", "X absent"), check X's tracked status before writing the
     line; and when two records of one step disagree, re-run the step rather than adjudicate from memory.
+18. **A locator you have to maintain is not a locator.** [OBSERVED 2026-11-05, T2] To name the newest row of a
+    scope-evidence table (`audit/wave0/t2-gate-and-checks.txt` § 8) whose own SHA does not exist yet, I built a
+    `git log -S'<phrase unique to that row's note>'` pickaxe anchor and then wrote a paragraph declaring the
+    anchor string **load-bearing**. One commit later the mechanism was false. Two independent measurements:
+    **(1)** a § 8 heading phrase used as an anchor resolved to exactly one commit when the warning was typed and
+    to **two** one commit later — not because anything was renamed, but because the later commit deleted an
+    unrelated command that happened to quote the phrase, and `git log -S` fires on any change in **occurrence
+    count**; **(2)** separately, a § 6a heading renamed mid-plan (`t2-boundary-authorship.txt`) left its old
+    phrase resolving to a 2-commit set (`6dbb312` in, `d388d17` out). Worse, the paragraph documenting the
+    hazard **quoted the phrase it was counting**, so reading and re-copying the file kept degrading the
+    instrument. What came out of it: **an anchor rots through ordinary prose edits, not only renames**, so prefer
+    the identifier you already have as soon as it exists; **never quote verbatim the literal whose count or
+    match-set a check reports** — that is editing the world to fix the instrument; and a locator whose string has
+    to be kept in step with the thing it locates is not a locator, it is a second copy of it. The replacement is
+    a convention, not a mechanism: *the commit that adds a table row fills in the SHA of the row above*, so
+    exactly one row is ever nameless and nobody has to construct a command to name their own commit. Governance
+    corollary, from the reviewer who caught it: **append-only history protects claims about the world, not
+    scaffolding about the document** — a false assertion (`1,843`, the invented `SKIP` line, the flat SHA bans
+    above) can only be answered by a correction commit, but an **instrument** shown to be unsound is deleted, not
+    annotated in perpetuity; mistaking the second for the first is how an artifact accretes defensive prose until
+    it buries its own payload.
 
 ## How to avoid
 Never let absence-of-output or a trailing `rc` carry a verdict when a **number** can be printed:

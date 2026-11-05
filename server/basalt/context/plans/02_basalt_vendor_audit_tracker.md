@@ -482,8 +482,34 @@ violation and cannot be cited by a later plan.
   here: `fe5bcdc` is named by its SHA (once a commit exists, a SHA beats an anchor and no anchor is wanted),
   the anchor trick is scoped to **the newest row only**, Rule E.5 gained the no-rename degradation mode, and
   § 8's blockquote now carries this as its worked example because it is the better one. Occurrence counts
-  restated from measurement: heading anchor 1, row-note anchor 2. Fourth self-authored green-but-wrong claim
-  found after the fact in this task, and the first one inside a sentence whose subject was exactly this defect.
+  restated from measurement: heading anchor 1, row-note anchor 2. *(Both counts superseded by round ten: the
+  row-note anchor was subsequently deleted and the heading phrase stands at 1 — which is itself the point about
+  perishable counts.)* Fourth self-authored green-but-wrong claim found after the fact in this task, and the
+  first one inside a sentence whose subject was exactly this defect.
+- **2026-11-05 · T2 round ten — the last T2 commit is a **cut**, not a correction, and the rule that decided
+  it is now in `RULES.md`.** Both reviewers were asked whether ten commits of self-corrections had become the
+  problem. Neckbeard: *"yes, it is over-defended, and § 8 is the tell… the last two buy a naming scheme for a
+  two-row table"*, with the discriminator — **append-only history protects claims about the world, not
+  scaffolding about the document**. `1,843`, `1,690`, the invented `SKIP` line and the flat SHA bans were
+  *assertions*, so a correction commit was the only honest answer; the anchor locator was an *instrument* that
+  proved unsound, and **unsound instruments get deleted, not annotated in perpetuity**. That is Rule **B2.5**
+  now, and § 8's locator machinery is gone rather than deprecated. Hoodie's MUST was narrower and sharper: the
+  blockquote documenting the hazard **quoted the phrase whose `-S` count it published**, so the file kept
+  degrading the instrument just by being read and re-copied — the heading phrase is therefore no longer quoted
+  anywhere (verified: **1** occurrence, the § 8 heading itself). Where the two disagreed, hoodie kept the
+  measured misresolutions and neckbeard would have evicted them: I kept them, because raw output in `wave0/` is
+  evidence and the lesson belongs in prose only once — now `context/pitfalls.md` **item 18**, which E.5 and B2.5
+  both cite rather than restating. Rule **E.5** was retargeted off § 8 for exactly the reason this round is
+  about: a rule pointing at an artifact it is about to delete is itself the stale cross-reference. **(iii) the
+  replacement is a convention, not a mechanism** — hoodie's: *the commit that adds a row fills in the SHA of the
+  row above*, so exactly one row is ever nameless and it is always the last. His answer to neckbeard's regress
+  objection is right: *"it doesn't regenerate the problem one row down — that's not a bug, that's the steady
+  state"*, and the backfill is free because this file is touched by every commit anyway. Applied here: the
+  `35a5dfc` row is named by this commit. **One override:** hoodie's variant that puts the anchor string *in* the
+  newest row's cell — declined, because under the convention nobody ever needs to resolve the newest row's name,
+  so it is machinery for a case that cannot arise. Two of the last four T2 commits exist to undo a mechanism
+  that should never have been built; the durable gain from all four is one sentence in `RULES.md` and one
+  pitfalls item, which is roughly what neckbeard says I should have landed in the first place.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every
