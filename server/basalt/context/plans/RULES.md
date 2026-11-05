@@ -230,27 +230,36 @@ permission. First invocation was `d388d17`, whose scope check is the `SCOPE_HITS
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and launchers have no extension. Pass: no `FAIL` line, the counts
 match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env` exists).
-**Expected counts: `5 b`** (Plan 01 T1: `lib/common.sh`; T2: `build`; T3: `run`; plus
-`context/audit/scripts/ledger-grid.sh`, added by Plan 02 T1's follow-up on 2026-11-05 under plan
-Execution rule 5's "if a helper is unavoidable" clause — it is the only generator of **coverage
-figures** under `context/audit/`, it is `shellcheck` 0.11.0 clean, and it is the single source of every coverage figure
-in `audit/` — and `context/audit/scripts/t2-census.sh`, added by Plan 02 T2 the same day under the
-same clause: it takes the repo, the pin, the row list and an **expected row count** as arguments and
-is the only thing that can regenerate `audit/wave0/t2-author-census.tsv`, whose **87 data rows** were
-verified to reproduce byte-identically from it (compared row-wise, header excluded — the header line is
-documentation and is not emitted by the generator). *Not* claimed to reproduce from it: the census's
-aggregate percentages, the blame-boundary counts and the lineage splits, which come from separate
-one-off blame passes recorded in `audit/wave0/t2-provenance.txt` § 6 and
-`audit/wave0/t2-lineage.txt` § 4. A figure with no generator has no reproduction, and claiming
-otherwise here is the overclaim this paragraph exists to prevent.) Bump this paragraph when a file is
-added or removed on purpose — a count that silently drops is the failure this step exists for.
-**The helper clause has now been used twice, in two consecutive tasks.** A third script added to this count
-should not be a third use of the clause: it should trigger the alternative the clause exists to avoid,
-which is narrowing step 1a to the project's own launchers and linting audit helpers in their own task-local
-check. Record the decision either way, in this paragraph.
+**Expected counts — two sets, split on 2026-11-05 at Plan 02 T3** (decision recorded below):
+**`3 b` product** (`lib/common.sh` from Plan 01 T1, `build` T2, `run` T3 — no `.py`, no `.json`) and
+**`3 b` audit helpers** (`context/audit/scripts/ledger-grid.sh`, `t2-census.sh`,
+`t3-model-file-poc.sh`). Bump these when a file is added or removed on purpose — a count that
+silently drops is the failure this step exists for.
+
+> **The helper-clause decision, 2026-11-05 (T3).** The clause above — "a third script added to this
+> count should not be a third use of the clause: it should trigger the alternative… narrowing step 1a
+> to the project's own launchers and linting audit helpers in their own task-local check" — **is now
+> taken.** T3 added `t3-model-file-poc.sh`, which would have been the third use of the helper clause
+> and would have pushed a single count from `5 b` to `6 b`. So: 1b now reports the **product** set and
+> the **audit-helper** set separately, step **2** lints only the product set, and step **2b** lints the
+> audit generators in their own check. Why this is the right fork rather than a convenience: step 2's
+> stated purpose is that *"the bash set is the whole product here"* — `run` and `build` are what boot a
+> GPU server, and letting coverage-figure generators share that gate had already started to blur it
+> (`t2-census.sh` and `ledger-grid.sh` emit numbers other plans cite, which is a different failure
+> class from a launcher typo). Two consequences stated plainly, so neither reads as a loosening:
+> **(i) both sets must be clean** — 2b is a pass/fail step like any other, not a advisory, and an audit
+> generator with a `FAIL` blocks its task; **(ii) 1a is deliberately *not* narrowed** — it still syntax
+> checks every tracked file, because dropping coverage to make a count tidier would be the wrong
+> trade, so 1a's scope and 1b/2's scope now differ on purpose. A fourth audit script is fine; it joins
+> `3 b` → `4 b` with no clause needed. What the split already bought: `context/audit/scripts/t3-census.sh`
+> (T3's generator, **still uncommitted**) carries **9 shellcheck findings** and would have been waved
+> through a shared count — measured, `shellcheck -x` exit 1. The two audit generators already tracked,
+> `t2-census.sh` and `ledger-grid.sh`, are clean (`shellcheck -x` exit 0 each, verified 2026-11-05), so
+> 2b does not fail on arrival; `t3-census.sh` must be linted before it is committed or 2b goes red.
 
 ```bash
-# 1a — syntax, over tracked files only (in-memory compile: no __pycache__ written)
+# 1a — syntax, over tracked files only (in-memory compile: no __pycache__ written).
+#      NOT narrowed: every tracked file, both sets. See the decision note above.
 git ls-files -z . | while IFS= read -r -d '' f; do
   case "$(head -n1 "$f" 2>/dev/null)" in   # 2>: a tracked symlink to a directory
     \#!*bash*|\#!*/sh) bash -n "$f" || echo "FAIL(bash) $f" ;;
@@ -264,10 +273,19 @@ git ls-files -z . | while IFS= read -r -d '' f; do
        esac ;;
   esac
 done
-# 1b — the counts, so an empty file list can never read green
-git ls-files -z . | while IFS= read -r -d '' f; do case "$(head -n1 "$f" 2>/dev/null)" in
-  \#!*bash*|\#!*/sh) echo b; continue ;; \#!*python*) echo p; continue ;; esac
-  case "$f" in *.sh) echo b ;; *.py) echo p ;; *.json) echo j ;; esac; done | sort | uniq -c
+# 1b — the counts, so an empty file list can never read green. Two named sets: the audit
+#      generators are excluded from PRODUCT_B and counted separately, per the decision above.
+classify() { git ls-files -z . | while IFS= read -r -d '' f; do case "$(head -n1 "$f" 2>/dev/null)" in
+  \#!*bash*|\#!*/sh) printf 'b\t%s\n' "$f"; continue ;; \#!*python*) printf 'p\t%s\n' "$f"; continue ;; esac
+  case "$f" in *.sh) printf 'b\t%s\n' "$f" ;; *.py) printf 'p\t%s\n' "$f" ;; *.json) printf 'j\t%s\n' "$f" ;; esac
+  done; }
+classify > /tmp/opencode/bashset.$$.tsv
+TOTAL_B=$(cut -f1 /tmp/opencode/bashset.$$.tsv | grep -c '^b$')
+AUDIT_B=$(cut -f2 /tmp/opencode/bashset.$$.tsv | grep -c '^context/audit/scripts/')
+echo "PRODUCT_B=$((TOTAL_B-AUDIT_B)) AUDIT_B=$AUDIT_B"
+grep $'^[pj]\t' /tmp/opencode/bashset.$$.tsv | cut -f1 | sort | uniq -c
+cut -f2 /tmp/opencode/bashset.$$.tsv | grep '^[^[:space:]]*$' | LC_ALL=C sort | sed 's|^|  b/p/j: |'
+rm -f /tmp/opencode/bashset.$$.tsv
 # 1c — versions.env stays plain KEY=value: it is `source`d by the scripts and passed to
 #      `docker build --build-arg`; a quoted value or trailing comment breaks one of the readers
 if [ -f versions.env ]; then
@@ -276,7 +294,8 @@ if [ -f versions.env ]; then
 else echo 'SKIP(1c: no versions.env yet)'; fi
 ```
 
-**2. shellcheck.** Pass: exit 0 and no output over the same bash set. `shellcheck` 0.11.0 is
+**2. shellcheck — product set only.** Pass: exit 0 and no output over the same bash set.
+`shellcheck` 0.11.0 is
 installed **user-local at `~/.local/bin/shellcheck`** (Plan 02 T0, 2026-11-05, official release
 tarball sha256 `8c3be12b…`, verified by `--version` and by a negative control that had to fire
 SC2115 — a tool's clean output is worthless until it has been shown to report something). The
@@ -284,13 +303,27 @@ SC2115 — a tool's clean output is worthless until it has been shown to report 
 `context/pitfalls.md`, "A gate prerequisite recorded in RULES.md can silently stop being true".
 If it is missing the step is **fail**, not skip — the bash set is the whole product here.
 
+**2b. shellcheck — audit generators.** Added 2026-11-05 (T3) with the 1b split; pass on the same
+terms as step 2. These scripts publish coverage and census figures that later plans cite, so a lint
+finding in one is a *correctness* signal, not cosmetics — and a generator nobody lints is how
+`t2-census.sh` arrived already carrying findings (see the note in `wave0/t3-model-file-poc.txt`).
+
 ```bash
+# 2 — product bash set: run, build, lib/common.sh (audit generators go to 2b)
 git ls-files -z . | while IFS= read -r -d '' f; do
+  case "$f" in context/audit/scripts/*) continue ;; esac
   case "$(head -n1 "$f" 2>/dev/null)" in
     \#!*bash*|\#!*/sh) printf '%s\0' "$f" ;;
     *) case "$f" in *.sh) printf '%s\0' "$f" ;; esac ;;
   esac
-done | xargs -0 -r shellcheck -x && echo 'shellcheck ok'
+done | xargs -0 -r shellcheck -x && echo 'shellcheck ok (product)'
+# 2b — audit generators
+git ls-files -z context/audit/scripts | while IFS= read -r -d '' f; do
+  case "$(head -n1 "$f" 2>/dev/null)" in
+    \#!*bash*|\#!*/sh) printf '%s\0' "$f" ;;
+    *) case "$f" in *.sh) printf '%s\0' "$f" ;; esac ;;
+  esac
+done | xargs -0 -r shellcheck -x && echo 'shellcheck ok (audit)'
 ```
 
 **3. Build preflight** (Plan 01 T2). Manages `vendor/basalt` (clones it on first use — network;

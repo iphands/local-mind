@@ -20,10 +20,11 @@ the artifact that carries "what the agent could and could not verify."**
 
 | Step | Last run | State | Who can run it |
 |---|---|---|---|
-| 1a syntax | 2026-11-05 | **pass** (no `FAIL`) | agent |
-| 1b counts | 2026-11-05 | **pass** (`5 b`; the number's owner is `RULES.md` § *The gate*, which enumerates all five) | agent |
+| 1a syntax | 2026-11-05 | **pass** (no `FAIL`) — still every tracked file, deliberately not narrowed by the 1b split | agent |
+| 1b counts | 2026-11-05 | **pass** (`PRODUCT_B=3 AUDIT_B=3`; split this date at T3, so the number's owner is `RULES.md` § *The gate*, which now enumerates two sets) | agent |
 | 1c `versions.env` | 2026-11-05 | **pass** (`env ok`) | agent |
-| 2 shellcheck | 2026-11-05 | **pass** (`shellcheck ok`) — after T0 re-installed it | agent |
+| 2 shellcheck | 2026-11-05 | **pass** (`shellcheck ok (product)`) — product set only since the T3 split | agent |
+| 2b shellcheck (audit) | 2026-11-05 | **pass** (`shellcheck ok (audit)`) — step added by the T3 split; `t3-census.sh` is held out of the repo until it clears this | agent |
 | 3 build preflight | 2026-11-05 (re-run at T1) | **BLOCKED** — `PREFLIGHT_ONLY=1 ./build` exit 1: `permission denied … /var/run/docker.sock` | **owner only** |
 | 4 `./run` dry run | — | **BLOCKED** (docker) | owner only |
 | 5 flags vs image | — | **BLOCKED** (docker, and needs an image for the pin) | owner only |

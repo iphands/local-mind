@@ -572,9 +572,57 @@ violation and cannot be cited by a later plan.
   `comments` at all, turning three absent fields into three confident zeros. Recorded as
   `context/pitfalls.md` item 19.
 
+- **2026-11-05 (T3, partway) — four findings executed against the `.basalt` parser; `census.md` still
+  owed, so row 3 stays `pending`.** `context/audit/findings.md` now carries F-1 🔴 / F-2 🟠 / F-3 🟡 /
+  F-4 ⚪, each with what-it-does / why-it-isn't-scary / what-would-make-it-scary / the one action, and
+  every claim is executed rather than reasoned: `context/audit/scripts/t3-model-file-poc.sh` (30 named
+  assertions, `POC_VERDICT=PASS`, exit 0) with its output and **three** firing negative controls in
+  `context/audit/wave0/t3-model-file-poc.txt`. F-1 is arbitrary file write from an unsanitised section
+  name (the working primitive is `tokenizer//abs/path`, which makes `Path(x) / "/abs"` **discard the
+  left operand** — no `..` needed); F-2 is that `cache_dir()` keys on the meta digest *as the file
+  declares it*, so a hostile pack can poison the cache a *genuine* pack later loads, and the same key
+  governs `conversations/` and `engine.log`. **Not remote**: `model_config()` runs in `main()` before
+  the listener binds and `/load`/`/unload` take no path, so the trigger is one operator act — pointing
+  `--model` at a pack they did not build. Two claims the reviewers killed in me: `sys.path` import
+  hijack (does not fit the 64-byte name field at this checkout's depth) and "changes model behaviour"
+  (the consumption question resolved to `server.py:164-165`, which is narrower and better — see below).
+  Two of *my* errors are recorded in the evidence file rather than quietly fixed: the first harness
+  printed `POC_VERDICT=PASS` while asserting nothing, and a probe printed `wrote` while writing nothing
+  because **F-2's cache short-circuit silently disables later probes that share its cache key**
+  (`pitfalls.md` items 18–19).
+  Still unexamined and said so on the page: `src/`/`include/` — the C++ engine's own reader of the same
+  128-byte entry table. Nothing on that page constrains it.
+
+  **Compliance miss, recorded rather than rewritten:** the previous commit `afd2bcd` (the stb 2.30
+  correction) carries no `Gate:` line, which RULES' carve-out condition (1) requires of every commit that
+  marks work done with steps 3–6 skipped. History is append-only, so this is the correction. Its four gate
+  steps were in fact run and passed at the time; the omission is in the message, not in the verification.
+
+- **2026-11-05 — the follow-up row "*open the pack audit only if T7 shows pack metadata can alter
+  server behaviour*": that condition is met, by F-2, not by T7.** `serve/server.py:164-165` assigns
+  `a.tokenizer = cfg["tokenizer"]`, and `cfg["tokenizer"]` is the **extracted-from-the-pack** directory.
+  So `:222` renders `ChatTemplate(tpath / "chat_template.jinja")` from the pack's own section when
+  present, falling back to the bundled template only if absent, and `:170-177` reads `vocab.json`,
+  `merges.txt` and `token_type.json` from that same directory. A pack therefore substitutes the chat
+  template and the tokenizer. Jinja is `ImmutableSandboxedEnvironment` (`serve/frontend.py:19,37`), so
+  there is no expression-level code execution, and whether an injected template changes generated
+  output end to end is **untested here** — `jinja2` is not installed in the audit shell.
+
+- **2026-11-05 — gate step 1/2 split into a product set and an audit-generator set (RULES.md).**
+  RULES' helper clause said a *third* audit script must trigger its alternative rather than a third use
+  of the clause; T3's `t3-model-file-poc.sh` was that third. So 1b now reports `PRODUCT_B` and
+  `AUDIT_B` separately (`3 b` / `3 b`), step 2 lints only `run`/`build`/`lib/common.sh`, and a new step
+  **2b** lints `context/audit/scripts/` on the same pass/fail terms. 1a deliberately still covers every
+  tracked file. The split caught a live problem the shared count was hiding: `t3-census.sh` carries 9
+  shellcheck findings and is **blocked from commit until linted**. Both already-tracked generators were
+  verified clean, so 2b is not red on arrival.
+
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every
-  "found nothing" names what it does and does not rule out.
+  "found nothing" names what it does and does not rule out. **Addendum 2026-11-05, after the first four
+  findings:** that is still the honest summary. F-1..F-4 are ordinary bugs sitting behind a trust
+  boundary, and nothing found so far indicates deliberately planted malice — the honest answer to "is
+  upstream malicious" remains *no evidence yet, and the vendored third-party tree is unread*.
 
 ## Follow-ups
 
@@ -585,5 +633,5 @@ violation and cannot be cited by a later plan.
 | Hash-pinned deps: `pip-compile --generate-hashes` → `pip install --require-hashes` in our `Dockerfile` | Unpinned wheels mean the audited source is **not provably** the built artifact — the verdict is conditional until this exists. A pin/build change, so its own plan per RULES.md's gate table. | Plan 05-ish (owner) |
 | Upstream report: ~~stale `stb_image` 2.21~~ → **not stale (2.30)**; the live items are the `preprocess.cpp` guard-vs-consumer gap, the missing `STBI_MALLOC` ceiling/timeout, `:20`'s silent truncation, `fit_size`'s aspect-ratio overshoot, and `stbi_set_flip_vertically_on_load*` never being called | Re-scoped 2026-11-05. Draft for the owner, not an issue — upstream's `AGENTS.md` forbids publishing without maintainer approval. | `context/audit/findings.md` → owner |
 | Re-audit policy on `BASALT_SHA` bumps | Upstream is ~2194 commits in six weeks; a verdict at `dc047a7` decays fast. Decide what re-triggers Plan 02's Wave 0. | `context/high_level.md` |
-| Model-pack (`.basalt`) weight-file audit | Out of Plan 02 scope; only the loaders are covered. Worth opening only if T7 shows pack metadata can alter server behaviour. | backlog |
+| Model-pack (`.basalt`) weight-file audit | Out of Plan 02 scope; only the loaders are covered. **The trigger condition is met — 2026-11-05, by finding F-2, not by T7**: `serve/server.py:164-165` assigns `a.tokenizer = cfg["tokenizer"]`, which is the directory *extracted from the pack*, so `:222` renders the pack's own `chat_template.jinja` when present and `:170-177` reads `vocab.json`/`merges.txt`/`token_type.json` from it. A pack substitutes the chat template and the tokenizer. Jinja is `ImmutableSandboxedEnvironment` (`serve/frontend.py:19,37`) so there is no expression-level exec, and end-to-end output change is **untested** (`jinja2` not installed in this shell). | backlog — **now unblocked**; raise it to a task |
 | Host hygiene: `docker.sock` group is `root:rtkit` | An odd owner:group for a docker socket, and it is why the agent cannot reach docker. Off-scope for Plan 02 (it is not vendor code) but it surfaced during the audit and the owner may want to look. | owner |

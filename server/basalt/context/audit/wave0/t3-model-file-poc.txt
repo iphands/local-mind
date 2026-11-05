@@ -1,0 +1,180 @@
+# Plan 02 T3 — raw output of context/audit/scripts/t3-model-file-poc.sh
+# Target dc047a7 / tree 3f7b69ae. Generated 2026-11-05. Never hand-edit this file.
+
+## command
+  POC_SPARSE=1 POC_BASE=/tmp/opencode/pocrun4 context/audit/scripts/t3-model-file-poc.sh
+  (the harness OVERWRITES $HOME with POC_BASE/home before any probe, so every
+   absolute-path write lands in the sandbox; $HOME is read only to stat and to take
+   string lengths, and the git column restores the real HOME explicitly.)
+
+## freeze check (re-run at commit time)
+  cd vendor/basalt && GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77... && echo "AUDIT TREE OK"
+  -> AUDIT TREE OK
+
+## shellcheck 0.11.0 on the harness
+  rc=0, no output
+
+## canonical run — exit 0, POC_VERDICT=PASS, 30 assertions
+ASSERT F1_ABSOLUTE_JOIN_WRITE                 == 'wrote'                ok
+ASSERT F1_AUTHORIZED_KEYS_WRITE               == 'wrote'                ok
+ASSERT F1_CACHE_DIR_IS_HEX                    == 'hex'                  ok
+ASSERT F1_NEW_FILE_IN_EXISTING_DIR            == 'wrote'                ok
+ASSERT F1_READER_ACCEPTS_64                   == 'yes'                  ok
+ASSERT F1_SYMLINKED_COMPONENT_WRITE           == 'wrote'                ok
+ASSERT F1_TRAVERSAL_WRITE                     == 'wrote'                ok
+ASSERT F1_TRUNCATE_PRESERVES_MODE_AND_INODE   == 'yes'                  ok
+ASSERT F1_WRITER_REJECTS_64                   == 'ValueError'           ok
+ASSERT F2_EVIL_BOOTED_FIRST                   == 'poisoned'             ok
+ASSERT F2_PACK_CHAT_TEMPLATE_AT_TPATH         == 'yes'                  ok
+ASSERT F2_PACK_VOCAB_AT_TPATH                 == 'yes'                  ok
+ASSERT F2_REAL_BOOTED_FIRST                   == 'no'                   ok
+ASSERT F2_SAME_META_SHORTCIRCUITS_EXTRACTION  == 'short-circuited'      ok
+ASSERT F2_SHARED_CONVERSATION_CACHE           == 'yes'                  ok
+ASSERT F2_SHARED_ENGINE_LOG                   == 'yes'                  ok
+ASSERT F2_SHARED_TOKENIZER_DIR                == 'yes'                  ok
+ASSERT F2_SIBLING_CACHE_POISON                == 'poisoned'             ok
+ASSERT F3_SHORT_READ_RAISES                   == 'none'                 ok
+ASSERT F4_EIGHT_BYTE_FILE                     == 'TRACEBACK'            ok
+ASSERT F4_META_NOT_AN_OBJECT                  == 'TRACEBACK'            ok
+ASSERT F4_N_512_SECTIONS                      == 'TRACEBACK'            ok
+ASSERT F4_STRUCT_ERROR_IN_TUPLE               == 'no'                   ok
+ASSERT OK_DUPLICATE_LAST_WINS                 == '{"SECOND":1}'         ok
+ASSERT OK_EMBEDDED_NUL                        == 'clean'                ok
+ASSERT OK_EMPTY_AFTER_PREFIX                  == 'clean'                ok
+ASSERT OK_NONUTF8_NAME                        == 'clean'                ok
+ASSERT OK_TRUNCATED_DOWNLOAD                  == 'clean'                ok
+ASSERT OK_ZERO_LENGTH_VOCAB_PASSES_GATE       == 'yes'                  ok
+ASSERT REFUTED_OS_REPLACE_FOLLOWS_SYMLINK     == 'not-followed'         ok
+POC F1_ABSOLUTE_JOIN_WRITE=wrote
+POC F1_AUTHORIZED_KEYS_WRITE=wrote
+POC F1_CACHE_DIR_IS_HEX=hex
+POC F1_NEWFILE_HOOKCFG_NAME_BYTES=51
+POC F1_NEW_FILE_IN_EXISTING_DIR=wrote
+POC F1_READER_ACCEPTS_64=yes
+POC F1_SYMLINKED_COMPONENT_WRITE=wrote
+POC F1_TRAVERSAL_WRITE=wrote
+POC F1_TRUNCATE_PRESERVES_MODE_AND_INODE=yes
+POC F1_WRITER_REJECTS_64=ValueError
+POC F2_EVIL_BOOTED_FIRST=poisoned
+POC F2_MODEL_NAME_FROM_PACK=TplPack
+POC F2_PACK_CHAT_TEMPLATE_AT_TPATH=yes
+POC F2_PACK_VOCAB_AT_TPATH=yes
+POC F2_REAL_BOOTED_FIRST=no
+POC F2_SAME_META_SHORTCIRCUITS_EXTRACTION=short-circuited
+POC F2_SHARED_CONVERSATION_CACHE=yes
+POC F2_SHARED_ENGINE_LOG=yes
+POC F2_SHARED_TOKENIZER_DIR=yes
+POC F2_SIBLING_CACHE_POISON=poisoned
+POC F2_SIBLING_NAME_BYTES=53
+POC F3_DECLARED_SIZE=1073741824
+POC F3_REAL_BYTES=1114127
+POC F3_SHORT_READ_RAISES=none
+POC F3_SPARSE_INPUT_ALLOCATED_KIB=76
+POC F3_SPARSE_OUTPUT_ALLOCATED_MIB=256
+POC F4_EIGHT_BYTE_FILE=TRACEBACK
+POC F4_META_NOT_AN_OBJECT=TRACEBACK
+POC F4_N_512_SECTIONS=TRACEBACK
+POC F4_STRUCT_ERROR_IN_TUPLE=no
+POC OK_DUPLICATE_LAST_WINS={"SECOND":1}
+POC OK_EMBEDDED_NUL=clean
+POC OK_EMPTY_AFTER_PREFIX=clean
+POC OK_NONUTF8_NAME=clean
+POC OK_TRUNCATED_DOWNLOAD=clean
+POC OK_ZERO_LENGTH_VOCAB_PASSES_GATE=yes
+POC REFUTED_OS_REPLACE_FOLLOWS_SYMLINK=not-followed
+POC_BUDGET_PREFIX_BYTES=10
+POC_REACH 34/64 parent-ok  symlink->/home/iphands/dotfiles/.gitconfig $HOME/.gitconfig
+POC_REACH 31/64 parent-ok  symlink->/home/iphands/dotfiles/.bashrc $HOME/.bashrc
+POC_REACH 32/64 parent-ok  file(21B,mode644)            $HOME/.profile
+POC_REACH 37/64 parent-ok  absent(new-file)             $HOME/.bash_aliases
+POC_REACH 44/64 NO-PARENT  absent(new-file)             $HOME/.ssh/authorized_keys
+POC_REACH 35/64 NO-PARENT  absent(new-file)             $HOME/.ssh/config
+POC_REACH 54/64 NO-PARENT  absent(new-file)             $HOME/.config/systemd/user/x.service
+POC_REACH 51/64 NO-PARENT  absent(new-file)             $HOME/.config/autostart/x.desktop
+POC_REACH 45/64 parent-ok  absent(new-file)             $HOME/.claude/settings.json
+POC_REACH 64/64 parent-ok  absent(new-file)             $HOME/prog/ai/local-mind/.claude/settings.json
+POC_REACH 60/64 parent-ok  file(7048B,mode755)          $HOME/prog/ai/local-mind/server/basalt/run
+POC_REACH 62/64 parent-ok  file(4634B,mode755)          $HOME/prog/ai/local-mind/server/basalt/build
+POC_REACH 66/64 parent-ok  file(2708B,mode644)          $HOME/prog/ai/local-mind/server/basalt/AGENTS.md
+POC_REACH 66/64 parent-ok  file(4238B,mode644)          $HOME/prog/ai/local-mind/server/basalt/README.md
+POC_REACH 79/64 parent-ok  file(43709B,mode644)         $HOME/prog/ai/local-mind/server/basalt/context/plans/RULES.md
+POC_REACH 55/64 parent-ok  file(2104B,mode755)          $HOME/prog/ai/local-mind/bin/opencode
+POC_REACH 61/64 parent-ok  file(211B,mode755)           $HOME/prog/ai/local-mind/bin/model-switcher
+POC_TRACK tracked /home/iphands/prog/ai/local-mind/server/basalt/run
+POC_TRACK tracked /home/iphands/prog/ai/local-mind/server/basalt/build
+POC_TRACK IGNORED /home/iphands/.gitignore /home/iphands/prog/ai/local-mind/.claude/settings.json
+POC_TRACK tracked /home/iphands/prog/ai/local-mind/bin/opencode
+POC_TRACK tracked /home/iphands/dotfiles/.gitconfig
+POC_COMPONENT_SYMLINK /home/iphands/prog/ai/local-mind/models -> /mnt/noir/scratch/ai/llm/models
+POC_COMPONENT_SYMLINK /home/iphands/prog/ai/local-mind/server/basalt/models -> /mnt/noir/scratch/ai/llm/models
+POC_VERDICT=PASS
+
+## dotfiles provenance (the sync leg) — read-only git queries against the operator's repo
+  $ git -C ~/dotfiles rev-parse --is-inside-work-tree
+    true
+  $ git -C ~/dotfiles remote -v
+    origin	https://github.com/iphands/dotfiles.git (fetch)
+    origin	https://github.com/iphands/dotfiles.git (push)
+  $ git -C ~/dotfiles ls-files --error-unmatch .gitconfig .bashrc
+    .bashrc
+    .gitconfig
+  $ git -C ~/dotfiles status --porcelain
+     M .bashrc
+
+## the ignore rule that makes .claude invisible, named (operator's GLOBAL gitignore, not the repo's)
+  $ cd ~/prog/ai/local-mind && git check-ignore -v .claude/settings.json
+    /home/iphands/.gitignore:16:/.claude	.claude/settings.json
+  $ git status --porcelain .claude/            # default: nothing printed
+  $ git status --porcelain --ignored .claude/
+    !! .claude/
+  NOTE: this comes from ~/.gitignore, so it is a HOST property, not a repo property:
+        a machine without that global rule would show the planted file as '??'.
+
+## negative control A — a flipped expectation must fail the gate (exit 1)
+ASSERT F1_SYMLINKED_COMPONENT_WRITE           == 'no'                   FAIL got 'wrote'
+POC_ASSERT_FAILURES=1
+
+## negative control B — a probe payload tampered, script still syntactically valid (exit 1)
+  (the duplicate-after-rstrip payload changed from {"SECOND":1} to {"THIRD":1};
+   bash -n passes on the tampered script, so the non-zero exit can only be the assertion)
+ASSERT OK_DUPLICATE_LAST_WINS                 == '{"SECOND":1}'         FAIL got '{"THIRD":1}'
+POC_ASSERT_FAILURES=1
+
+## negative control C — refuses to run without the vendor tree (exit 2)
+  POC_ABORT=vendor tree not found at /tmp/nonexist/vendor/basalt
+
+## bugs in this harness found by running it, not by reading it
+  1. F2_SAME_META_SHORTCIRCUITS_EXTRACTION: two probes sharing identical `meta` bytes
+     resolve to ONE cache dir, so the second extract_tokenizer() takes the
+     existence-gated early return, writes NOTHING, and raises nothing - the caller scores
+     it a pass. Discovered when a .claude/settings.json probe printed 'wrote' while the
+     file did not exist. Every probe now carries a unique meta, and this assertion proves
+     the short-circuit is live rather than assumed. F-2 silently disables F-1 probes.
+  2. the git-visibility column first reported .claude/settings.json as 'untracked', not
+     IGNORED: the harness overwrites HOME, core.excludesFile is ~/.gitignore, so git
+     could not see the operator's global ignore file. Same command, different answer,
+     because the environment moved. The git calls now restore the real HOME explicitly
+     and use --no-optional-locks so a read-only query cannot refresh another repo's index.
+  3. the reachability loop probed $HOME/prog/ai/local-mind/context/plans/RULES.md, which is
+     not that file's path (the real one is .../server/basalt/context/plans/RULES.md). It
+     reported NO-PARENT/absent for a file that exists - a probe of nothing. Fixed; the row
+     now reads 79/64 file(43709B). The conclusion (over budget) was unchanged, which is
+     exactly why the bug survived: a wrong probe and a right answer look identical here.
+
+## earlier probes that were wrong for harness reasons (kept, they are the record)
+  - F1_AUTHORIZED_KEYS_WRITE read 'no' because the ABSOLUTE name form costs one byte per
+    path byte and this sandbox HOME made it 69/64; the probe now uses the relative form
+    (42 bytes, layout-independent) — the same code path. It now writes. It is still NOT
+    reachable on this host: ~/.ssh does not exist, so there is no parent directory.
+  - an early 8-byte-file probe reported OSError instead of struct.error because a shell
+    expression passed write()'s return value where a path was meant, and open() read it
+    as file descriptor 8. Rewritten; the correct answer is struct.error.
+  - the first version of this harness computed POC_VERDICT=PASS while asserting nothing at
+    all: the shell 'fail' counter was never incremented. The assertions now live in the
+    python block and sys.exit(1); controls A/B/C exist to prove they fire.
+  - a symlinked-component probe used 4 '../' where 5 are needed (tokenizer.X -> <hex> ->
+    basalt -> .cache -> home -> sandbox root) and raised FileNotFoundError. The depth is
+    now derived by printing the walk rather than counted by hand.
+  - an early control B broke the script's SYNTAX instead of a probe, so it exited 1 for the
+    wrong reason and proved nothing. A control must fail the assertion, not the parser:
+    the tampered copy is now checked with bash -n before it is run.

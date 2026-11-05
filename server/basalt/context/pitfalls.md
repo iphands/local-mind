@@ -291,8 +291,10 @@ from noir, defragment it there first (`btrfs filesystem defragment -f -t 128M <f
 *The count is deliberately not in the heading — it grows, and every earlier cross-reference then goes
 stale. Two already have: `audit/wave0/t1-freeze-and-manifest.txt` cites this § as "Four shell idioms…"
 (that artifact is a stamped transcript of a past run and is **not** edited retroactively — this line is
-the reconciliation), and the follow-up commit grew it to seven. Seventeen entries as of 2026-11-05; items
-10–17 are all from Plan 02 T2, and items 11–13 are the same three traps that produced item 9's family.*
+the reconciliation), and the follow-up commit grew it to seven. Nineteen entries as of 2026-11-05; items
+10–17 are from Plan 02 T2, and items 18–19 are from Plan 02 T3's security harness — both from the same
+week and the same failure family: *the check that reports green because the thing it checks was never
+reached.* Items 11–13 are the same three traps that produced item 9's family.*
 
 ## Problem
 [OBSERVED 2026-11-05] During Plan 02 T1 (freeze `vendor/basalt`, manifest 862 files), its coverage
@@ -577,6 +579,26 @@ came from controls that *failed*:
   transcript from memory; when one states a precondition, verify that precondition against the tree first;
   and when two records of one step disagree, **re-run the step** rather than adjudicate from recall — recall
   is what manufactured the fabricated "before" state in this task's own tracker note.
+- **18. A lookup with an existence-gated early return can silently disable the probes that come after it.**
+  [OBSERVED 2026-11-05] In `t3-model-file-poc.sh`, a probe that plants `~/.claude/settings.json` printed
+  `wrote` while the file did not exist. Two probes whose `meta` bytes are identical resolve to **one**
+  `cache_dir` (the key is the meta digest *as declared in the file* — that is finding F-2), so the second
+  `extract_tokenizer()` takes `if (out / "vocab.json").exists(): return out`, writes **nothing**, raises
+  **nothing**, and the caller scores a pass. The finding under test was switching off its own probes. The
+  fix is structural, not careful: give every probe a unique cache key, and promote the collision to a named
+  assertion (`F2_SAME_META_SHORTCIRCUITS_EXTRACTION=short-circuited`) so the mechanism is *proven live*
+  rather than trusted. Generalise: whenever the code under test caches, assume later probes are no-ops until
+  one assertion says otherwise.
+- **19. A harness that reassigns `HOME` changes what `git` reports, not just where files land.**
+  [OBSERVED 2026-11-05] The same harness overwrites `HOME` so absolute-path writes are sandboxed — correct,
+  and the point of the guard. But `core.excludesFile` is `~/.gitignore`, so with the sandbox `HOME` git
+  cannot see the operator's global ignore file and `git check-ignore` answered **untracked** for
+  `.claude/settings.json`, a path that is genuinely **IGNORED** (`~/.gitignore:16 /.claude`) in the real
+  environment. One command, two answers, because the *environment* moved and only `$HOME` was thought about.
+  Since that column is the tamper-visibility evidence a 🔴 rating leans on: any probe that shells out to a
+  tool with per-user config (`git`, `gh`, `ssh`, package managers) must **pin the config it means to
+  measure** — here, `HOME="$REAL_HOME"` on each git call, plus `--no-optional-locks` so a read-only query
+  cannot refresh the index of somebody else's repo.
 
 ## Sources
 - basalt: `context/audit/manifest/index.md` (the checks, as corrected) and
