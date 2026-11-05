@@ -382,7 +382,9 @@ loosen them. This section belongs to the project; `hands-plan resync` never rewr
 
 - **P1 — One worktree, two writers: the agent keeps the tree clean.** The owner runs the GPU, docker
   and boot steps **in this same worktree**, so an agent's uncommitted files are always at risk of being
-  swept into his commit (done to us on 2026-11-05 by `b308244`; see
+  swept into his commit (done to us on 2026-11-05 by `b308244` — *corrected 2026-11-04 PST: that
+  commit was the host agent session's, not the owner's (`0b1efb6`); the rule holds for any second
+  writer, agent or human*; see
   `context/pitfalls.md` § *A shared worktree has no such thing as "my uncommitted edits are private"*).
   Therefore: (a) an agent stages **explicit paths** the moment a logical unit finishes —
   `git add <paths>`, never `-A`/`-a` — and never ends a turn with `context/` or plan files dirty while

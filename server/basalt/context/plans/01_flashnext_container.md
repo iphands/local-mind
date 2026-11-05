@@ -26,14 +26,16 @@ again mistaken for a regression someone caused.
 | 1b counts | 2026-11-05 | **pass** (`3 b`) | any shell |
 | 1c `versions.env` | 2026-11-05 | **pass** (`env ok`) | any shell |
 | 2 shellcheck | 2026-11-05 | **pass** (`shellcheck ok`, v0.11.0 at `~/.local/bin`) | any shell that has `shellcheck` on `PATH` |
+| 3–6, host agent session | 2026-11-04 18:2x PST (= 2026-11-05 UTC) | **pass** — `preflight ok`, `dry-run ok`, `flags ok (2 engine, 8 server)`, `imports ok (32 serve modules)` (`b308244` body) | the host shell on `cosmo` |
 | 3 build preflight | 2026-11-05 | **BLOCKED here** — `image_for_pin` exit 1: `permission denied … /var/run/docker.sock` | **any shell in the docker group** — true in the owner's host shell on `cosmo`, false in the agent container |
 | 4 `./run` dry run | 2026-11-05 | **BLOCKED here** — same docker refusal, and it fires in `DRY_RUN` too (`run:96` → `refuse_busy`) | as step 3 |
 | 5 flags vs image | 2026-11-04 | **pass** on `cu1343-sm120-dc047a7`; not re-runnable here | as step 3 |
 | 6 server imports | 2026-11-04 | **pass** on `63d25a81f328`; not re-runnable here | as step 3 |
 
 **Gate steps are gated by environment, not by role.** An earlier revision of this table said "owner
-only"; the owner's own commit body for `b308244` is what disproves it — *"Gate steps 1-6 run from the
-host session (shellcheck /usr/local/bin, docker group)"*. He is not privileged, his **shell** is: an
+only"; the commit body of `b308244` is what disproves it — *"Gate steps 1-6 run from the
+host session (shellcheck /usr/local/bin, docker group)"* (that commit was the **host agent
+session's**, not the owner's — corrected 2026-11-04 PST, `0b1efb6`). It is not privileged, its **shell** is: an
 agent session running on the host may run steps 3–6 itself and must not record them as owner-exclusive.
 A session that cannot run a step records it `blocked` with the probe output below; it asks the owner to
 paste only for work that genuinely needs the GPU. Self-identify before claiming anything about this

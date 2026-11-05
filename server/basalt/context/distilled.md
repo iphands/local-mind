@@ -136,7 +136,8 @@ section**, which always stays last. Keep it dense.
   the solo one take 0.37 GiB of VRAM on CUDA0 that the expert cache would otherwise hold`.
 - **Provenance limit on the three bullets above**: they were read from the **owner's running
   daily-driver** on 2026-11-05 (`/metrics` + its `engine.log`), launch provenance unconfirmed — the
-  card held three `--batch 4` boots logged that morning, none `--single`. They corroborate Plan 01's
+  card held three `--batch 4` boots logged that morning (*UTC morning = 2026-11-04 evening PST; the
+  "daily-driver" was Plan 01's T6 test boot 3 — host agent session, 2026-11-04*), none `--single`. They corroborate Plan 01's
   boot 3; they are not a substitute for T6's directed boots, and `--single`'s geometry is still unknown.
 
 ## This host: one sm_120 card, 125 GiB RAM [LIVE 2026-11-04]

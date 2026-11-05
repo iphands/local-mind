@@ -208,6 +208,10 @@ the task `in-progress` with the reason recorded.
 # A shared worktree has no such thing as "my uncommitted edits are private"
 
 ## Problem
+*Correction (host agent session, 2026-11-04 PST): the other writer was the **host agent session**, not
+the owner — `b308244` is its commit (`0b1efb6`, `aec717a`). Read "the host session" for "the owner"
+below; the lesson is unchanged.*
+
 [OBSERVED 2026-11-05] The agent was editing `context/plans/01_flashnext_container.md` and the Plan 01
 tracker while the owner worked in the **same worktree** on the host. He ran a commit; it collected the
 agent's in-flight files with its own. `b308244`, whose subject is *"record memlock unlimited inside the

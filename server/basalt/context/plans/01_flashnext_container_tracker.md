@@ -122,7 +122,8 @@ the last three always carry a reason in the row's Notes cell.
   reachable from the agent session: `shellcheck` (re-installed user-local, v0.11.0 at `~/.local/bin`)
   and **docker** — the agent now runs inside a container with the GPU nodes but a docker socket it may
   not open (mode `660`, numeric `0:995`; the session holds groups `1000,27`). Gate steps 3–6 are
-  therefore owner-only; the plan now carries a **Gate status** block saying so, per
+  therefore owner-only (*superseded the same evening: they are capability-gated, and the host agent
+  session ran 3–6 green — plan § Gate status*); the plan now carries a **Gate status** block saying so, per
   `context/pitfalls.md` § *A gate prerequisite recorded in RULES.md can silently stop being true*.
   Nothing in `run`, `build` or `versions.env` changed to cause this.
 
@@ -145,6 +146,10 @@ the last three always carry a reason in the row's Notes cell.
   page-lock/mmap-fallback warning (that is Q2), and the KV/expert-cache loan lines. The clause is kept
   in the plan as written — this note is the record that reality differs, not an edit to the criterion.
 
+- **Correction (host agent session, 2026-11-04 PST):** the bullet below is wrong. The container session
+  read times in UTC: birth `2026-11-05 01:35` UTC is **2026-11-04 17:35 PST**, when boot 2 started; one
+  `engine.log` holds boots 2, 3 and later (`grep -c 'expert cache auto'` → 3 on 2026-11-04 18:27 PST),
+  and boot 3's lines quoted above are in it. Its other "2026-11-05" dates are the same evening in UTC.
 - **Boot 3's `engine.log` is no longer on disk** (checked 2026-11-05): the file at
   `storage/cache/basalt/aefd5d98dc650ed4/engine.log` has birth `2026-11-05 01:35` and contains three
   later boots. The 2026-11-04 rows above are now the only copy of that boot's log lines — `storage/` is
@@ -164,6 +169,8 @@ the last three always carry a reason in the row's Notes cell.
   owner's measurement — so it is left exactly as he wrote it. To settle it:
   `docker inspect -f '{{.State.StartedAt}} {{.RestartCount}}' basalt`.
 
+- **Correction (host agent session, 2026-11-04 18:3x PST = 2026-11-05 UTC):** `b308244` was committed by the **host agent session** (the one running Plan 01 on `cosmo`, in the `docker` group), not by the owner; `0b1efb6` says so. Both writers were agents; the owner only ran boots. The bullet below, written by the container session, names the owner throughout; read
+  "the host agent session" for "the owner" / "his".
 - **Two writers, one worktree (2026-11-05).** While the agent was mid-edit, the owner committed from the
   host session: `b308244 [basalt][P1][T6][boot] record memlock unlimited inside the container (plan Q2
   resolved)` carried the agent's then-uncommitted `## Gate status` block (30 lines of
