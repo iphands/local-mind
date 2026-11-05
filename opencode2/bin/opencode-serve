@@ -1,6 +1,8 @@
 #!/bin/bash
 # ~/bin/opencode-serve inside the ocli2 container: the `opencode serve` that ~/bin/opencode joins.
 #
+# A bare `opencode-serve` runs `start`. `status` is the read-only verb -- use it to check.
+#
 #   OPENCODE_SERVE_HOST / OPENCODE_SERVE_PORT   bind address and port (default 0.0.0.0 / 8080)
 #   OPENCODE_PASSWORD                           reused if set, else a random one is generated
 #
@@ -30,6 +32,23 @@ pids() {
 
 up() { curl -s -m 2 -o /dev/null "$URL/api/info"; }
 
+# A zombie counts as dead, and here it usually is one: PID 1 of this container is a login
+# shell, so the nohup'd serve reparents to it and is never reaped. Plain `kill -0` would
+# call such a serve alive forever. A pid with no readable State is gone, too, so the state
+# lookup fails toward dead rather than printing a false "failed to stop".
+# Call this only in conditions, to stay out of set -e.
+alive() {
+  kill -0 "$1" 2>/dev/null || return 1
+  local state
+  state=$(awk '/^State:/ {print $2}' "/proc/$1/status" 2>/dev/null) || return 1
+  [ -n "$state" ] && [ "$state" != Z ]
+}
+
+usage() {
+  echo "usage: ${0##*/} [start|stop|restart|status|logs [n]|help]   (no verb = start)"
+  echo "  env: OPENCODE_SERVE_HOST (0.0.0.0)  OPENCODE_SERVE_PORT (8080)  OPENCODE_PASSWORD"
+}
+
 # Pick up the password from a serve that is already running (its own environment wins over a
 # stale one in this shell); leaves OPENCODE_PASSWORD alone when nothing is running
 ensure_password() {
@@ -44,11 +63,19 @@ ensure_password() {
   return 0
 }
 
-case "${1:-status}" in
+case "${1:-start}" in
   start)
+    # ours already running is an idempotent success; someone else holding $URL is not, and
+    # reporting it as a start would leave `oc-pair` looking for a password we never set
     running=$(pids | head -1)
-    if [ -n "$running" ] || up; then
-      echo "already serving on $URL (pid ${running:-started elsewhere}); use stop or restart"
+    if [ -n "$running" ]; then
+      echo "already serving on $URL (pid $running, bind $HOST:$PORT) -- nothing to do"
+      echo "use stop or restart"
+      exit 0
+    fi
+    if up; then
+      echo "nothing of ours on $URL, but something else answers it -- not starting ours" >&2
+      echo "  move ours instead: OPENCODE_SERVE_PORT=$((PORT + 1)) ${0##*/} start" >&2
       exit 1
     fi
 
@@ -60,6 +87,8 @@ case "${1:-status}" in
     pid=$!
     echo "$pid" >"$PIDFILE"
 
+    # the wait below takes up to 10s; say so, or a slow bind looks like a stuck script
+    echo "starting serve on $URL ..."
     for _ in $(seq 20); do
       if up; then break; fi
       sleep 0.5
@@ -67,7 +96,10 @@ case "${1:-status}" in
     if ! up; then
       echo "failed to come up on $URL; last lines of $LOG:"
       tail -20 "$LOG"
+      # otherwise a serve that binds late keeps the port with no pidfile behind it
+      kill "$pid" 2>/dev/null || true
       rm -f "$PIDFILE"
+      echo "killed $pid, $URL released"
       exit 1
     fi
 
@@ -78,16 +110,39 @@ case "${1:-status}" in
   stop)
     running=$(pids | head -1)
     if [ -z "$running" ]; then
-      echo "not serving on $URL"
+      if up; then
+        echo "nothing of ours on $URL, but something else answers it -- left running" >&2
+        echo "  ours lives elsewhere: OPENCODE_SERVE_PORT=$((PORT + 1)) ${0##*/} start" >&2
+        exit 0
+      fi
+      echo "already stopped on $URL -- nothing to do"
       rm -f "$PIDFILE"
       exit 0
     fi
     kill "$running" 2>/dev/null || true
     for _ in $(seq 20); do
-      kill -0 "$running" 2>/dev/null || break
+      alive "$running" || break
       sleep 0.5
     done
-    kill -0 "$running" 2>/dev/null && kill -9 "$running" 2>/dev/null || true
+    alive "$running" && kill -9 "$running" 2>/dev/null || true
+    # restart's last command is `start`, which now reports already-serving as success: only
+    # here can we tell whether the old serve is really gone, so `restart` cannot claim a
+    # password rotation that never happened. Give SIGKILL a moment to land rather than
+    # asking kill -0 the instant after sending it.
+    for _ in $(seq 10); do
+      alive "$running" || break
+      sleep 0.2
+    done
+    if alive "$running"; then
+      echo "failed to stop $running (still alive)" >&2
+      exit 1
+    fi
+    # a just-killed serve can hold the socket for a moment; if we return while it still
+    # answers, `start` reads it as a stranger and advises a pointless port bump
+    for _ in $(seq 10); do
+      up || break
+      sleep 0.2
+    done
     rm -f "$PIDFILE"
     echo "stopped $running"
     ;;
@@ -115,8 +170,12 @@ case "${1:-status}" in
     fi
     ;;
 
+  help|-h|--help)
+    usage
+    ;;
+
   *)
-    echo "usage: ${0##*/} [start|stop|restart|status|logs [n]]"
+    usage >&2
     exit 2
     ;;
 esac
