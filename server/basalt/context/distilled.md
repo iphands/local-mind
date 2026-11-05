@@ -60,6 +60,18 @@ section**, which always stays last. Keep it dense.
 - Experts that do not fit in VRAM live in system RAM (optionally a second Blackwell GPU as a peer
   tier). `--gpu auto` uses every visible Blackwell GPU (`docs/building.md`).
 
+## Basalt loads weights with `O_DIRECT`, and there is no switch [SOURCE][LIVE 2026-11-04]
+
+- `include/basalt/core/direct_upload.hpp:1-6` at `dc047a77`: a load phase copies file ranges to VRAM
+  through block-aligned `O_DIRECT` reads into pinned staging buffers (falls back to buffered reads
+  only when the filesystem refuses `O_DIRECT`; NFS accepts it). `src/platform/direct_file.cpp:384`
+  opens with `O_RDONLY | O_DIRECT`. No CLI flag or env var turns it off (`getenv` in `src/`:
+  `CUDA_VISIBLE_DEVICES`, `CUDA_MODULE_LOADING` only).
+- Live: boot 2 of the DQ6_K pack from `/mnt/noir` (NFS 4.2/RDMA) showed 6 engine threads in
+  `nfs_file_direct_read` and a load of ~5–10 MB/s. Buffered `dd` of the same file measured 28.9 MB/s
+  during the boot, so the NFS link was slow too that evening (not separated — Plan 01 tracker).
+- Means: expect basalt boots from NFS to be slow; local NVMe is the layout upstream targets.
+
 ## The built image: `iphands/basalt-blackwell:cu1343-sm120-dc047a7` [LIVE 2026-11-04]
 
 - Owner build (Plan 01 T4): 3.42 GB, `ai.basalt.ref=dc047a77…`; Basalt's compile is 507 ninja steps

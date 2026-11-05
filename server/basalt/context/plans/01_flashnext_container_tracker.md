@@ -65,9 +65,18 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-11-04 | owner boot 1: `./run` (default) on `27770926a3f6` | died after `[server] legend`: `serve/engine/modelfile.py:14` `from model_file import ModelFile` → `ModuleNotFoundError: No module named 'model_file'`; nothing loaded | 1 | — |
 | 2026-11-04 | gate step 6 draft on `27770926a3f6` | `FAIL(imports) serve.engine.modelfile: ModuleNotFoundError: No module named 'model_file'` (the only failure) | 1 | reproduces boot 1 without a GPU |
 | 2026-11-04 | owner rebuild with `tools/` → `63d25a81f328` (same tag); gate steps 1–6 | build stage `CACHED`, pip 5.4 s; `3 b`, `env ok`, `shellcheck ok`, `preflight ok`, `dry-run ok`, `flags ok (2 engine, 8 server)`, `imports ok (32 serve modules)` | 1 | — |
+| 2026-11-04 | owner boot 2: `./run` (default) on `63d25a81f328`, start lines | `engine ctx=262144 kv=int8 batch=4 (from cli)`; `sampling temp=1.0 top_p=0.95 top_k=20 min_p=0.0`; `vision mode=dynamic gpu=0 (RTX PRO 6000 …) load=per-image`; `hosts cosmo.lan,cosmo`; `warning: this CPU has no AVX-512: the expert kernels run on AVX-2 …`; then `loading weights into cuda0 … /67.8 GiB  10 MB/s` → `6 MB/s` | 1 | in progress |
+| 2026-11-04 | host view of boot 2: `ps -L` on the engine, `/proc/<pid>/io` over 5 s, `vmstat` | 6 threads in `nfs_file_direct_read` (D state), main thread `futex_wait`; rchar +26 MiB / 5 s; host 99–100 % idle | 1 | — |
+| 2026-11-04 | `dd` from the pack during boot 2: `iflag=direct bs=16M count=16`, `iflag=direct bs=1M count=64`, buffered `bs=16M count=16` (uncached offsets) | 17.4 MB/s, 4.1 MB/s, 28.9 MB/s | 1 each | taken while the engine's 6 direct readers ran — NFS link vs read pattern not separated |
 | 2026-11-04 | T1 guards: `DOCKER='sudo docker'`, `DOCKER=/usr/bin/nonexistent-docker` sourcing `lib/common.sh` | both refuse, rc=1, with the fix line | 1 each | — |
 
 ## Notes / Deviations
+
+- **Boot 2 loads at ~5–10 MB/s from NFS** (plan Q9 assumed vLLM-like ~57 s loads). Basalt uploads
+  weights with `O_DIRECT` (`include/basalt/core/direct_upload.hpp`), no switch or env var, built for
+  local NVMe; but buffered NFS reads were also only 28.9 MB/s during the boot. The owner chose to let
+  it keep loading (2026-11-04); options recorded: measure NFS with nothing running, or copy the pack
+  to local NVMe (`/home`: 301 GB free).
 
 - **T2 premise wrong** (plan *Why a source-built two-stage image* and T2: "the runtime stage must hold
   `bin/`, `serve/` and `data/`"): `serve/` also needs `tools/` — `serve/engine/modelfile.py` puts

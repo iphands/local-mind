@@ -424,6 +424,9 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
 9. **Risk: NFS load time.** 131.7 GB over NFS/RDMA at every boot (vLLM's FP4-Local: 57 s weight load
    on 40 GbE, `../vllmcustom/context/distilled.md`). *Mitigation*: none needed for correctness;
    T6 records it; a local-disk copy is a Follow-up if it hurts.
+   **It hurts (T6, 2026-11-04):** boot 2 loads at ~5–10 MB/s — Basalt reads weights with `O_DIRECT`
+   (no switch), and buffered NFS reads measured 28.9 MB/s during the boot. Owner let it run; see the
+   tracker Notes.
 10. **Question: `pip install` at image build needs network.** *How we'll settle it*: T2 keeps
     upstream's pinned `requirements.txt`; the owner's build has network (ninfer's did).
 
