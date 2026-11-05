@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 14% complete (1/7 tasks)
+- Status: 29% complete (2/7 tasks)
 - Start date: 2026-11-04
 - Plan: `context/plans/01_flashnext_container.md`
 - Evidence: the table below; build logs in `captures/build_<date>_<sha7>.log` (gitignored); boot
@@ -27,14 +27,14 @@
 - Does `bin/basalt --help` run without a GPU? (plan Q4 — T4)
 - Does the RAM tier page-lock inside the container with `--ulimit memlock=-1`? (plan Q2 — T6)
 - VRAM/RAM split and KV size for 4×262144 vs 1×262144 on this card (plan Q1, Q3 — T6)
-- Runtime image's Python version (Key Facts — T2)
+- ~~Runtime image's Python version (Key Facts — T2)~~ RESOLVED (T2): the runtime base has no python3; apt candidate `python3`/`python3-venv` 3.12.3-0ubuntu2.1 (Evidence).
 
 ## Progress
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 1 | T1: Pins, shared guards, project skeleton | `versions.env`, `lib/common.sh`, `.gitignore`, `models`, `README.md` | done | Digests unchanged since ../ninfer pinned them; sudo / missing-docker guards refuse (rc=1); gate `1 b`, `env ok`. |
-| 2 | T2: Dockerfile + `./build` | `Dockerfile`, `Dockerfile.dockerignore`, `build` | pending | |
+| 2 | T2: Dockerfile + `./build` | `Dockerfile`, `Dockerfile.dockerignore`, `build` | done | Preflight ok at `dc047a77`; dirty (untracked) checkout refused; context probe: 11.75 MB, no `.git`; no image built. Gate step 3 added. |
 | 3 | T3: `./run` + its dry-run gate step | `run`, `README.md`, RULES gate | pending | |
 | 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | pending | owner runs `./build` |
 | 5 | T5: Check `./run`'s flags against the built image | RULES gate step 5 | pending | needs T4 |
@@ -49,6 +49,11 @@ the last three always carry a reason in the row's Notes cell.
 | Date | What ran (command / build / input) | Result | Runs | Spread / notes |
 |------|------------------------------------|--------|------|----------------|
 | 2026-11-04 | `docker buildx imagetools inspect` on both `nvidia/cuda:13.4.3-{devel,runtime}-ubuntu24.04` tags | `sha256:5626a7d0…` / `sha256:f58bd7a0…` — identical to `../ninfer/versions.env` (2026-10-27) | 1 | — |
+| 2026-11-04 | throwaway `docker run --rm <runtime digest>`: `command -v python3`; `apt-cache policy python3 python3-venv` | no python3 in base; candidates 3.12.3-0ubuntu2.1 | 1 | — |
+| 2026-11-04 | throwaway `docker run --rm <devel digest>`: `apt-cache policy cmake g++ ninja-build`; `nvcc --version` | cmake 3.28.3-1build7, g++ 13.2.0-7ubuntu1, ninja 1.11.1-2; nvcc 13.4.92 | 1 | — |
+| 2026-11-04 | `PREFLIGHT_ONLY=1 ./build` (fresh clone) | `vendor/basalt` at `dc047a77…`, both bases resolve, `Check complete, no warnings found.`, `preflight ok`, rc=0 | 2 | identical |
+| 2026-11-04 | `touch vendor/basalt/.dirty-probe && PREFLIGHT_ONLY=1 ./build` | `## vendor/basalt is dirty … ?? .dirty-probe`, rc=1; probe file removed after | 1 | — |
+| 2026-11-04 | context probe: scratchpad `Probe.Dockerfile` + a copy of `Dockerfile.dockerignore`, context `vendor/basalt`, untagged | `transferring context: 11.75MB`; `/c` lists no `.git`, 13M | 1 | — |
 | 2026-11-04 | T1 guards: `DOCKER='sudo docker'`, `DOCKER=/usr/bin/nonexistent-docker` sourcing `lib/common.sh` | both refuse, rc=1, with the fix line | 1 each | — |
 
 ## Notes / Deviations

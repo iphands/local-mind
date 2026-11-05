@@ -30,7 +30,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 01** — Basalt Flash-Next container: in progress, 1/7 tasks done; next T2 (Dockerfile + `./build`).
+- **Plan 01** — Basalt Flash-Next container: in progress, 2/7 tasks done; next T3 (`./run` + its dry-run gate step).
 
 ## Plans <!-- hp:plans -->
 

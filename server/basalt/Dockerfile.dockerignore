@@ -1,0 +1,14 @@
+# BuildKit reads <Dockerfile>.dockerignore beside the Dockerfile; the context is vendor/basalt,
+# which has no .dockerignore of its own. Mirrors upstream's .gitignore (build output, local packs).
+.git
+build*/
+bin/
+pack/
+packs/
+mtp/
+models/
+logs/
+.venv/
+.ccache/
+**/__pycache__/
+**/*.pyc

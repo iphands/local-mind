@@ -60,6 +60,16 @@ section**, which always stays last. Keep it dense.
 - Experts that do not fit in VRAM live in system RAM (optionally a second Blackwell GPU as a peer
   tier). `--gpu auto` uses every visible Blackwell GPU (`docs/building.md`).
 
+## Image build inputs: BuildKit honors `Dockerfile.dockerignore`; the runtime base has no Python [LIVE 2026-11-04]
+
+- The build context is `vendor/basalt`, which has no `.dockerignore`. BuildKit reads
+  `<Dockerfile>.dockerignore` beside the `-f` Dockerfile: with ours, the context is 11.75 MB and
+  holds no `.git` (scratchpad probe build, Plan 01 T2 Evidence).
+- `nvidia/cuda:13.4.3-runtime-ubuntu24.04@sha256:f58bd7a0…` has no `python3`; apt's candidate is
+  3.12.3 (`python3`, `python3-venv`). The devel base: cmake 3.28.3, g++ 13.2.0, ninja 1.11.1,
+  nvcc 13.4.92 — all above Basalt's minimums.
+- `PREFLIGHT_ONLY=1 ./build` → `preflight ok` at `dc047a77`; `docker build --check` sends no context.
+
 ## This host: one sm_120 card, 125 GiB RAM [LIVE 2026-11-04]
 
 - `nvidia-smi`: GPU 0 RTX PRO 6000 Blackwell Workstation, 97,887 MiB, cc 12.0; GPU 1 RTX 4060,

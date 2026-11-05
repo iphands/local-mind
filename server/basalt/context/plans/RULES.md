@@ -131,7 +131,7 @@ where an applicable step was skipped.
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and launchers have no extension. Pass: no `FAIL` line, the counts
 match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env` exists).
-**Expected counts: `1 b`** (Plan 01 T1: `lib/common.sh`). Bump this paragraph when a file is
+**Expected counts: `2 b`** (Plan 01 T1: `lib/common.sh`; T2: `build`). Bump this paragraph when a file is
 added or removed on purpose — a count that silently drops is the failure this step exists for.
 
 ```bash
@@ -174,13 +174,22 @@ git ls-files -z . | while IFS= read -r -d '' f; do
 done | xargs -0 -r shellcheck -x && echo 'shellcheck ok'
 ```
 
-**Blind spots.** Steps 1–2 never run docker, never build, never boot. They cannot see a flag
-Basalt does not accept, a container that cannot reach the GPU or lock memory, a pack the engine
-refuses, or a port that is already taken. **Keep the gate current (item 5):** the task that adds
-`./run` adds a dry-run step (print the `docker run` + `basalt serve` command without starting
-anything, checked mechanically); the task that adds `./build` adds its preflight step
-(`PREFLIGHT_ONLY=1`, pins checked, nothing built). A step that needs the image checks the flags
-`./run` emits against the built `bin/basalt serve --help`.
+**3. Build preflight** (Plan 01 T2). Manages `vendor/basalt` (clones it on first use — network;
+refuses a dirty checkout, untracked files included; checks out `BASALT_SHA` detached), resolves
+both base digests, runs `docker build --check` (lint; the context is not sent, nothing is built)
+and prints the build command. Pass: exit 0 and the last line `preflight ok`. Missing docker or
+network is **fail**, not skip.
+
+```bash
+PREFLIGHT_ONLY=1 ./build 2>&1 | tail -1    # → preflight ok
+```
+
+**Blind spots.** Steps 1–3 never build and never boot. They cannot see a compile error in Basalt,
+a flag Basalt does not accept, a container that cannot reach the GPU or lock memory, a pack the
+engine refuses, or a port that is already taken. **Keep the gate current (item 5):** the task that
+adds `./run` adds a dry-run step (print the `docker run` + `basalt serve` command without starting
+anything, checked mechanically). A step that needs the image checks the flags `./run` emits
+against the built `bin/basalt --help` and `serve.server --help`.
 
 **Build actually loaded.** Behavior is verified on a boot the owner runs (SERIES *Standing
 Constraints*): the boot log must name the Basalt commit and the pack `./run` was asked for —
