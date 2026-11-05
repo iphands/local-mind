@@ -420,7 +420,7 @@ need() { local where=$1 out=$2 w; shift 2; for w; do [[ $out == *"$w"* ]] || ech
 both=('-p 0.0.0.0:8700:8700' '--gpus device=0' '--ulimit memlock=-1' ':/models:ro' '--host 0.0.0.0'
       '--port 8700' '--alias cosmo-6000' '--allowed-host cosmo.lan' '--max-context 262144' '--kv int8'
       '--vision dynamic' 'serve /models/Qwen3.8-FN-NVFP4-DQ6_K.basalt' '(DRY_RUN) nothing started')
-need default "$d" "${both[@]}" '--parallel 4' '--slot-full-context'
+need default "$d" "${both[@]}" '--parallel 3' '--slot-full-context'
 need single "$s" "${both[@]}" '--parallel 1'
 [[ $s == *--slot-full-context* ]] && echo 'FAIL(dry:single) has --slot-full-context'
 n=$(DRY_RUN=1 ./run /tmp/x.ninfer 2>&1) && echo 'FAIL(dry:ninfer) exit 0'

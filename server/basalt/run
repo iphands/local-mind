@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Serve a Basalt pack on :8700: ./run [--single] [PACK.basalt]
 #
-#   ./run                 4 slots, each with the whole 262144-token context (--slot-full-context)
+#   ./run                 3 slots, each with the whole 262144-token context (--slot-full-context)
 #   ./run --single        1 slot, 262144 tokens (Basalt's single-stream path)
 #   DRY_RUN=1 ./run …     every check, then print the docker command; starts and creates nothing
 #
 # Knobs (env)        default                                    Basalt setting
 #   PACK / $1        models.local/Qwen3.8-FN-NVFP4-DQ6_K.basalt   serve <pack> (its dir mounted :ro at /models)
 #                    (local NVMe; the NFS copy, models/vllm/jesdga/…, loads at ~5–10 MB/s: O_DIRECT)
-#   PARALLEL         4; 1 with --single                         --parallel (1..8)
+#   PARALLEL         3; 1 with --single                         --parallel (1..8)
 #   SLOT_FULL_CONTEXT 1 (only when PARALLEL > 1)                --slot-full-context (each slot gets MAX_CONTEXT)
 #   MAX_CONTEXT      262144                                     --max-context
 #   KV               int8                                       --kv   (fp16 | int8 | q4_0 | k8v4)

@@ -42,7 +42,7 @@ Python server from the source directory compiled into the binary.
 ## Run
 
 ```bash
-./run                      # 4 slots, each with the full 262144-token context
+./run                      # 3 slots, each with the full 262144-token context
 ./run --single             # 1 slot, 262144 tokens
 DRY_RUN=1 ./run            # every check, print the docker command, start nothing
 ./run --help               # the knob table
@@ -55,7 +55,7 @@ name the model `cosmo-6000`; any other name gets a 404. Stop the server with Ctr
 | Knob (env) | Default | Basalt setting |
 |---|---|---|
 | `PACK` / first argument | `models.local/Qwen3.8-FN-NVFP4-DQ6_K.basalt` | `serve <pack>`; its directory is mounted read-only at `/models` |
-| `PARALLEL` | `4`; `1` with `--single` | `--parallel` (1..8) |
+| `PARALLEL` | `3`; `1` with `--single` | `--parallel` (1..8) |
 | `SLOT_FULL_CONTEXT` | `1` (only when `PARALLEL` > 1) | `--slot-full-context`: every slot gets `MAX_CONTEXT`, at N× the KV cache |
 | `MAX_CONTEXT` | `262144` | `--max-context` |
 | `KV` | `int8` | `--kv` (`fp16`, `int8`, `q4_0`, `k8v4`) |
