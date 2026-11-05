@@ -53,8 +53,12 @@ require `p` itself to exist. So the class of writable targets is *every existing
 new file in any existing directory**, and the new-file half is the quieter one: nothing is
 overwritten, so nothing looks damaged.
 
-Measured against this host by the harness (`POC_REACH` lines; three columns because byte count,
-reachability and visibility are three different facts):
+Measured against this host by the harness (`POC_REACH` lines; four columns because byte count,
+parentage, current state and git visibility are four different facts). **Read the budget column as
+*this sink's* budget, not the format's**: the 10-byte prefix is not a convention I chose, it is forced
+by `modelfile.py:88`, which selects sections with `n.startswith("tokenizer/")`. So `66/64` means
+"unreachable through `extract_tokenizer`", and says nothing about a future consumer with a shorter
+prefix. Say it that way or the column reads as "long path ⇒ safe", which is the wrong lesson.
 
 | target | name bytes | parent | state | git |
 |---|---|---|---|---|
@@ -80,12 +84,20 @@ has one. A developer box that does have one is the normal case, so the leg is re
 unavailable here. Say it out loud: it is the reason the severity argument below is *not* built on
 `authorized_keys`.
 
-**`open(p,"wb")` truncates the existing inode** — it neither replaces it nor changes its mode
-(`F1_TRUNCATE_PRESERVES_MODE_AND_INODE=yes`, same inode, still `0755`, still `os.access(X_OK)`).
-That single fact is what turns a file write into code execution on `run`, `build` and
-`bin/opencode`: the overwrite leaves them executable and interpreted, so the next invocation runs
-the attacker's script. Contrast the refuted `os.replace` leg below, which *does* replace the
-inode.
+**`open(p,"wb")` truncates the existing inode** — it neither replaces it nor changes its mode. That
+single fact is what turns a file write into code execution on `run`, `build` and `bin/opencode`: the
+overwrite leaves them executable and interpreted, so the next invocation runs the attacker's script.
+It is **specific to this sink**: `write_section()` in the same module is `mkstemp` + `os.replace`
+(`modelfile.py:65,76`), which *replaces* the inode, so the vision path does not preserve a pre-existing
+mode. Do not read this paragraph as "every write in `modelfile.py` preserves mode".
+
+This one is now executed end to end rather than composed. `F1_REAL_PATH_OVERWRITES_MODE755_IN_PLACE=preserved`
+drives the **real `extract_tokenizer()`** at a pre-existing `#!/usr/bin/env bash` file at mode `0755`
+and then re-reads `st_ino`, full `st_mode` and `os.access(X_OK)` after the write. An earlier version of
+this page leaned on a `bare open()` analogue plus a separate reach probe — each executed, the pair
+composed — which is a weaker claim than the sentence made, and the fix was to add the probe rather than
+hedge the sentence (`F1_TRUNCATE_PRESERVES_MODE_AND_INODE` is still there, as the isolated version of
+the same fact). Contrast the refuted `os.replace` leg below, which *does* replace the inode.
 
 **Symlinks are followed at the final component *and* through path components.** Both measured.
 A dotfile here that is symlinked into `~/dotfiles` has its **target** written, so a hostile
@@ -177,6 +189,12 @@ trusted:
 - With `--conversation-cache-disk-mib` above zero, two colliding packs share one
   `--conversation-cache-dir` (`F2_SHARED_CONVERSATION_CACHE=yes`) and one `engine.log`
   (`F2_SHARED_ENGINE_LOG=yes`) — cross-model state sharing, not just bad tokenizer files.
+  **That leg is opt-in, and the pack cannot opt in for you**: the default is `0 (off)`
+  (`docs/configuration/index.md:220`, and `conversation_cache_disk_mib = 0` in the engine's own
+  `include/basalt/program/options.hpp:221`), `with_conversation_dir` only appends the directory when
+  the flag is already present and positive (`modelfile.py:37-39`), and engine words arrive from
+  `--config` or the command line (`server.py:95,118`), never from the `.basalt` file. `engine.log`
+  is unconditional, so that half of the leg is live on every boot. Neither `run` nor `build` sets it.
 
 **Why it isn't 🔴.** It is an integrity chain, not a primitive: the template is rendered by
 `ImmutableSandboxedEnvironment` (`serve/frontend.py:19,37`), so there is no expression-level

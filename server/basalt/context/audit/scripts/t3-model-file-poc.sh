@@ -28,12 +28,19 @@ BASE=${POC_BASE:-$(mktemp -d "${TMPDIR:-/tmp}/basalt-poc.XXXXXX")}
 export HOME="$BASE/home"
 mkdir -p "$HOME/.ssh"          # a realistic dev box has ~/.ssh; write_bytes cannot mkdir
 export PYTHONPATH="$VENDOR"
+# MANDATORY. This harness runs with cwd inside the audited tree and imports its modules, and CPython
+# writes __pycache__/*.pyc next to the source it imported. That contaminated the vendored tree with
+# 13 bytecode files during this audit, and `git diff dc047a7` did NOT see them because server/basalt/
+# .gitignore line 1 is /vendor/ — the freeze check is blind to anything untracked in there. The census
+# universe sentinel caught it (875 files against a pinned 862). Never import the audited tree without
+# this set.
+export PYTHONDONTWRITEBYTECODE=1
 cd "$VENDOR" || exit 2
 
 
 python3 - "$BASE" <<'PY'
 """Every probe. Prints NAME=value; raises nothing that the caller cannot see."""
-import sys, os, json, hashlib, struct, shutil
+import sys, os, json, hashlib, struct, shutil, stat, inspect
 from pathlib import Path
 
 BASE = sys.argv[1]
@@ -151,6 +158,32 @@ M.extract_tokenizer(ModelFile(p))
 V["F1_SYMLINKED_COMPONENT_WRITE"] = (
     "wrote" if (store / "evil.pth").exists()
     and (store / "evil.pth").read_bytes() == b"PLANTED IN THE MODEL STORE\n" else "no")
+
+# THE END-TO-END LEG. Every probe above either proves a JOIN/TRAVERSAL shape or proves truncate
+# semantics with a bare open(); neither is the shipped call. This one drives the real
+# extract_tokenizer() at a PRE-EXISTING, mode-0755, shebang-bearing file and then re-reads mode and
+# inode, which is what the "`run` survives the overwrite executable" claim actually needs. A fix that
+# switched the sink to mkstemp + os.replace would flip the inode and turn this red.
+exe = Path(BASE) / "launcher"
+exe.write_bytes(b"#!/usr/bin/env bash\necho ORIGINAL\n"); exe.chmod(0o755)
+before = (exe.stat().st_mode, exe.stat().st_ino)
+rel = "../../../../../launcher"                       # 5 ups from tokenizer.X -> BASE
+V["F1_EXISTING_EXEC_NAME_BYTES"] = len("tokenizer/" + rel)
+p = craft(f"{BASE}/exec.basalt", [(b"meta", b'{"name":"EXEC"}'), (b"tokenizer/vocab.json", b"{}"),
+                                  (b"tokenizer/" + rel.encode(), b"#!/usr/bin/env bash\necho PLANTED\n")])
+M.extract_tokenizer(ModelFile(p))
+after = (exe.stat().st_mode, exe.stat().st_ino)
+V["F1_REAL_PATH_OVERWRITES_MODE755_IN_PLACE"] = (
+    "preserved" if before[0] == after[0] and before[1] == after[1]
+    and exe.read_bytes() == b"#!/usr/bin/env bash\necho PLANTED\n"
+    and os.access(exe, os.X_OK) and stat.S_IMODE(after[0]) == 0o755 else "no")
+
+# The other sink in the same file behaves DIFFERENTLY, and the difference matters: write_section()
+# uses mkstemp + os.replace, so it REPLACES the inode and a pre-existing mode does not survive it.
+# Keeping the two paths separate is what stops "the tokenizer path preserves mode" being read as
+# "every write in this module preserves mode".
+V["F2_WRITETYPE_PATH_IS_ATOMIC_REPLACE"] = (
+    "yes" if "os.replace" in inspect.getsource(M.write_section) else "no")
 
 # ---------------------------------------------------------------- F-2 cache identity
 good = craft(f"{BASE}/good.basalt", [(b"meta", json.dumps({"name": "Good Pack"}).encode()),
@@ -308,6 +341,8 @@ EXPECTED = {
     "F1_READER_ACCEPTS_64": "yes", "F1_CACHE_DIR_IS_HEX": "hex",
     "F1_TRUNCATE_PRESERVES_MODE_AND_INODE": "yes",
     "F1_NEW_FILE_IN_EXISTING_DIR": "wrote", "F1_SYMLINKED_COMPONENT_WRITE": "wrote",
+    "F1_REAL_PATH_OVERWRITES_MODE755_IN_PLACE": "preserved",
+    "F2_WRITETYPE_PATH_IS_ATOMIC_REPLACE": "yes",
     # F-2: cache identity is declared, not derived
     "F2_SIBLING_CACHE_POISON": "poisoned", "F2_SHARED_TOKENIZER_DIR": "yes",
     "F2_SHARED_ENGINE_LOG": "yes", "F2_SHARED_CONVERSATION_CACHE": "yes",
@@ -340,6 +375,18 @@ if bad:
     sys.exit(1)
 PY
 rc=$?
+
+# THE AUDITED TREE MUST BE EXACTLY AS FOUND — and `git diff` is not the check. server/basalt/.gitignore
+# line 1 is /vendor/, so anything a probe leaves inside vendor/basalt is untracked AND ignored: 13
+# __pycache__ files sat in the audited tree through a whole session of "AUDIT TREE OK" lines and were
+# caught only by the census universe hash (875 files against a pinned 862). Count the files; do not
+# ask git. Bytecode is the specific mechanism this harness can trip, so it is named, not folded into
+# a count. An exit 3 here means the experiment damaged its own subject.
+if [ -d "$VENDOR" ]; then
+  npyc=$(find "$VENDOR" -name '*.pyc' -o -name '__pycache__' | wc -l)
+  echo "POC_TREE_FILES=$(find "$VENDOR" -type f ! -path "$VENDOR/.git/*" | wc -l) POC_TREE_BYTECODE=$npyc"
+  [ "$npyc" -eq 0 ] || { echo "POC_ABORT=python bytecode left inside the audited tree"; exit 3; }
+fi
 
 # Byte budget for absolute targets: the ENTRY name field is 64 bytes, prefix costs 10.
 # Measured against the REAL home, which is what an attacker would target. This loop only

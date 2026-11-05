@@ -613,9 +613,26 @@ violation and cannot be cited by a later plan.
   of the clause; T3's `t3-model-file-poc.sh` was that third. So 1b now reports `PRODUCT_B` and
   `AUDIT_B` separately (`3 b` / `3 b`), step 2 lints only `run`/`build`/`lib/common.sh`, and a new step
   **2b** lints `context/audit/scripts/` on the same pass/fail terms. 1a deliberately still covers every
-  tracked file. The split caught a live problem the shared count was hiding: `t3-census.sh` carries 9
-  shellcheck findings and is **blocked from commit until linted**. Both already-tracked generators were
-  verified clean, so 2b is not red on arrival.
+  tracked file. *Correction made the same day, after review:* the first version of this bullet said the
+  split "caught a live problem the shared count was hiding". It did not — step 2 before the split linted
+  every tracked bash file, so a tracked `t3-census.sh` would have failed it identically. What caught
+  `t3-census.sh`'s 9 findings was linting a file that was **not tracked yet**, which is now a rule: an
+  untracked file is invisible to every gate step, so lint before you `git add`.
+
+- **2026-11-05 — the audit contaminated its own subject, and the freeze check could not see it.**
+  `t3-census.sh`'s universe sentinel went red on the first real run: **875 files against a pinned 862**,
+  LOC +999, hash mismatch, 4 of 27 sentinels FAIL, `T3_CENSUS_VERDICT=FAIL`. The cause was 13
+  `__pycache__` files the PoC harness had written into `vendor/basalt` by importing it with
+  `cwd=vendor/basalt` and no `PYTHONDONTWRITEBYTECODE`. `AUDIT TREE OK` had been true the entire time —
+  `server/basalt/.gitignore` line 1 is `/vendor/`, so `git diff <pin>` cannot see a single one of those
+  files. This is the plan's most important process finding so far, because it means a check the plan
+  treats as authoritative (`Risk 1`, Wave 0 exit, every resume step) was verifying less than it claimed.
+  Fixed in four places: the **one freeze-check is now three legs** (contents / file count = 862 /
+  `git status --porcelain --ignored` empty) in plan § *The one freeze-check*; both scripts set
+  `PYTHONDONTWRITEBYTECODE=1`; `t3-census.sh` gained `TREE_FREE_OF_BUILD_ARTIFACTS`; the PoC harness
+  exits **3** on `POC_TREE_BYTECODE>0`, with negative control **D** proving the guard fires (exit 3, 8
+  artifacts, after 32 assertions had already passed). Tree restored to 862 and re-verified; transcript
+  in `context/audit/wave0/t3-tree-contamination.txt`, `pitfalls.md` items 20–21.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every

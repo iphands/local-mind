@@ -247,15 +247,19 @@ silently drops is the failure this step exists for.
 > GPU server, and letting coverage-figure generators share that gate had already started to blur it
 > (`t2-census.sh` and `ledger-grid.sh` emit numbers other plans cite, which is a different failure
 > class from a launcher typo). Two consequences stated plainly, so neither reads as a loosening:
-> **(i) both sets must be clean** — 2b is a pass/fail step like any other, not a advisory, and an audit
-> generator with a `FAIL` blocks its task; **(ii) 1a is deliberately *not* narrowed** — it still syntax
-> checks every tracked file, because dropping coverage to make a count tidier would be the wrong
-> trade, so 1a's scope and 1b/2's scope now differ on purpose. A fourth audit script is fine; it joins
-> `3 b` → `4 b` with no clause needed. What the split already bought: `context/audit/scripts/t3-census.sh`
-> (T3's generator, **still uncommitted**) carries **9 shellcheck findings** and would have been waved
-> through a shared count — measured, `shellcheck -x` exit 1. The two audit generators already tracked,
-> `t2-census.sh` and `ledger-grid.sh`, are clean (`shellcheck -x` exit 0 each, verified 2026-11-05), so
-> 2b does not fail on arrival; `t3-census.sh` must be linted before it is committed or 2b goes red.
+> **(i) both sets must be clean** — 2b is pass/fail like any other step, and an audit generator with a
+> `FAIL` blocks its task; **(ii) 1a is deliberately *not* narrowed** — it still syntax-checks every
+> tracked file, because dropping coverage to tidy a count is the wrong trade; 1a's scope and 1b/2's
+> scope differ on purpose. A fourth audit script just moves `AUDIT_B` from 3 to 4, no clause needed.
+>
+> What the split did **not** do is catch anything, and the first version of this paragraph said
+> otherwise. Step 2 before the split linted *every* tracked bash file, so a tracked `t3-census.sh`
+> would have failed it exactly the same way. What caught that script's **9 shellcheck findings**
+> (`shellcheck -x` exit 1, measured 2026-11-05, since linted clean) was running the linter on a file
+> that was **not tracked yet**. That is the actual lesson, and it is a rule now: **lint a new script
+> before you `git add` it**, because an untracked file is invisible to every step of this gate — 1a
+> syntax, 1b counts and 2/2b all enumerate `git ls-files`. `t2-census.sh` and `ledger-grid.sh`, the two
+> generators already tracked, are clean (`shellcheck -x` exit 0 each).
 
 ```bash
 # 1a — syntax, over tracked files only (in-memory compile: no __pycache__ written).
@@ -279,13 +283,31 @@ classify() { git ls-files -z . | while IFS= read -r -d '' f; do case "$(head -n1
   \#!*bash*|\#!*/sh) printf 'b\t%s\n' "$f"; continue ;; \#!*python*) printf 'p\t%s\n' "$f"; continue ;; esac
   case "$f" in *.sh) printf 'b\t%s\n' "$f" ;; *.py) printf 'p\t%s\n' "$f" ;; *.json) printf 'j\t%s\n' "$f" ;; esac
   done; }
-classify > /tmp/opencode/bashset.$$.tsv
-TOTAL_B=$(cut -f1 /tmp/opencode/bashset.$$.tsv | grep -c '^b$')
-AUDIT_B=$(cut -f2 /tmp/opencode/bashset.$$.tsv | grep -c '^context/audit/scripts/')
-echo "PRODUCT_B=$((TOTAL_B-AUDIT_B)) AUDIT_B=$AUDIT_B"
-grep $'^[pj]\t' /tmp/opencode/bashset.$$.tsv | cut -f1 | sort | uniq -c
-cut -f2 /tmp/opencode/bashset.$$.tsv | grep '^[^[:space:]]*$' | LC_ALL=C sort | sed 's|^|  b/p/j: |'
-rm -f /tmp/opencode/bashset.$$.tsv
+TSV=/tmp/opencode/bashset.$$.tsv; AB=/tmp/opencode/auditb.$$.txt
+classify > "$TSV"
+# Each set is SELECTED by (class AND path). Never derive one set by subtracting a class-blind filter
+# from a class-aware total: `AUDIT_B` used to filter on the path alone, so a `context/audit/scripts/gen.py`
+# would have added 1 to AUDIT_B and 0 to TOTAL_B — PRODUCT_B silently under-counts (it can go
+# negative), and the *audit* half goes falsely green, since 2b's set shrinks while its number does not.
+grep $'^b\t' "$TSV" | cut -f2 | grep '^context/audit/scripts/' > "$AB"
+PRODUCT_B=$(grep $'^b\t' "$TSV" | cut -f2 | grep -vc '^context/audit/scripts/')
+AUDIT_B=$(grep -c . "$AB")
+echo "PRODUCT_B=$PRODUCT_B AUDIT_B=$AUDIT_B TOTAL_B=$((PRODUCT_B+AUDIT_B))"
+# IDENTITY GUARD. `git ls-files` prints **cwd-relative** paths, so run this block from
+# context/audit/ and the anchor above matches nothing: AUDIT_B=0 and PRODUCT_B=3 — the expected
+# product number, printed over zero launchers. Reproduced 2026-11-05, not reasoned: from
+# context/audit/ the paths are `scripts/t2-census.sh`, from the project root `context/audit/scripts/…`.
+# No count can detect that; only naming the files can. This is a locally-owned sentinel — do not DRY
+# it into a pointer at the expected-count line, because a sentinel replaced by a citation cannot fail.
+for f in run build lib/common.sh; do
+  awk -F'\t' -v w="$f" '$2==w{g=1} END{exit !g}' "$TSV" || echo "FAIL(1b) missing product bash: $f"
+done
+# enumeration: the printed sets are the sets the two numbers count, per Rule A.4 "look at it"
+echo '  product b:'; grep $'^b\t' "$TSV" | cut -f2 | grep -v '^context/audit/scripts/' | LC_ALL=C sort | sed 's|^|    |'
+echo '  audit b:';   LC_ALL=C sort "$AB" | sed 's|^|    |'
+grep $'^[pj]\t' "$TSV" | cut -f1 | sort | uniq -c
+echo "CLASSIFIED=$(grep -c . "$TSV")"
+rm -f "$TSV" "$AB"
 # 1c — versions.env stays plain KEY=value: it is `source`d by the scripts and passed to
 #      `docker build --build-arg`; a quoted value or trailing comment breaks one of the readers
 if [ -f versions.env ]; then
@@ -305,8 +327,11 @@ If it is missing the step is **fail**, not skip — the bash set is the whole pr
 
 **2b. shellcheck — audit generators.** Added 2026-11-05 (T3) with the 1b split; pass on the same
 terms as step 2. These scripts publish coverage and census figures that later plans cite, so a lint
-finding in one is a *correctness* signal, not cosmetics — and a generator nobody lints is how
-`t2-census.sh` arrived already carrying findings (see the note in `wave0/t3-model-file-poc.txt`).
+finding in one is a *correctness* signal, not cosmetics. What motivated the step is `t3-census.sh`:
+9 findings at `shellcheck -x` exit 1 when it was about to be committed, which is why new scripts are
+linted *before* `git add` — see the decision note above. (An earlier draft of this line blamed
+`t2-census.sh` for arriving unlinted; that was false, it and `ledger-grid.sh` are exit 0, and the
+sentence contradicted the decision note two pages back. Corrected 2026-11-05.)
 
 ```bash
 # 2 — product bash set: run, build, lib/common.sh (audit generators go to 2b)
@@ -317,14 +342,25 @@ git ls-files -z . | while IFS= read -r -d '' f; do
     *) case "$f" in *.sh) printf '%s\0' "$f" ;; esac ;;
   esac
 done | xargs -0 -r shellcheck -x && echo 'shellcheck ok (product)'
-# 2b — audit generators
-git ls-files -z context/audit/scripts | while IFS= read -r -d '' f; do
-  case "$(head -n1 "$f" 2>/dev/null)" in
-    \#!*bash*|\#!*/sh) printf '%s\0' "$f" ;;
-    *) case "$f" in *.sh) printf '%s\0' "$f" ;; esac ;;
-  esac
-done | xargs -0 -r shellcheck -x && echo 'shellcheck ok (audit)'
+# 2b — audit generators. The list is named and its size asserted, because `git ls-files <path>` is
+# cwd-dependent: run this from a directory where context/audit/scripts is not a path and it enumerates
+# NOTHING, xargs -r runs nothing, and the step prints "ok" having linted zero files. A guard that only
+# counts would not notice; naming the files does.
+mapfile -d '' AUD < <(git ls-files -z context/audit/scripts)
+printf '  audit file: %s\n' "${AUD[@]}"
+if [ "${#AUD[@]}" -ge 1 ]; then
+  printf '%s\0' "${AUD[@]}" | xargs -0 -r shellcheck -x && echo 'shellcheck ok (audit)'
+else
+  echo "FAIL(2b) enumerated 0 audit scripts — wrong cwd? (running this with an empty list would print \"ok\")"
+fi
 ```
+
+**Three copies of the classifier exist** — 1a's `case`, 1b's `classify`, and step 2's loop — because each
+gate step is a self-contained block meant to be pasted on its own, and hoisting one function into a
+shared preamble would make step 2 unrunnable without step 1 first. That is a deliberate duplication and
+it will drift if nobody watches: **when you change how a file is classified, change all three in the
+same commit**, and say so in the message. The alternative (a sourced helper under `context/audit/`)
+puts gate machinery outside the tracked launchers this gate exists to protect.
 
 **3. Build preflight** (Plan 01 T2). Manages `vendor/basalt` (clones it on first use — network;
 refuses a dirty checkout, untracked files included; checks out `BASALT_SHA` detached), resolves

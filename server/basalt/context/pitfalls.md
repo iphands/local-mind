@@ -291,10 +291,12 @@ from noir, defragment it there first (`btrfs filesystem defragment -f -t 128M <f
 *The count is deliberately not in the heading — it grows, and every earlier cross-reference then goes
 stale. Two already have: `audit/wave0/t1-freeze-and-manifest.txt` cites this § as "Four shell idioms…"
 (that artifact is a stamped transcript of a past run and is **not** edited retroactively — this line is
-the reconciliation), and the follow-up commit grew it to seven. Nineteen entries as of 2026-11-05; items
-10–17 are from Plan 02 T2, and items 18–19 are from Plan 02 T3's security harness — both from the same
+the reconciliation), and the follow-up commit grew it to seven. Twenty-one entries as of 2026-11-05; items
+10–17 are from Plan 02 T2, and items 18–21 are from Plan 02 T3's security harness — all from the same
 week and the same failure family: *the check that reports green because the thing it checks was never
-reached.* Items 11–13 are the same three traps that produced item 9's family.*
+reached, or was looking somewhere else.* Items 20–21 are the two that a passing audit rested on while
+wrong: a freeze check blind to an ignored directory, and a file listing that contained itself. Items
+11–13 are the same three traps that produced item 9's family.*
 
 ## Problem
 [OBSERVED 2026-11-05] During Plan 02 T1 (freeze `vendor/basalt`, manifest 862 files), its coverage
@@ -599,6 +601,27 @@ came from controls that *failed*:
   tool with per-user config (`git`, `gh`, `ssh`, package managers) must **pin the config it means to
   measure** — here, `HOME="$REAL_HOME"` on each git call, plus `--no-optional-locks` so a read-only query
   cannot refresh the index of somebody else's repo.
+- **20. `git diff --quiet <pin>` proves tracked contents, not an untouched tree — and inside a gitignored
+  directory it proves almost nothing.** [OBSERVED 2026-11-05] `server/basalt/.gitignore` line 1 is
+  `/vendor/`, so every file created inside `vendor/basalt` is untracked *and* ignored, and `git diff <pin>`
+  — which compares tracked contents against a commit — cannot see one of them. This audit's own PoC
+  harness ran with `cwd=vendor/basalt` and imported `serve.*` and `tools.model_file`, so CPython wrote
+  **13 `__pycache__` files into the tree under audit**, and a string of `AUDIT TREE OK` lines was true and
+  useless the whole time. It surfaced only as `t3-census.sh`'s universe hash: **875 files against a pinned
+  862** (and LOC +999, because a LOC pass counts newline bytes and `.pyc` files are full of them). So a
+  freeze check is **three legs**: `git diff` for contents, a **file count** against the frozen number, and
+  `git status --porcelain --ignored` being **empty** — the last one names the offending paths, which a
+  count cannot. And any tool that imports its subject sets `PYTHONDONTWRITEBYTECODE=1` *and* asserts
+  afterward that it left nothing: the harness now exits **3** on `POC_TREE_BYTECODE>0`, because "the
+  experiment modified its subject" is a different failure from "an assertion failed" and earns its own
+  exit code. What did *not* save us: 32 named assertions all passed on the contaminated tree.
+- **21. `ls` lists its own redirect target.** [OBSERVED 2026-11-05] `ls "$FIX" | sed … > "$FIX/fixlist.tmp"`
+  creates `fixlist.tmp` before `ls` runs, so the listing contains the file being written. In
+  `t3-census.sh` that inflated `FIXTURE_FILES` by one and handed `xargs` a path the following `mv` had
+  just deleted. The worse sibling is writing the list *inside the corpus it describes*: on the next run
+  the list is a corpus member, and here its absolute paths were greppable by the very family patterns
+  being scored against it. Use `find … ! -name 'fixlist*'`, and keep derived lists outside what they
+  enumerate.
 
 ## Sources
 - basalt: `context/audit/manifest/index.md` (the checks, as corrected) and

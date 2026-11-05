@@ -1,0 +1,138 @@
+# Plan 02 T3 — the audited tree was contaminated by this audit's own tooling, and the
+# census caught it. 2026-11-05. Raw output; never hand-edit this file.
+#
+# Why this artifact exists: the freeze-check this plan had been pasting for a day was
+#   GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77 && echo 'AUDIT TREE OK'
+# and it was TRUE the whole time, and it was not checking the tree. server/basalt/.gitignore
+# line 1 is /vendor/, so anything a probe writes inside vendor/basalt is untracked AND
+# ignored: git diff against a commit compares tracked contents and cannot see a single one
+# of these files.
+
+## 1 · what was in there (all created today, 05:59 and 06:01, by the PoC harness importing
+##     serve.* and tools.model_file with cwd=vendor/basalt and no PYTHONDONTWRITEBYTECODE)
+**NOT RE-RUNNABLE.** The listing below is transcribed from the output of the discovery command
+`find vendor/basalt -name '*.pyc' -printf '  %TY-%Tm-%Td %TH:%TM %s %p\n' | LC_ALL=C sort`, taken
+before cleanup. Those files are gone and cannot be regenerated, so this is a transcript of a past run
+labelled as one, not a paste you can reproduce. The mtime column is the evidence tying them to this
+session's harness runs rather than to the clone.
+
+  totals at discovery: 13 .pyc files in 4 __pycache__ directories
+  tracked bytecode in the vendored repo, checked before deleting anything: 0
+    2026-11-05 05:59 10319 vendor/basalt/serve/engine/__pycache__/modelfile.cpython-312.pyc
+    2026-11-05 05:59 12980 vendor/basalt/tools/__pycache__/model_file.cpython-312.pyc
+    2026-11-05 05:59  1305 vendor/basalt/serve/engine/__pycache__/flags.cpython-312.pyc
+    2026-11-05 05:59   308 vendor/basalt/serve/engine/__pycache__/__init__.cpython-312.pyc
+    2026-11-05 05:59   451 vendor/basalt/serve/__pycache__/__init__.cpython-312.pyc
+    2026-11-05 06:01 100356 vendor/basalt/serve/__pycache__/service.cpython-312.pyc
+    2026-11-05 06:01  24315 vendor/basalt/serve/__pycache__/server.cpython-312.pyc
+    2026-11-05 06:01   2669 vendor/basalt/serve/engine/__pycache__/errors.cpython-312.pyc
+    2026-11-05 06:01   2822 vendor/basalt/serve/engine/__pycache__/slots.cpython-312.pyc
+    2026-11-05 06:01    288 vendor/basalt/serve/util/__pycache__/__init__.cpython-312.pyc
+    2026-11-05 06:01   6184 vendor/basalt/serve/engine/__pycache__/mock.cpython-312.pyc
+    2026-11-05 06:01  66558 vendor/basalt/serve/__pycache__/frontend.cpython-312.pyc
+    2026-11-05 06:01   8601 vendor/basalt/serve/util/__pycache__/text.cpython-312.pyc
+  (totals and the tracked-bytecode pre-check are stated in the block header above)
+
+## 2 · how it surfaced — the FIRST census run against vendor/basalt, verbatim
+### T3_CENSUS_VERDICT=FAIL, exit 1
+  UNIVERSE=875
+  UNIVERSE_SHA256=915de52934de3e1952e272ce5bff0b0017ec9987c605e13dd5b113f4b196559e   # a hash of the sorted path set, NOT git's tree hash: the tree hash covers contents and this one does not
+  SENT UNIVERSE_COUNT_EQ_PIN                          actual=875            eq  862            : FAIL
+  SENT UNIVERSE_SHA_MATCHES_PIN                       actual=915de52934de3e1952e272ce5bff0b0017ec9987c605e13dd5b113f4b196559e eq  6d0c70b8f6bd1c5c1e1496903c9e4ced2e3ddf70631f858c6e3d4b7c33462c23 : FAIL
+  LOC_TOTAL=220246  MANIFEST_LOC_SUM=219247
+  SENT LOC_WORKTREE_EQ_MANIFEST                       actual=220246         eq  219247         : FAIL
+  SENT LOC_EQ_PIN_CONSTANT                            actual=220246         eq  219247         : FAIL
+  SENT S14_PROCEDURE_REAL                             ran to completion           : PASS
+  SENT S14_DENOMINATOR_REPORTED                       actual=1094           nonempty                : PASS
+  SENT S14_PROCEDURE_CONTROL                          ran to completion           : PASS
+  SENT S14_CONTROL_ROWS_FILE                          exists                      : PASS
+  SENT S14_CONTROL_FIRED_SET                          actual=image-webhook-url,remote-report-url,sink-target,webhook-path eq  image-webhook-url,remote-report-url,sink-target,webhook-path : PASS
+  SENT S14_CONTROL_NO_CONSUMER_LEAK                   actual=0              z                  : PASS
+  SENT S15_PROCEDURE_REAL                             ran to completion           : PASS
+  SENT S15_IMPORT_EDGES_NONZERO                       actual=300            ge  1              : PASS
+  SENT S15_PROCEDURE_CONTROL                          ran to completion           : PASS
+  SENT S15_CONTROL_ROWS_FILE                          exists                      : PASS
+  SENT S15_CONTROL_VERDICTS                           actual=serve/metrics.py=reaches-a-sink serve/metrics_local.py=no-sink-in-closure eq  serve/metrics.py=reaches-a-sink serve/metrics_local.py=no-sink-in-closure : PASS
+  SENT GUARD_INVERSION_POPULATION_FROZEN              actual=3              eq  3              : PASS
+  SENT GRANULARITY_FORCE_IS_FIRED                     actual=92             ge  1              : PASS
+  SENT SITE_ROWS_WRONG_FIELD_COUNT                    actual=0              z                  : PASS
+  SENT SITE_ROWS_WITH_BLANK_PATH_OR_PRIMITIVE         actual=0              z                  : PASS
+  SENT SITE_ROWS_BAD_PROVENANCE                       actual=0              z                  : PASS
+  SENT SITE_ROWS_BAD_ROUTING_VERDICT                  actual=0              z                  : PASS
+  SENT SITES_WITHOUT_A_TN                             actual=0              z                  : PASS
+  UNIVERSE=875 = SCANNED(855) + NOT_SCANNED_BINARY(20)  CLOSES=yes(by construction: arithmetic on my own labels, not an independent check)
+  SENT MANIFEST_ROWS_EQ_862                           actual=862            eq  862            : PASS
+  SENT MANIFEST_TIER_UNASSIGNED_NONZERO               actual=786            nz                 : PASS
+  SENT CENSUS_SITES_ON_UNASSIGNED_ROWS_NONZERO        actual=136            nz                 : PASS
+  SENT TN_TOKENS_WITHOUT_A_PLAN_TASK                  actual=0              z                  : PASS
+  SENT COLUMN6_TOKENS_ALL_DECLARED                    actual=0              z                  : PASS
+  T3_CENSUS_VERDICT=FAIL (4 expectation(s) unmet — do not commit this run as evidence)
+
+  875 - 862 = 13, exactly the .pyc count. LOC_TOTAL was +999 for the same reason: the
+  LOC pass counts newline bytes, and .pyc files are full of them.
+
+## 3 · cleanup (nothing else removed; only bytecode, only after proving none was tracked)
+  find vendor/basalt -name "*.pyc" -delete
+  find vendor/basalt -name __pycache__ -type d -empty -delete
+  universe recount: 862 files
+
+## 4 · the SAME census invocation, after cleanup, verbatim
+  UNIVERSE_SHA256=6d0c70b8f6bd1c5c1e1496903c9e4ced2e3ddf70631f858c6e3d4b7c33462c23   # a hash of the sorted path set, NOT git's tree hash: the tree hash covers contents and this one does not
+  SENT UNIVERSE_COUNT_EQ_PIN                          actual=862            eq  862            : PASS
+  SENT UNIVERSE_SHA_MATCHES_PIN                       actual=6d0c70b8f6bd1c5c1e1496903c9e4ced2e3ddf70631f858c6e3d4b7c33462c23 eq  6d0c70b8f6bd1c5c1e1496903c9e4ced2e3ddf70631f858c6e3d4b7c33462c23 : PASS
+  LOC_TOTAL=219247  MANIFEST_LOC_SUM=219247
+  SENT LOC_WORKTREE_EQ_MANIFEST                       actual=219247         eq  219247         : PASS
+  SENT LOC_EQ_PIN_CONSTANT                            actual=219247         eq  219247         : PASS
+  FAMILIES=15 FIXTURE_FILES=17 FAMILIES_SEEN_IN_FIXTURES=15/15  # sensitivity: of the 15 narrow patterns, how many reach any planted shape at all
+  SENT S14_PROCEDURE_REAL                             ran to completion           : PASS
+  SENT S14_DENOMINATOR_REPORTED                       actual=1094           nonempty                : PASS
+  SENT S14_PROCEDURE_CONTROL                          ran to completion           : PASS
+  SENT S14_CONTROL_ROWS_FILE                          exists                      : PASS
+  SENT S14_CONTROL_FIRED_SET                          actual=image-webhook-url,remote-report-url,sink-target,webhook-path eq  image-webhook-url,remote-report-url,sink-target,webhook-path : PASS
+  SENT S14_CONTROL_NO_CONSUMER_LEAK                   actual=0              z                  : PASS
+  SENT S15_PROCEDURE_REAL                             ran to completion           : PASS
+  SENT S15_IMPORT_EDGES_NONZERO                       actual=300            ge  1              : PASS
+  SENT S15_PROCEDURE_CONTROL                          ran to completion           : PASS
+  SENT S15_CONTROL_ROWS_FILE                          exists                      : PASS
+  SENT S15_CONTROL_VERDICTS                           actual=serve/metrics.py=reaches-a-sink serve/metrics_local.py=no-sink-in-closure eq  serve/metrics.py=reaches-a-sink serve/metrics_local.py=no-sink-in-closure : PASS
+  SENT GUARD_INVERSION_POPULATION_FROZEN              actual=3              eq  3              : PASS
+  SENT GRANULARITY_FORCE_IS_FIRED                     actual=92             ge  1              : PASS
+  SITES=278
+  SECTIONS_TOTAL=19 (site=14 procedure=3 substrate=2) SECTIONS_EMITTING=11 SECTIONS_ZERO=3 (: S10 S11 S5)
+  SENT SITE_ROWS_WRONG_FIELD_COUNT                    actual=0              z                  : PASS
+  SENT SITE_ROWS_WITH_BLANK_PATH_OR_PRIMITIVE         actual=0              z                  : PASS
+  SENT SITE_ROWS_BAD_PROVENANCE                       actual=0              z                  : PASS
+  SENT SITE_ROWS_BAD_ROUTING_VERDICT                  actual=0              z                  : PASS
+  SENT SITES_WITHOUT_A_TN                             actual=0              z                  : PASS
+  SENT MANIFEST_ROWS_EQ_862                           actual=862            eq  862            : PASS
+  SENT MANIFEST_TIER_UNASSIGNED_NONZERO               actual=786            nz                 : PASS
+  SENT CENSUS_SITES_ON_UNASSIGNED_ROWS_NONZERO        actual=136            nz                 : PASS
+  SENT TN_TOKENS_WITHOUT_A_PLAN_TASK                  actual=0              z                  : PASS
+  SENT COLUMN6_TOKENS_ALL_DECLARED                    actual=0              z                  : PASS
+  SENTINEL_TOTAL=27 SENTINEL_FAILS=0
+  T3_CENSUS_VERDICT=PASS (all 27 compared expectations met; unverified claims are named as displays, not passes)
+
+## 5 · control D on the PoC harness: deliberately disable PYTHONDONTWRITEBYTECODE and
+##     prove the new guard catches it (exit 3), rather than trusting the fix
+  POC_TREE_FILES=867 POC_TREE_BYTECODE=8
+  POC_ABORT=python bytecode left inside the audited tree
+  exit=3; artifacts physically present in vendor/basalt at that moment: 8
+  assertions that had ALREADY PASSED when the guard fired: 32
+  ^ that line is the whole point. Thirty-two named assertions all went green on a tree the
+    harness had just modified. The guard that caught it is a file count at the end, not a
+    property of the probes.
+
+## 6 · tree re-verified against the pin after every experiment above
+  AUDIT TREE OK (tracked contents)
+  TREE FILE COUNT OK (862)
+  TREE CLEAN (no untracked/ignored)
+
+## 7 · permanent changes made because of this
+  - t3-model-file-poc.sh: export PYTHONDONTWRITEBYTECODE=1 before importing the tree, plus a
+    post-run POC_TREE_BYTECODE check that exits 3 (a new code: the experiment damaged its
+    subject, which is not the same failure as an assertion failing).
+  - t3-census.sh: the same export, plus a named sentinel TREE_FREE_OF_BUILD_ARTIFACTS, so the
+    next occurrence says what it is instead of showing up as a hash nobody recognises.
+  - the plan's one freeze-check is now three legs: tracked contents, file count = 862, and
+    'git status --porcelain --ignored' empty. The count and the status legs are the ones git
+    diff cannot substitute for.

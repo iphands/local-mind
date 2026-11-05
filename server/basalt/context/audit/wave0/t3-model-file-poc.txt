@@ -2,24 +2,28 @@
 # Target dc047a7 / tree 3f7b69ae. Generated 2026-11-05. Never hand-edit this file.
 
 ## command
-  POC_SPARSE=1 POC_BASE=/tmp/opencode/pocrun4 context/audit/scripts/t3-model-file-poc.sh
+  POC_SPARSE=1 POC_BASE=/tmp/opencode/pocrun5 context/audit/scripts/t3-model-file-poc.sh
   (the harness OVERWRITES $HOME with POC_BASE/home before any probe, so every
    absolute-path write lands in the sandbox; $HOME is read only to stat and to take
    string lengths, and the git column restores the real HOME explicitly.)
 
-## freeze check (re-run at commit time)
-  cd vendor/basalt && GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77... && echo "AUDIT TREE OK"
-  -> AUDIT TREE OK
+## freeze check — THREE legs, because git diff cannot see untracked files in an ignored tree
+  (see wave0/t3-tree-contamination.txt for why this is no longer one line)
+  cd vendor/basalt && GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77... ; file count ; status --ignored
+  -> AUDIT TREE OK (tracked contents)
+  -> TREE FILE COUNT OK (862)
+  -> TREE CLEAN (no untracked/ignored)
 
 ## shellcheck 0.11.0 on the harness
   rc=0, no output
 
-## canonical run — exit 0, POC_VERDICT=PASS, 30 assertions
+## canonical run — exit 0, POC_VERDICT=PASS, 32 assertions
 ASSERT F1_ABSOLUTE_JOIN_WRITE                 == 'wrote'                ok
 ASSERT F1_AUTHORIZED_KEYS_WRITE               == 'wrote'                ok
 ASSERT F1_CACHE_DIR_IS_HEX                    == 'hex'                  ok
 ASSERT F1_NEW_FILE_IN_EXISTING_DIR            == 'wrote'                ok
 ASSERT F1_READER_ACCEPTS_64                   == 'yes'                  ok
+ASSERT F1_REAL_PATH_OVERWRITES_MODE755_IN_PLACE == 'preserved'            ok
 ASSERT F1_SYMLINKED_COMPONENT_WRITE           == 'wrote'                ok
 ASSERT F1_TRAVERSAL_WRITE                     == 'wrote'                ok
 ASSERT F1_TRUNCATE_PRESERVES_MODE_AND_INODE   == 'yes'                  ok
@@ -33,6 +37,7 @@ ASSERT F2_SHARED_CONVERSATION_CACHE           == 'yes'                  ok
 ASSERT F2_SHARED_ENGINE_LOG                   == 'yes'                  ok
 ASSERT F2_SHARED_TOKENIZER_DIR                == 'yes'                  ok
 ASSERT F2_SIBLING_CACHE_POISON                == 'poisoned'             ok
+ASSERT F2_WRITETYPE_PATH_IS_ATOMIC_REPLACE    == 'yes'                  ok
 ASSERT F3_SHORT_READ_RAISES                   == 'none'                 ok
 ASSERT F4_EIGHT_BYTE_FILE                     == 'TRACEBACK'            ok
 ASSERT F4_META_NOT_AN_OBJECT                  == 'TRACEBACK'            ok
@@ -48,9 +53,11 @@ ASSERT REFUTED_OS_REPLACE_FOLLOWS_SYMLINK     == 'not-followed'         ok
 POC F1_ABSOLUTE_JOIN_WRITE=wrote
 POC F1_AUTHORIZED_KEYS_WRITE=wrote
 POC F1_CACHE_DIR_IS_HEX=hex
+POC F1_EXISTING_EXEC_NAME_BYTES=33
 POC F1_NEWFILE_HOOKCFG_NAME_BYTES=51
 POC F1_NEW_FILE_IN_EXISTING_DIR=wrote
 POC F1_READER_ACCEPTS_64=yes
+POC F1_REAL_PATH_OVERWRITES_MODE755_IN_PLACE=preserved
 POC F1_SYMLINKED_COMPONENT_WRITE=wrote
 POC F1_TRAVERSAL_WRITE=wrote
 POC F1_TRUNCATE_PRESERVES_MODE_AND_INODE=yes
@@ -66,6 +73,7 @@ POC F2_SHARED_ENGINE_LOG=yes
 POC F2_SHARED_TOKENIZER_DIR=yes
 POC F2_SIBLING_CACHE_POISON=poisoned
 POC F2_SIBLING_NAME_BYTES=53
+POC F2_WRITETYPE_PATH_IS_ATOMIC_REPLACE=yes
 POC F3_DECLARED_SIZE=1073741824
 POC F3_REAL_BYTES=1114127
 POC F3_SHORT_READ_RAISES=none
@@ -82,6 +90,7 @@ POC OK_NONUTF8_NAME=clean
 POC OK_TRUNCATED_DOWNLOAD=clean
 POC OK_ZERO_LENGTH_VOCAB_PASSES_GATE=yes
 POC REFUTED_OS_REPLACE_FOLLOWS_SYMLINK=not-followed
+POC_TREE_FILES=862 POC_TREE_BYTECODE=0
 POC_BUDGET_PREFIX_BYTES=10
 POC_REACH 34/64 parent-ok  symlink->/home/iphands/dotfiles/.gitconfig $HOME/.gitconfig
 POC_REACH 31/64 parent-ok  symlink->/home/iphands/dotfiles/.bashrc $HOME/.bashrc
@@ -97,7 +106,7 @@ POC_REACH 60/64 parent-ok  file(7048B,mode755)          $HOME/prog/ai/local-mind
 POC_REACH 62/64 parent-ok  file(4634B,mode755)          $HOME/prog/ai/local-mind/server/basalt/build
 POC_REACH 66/64 parent-ok  file(2708B,mode644)          $HOME/prog/ai/local-mind/server/basalt/AGENTS.md
 POC_REACH 66/64 parent-ok  file(4238B,mode644)          $HOME/prog/ai/local-mind/server/basalt/README.md
-POC_REACH 79/64 parent-ok  file(43709B,mode644)         $HOME/prog/ai/local-mind/server/basalt/context/plans/RULES.md
+POC_REACH 79/64 parent-ok  file(46626B,mode644)         $HOME/prog/ai/local-mind/server/basalt/context/plans/RULES.md
 POC_REACH 55/64 parent-ok  file(2104B,mode755)          $HOME/prog/ai/local-mind/bin/opencode
 POC_REACH 61/64 parent-ok  file(211B,mode755)           $HOME/prog/ai/local-mind/bin/model-switcher
 POC_TRACK tracked /home/iphands/prog/ai/local-mind/server/basalt/run
@@ -131,7 +140,8 @@ POC_VERDICT=PASS
         a machine without that global rule would show the planted file as '??'.
 
 ## negative control A — a flipped expectation must fail the gate (exit 1)
-ASSERT F1_SYMLINKED_COMPONENT_WRITE           == 'no'                   FAIL got 'wrote'
+  (F1_REAL_PATH_OVERWRITES_MODE755_IN_PLACE expected "no")
+ASSERT F1_REAL_PATH_OVERWRITES_MODE755_IN_PLACE == 'no'                   FAIL got 'preserved'
 POC_ASSERT_FAILURES=1
 
 ## negative control B — a probe payload tampered, script still syntactically valid (exit 1)
@@ -142,6 +152,16 @@ POC_ASSERT_FAILURES=1
 
 ## negative control C — refuses to run without the vendor tree (exit 2)
   POC_ABORT=vendor tree not found at /tmp/nonexist/vendor/basalt
+
+## negative control D — PYTHONDONTWRITEBYTECODE deliberately disabled: the tree guard must fire
+  (exit 3, a code that means "the experiment damaged its subject", distinct from an assertion
+   failure, because a green run that modified the audited tree is worse than a red one)
+  POC_TREE_FILES=867 POC_TREE_BYTECODE=8
+  POC_ABORT=python bytecode left inside the audited tree
+  exit=3. assertions that had ALREADY passed when it fired: 32
+  32 named assertions passed on a tree the harness had just written into. That is why this
+  control exists, and why the guard is a file count at the end rather than a probe property.
+  Artifacts left by that run were removed; the tree was re-counted to 862 afterwards.
 
 ## bugs in this harness found by running it, not by reading it
   1. F2_SAME_META_SHORTCIRCUITS_EXTRACTION: two probes sharing identical `meta` bytes
@@ -156,25 +176,35 @@ POC_ASSERT_FAILURES=1
      because the environment moved. The git calls now restore the real HOME explicitly
      and use --no-optional-locks so a read-only query cannot refresh another repo's index.
   3. the reachability loop probed $HOME/prog/ai/local-mind/context/plans/RULES.md, which is
-     not that file's path (the real one is .../server/basalt/context/plans/RULES.md). It
-     reported NO-PARENT/absent for a file that exists - a probe of nothing. Fixed; the row
-     now reads 79/64 file(43709B). The conclusion (over budget) was unchanged, which is
-     exactly why the bug survived: a wrong probe and a right answer look identical here.
+     not that file's path. It reported NO-PARENT/absent for a file that exists - a probe of
+     nothing. Fixed; the row now reads 79/64 file(43709B). The conclusion (over budget) was
+     unchanged, which is exactly why the bug survived: a wrong probe and a right answer look
+     identical here.
+  4. the harness wrote 13 __pycache__ files INTO THE AUDITED TREE (it imports the tree with
+     cwd=vendor/basalt). git diff could not see them because /vendor/ is gitignored, so a
+     whole session of 'AUDIT TREE OK' was true and useless. Caught by the census universe
+     hash. Fixed with PYTHONDONTWRITEBYTECODE plus the POC_TREE_BYTECODE guard, and control D
+     above exists to prove the guard is not decorative. Full record:
+     wave0/t3-tree-contamination.txt.
 
 ## earlier probes that were wrong for harness reasons (kept, they are the record)
   - F1_AUTHORIZED_KEYS_WRITE read 'no' because the ABSOLUTE name form costs one byte per
     path byte and this sandbox HOME made it 69/64; the probe now uses the relative form
-    (42 bytes, layout-independent) — the same code path. It now writes. It is still NOT
+    (42 bytes, layout-independent) - the same code path. It now writes. It is still NOT
     reachable on this host: ~/.ssh does not exist, so there is no parent directory.
   - an early 8-byte-file probe reported OSError instead of struct.error because a shell
     expression passed write()'s return value where a path was meant, and open() read it
     as file descriptor 8. Rewritten; the correct answer is struct.error.
   - the first version of this harness computed POC_VERDICT=PASS while asserting nothing at
     all: the shell 'fail' counter was never incremented. The assertions now live in the
-    python block and sys.exit(1); controls A/B/C exist to prove they fire.
+    python block and sys.exit(1); controls A/B/C/D exist to prove they fire.
   - a symlinked-component probe used 4 '../' where 5 are needed (tokenizer.X -> <hex> ->
     basalt -> .cache -> home -> sandbox root) and raised FileNotFoundError. The depth is
     now derived by printing the walk rather than counted by hand.
   - an early control B broke the script's SYNTAX instead of a probe, so it exited 1 for the
     wrong reason and proved nothing. A control must fail the assertion, not the parser:
     the tampered copy is now checked with bash -n before it is run.
+  - control D was first run WITHOUT REPO=$PWD, aborted at exit 2 for a missing vendor tree,
+    and looked like a pass because nothing was left behind. A control that never reached the
+    code under test is indistinguishable from a control that passed. Re-run with the
+    parameter it needed; it then exited 3 as intended.

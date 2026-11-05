@@ -110,12 +110,30 @@ row above. Steps 4–6 remain unrun for every T1 commit.
 5. **Audit commands are written inline** (plan/tracker/Evidence), never as helper scripts: gate step 1 classifies by **shebang first**, so even an extensionless `#!/usr/bin/env bash` helper in `context/` counts toward the gate's "Expected counts" line — whose owner and current value are `RULES.md` § *The gate* — and a count above it without a matching RULES bump fails the gate. If a helper is unavoidable it lands with a bump to that RULES.md paragraph in the same commit.
 6. **Every `context/audit/` file opens with a stamp:** `Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.`
 
-**The one freeze-check** (used by Resume step 1 and by every wave exit — there is deliberately only one):
+**The one freeze-check** (used by Resume step 1 and by every wave exit — there is deliberately only one).
+**`git diff` is not the tree.** `server/basalt/.gitignore` line 1 is `/vendor/`, so anything a probe
+leaves inside `vendor/basalt` is untracked *and* ignored, and `git diff <pin>` structurally cannot see
+it. Thirteen `__pycache__` files that this plan's own PoC harness wrote sat behind a string of
+`AUDIT TREE OK` lines on 2026-11-05 and surfaced only as the census universe hash (875 files against a
+pinned 862). Three legs, all required — contents, file count, and anything git calls untracked or
+ignored:
 
 ```bash
-cd vendor/basalt && GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 \
-  && echo "AUDIT TREE OK" || echo "AUDIT TREE DRIFTED — STOP"
+cd vendor/basalt
+GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 \
+  && echo "AUDIT TREE OK (tracked contents)" || echo "AUDIT TREE DRIFTED — STOP"
+N=$(find . -type f -not -path './.git/*' | wc -l)
+[ "$N" -eq 862 ] && echo "TREE FILE COUNT OK (862)" || echo "TREE FILE COUNT=$N — untracked additions — STOP"
+U=$(git status --porcelain --ignored | grep -c .)
+[ "$U" -eq 0 ] && echo "TREE CLEAN (no untracked/ignored)" \
+  || { echo "TREE NOT CLEAN: $U entries — STOP"; git status --porcelain --ignored | head; }
+cd ../..
 ```
+
+The count leg is the one that catches a *deleted* tracked file's replacement or a stray artifact; the
+status leg names the offending paths, which the count alone cannot. `862` is the frozen universe, owned
+by `manifest/*.tsv` row count and by `t3-census.sh`'s `UNIVERSE_COUNT_EQ_PIN` — if you bump the pin,
+all three move together.
 
 ---
 
@@ -709,7 +727,7 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 8. **Question: can a model pack alter server behaviour?** Its metadata already reaches request defaults via `modelfile.py`; the chat template is the dangerous version. *How we'll settle it*: T7; if a pack can override the template, the model-pack scope exclusion is revisited.
 9. **Risk: T9 is unsizable at plan time.** *Mitigation*: its file list freezes at Wave 0 exit with a line count; >3,000 lines splits into numbered subtasks in SERIES before reading starts. *How we'll settle it*: the frozen list is a Wave 0 exit artifact.
 10. **Risk: tasks larger than a session die mid-flight with nothing committed.** *Mitigation*: the ≤1,500-line commit-slice rule; T6 and T11 pre-split. *How we'll settle it*: one commit per slice, each carrying its manifest rows.
-11. **Risk: audit helpers break the gate** (shebang-first counting vs the "Expected counts" line — owned by `RULES.md` § *The gate*, `5 b` as of 2026-11-05, up from `3 b` as each unavoidable helper landed). *Mitigation*: inline commands; any unavoidable helper lands with the RULES counts bump in the same commit. *How we'll settle it*: gate step 1b in each commit's Evidence.
+11. **Risk: audit helpers break the gate** (shebang-first counting vs the "Expected counts" line — owned by `RULES.md` § *The gate*, `3 b` product + `3 b` audit helpers as of 2026-11-05, split that day; it read `5 b` in one set before that). *Mitigation*: inline commands; any unavoidable helper lands with the RULES counts bump in the same commit, and **a new script is linted before it is `git add`ed** — an untracked file is invisible to every gate step. *How we'll settle it*: gate step 1b in each commit's Evidence, and its identity guard (`FAIL(1b) missing product bash: …`) firing rather than a count matching by luck.
 12. **Risk: blocked docker steps become silent passes.** *Mitigation*: the Gate status block names which steps are owner-only; a task whose only verifier is blocked is not `done`. *How we'll settle it*: commit messages that name skipped steps.
 13. **Risk: effort overrun (14–19 sessions, T5 on the critical path behind an owner-run build).** *Mitigation*: T11's mechanical pass is command-generated; the verdict can be issued at Tier-B completeness with the depth table explicit, and Plan 04 picked up later. *How we'll settle it*: the coverage ledger's time series.
 
