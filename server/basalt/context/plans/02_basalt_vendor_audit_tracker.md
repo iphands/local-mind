@@ -510,14 +510,16 @@ violation and cannot be cited by a later plan.
   so it is machinery for a case that cannot arise. Two of the last four T2 commits exist to undo a mechanism
   that should never have been built; the durable gain from all four is one sentence in `RULES.md` and one
   pitfalls item, which is roughly what neckbeard says I should have landed in the first place.
-- **2026-11-05 — the gate carve-out is unexercised exactly where it matters (neckbeard's caution, recorded
-  before T13 rather than at it).** The carve-out has now been invoked 11 times and every § 8 row of
-  `audit/wave0/t2-gate-and-checks.txt` reads `SCOPE_HITS=0` with behaviour class `none`. So the branch that
-  actually has to work — a commit that *does* touch `run`, `lib/common.sh`, `versions.env` or the `Dockerfile`
-  — has **never run**, and all eleven greens are consistent with the guard being broken. **T13 is the first such
-  task**; there, a `class none` row would be flatly wrong rather than merely uninformative, and the condition
-  (3) refusal is what should fire. That is the row to scrutinise, not these eleven. Recorded now because T13 is
-  task 18 of 19 and the tracker is what a reader has in front of them at T13, not T3's notes.
+- **2026-11-05 — what the gate carve-out has never exercised is the refusal branch (neckbeard's caution,
+  recorded before T13 rather than at it).** Every row of `audit/wave0/t2-gate-and-checks.txt` § 8's table is
+  `SCOPE_HITS=0` / behaviour class `none` — the table is the count of invocations, so it is not restated here,
+  and it grows with every commit. **The producer is verified:** `b2e5fa4`, `4ca31ae`, `5f8890d` and `1eafda7`
+  score 1, 1, 2 and 4 under this `PATTERNS`, so the guard demonstrably sees the surface. What has **not** been
+  exercised is a live commit touching `run`, `lib/common.sh`, `versions.env` or the `Dockerfile` being turned
+  away — back-dated controls prove the producer scores the surface, they do not prove a real invocation would
+  be refused. **T13 is the first such task**; there a `class none` row would be flatly wrong rather than merely
+  uninformative, and condition (3)'s refusal is what should fire. Recorded now because T13 is task 18 of 19 and
+  the tracker is what a reader has in front of them at T13, not T3's notes fifteen tasks early.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every

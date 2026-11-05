@@ -523,10 +523,13 @@ A plan is not done when the code works. It is done when what you learned is on d
    The same applies to a **number a record copies**: cite the owner for an expected value rather than restating
    it, because a restated count becomes a second authority the moment the number legitimately moves, and an
    agent who sees it disagree with the live tool concludes drift rather than staleness. (Observed 2026-11-05:
-   four places held `3 b` after the count moved to `5 b`: three live instructions, each fixed by citing
-   the owner rather than restating the number, plus one
-   stamped capture, which was **annotated forward in its own notes section** and never rewritten: rewriting it
-   would retro-date the helpers into the task that captured it.)
+   four places held `3 b` after the count moved to `5 b`: three live instructions, each fixed by citing the
+   owner rather than restating the number, plus one stamped capture, annotated forward in its own notes section
+   and never rewritten — rewriting it would retro-date the helpers into the task that captured it.)
+   **Boundary: the owner is a named file**, so this applies only where the value's owner sits outside the file
+   holding the copy. A check's own locally-owned expectation — § 6a's `PATHS=10`, a section's own `SCOPE_HITS`
+   — stays a literal, and citation would delete it: a sentinel you replaced with a pointer can no longer fail,
+   which is the opposite mistake and a worse one.
 
 ---
 

@@ -419,24 +419,26 @@ carve-out*. It is repeated here on purpose: if `PATTERNS` is amended later, this
 `SCOPE_HITS` were actually computed against. The definition is `RULES.md`'s; where the two disagree, the
 `RULES.md` code block governs future runs and this one stands as history.
 
-| commit | FILES | SCOPE_HITS | behaviour class (condition (4)) | note |
+| commit (↑ = SHA filled by the row below) | FILES | SCOPE_HITS | behaviour class (condition (4)) | note |
 |---|---|---|---|---|
 | `aab418e` | 3 | 0 | none | first invocation **under** the rule; measured from the commit object |
-| `fe5bcdc` | 4 | 0 | none | backfilled ↑ |
-| `b17c277` | 3 | 0 | none | third under the rule; touched exactly the same three paths as the row below |
-| `35a5dfc` | 3 | 0 | none | backfilled ↑ |
-| `08b8ead` | 5 | 0 | none | backfilled ↑; first read `FILES=3`, re-measured after the last file was staged — the row was rewritten, not shipped as a prediction |
-| *(the commit adding this row)* | 5 | 0 | none | plan-file maintenance: execution rule 5's stale gate count retired, the T1 capture annotated forward, two § 8 notes trimmed |
+| `fe5bcdc` ↑ | 4 | 0 | none | — |
+| `b17c277` | 3 | 0 | none | touched exactly the same three paths as the row below |
+| `35a5dfc` ↑ | 3 | 0 | none | — |
+| `08b8ead` ↑ | 5 | 0 | none | first read `FILES=3`, re-measured after the last file was staged — the row was rewritten, not shipped as a prediction |
+| `b3248db` ↑ | 5 | 0 | none | execution rule 5's stale gate count retired, the T1 capture annotated forward, two § 8 notes trimmed |
+| *(the commit adding this row)* | 3 | 0 | none | legend moved into the header cell, the T13 caution narrowed, E.7 given its boundary clause |
 
-**Naming the rows: a convention, replacing a locator.** Every row carries a SHA except the last, which cannot
-have one until it lands; that row's numbers were taken against the **index while staged**, immediately before
-`git commit`, and re-match the commit object afterwards. **The convention: the commit that adds a row fills in
-the SHA of the row above it** — those rows are marked `backfilled ↑`, meaning the SHA in that first cell is what
-a later commit supplied. The steady state is therefore exactly one nameless row, always the last, and the
-backfill is free because this file is already edited by every commit. An earlier round built a `git log -S`
-anchor scheme to name the newest row instead; it was unsound rather than under-maintained, and it has been
-deleted rather than annotated — the general lesson is `context/pitfalls.md` item 18, and the measurements that
-killed it are below.
+**Naming the rows: a convention, replacing a locator.** Every row carries a SHA except the last,
+which cannot have one until it lands; that row's numbers were taken against the **index while
+staged**, immediately before `git commit`, and re-match the commit object afterwards. **The
+convention: the commit that adds a row fills in the SHA of the row above it** — a commit that was
+supplied this way carries **↑** after its SHA in the first column, which is what the table's header
+legend names. The steady state is therefore exactly one nameless row, always the last, and the
+backfill is free because this file is already edited by every commit. An earlier round built a `git
+log -S` anchor scheme to name the newest row instead; it was unsound rather than under-maintained,
+and it has been deleted rather than annotated — the general lesson is `context/pitfalls.md` item 18,
+and the measurements that killed it are below.
 
 > **Why the anchor scheme was deleted, keeping its measurements.** Two misresolutions, both real output.
 > **(1)** The § 8 heading phrase — deliberately **not quoted here**, since quoting it adds an occurrence and
