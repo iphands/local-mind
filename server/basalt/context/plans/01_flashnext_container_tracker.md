@@ -36,7 +36,7 @@
 | 1 | T1: Pins, shared guards, project skeleton | `versions.env`, `lib/common.sh`, `.gitignore`, `models`, `README.md` | done | Digests unchanged since ../ninfer pinned them; sudo / missing-docker guards refuse (rc=1); gate `1 b`, `env ok`. |
 | 2 | T2: Dockerfile + `./build` | `Dockerfile`, `Dockerfile.dockerignore`, `build` | done | Preflight ok at `dc047a77`; dirty (untracked) checkout refused; context probe: 11.75 MB, no `.git`; no image built. Gate step 3 added. |
 | 3 | T3: `./run` + its dry-run gate step | `run`, `README.md`, RULES gate | done | Gate step 4 added and passing with `image: stub:none` (no image yet); negative control `KV=fp16` → 2 FAIL lines; busy/ninfer/missing/not-a-pack all rc=1. |
-| 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | pending | owner runs `./build` |
+| 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | blocked | Waiting on the owner's `./build` (SERIES Standing Constraints); `PREFLIGHT_ONLY=1 ./build` passes (T2). T5–T7 depend on it. |
 | 5 | T5: Check `./run`'s flags against the built image | RULES gate step 5 | pending | needs T4 |
 | 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | pending | owner boots |
 | 7 | T7: Harvest | `context/*.md`, `README.md` | pending | |
