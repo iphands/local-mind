@@ -228,5 +228,11 @@ AUDIT TREE OK (post-capture)
 #    helpers that later raised the count (`context/audit/scripts/ledger-grid.sh` at `3c27913`,
 #    `context/audit/scripts/t2-census.sh` at `9a56c8d`) did not exist at T1 — so rewriting that line
 #    would retro-date them into this task. Do NOT read a higher count today as tree drift: the live
-#    expected count and its enumeration are owned by `context/plans/RULES.md` § *The gate*. A copied
-#    transcript cites that owner for an expected value; it does not restate the number.
+#    expected count and its enumeration are owned by `context/plans/RULES.md` § *Project gate* →
+#    Expected counts. A copied transcript cites that owner for an expected value; it does not restate
+#    the number.
+# 5. Currency note, 2026-11-05 (a later Plan-02 commit; nothing above edited). This capture has NO
+#    `INTERPRETER=` line because the gate did not print one until 2026-11-05: block `# 0` was added to
+#    `RULES.md` § *Project gate* step 1 during T3, after this run. So the python that executed T1's 1a
+#    half is unrecorded and not re-derivable — read the absence as "not captured", never as "not
+#    required". Same applies to `t2-gate-and-checks.txt` and to RULES.md's own init baseline.

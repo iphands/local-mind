@@ -242,6 +242,18 @@ purpose — a count that silently drops is the failure this step exists for. *(M
 **before** `git add`, which is the only reason 2b had anything to check — see the note at 2b. This line
 is the **owner** of both numbers: cite it, do not restate it, per § *Rule E* item 7.)*
 
+> **Citation form, and what this line actually owns.** Cite it as
+> **`RULES.md` § *Project gate* → Expected counts**. "Expected counts" is a **bold prose label under
+> the heading `#### Project gate`**, not a heading; a bare `§ *The gate*` or `§ *Expected counts*`
+> resolves to nothing in this file, and both forms were in circulation until 2026-11-05. The same
+> applies to **Prerequisites** below it. *(Not re-headed on purpose: promoting either to a heading
+> renumbers a section Plan 01's completed files cite.)*
+> **This line is the owner of the two COUNTS, not of set membership.** Membership is derived: 1b selects
+> by class **and** path over `git ls-files`, and no assertion checks `AUDIT_B=5` — the enumeration
+> above is illustrative, and 2b's printed file list is the machine check on who is in the set. A sixth
+> audit script moves the live count against this number, and that is the drift 1b's identity guard
+> exists to surface.
+
 > **The helper-clause decision, 2026-11-05 (T3).** The clause above — "a third script added to this
 > count should not be a third use of the clause: it should trigger the alternative… narrowing step 1a
 > to the project's own launchers and linting audit helpers in their own task-local check" — **is now
@@ -275,7 +287,9 @@ is the **owner** of both numbers: cite it, do not restate it, per § *Rule E* it
 #     fails closed when the environment moves; one the gate ECHOES cannot go stale silently. The
 #     python halves of the audit generators (t3-census.sh's S14/S15 procedures) and every `python3 -c`
 #     compile in 1a below run under this interpreter, so "which python3" is part of the record.
-echo "INTERPRETER bash=$BASH_VERSION python=$(python3 -c 'import sys;print(sys.version.split()[0])' 2>/dev/null || echo MISSING) at=$(command -v python3)"
+_py=$(python3 -c 'import sys;print(sys.version.split()[0])' 2>/dev/null || true)
+_at=$(command -v python3 2>/dev/null || true)
+echo "INTERPRETER bash=${BASH_VERSION:-MISSING} python=${_py:-MISSING} at=${_at:-MISSING}"
 # 1a — syntax, over tracked files only (in-memory compile: no __pycache__ written).
 #      NOT narrowed: every tracked file, both sets. See the decision note above.
 git ls-files -z . | while IFS= read -r -d '' f; do
@@ -491,7 +505,9 @@ command and records the pasted output, and a commit names the gate steps it coul
 
 **Init baseline (2026-11-04):** step 1 pass over 0 tracked files (no counts printed), 1c
 `SKIP(1c: no versions.env yet)` — not applicable until a task adds the pin file; step 2
-`shellcheck ok` over an empty set. No files generated.
+`shellcheck ok` over an empty set. No files generated. *(Currency note 2026-11-05: this baseline predates
+the `INTERPRETER=` echo now in step 1, so it carries no interpreter line; the same absence in any
+pre-2026-11-05 capture means **not captured**, never **not required**.)*
 
 ### Rule B — Commit at every task boundary (or more often) <!-- hp:commit -->
 

@@ -105,6 +105,11 @@ shellcheck ok        → 2 PASS (includes the new t2-census.sh; shellcheck 0.11.
 > edits in (`PARALLEL` 4→3, deliberately excluded from this commit). `shellcheck ok` here therefore means
 > "the bash set parses and lints clean as of this checkout", not "the bash set as committed by T2 lints
 > clean". Re-run after staging if a reviewer wants that stronger claim.
+>
+> **Currency note, 2026-11-05** (later Plan-02 commit; nothing above edited): this capture carries no
+> `INTERPRETER=` line because the gate grew that echo during T3, after this run — see
+> `t1-freeze-and-manifest.txt` note 5. The python that ran T2's 1a is unrecorded; read the absence as
+> "not captured", not "not required".
 
 ```text
 # 3–6 — build preflight, container build, serve, bench: NOT RUN.

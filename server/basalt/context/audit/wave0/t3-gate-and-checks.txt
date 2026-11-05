@@ -2,15 +2,37 @@ Target dc047a77beeddf1e91234d983a91d6bf929e9619 / tree 3f7b69ae4054969ed15b9b6f0
 
 # Plan 02 T3 · the gate and the freeze pairing, run as published, 2026-11-05
 
+**Commit documented: `dd94598ae6562fa723c70666b225269a3f29cc2b`**
+(`[basalt][P2][T3][census-tooling]`). Its controls file was amended by
+`a207f9a3b6936e44746cad39d17d5958bab06486`; **every gate number below is from `dd94598`'s staged set**,
+not from the amendment.
+
 Companion to [`t3-sentinels-real.txt`](t3-sentinels-real.txt) (the census run) and
 [`t3-census-controls.txt`](t3-census-controls.txt) (the controls). This file answers a different
 question: *was the commit that landed those two allowed to land, and is the script it committed the
 same program that produced them?*
 
 Nothing here was hand-copied. Steps 0/1a/1b/1c and 2/2b were **extracted from `plans/RULES.md`'s own
-fenced blocks** with `sed -n '274,330p'` / `sed -n '351,369p'` and executed, so the thing that ran is
-the thing that is published — not a paraphrase of it. Same for the scope producer (`:155,163`). Run
-from the project root (`server/basalt`), `diff.relative` unset, `LC_ALL=C`.
+fenced blocks and executed**, so the thing that ran is the thing that is published — not a paraphrase of
+it. Same for the scope producer. Run from the project root (`server/basalt`), `diff.relative` unset,
+`LC_ALL=C`.
+
+The extraction coordinates alone would not survive the commit that used them — this is the pattern
+`pitfalls.md` § *Provenance that cannot contradict its own claim* names ("a range silently relocates
+when the premise is wrong"), and `RULES.md` is a file this plan edits. So the ranges are pinned to the
+blob they were cut from:
+
+```bash
+git cat-file blob 3d2966965cf9414f725188ae347b048f0ad7e51b | sed -n '274,330p' | sha256sum
+# 2ed670357c226a478abdd7ca19dc98d7a7880ab39bf72597b375cf0c480ade1d   ← step 0/1a/1b/1c, ran from this
+git cat-file blob 3d2966965cf9414f725188ae347b048f0ad7e51b | sed -n '351,369p' | sha256sum
+# ba991abfee7220ebf13f9df1dfe5a465f962ac64b158d2ce807e966174772b29   ← steps 2/2b
+```
+
+`3d296696…` **is** `context/plans/RULES.md` as committed in `dd94598`
+(`git rev-parse dd94598:server/basalt/context/plans/RULES.md`). Both commands above were run and printed
+the two digests shown, so § 1 and § 2 are re-derivable from the object store even after `RULES.md`
+moves. § 1 and § 2 paste output only; the block whose output they are is identified by these digests.
 
 ---
 
@@ -37,10 +59,10 @@ env ok
 ```
 
 Exit 0. **No `FAIL` line**, so 1a passed over every tracked file (both sets, deliberately not
-narrowed). `PRODUCT_B=3 AUDIT_B=5` **matches the owner line** — `RULES.md` § *Expected counts*, bumped
-`3 b` → `5 b` in this same commit for `t3-census.sh` and `t3-inputs.sh`. The identity guard printed no
-`FAIL(1b) missing product bash: …`, which is the point: the product number is 3 *over three named
-launchers*, not 3 over nothing from the wrong cwd.
+narrowed). `PRODUCT_B=3 AUDIT_B=5` **matches the owner line** — `RULES.md` § *Project gate* →
+**Expected counts**, bumped `3 b` → `5 b` in this same commit for `t3-census.sh` and `t3-inputs.sh`.
+The identity guard printed no `FAIL(1b) missing product bash: …`, which is the point: the product
+number is 3 *over three named launchers*, not 3 over nothing from the wrong cwd.
 
 `AUDIT_B=5` is only true **after** `git add`: 1b enumerates `git ls-files`, so an untracked script is
 invisible to 1a, 1b and 2/2b alike. That is why the sequence for this commit was *lint both scripts by
@@ -85,43 +107,33 @@ affect a boot. That claim is *why* the class is `none`, but the **permission** t
 
 ## 4 · Scope evidence (condition (3))
 
-Producer is `RULES.md`'s own pre-commit twin, run against the **staged** set. Two passes, because this
-file stages after the first reading — every number below is a printed line, and the pair is what makes
-the self-exclusion checkable rather than asserted:
+Producer is `RULES.md`'s own pre-commit twin, run against the **staged** set. It strips
+`^server/basalt/`, so it counts this project's paths only — `FILES_ALL` is the same producer over
+**all** staged paths, run to show `SCOPE_HITS=0` is not an artifact of the narrower input. Two passes,
+because this file stages after the first reading:
+
+| Pass | State of this file | `FILES` | `FILES_ALL` | `SCOPE_HITS` | `SCOPE_HITS_ALL` |
+|---|---|---|---|---|---|
+| 1 | not yet staged | 11 | 12 | 0 | 0 |
+| 2 | staged | 12 | 13 | 0 | 0 |
+| 3 | staged, § 4 then widened | 12 | 13 | 0 | 0 |
 
 ```text
-PASS 1  (12 paths staged, this file not among them)
-FILES=11 SCOPE_HITS=0
-PATTERNS=^(run|build|Dockerfile|Dockerfile\.dockerignore|versions\.env|lib/|models|\.gitignore)
-
-PASS 2  (this file staged as well)
-FILES=12 SCOPE_HITS=0
 PATTERNS=^(run|build|Dockerfile|Dockerfile\.dockerignore|versions\.env|lib/|models|\.gitignore)
 ```
 
 `PATTERNS` is pasted as run output, not copied from the definition: if the list is amended later, this
-line says which list these hits were computed against.
+line says which list these hits were computed against. `FILES` is 11/12 and `FILES_ALL` 12/13 because
+one path — the monorepo's `context/pitfalls.md`, the locale host-limit copy — is invisible to the strip;
+tested against `PATTERNS` on its own it returns `hits=0`. So the machine condition behind the carve-out
+holds over **every** path in the commit, and only the *file count* is project-scoped.
 
-Two scope limits on those lines, both measured rather than assumed:
-
-- **They count this project's files only.** The producer strips `^server/basalt/`, so a commit touching
-  the monorepo root is under-counted by design — 11 of 12 in pass 1, 12 of 13 in pass 2. This commit
-  does touch it: `context/pitfalls.md` (the locale host-limit copy) is invisible to the strip. So the
-  whole-commit variant was run too, and `SCOPE_HITS=0` is **not** an artifact of the narrower input:
-
-  ```text
-  PASS 1  FILES_ALL=12 SCOPE_HITS_ALL=0
-  PASS 2  FILES_ALL=13 SCOPE_HITS_ALL=0
-  ```
-
-  with the strip-excluded path tested against `PAT` on its own returning `hits=0`. The machine
-  condition behind the carve-out therefore holds over every path in the commit; only the *file count*
-  is project-scoped.
-- **Neither pass can measure the commit object**, and pass 1 cannot see the file carrying it.
-  `t2-gate-and-checks.txt` § 8 is the precedent for recording the staged passes and letting the next
-  commit carry the landed one. A third run, after § 4 itself was widened to carry these numbers, printed
-  `FILES=12 SCOPE_HITS=0` again — measured, not inferred, though inference would have been safe here:
-  editing a staged file changes no path and removes none.
+**No pass can measure the commit object**, and pass 1 cannot see the file carrying it; pass 3 is a
+re-run after § 4 itself was widened, included because "editing a staged file changes no path" is
+trivially true but measuring it costs one line. `t2-gate-and-checks.txt` § 8 is the precedent for
+recording staged passes and letting the next commit carry the landed one — which is what the commit
+message of the *amendment* does: measured over `dd94598`'s own commit object, `FILES=12 SCOPE_HITS=0`
+and `FILES_ALL=13 SCOPE_HITS_ALL=0`, equal to pass 2 above.
 
 ## 5 · The freeze pairing — committed script vs the run that cites it
 
@@ -137,13 +149,24 @@ paste                = GENERATOR_SHA256=1bab1ec5e7933c90a80a97aa8752183510522804
 Equal for `t3-census.sh`. Re-check in one line from the commit object (any later session):
 
 ```bash
-git cat-file blob <sha>:server/basalt/context/audit/scripts/t3-census.sh | sha256sum
-# must equal the GENERATOR_SHA256= line of t3-sentinels-real.txt
+git cat-file blob dd94598ae6562fa723c70666b225269a3f29cc2b:server/basalt/context/audit/scripts/t3-census.sh | sha256sum
+# must equal 1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106
+#          == the GENERATOR_SHA256= line of t3-sentinels-real.txt
 ```
 
 `t3-inputs.sh` has no token in the paste — it is the *producer* of the three `INPUT_SHA256=` legs, so
 its pairing is indirect: re-running `scripts/t3-inputs.sh && scripts/t3-census.sh vendor/basalt real`
-must reproduce those three hash lines. Its own hash is recorded here so a later edit is attributable.
+must reproduce those three hash lines. Its own hash is recorded above so a later edit is attributable,
+and **one has happened**: `a207f9a` added the input-set totals asserts (`INPUT_TSVS=12`,
+`INPUT_ROWS=862`, exit 4) to `t3-inputs.sh`, moving its sha
+`327bf7c3f4460a0a3fdb60a3e1782ac25317babb3b80426aefe91929b4251d5e` →
+`812edf09da0ac20b69e4ae0da51c0f2b3c02c0d4d8be5feab0a417479edabc65`. The pairing survives because the
+edit is a **guard, not a projection**: the script was re-run and all three produced files are
+byte-identical (`diff -r` of a pre-edit snapshot is empty) and still equal, in order, to the
+`INPUT_SHA256=` legs pasted in `t3-sentinels-real.txt`. `t3-census.sh` itself is untouched
+(`1bab1ec5…`). Both new asserts were fired before staging — dropping a TSV gives
+`INPUT_TSVS=11 … exit 4`, dropping one row gives `INPUT_ROWS=861 … exit 4` — and neither control could
+overwrite the real inputs, because the guards sit **before** the script's writes.
 
 Note the shape of that pairing: **it is a pairing, not a proof.** If the two scripts and the paste all
 change together they stay mutually consistent while describing neither the tree nor any run anyone
@@ -164,13 +187,23 @@ TREE CLEAN (no untracked/ignored)
 Three legs, all three required — the reason is [`t3-tree-contamination.txt`](t3-tree-contamination.txt),
 and the tracker's Resume step 1 now carries all three for the same reason.
 
-**The interpreter, and the fact this replaces.** `INTERPRETER=… python=3.12.16` above is the reason
-`RULES.md` § *Prerequisites* stopped reading `python3 (3.14.10 here)`: an exact version in prose is a
-prerequisite that fails silently closed when the shell moves, whereas the echo above is part of the
-gate's own record every commit. `3.14.10` is a real CPython release (python.org, 2026-10-25) — the
-defect was that the line named **no environment**, not that the number was impossible. `distilled.md`'s
-dated, scoped copy of the same number was **left untouched**; see
-`context/pitfalls.md` § *A dated fact scoped to a shell I could not enter…*.
+**The `INTERPRETER=` line.** Step 1 gained it in this commit because a prerequisite stated as an exact
+version in prose fails silently closed when the shell moves; the echo is part of the gate's own record
+every time. That is the whole claim this file makes about it — the history of the `python3 (3.14.10)`
+line it replaces, including why that number was not itself wrong, is in
+`context/pitfalls.md` § *A dated fact scoped to a shell I could not enter…* and the tracker's Notes, not
+here.
+
+Two honest limits on it, stated next to the output rather than defended:
+
+- **Nothing machine-checks its presence.** `RULES.md` § *Project gate* requires the line to be pasted,
+  and no `FAIL` fires if a paste drops it — unlike 1b's identity guard or 2b's enumerated file list. This
+  is a deliberate exception: the line is evidence about the *environment*, it gates nothing, and a guard
+  that fails a commit for a missing informational line invites the failure mode this plan documents
+  (a green step read as a covered one). If it is ever used as a threshold, it needs a guard first.
+- **All three legs now print `MISSING` on failure.** The first cut guarded only `python=`, so a shell
+  with no `command -v python3` would have printed `at=` — indistinguishable from a formatting quirk.
+  Fixed in the follow-up commit; § 1's paste above predates that edit and shows a fully-populated line.
 
 ## 7 · What this commit did to the counts it documents
 

@@ -112,6 +112,19 @@ session's harness runs rather than to the clone.
   SENTINEL_TOTAL=27 SENTINEL_FAILS=0
   T3_CENSUS_VERDICT=PASS (all 27 compared expectations met; unverified claims are named as displays, not passes)
 
+> **`SENTINEL_TOTAL=27` above is not drift, and there is no second producer.** It is the census itself —
+> this section is the same invocation — run against an **earlier cut of the generator**, before the
+> cleanup guards existed. Its assertion set genuinely differs from the frozen one: **6** names printed
+> here no longer exist (the `S14/S15 *_PROCEDURE_*` and `*_CONTROL_ROWS_FILE` "ran to completion"
+> checks, since replaced by value comparisons) and **16** of today's names were not yet present. So: 27
+> on this cut, 34 on the frozen `1bab1ec5…` run
+> ([`t3-sentinels-real.txt`](t3-sentinels-real.txt)), 28 on that script's **mutants**
+> ([`t3-census-controls.txt`](t3-census-controls.txt) § 2). The PoC harness — the other script in this
+> story — emits `POC_VERDICT`/`POC_*` and has never printed `SENTINEL_TOTAL`, so a grep across `wave0/`
+> that returns several values is returning **different programs and different dates**, not a metric
+> moving. Annotated at the line rather than renamed: 27 is this section's own evidence. *(This note is
+> commentary added 2026-11-05 outside the transcript; no pasted line above it is altered.)*
+
 ## 5 · control D on the PoC harness: deliberately disable PYTHONDONTWRITEBYTECODE and
 ##     prove the new guard catches it (exit 3), rather than trusting the fix
   POC_TREE_FILES=867 POC_TREE_BYTECODE=8

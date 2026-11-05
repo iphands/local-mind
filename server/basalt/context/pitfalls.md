@@ -462,7 +462,7 @@ docker step looks like in this convention. Two variants of that are worth naming
     Plan 01 T1), so the `else` branch that emits that string is unreachable in this project, and T1's own
     stamped gate block records `env ok` for the same step. The sentence had been carried in from what the
     step *would* print in a repo without pins — a prediction of output, typed into a transcript. Cost had it
-    shipped: RULES.md § *The gate* makes "**skip is not pass**" load-bearing for steps 3–6, which genuinely
+    shipped: RULES.md § *Project gate* makes "**skip is not pass**" load-bearing for steps 3–6, which genuinely
     are owner-only; spending that marker on a line that never ran trains the next reader to discount the
     real SKIPs. The same error appeared one level up, in the tracker note written to
     explain it: "step 1c **changed state** under this task, and it is a pass, not a regression" — an
@@ -869,6 +869,11 @@ controls after it is not.
   compares — had been overwritten too. Enumerate the artifacts, then verify all of them.
 - A mis-launched control is a **broken control, not a fired one** — exit 2 means nothing was asserted.
   Treat it as an incident: it may still have written, or deleted, something.
+- **A command block inside an evidence file is a command someone will run, so its output paths are part
+  of that file's blast radius.** An earlier `wave0` header said `2> stderr.txt` and was executed, leaving
+  a 0-byte untracked file in the project root; in `vendor/basalt` the same line would have been invisible
+  to `git diff` *and* counted by the freeze check's file leg. Write every redirect in a pasted command as
+  an absolute `/tmp/opencode/...` path, and if a stray appears, say it **fired** rather than "would have".
 - Related failure already in this file, same root (wrong cwd, empty inputs, a check that inherits the
   emptiness): § *Shell idioms that report green on the thing they did not check* items 3 and 20. This
   entry adds only the destructive half.
@@ -1020,6 +1025,11 @@ Two related errors from the same five minutes, both about *inference* rather tha
 
 ## Problem
 
+**The tokens:** `git status`'s two-column `XY` (a leading space — ` M` — means *worktree-only*, index
+clean), `git diff` (worktree vs index) versus `git diff --cached` (index vs `HEAD`),
+`git show <commit>:<path>`, and the blade specific to this project: gate steps 1a/1b/2b enumerate
+`git ls-files`, so **`shellcheck ok` is a claim about the index, never about the bytes that landed.**
+
 **[OBSERVED 2026-11-05]** A `wave0` evidence file was `git add`ed, then edited **four times** to replace
 four truncated hashes with full ones, and never re-staged. The commit therefore shipped the
 **pre-edit** content. `git status` said ` M context/audit/wave0/t3-census-controls.txt` the whole time —
@@ -1056,6 +1066,9 @@ exactly the sequence that produces this.
 - Related trap in the same family: `git commit <path>` commits the **worktree** content for that path
   while leaving everything else from the index, so it silently mixes two states of the tree.
   Stage-and-`git commit` with no pathspec keeps the two states identical by construction.
+- **Keep the two states identical by sequence, not by memory**: lint → `git add` → gate → paste the
+  gate's numbers → commit. 1b/2b read the index, so a count like `AUDIT_B=5` is only true *after* the
+  `git add`; a claim pasted before it is a claim about a set that does not exist yet.
 
 ## Sources
 
@@ -1064,4 +1077,78 @@ exactly the sequence that produces this.
   which also inserts the transcription note into `wave0/t3-census-controls.txt`
 - the same family as § *Shell idioms that report green on the thing they did not check*: a check whose
   input is not the thing under test — here the input was the worktree and the subject was the commit
+- git-semantics siblings, kept separate on purpose because each is about a different part of git's
+  model: § *Cross-repo git forensics: three commands that answer a different question than they look
+  like* (wrong *object* selection across two histories) and § *A shared worktree has no such thing as
+  "my uncommitted edits are private"* (the same index, two authors). This entry is the **index vs
+  worktree** axis of that family, which is the one that bites a solo session.
+- observed Plan 02 T3, 2026-11-05
+
+---
+
+# A number measured on mutated copies got recorded as a property of the tag they ran under
+
+## Problem
+
+**[OBSERVED 2026-11-05]** `t3-census.sh` prints `SENTINEL_TOTAL` — how many internal assertions it
+compared. On the `real` run it is 34. In the controls evidence it reads **28** under `tag=negctl`, and
+I wrote that down as *"`SENTINEL_TOTAL=28` on `negctl`"* — in the evidence file, and again in the
+tracker's canary row, which is the file a future session seeds a floor constant from.
+
+Every one of those 28s came from a **mutated copy of the generator**. Checked directly: of the thirteen
+non-real runs on disk, **all thirteen are mutants** (`GENERATOR_SHA256` ≠ the frozen `1bab1ec5…`), and
+**zero unmutated non-real runs have ever been made**. So "28 on `negctl`" attributes to the *tag* what
+is a property of *ten different edited programs that happened to be run with that tag on the command
+line*.
+
+Why this is not caught by anything:
+
+- **The label was real.** The runs really did carry `tag=negctl`, really did write `run-negctl/`, and
+  really did print 28. Nothing in the output distinguishes "the tag's value" from "this mutant's value"
+  — the generator hash that would distinguish them is on a different line, in a different section.
+- **The number is plausible, which is what makes it sticky.** The reason 28 < 34 is genuine: a block of
+  assertions is `[ "$TAG" = real ]`-gated. So the *explanation* for the gap is about the tag, and the
+  explanation being right is what let the *value* pass review. A confound with a correct causal story
+  survives both author and reviewer.
+- **The instrument disagreed with my prose and nobody asked it.** `t3-census.sh` says in a comment
+  "**measure this line on the first canary run**" before a per-tag floor is added. The script already
+  refused the shortcut; the prose had just walked past it.
+
+The damage was prospective, not retrospective: nothing computed with 28 was wrong yet, but the floor for
+a canary tag is exactly the constant that seeds a `FAIL`/`PASS` decision, and `SENT_TOTAL_FLOOR` guessed
+once before (as 31) already printed a green over the wrong quantity.
+
+## How to avoid
+
+- Grep anchors: `on <tag>`, `measured`, `baseline`, `expected`, `FLOOR`, `TOTAL`, `under tag=`.
+- **Before writing "X is N on tag T", name the artifact that produced N.** Not the tag, not the
+  directory: the program, identified by hash. If the producing artifacts are many and differ, there is
+  no measurement of T — there are N measurements of N mutants.
+- **A control run measures the mutation, not the environment.** Its tag is plumbing. Anything a control
+  prints that is *not* the assertion it was built to fire is a mutant property and gets labelled as
+  one at its own block, not promoted to a section-level fact.
+- **State the population, then the count.** "All thirteen non-real runs are mutants; no clean non-real
+  run exists" is the sentence that makes 28 harmless. "28" without it is a seed waiting to happen.
+- **Where a value will seed a threshold, record its provenance in the same place as the threshold.**
+  The floor-constant instruction lives in the script; the would-be value lived in two prose files, and
+  the two never met. Write "do not seed from this" next to the number, not next to the rule.
+- **Same-identifier collisions are a separate trap in the same grep.** `SENTINEL_TOTAL=` appears in
+  `wave0/` from three producers (the census on real, census mutants, and the PoC harness printing 27)
+  with five distinct values. When two programs reuse an identifier, annotate the line with its owner
+  rather than renaming a committed script — renaming one orphans that script's own evidence.
+- Cross-references: § *Provenance that cannot contradict its own claim* is the case where the evidence
+  cannot refute the claim attached to it; § *A dated fact scoped to a shell I could not enter…* is
+  reading a scope qualifier that was there. **This is the case where the qualifier was never recorded at
+  all** — the number arrived pre-laundered by its own author.
+
+## Sources
+
+- the laundered figure and its correction: `context/audit/wave0/t3-census-controls.txt` § 2 ("Scope of
+  that `28`") and the tracker's canary Evidence row, both 2026-11-05
+- the population check: `GENERATOR_SHA256=` compared against the frozen `1bab1ec5…` across all thirteen
+  `/tmp` control transcripts — scratch, so re-derive by re-making a mutant, not by reading my logs
+- the instrument's own instruction: `context/audit/scripts/t3-census.sh`, the per-tag
+  `SENT_TOTAL_FLOOR_$TAG` comment
+- the earlier sibling in this plan: `SENT_TOTAL_FLOOR_REAL` guessed as 31 and passing over the wrong
+  quantity, recorded in `wave0/t3-census-controls.txt` § 2
 - observed Plan 02 T3, 2026-11-05

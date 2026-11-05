@@ -57,7 +57,8 @@
      so it may have been true of a shell that **cannot be re-entered and is not named** — that
      non-derivability is the datum, not an omission. Nothing in this plan's work depends on a python
      version, and the gate's step 1 now **echoes** the interpreter it used
-     (`INTERPRETER=…`, `RULES.md` § *The gate*) so the next session does not have to trust either line.
+     (`INTERPRETER=…`, `RULES.md` § *Project gate*, step 1) so the next session does not have to trust
+     either line.
      `RULES.md` § *Prerequisites* is corrected in place; `distilled.md` `:162` is **left alone** because
      it is properly scoped — see `context/pitfalls.md` § *A dated fact scoped to a shell I could not
      enter…*.
@@ -107,7 +108,7 @@
 | 0 | T0: Restore the gate (shellcheck user-local, RULES.md prerequisite) | `context/plans/RULES.md` | **done** | v0.11.0 at `~/.local/bin`, negative control fired SC2115/SC2086; gate 2 `shellcheck ok`; RULES.md steps 2 + Prerequisites corrected in place, dated. Docker (steps 3–6) recorded owner-run, not fixed |
 | 1 | T1: Freeze the pin, manifest all 862 files | `context/audit/manifest/` | **done** | 862 rows / 12 TSVs / 219,247 l; `MISMATCH_COUNT=0` under `GIT_NO_LAZY_FETCH=1`; tree frozen, `VENDOR_DIRTY=0`; 862 objects all `blob` (858×100644, 4×100755 — no gitlinks, no symlinks); 0 paths outside printable ASCII; worktree `sha256sum` == object sha256 for all 862; pipeline byte-deterministic over two runs and `diff`-equal to the committed TSVs. Tier A pre-seeded 75 f / 19,659 l, `B-vendored@T5` 1 f, **786 f `unassigned` for T3**; **0 lines read**. Gate 1a/1b/1c/2 pass, 3–6 docker-blocked (owner). See `context/audit/wave0/t1-freeze-and-manifest.txt` |
 | 2 | T2: Pin provenance + boundary-author census | `manifest/index.md` | **done** | **All 862 blob SHAs match GitHub's tree object `3f7b69ae` for the pin** — `INTERSECT=862 ONLY_IN_API=0 ONLY_IN_LOCAL=0 BLOB_SHA_MISMATCH=0`, `GITLINKS=0`, canonical `sha256(path⇥blob)` equal both sides; sensitivity control against the first parent returns `BLOB_SHA_MISMATCH=1` (one file: `serve/util/telemetry.py`). **Limit, recorded as a limit:** the signature is GitHub's own key (`B5690EEEBB952194`) on a GitHub-made squash merge and is unverifiable here (`No public key`); all 3 of **basalt's own** tags are annotated-**unsigned** (Strata's same-named tags are different objects); SWH has no origin for `jesdga95/basalt` and no revision for the pin → **no non-GitHub anchor for the pinned commit** (it *does* hold the ancestor Strata in 9 visits — 8 `full`, 1 `failed` — and our root commit — see `wave0/t2-lineage.txt` § 7; an earlier draft of this row said SWH "has never archived this project", which was true only of the broken `/get/` endpoint form — `pitfalls.md` item 10). **Pin is untagged `main`, not `v0.3.5`** (that tag does not exist upstream; docs/pyproject claim it → no release artifact to diff, feeds Risk 5); 3 commits since `v0.2.1`; no `SECURITY.md` anywhere. Census of **87 rows / 80 blameable first-party files** (`scripts/t2-census.sh`, which reproduces `wave0/t2-author-census.tsv` byte-identically — *the 80*: 87 rows − 6 `BINARY_SKIPPED` − 1 vendored `stb_image.h`; 69 `A-planned` + 11 `unassigned`): 20,111 blamed lines, 53 authors, core two 81 %; **560 lines (2.78 %) sit on a blame boundary and they are the same 560 credited to the root commit**, per-file identical across 7 files (blame cannot walk past a parentless commit), so this is a **lineage** quantity, not an error bar — `wave0/t2-provenance.txt` § 6. *Corrected 2026-11-05: this row first said "**0** blame-boundary lines", which was a false zero from an unanchored `grep boundary` over blame output — `pitfalls.md` item 13. The file denominator also went 86 → 80, and `tail -n +2` on this headerless TSV dropped `CMakeLists.txt` from two of my own verification commands — item 14.* `serve/engine/image_source.py` 570 l = 1 commit/1 author; `dynlib.cpp` 64 l = 1 commit/1 author; **`jeancmyk` holds the plurality of `process.cpp` 216/321, `file.cpp` 247/456, `direct_file.cpp` 255/455, each majority landing in ONE commit** — read first (T8). Tiering gaps found: `CMakeLists.txt` (287 commits) and `serve/engine/process.py` (1,419 l) are `unassigned`. Two plan errors corrected: `src/server/` does not exist; `gh` is not installed. Raw: `wave0/t2-provenance.txt`, `t2-github-tree-paths.txt`, `t2-boundary-authorship.txt`, `t2-gate-and-checks.txt` |
-| 3 | T3: Census + **6-canary** control + orphan-key + diagnostics-shape | `context/audit/census.md` | in-progress | tooling + first clean `tag=real` run committed (`wave0/t3-sentinels-real.txt`, `wave0/t3-census-controls.txt`) — figures and limits in Notes, 2026-11-05. **Deliverable `census.md` still owed.** Gate: **6/6 or census is void**; also freezes T9's list |
+| 3 | T3: Census + **6-canary** control + orphan-key + diagnostics-shape | `context/audit/census.md` | in-progress | tooling + first clean `tag=real` run committed (`wave0/t3-sentinels-real.txt`, `wave0/t3-census-controls.txt`); figures and limits in Notes — *"2026-11-05 — T3's census tooling landed; what it does and does not establish"*. **Deliverable `census.md` still owed.** Gate: **6/6 or census is void**; also freezes T9's list; gate 3–6 docker-blocked (owner), see `wave0/t3-gate-and-checks.txt` |
 | 4 | T4: `image_source.py` + `security.py`; **execute** the 9-class bypass list | `serve/engine/image_source.py` | pending | deliverable = delta vs upstream tests |
 | 5 | T5: decode-path **resource bounds + first-party amplification** (stb is 2.30, current — re-scoped 2026-11-05, see Notes); ASan/UBSan + peak-RSS harness + guard-vs-consumer arithmetic | `src/vision/` | pending | P0 kept, justification replaced; harness agent-built, long runs owner-run |
 | 6 | T6a: Logging + `/metrics` disclosure | `serve/util/`, service/handler | pending | ≤1,500-line slice |
@@ -144,7 +145,7 @@ violation and cannot be cited by a later plan.
 | 2026-11-05 | Gate steps 1a/1b/1c/2, re-run **with `context/audit/` present** (3 new `.md`, 12 `.tsv`, 1 `.sha256`) | 1a no `FAIL` · **`3 b`** · `env ok` · `shellcheck ok` | 1 | Rule 5 holds: none of T1's artifacts enters the bash set. Steps 3–6: step 3 re-measured as docker-denied; 4–6 unrun |
 | 2026-11-05 | T3 census, pristine: `PYTHONDONTWRITEBYTECODE=1 LC_ALL=C context/audit/scripts/t3-census.sh vendor/basalt real` | exit 0, stderr 0 bytes; `SENTINEL_TOTAL=34 SENTINEL_FAILS=0`; `T3_CENSUS_VERDICT=PASS_PENDING_CANARY`; the figures belong to `wave0/t3-sentinels-real.txt`, not to this row | 2 | **`tag=real` only — no canary tag has ever been run.** A second run is byte-identical to the pasted one except the two timestamp lines (`diff` empty): that is the `run-real` restore anchor. Three-leg freeze check clean after both |
 | 2026-11-05 | T3 harness negative controls: 10 exact-string-mutated copies run **beside** the original (`context/audit/scripts/.neg-*.sh`, deleted after) | 10/10 fired — each exit 1, `T3_CENSUS_VERDICT=FAIL`, and its own assertion line `FAIL`; each block records its mutant's `GENERATOR_SHA256` | 10 | **Coverage: 10 of 34 assertions, real path only.** Two are **wiring-only** (C2, C9: they exercise a comparison, not the failure it guards); C4/C5 are maximal (whole-set); C7 proves the comparator, **not** collation sensitivity. No control under `tag=real` again — Notes. Detail: `wave0/t3-census-controls.txt` |
-| — | T3 canary capture (target **6/6**, one per planted class) | — | | **Wave 0 gate.** `t3-canary-score.tsv` must reach 6 rows before the census prints plain `PASS`. A canary tag **floors nothing** today (`SENTINEL_TOTAL=28` on `negctl` vs 34 on `real`; the non-`real` floor line is a `FIND`, not a fail), so a canary run that silently loses assertions still prints PASS — the canary floor is unmeasurable until this row exists |
+| — | T3 canary capture (target **6/6**, one per planted class) | — | | **Wave 0 gate.** `t3-canary-score.tsv` must reach 6 rows before the census prints plain `PASS`. A canary tag **floors nothing** today — the non-`real` floor line is a `FIND`, not a fail — so a canary run that silently loses assertions still prints PASS. `SENTINEL_TOTAL` reads **28** under `tag=negctl` against **34** on `real`, but **every one of those 28s came from a mutated copy** (C3–C10); no unmutated non-real run exists, so **do not seed `SENT_TOTAL_FLOOR_<tag>` from 28** — seed it from this row's first clean run (`wave0/t3-census-controls.txt` § 2) |
 | — | T5 ASan/UBSan fuzz, JPEG/PNG/BMP/GIF at request-reachable `max_pixels` | — | | report count, target 0 |
 | — | T11 `LC_ALL=C comm` manifest vs `git ls-files src/ include/` (target 0) | — | | after each directory slice |
 
@@ -696,7 +697,8 @@ violation and cannot be cited by a later plan.
   (each family's `<name>.sites-linelevel.tsv` is preserved by the run); `raw_rows` is reported as
   `line_hits`. The `153 → 91` partition closes **by construction** of the three-way branch and is not
   evidence that 62 rows *should* be collapses.
-- **2026-11-05 — `AUDIT_B` moved `3 b` → `5 b`; the owner is `RULES.md` § *The gate*.** Stamped captures
+- **2026-11-05 — `AUDIT_B` moved `3 b` → `5 b`; the owner is `RULES.md` § *Project gate* → Expected
+  counts.** Stamped captures
   in this tracker and in `plans/completed/01_*` that still read `3 b` are **not errors** and are not
   rewritten — rewriting one retro-dates the helpers into the task that captured it. Cite the owner line;
   `plans/02_…md`'s Gate status row and Risk 11 were converted from restatements to citations in this
@@ -711,6 +713,66 @@ violation and cannot be cited by a later plan.
   measurement's scope is part of the measurement**, and the gate step now echoes `INTERPRETER=` so no
   future session has to trust a prose version at all. See `pitfalls.md` § *A dated fact scoped to a
   shell I could not enter…* and `context/AGENTS.md` § *Provenance*.
+- **2026-11-05 — the tooling commits reviewed; what the review found, and the one finding that was
+  wrong.** Both reviewers joined `dd94598`+`a207f9a`; the corrections are the commit that follows.
+  - **`t3-inputs.sh` asserted nothing about its own input set.** It globbed `"$MAN"/*.tsv`, checked only
+    duplicates, and *printed* `MANIFEST_LOC=` with no expected value — the T1 `.github.tsv`→860 shape
+    again. And `MANIFEST_ROWS_EQ_862` in the census sits inside `if [ "$TAG" = real ]` (`t3-census.sh:1435`),
+    so **nothing on a canary tag catches a short manifest**: the census would read a short assigned-TN
+    column and never complain. Now asserts `INPUT_TSVS=12` and `INPUT_ROWS=862` (exit 4), **before** its
+    writes, so a failing control cannot leave the previous run's inputs in place for the census to
+    mistake for fresh ones. Both arms fired: drop a TSV → `INPUT_TSVS=11`, exit 4; drop one row →
+    `INPUT_ROWS=861`, exit 4 — distinct causes, and 12/862 are stated here because this script **owns**
+    them (Rule E.7's boundary, not a violation of it). Re-run proves the three `INPUT_SHA256=` legs and
+    the frozen generator sha are byte-unchanged, so `t3-sentinels-real.txt`'s pairing survives.
+  - **`SENTINEL_TOTAL=28` was laundered.** 34 is a real run; **every** 28 came from a *mutated* copy run
+    under `tag=negctl`. Of the thirteen non-real runs on disk, **all thirteen are mutants**; no unmutated
+    non-real run has ever existed. The number is why the value was plausible — the real-only assertion
+    block is genuinely tag-gated — and a confound with a correct causal story survives both author and
+    reviewer. `t3-census.sh:1566` already says "measure this line on the first canary run"; my prose had
+    walked past it. Both copies now say **do not seed `SENT_TOTAL_FLOOR_<tag>` from 28**. New pitfalls
+    entry § *A number measured on mutated copies got recorded as a property of the tag they ran under*.
+  - **A locator family that resolved to nothing.** Seven citations pointed at `RULES.md` § *The gate* and
+    one at § *Expected counts*; **neither is a heading** (`#### Project gate` is). Standardised on
+    **`§ *Project gate* → Expected counts`** rather than promoting a heading, which would renumber a
+    section `plans/completed/01_*` cites. The owner line now declares what it owns: **the two counts, not
+    set membership** — membership is 1b's class-and-path glob, unchecked by any assertion, with 2b's
+    printed list as the machine check. `§ *Prerequisites*` is the same pre-existing prose-only trap and is
+    left, named, alone.
+  - **One reviewer finding was wrong, and checking it changed the fix.** The `SENTINEL_TOTAL=27` in
+    `wave0/t3-tree-contamination.txt` was attributed to the PoC harness reusing the census's identifier,
+    with the suggested fix of renaming the PoC's counter. `t3-model-file-poc.sh` contains **zero**
+    occurrences of `SENTINEL_TOTAL` and prints `POC_VERDICT`; the transcript's own heading is *"the SAME
+    census invocation"*. It is the **census**, on an earlier cut of the generator — proven by diffing
+    assertion names against the frozen script: **6 names printed there no longer exist, 16 of today's
+    were not yet present**. So the correct action was an annotation at the line, and the proposed rename
+    had no target. A reviewer's *causal* claim needs the same verification as a number.
+  - Two header defects, one of which had **already fired**. `t3-sentinels-real.txt`'s command block read
+    `2> stderr.txt`, and that draft line was executed: it left a 0-byte `server/basalt/stderr.txt`,
+    untracked and not ignored (`.gitignore` here ignores only `/vendor/`), found and removed 2026-11-05.
+    Every command block in a `wave0` file is now written with `/tmp/opencode` redirects, because these
+    headers get copy-pasted. And the four hash tokens `dd94598` shipped truncated are now **named by
+    control** (C7/C9/C10 + the § 4 line), so seven of ten controls keep full identification instead of
+    all ten being demoted for my error.
+  - `INTERPRETER=` now prints `MISSING` on **all three** legs (only `python=` was guarded, so a missing
+    python would have printed `at=` — indistinguishable from formatting). The three earlier captures that
+    lack the line (`t1-freeze-and-manifest.txt` note 5, `t2-gate-and-checks.txt`, RULES' init baseline)
+    are **annotated, not rewritten**: absence means *not captured*, never *not required*. **No machine
+    guard** checks its presence — deliberate, with the reason stated in `t3-gate-and-checks.txt` § 6.
+  - Gate-block provenance: the `sed` line ranges that cut steps 0/1a/1b/1c and 2/2b out of `RULES.md` are
+    pinned to the blob they were cut from (`3d296696…`) plus each block's sha256, because a bare line
+    range is this plan's own named defect and `RULES.md` is a file this plan edits.
+- **2026-11-05 — T3's remaining order, fixed.** **Canaries first, then `census.md` once.** The reason is
+  not the numbers but the anchor: a canary that exposes a harness gap forces a generator edit, which mints
+  a new `GENERATOR_SHA256`, and `census.md` is written to be read against a frozen one — every
+  paste-locator in a census drafted now would be orphaned by the first harness fix. So: (1) six canaries +
+  `t3-canary-score.tsv`, seeding each canary tag's floor from a **clean** run (retiring 28) in the same
+  pass; (2) in parallel, as its own commit — the column-6 `unassigned` residue into T9/T10 dispositions,
+  an independent Wave-0 exit condition that depends on nothing the canaries produce; (3) `census.md`
+  **once**, pasting both the real and the canary output. **`tests/` (163 files, 51,125 l) is not separate
+  debt**: census.md's stated job is that every row carries a task number, so an unowned `tests/` is a
+  defect *in* it — it gets a row there, or a named `invalid` with a reason. Same for the C++ reader of the
+  pack's 128-byte entry table: it goes in census.md's routing (T9 or T11c), not in a backlog.
 
 ## Follow-ups
 

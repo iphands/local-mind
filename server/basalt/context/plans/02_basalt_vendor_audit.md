@@ -21,7 +21,7 @@ the artifact that carries "what the agent could and could not verify."**
 | Step | Last run | State | Who can run it |
 |---|---|---|---|
 | 1a syntax | 2026-11-05 | **pass** (no `FAIL`) — still every tracked file, deliberately not narrowed by the 1b split | agent |
-| 1b counts | 2026-11-05 | **pass** — the two expected counts are owned by `RULES.md` § *The gate*; this row cites that owner rather than restating the pair (Rule E.7: a restated count becomes a second authority the day the number moves). This commit's measured pair is in the tracker's dated Evidence row | agent |
+| 1b counts | 2026-11-05 | **pass** — the two expected counts are owned by `RULES.md` § *Project gate* → **Expected counts**; this row cites that owner rather than restating the pair (Rule E.7: a restated count becomes a second authority the day the number moves). This commit's measured pair is in the tracker's dated Evidence row | agent |
 | 1c `versions.env` | 2026-11-05 | **pass** (`env ok`) | agent |
 | 2 shellcheck | 2026-11-05 | **pass** (`shellcheck ok (product)`) — product set only since the T3 split | agent |
 | 2b shellcheck (audit) | 2026-11-05 | **pass** (`shellcheck ok (audit)`) — step added by the T3 split; the hold-out rule was *linted before `git add`*, and `t3-census.sh` and `t3-inputs.sh` each cleared `shellcheck -x` at exit 0 before landing | agent |
@@ -46,7 +46,7 @@ commits in this plan cite this line instead of re-deriving it; re-verify only if
 edited.
 
 **Re-run at T1 (2026-11-05, commit `[basalt][P2][T1][audit] …`)**: steps 1a (no `FAIL`), 1b
-(`3 b` — the plan's `.md`/`.tsv`/`.sha256` artifacts add nothing to the bash set, which is Execution
+(`3 b` then-current — the plan's `.md`/`.tsv`/`.sha256` artifacts add nothing to the bash set, which is Execution
 rule 5 holding in practice), 1c (`env ok`) and 2 (`shellcheck ok`) all pass with `context/audit/`
 present; verbatim in `context/audit/wave0/t1-freeze-and-manifest.txt`. Step 3 fails identically to the
 row above. Steps 4–6 remain unrun for every T1 commit.
@@ -107,7 +107,7 @@ row above. Steps 4–6 remain unrun for every T1 commit.
 2. **Tick unit ≠ commit unit**: flip *all* the manifest rows a slice covers in that slice's commit.
 3. **Never write inside `vendor/basalt/`.** `./build` refuses a dirty checkout, *untracked files included*, so a scratch artifact there breaks gate step 3 for every later commit. Scratch work lives in `/tmp/opencode/basalt-audit/`.
 4. **Commands end with an unconditional sentinel** (`; echo "— done rc=$?"`) so an empty result is distinguishable from a failed command. See `context/pitfalls.md` — this plan already lost one Key Fact to the opposite mistake.
-5. **Audit commands are written inline** (plan/tracker/Evidence), never as helper scripts: gate step 1 classifies by **shebang first**, so even an extensionless `#!/usr/bin/env bash` helper in `context/` counts toward the gate's "Expected counts" line — whose owner and current value are `RULES.md` § *The gate* — and a count above it without a matching RULES bump fails the gate. If a helper is unavoidable it lands with a bump to that RULES.md paragraph in the same commit.
+5. **Audit commands are written inline** (plan/tracker/Evidence), never as helper scripts: gate step 1 classifies by **shebang first**, so even an extensionless `#!/usr/bin/env bash` helper in `context/` counts toward the gate's "Expected counts" line — owner: `RULES.md` § *Project gate* → **Expected counts** — and a count above it without a matching RULES bump fails the gate. If a helper is unavoidable it lands with a bump to that RULES.md paragraph in the same commit.
 6. **Every `context/audit/` file opens with a stamp:** `Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.`
 
 **The one freeze-check** (used by Resume step 1 and by every wave exit — there is deliberately only one).
@@ -727,7 +727,7 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 8. **Question: can a model pack alter server behaviour?** Its metadata already reaches request defaults via `modelfile.py`; the chat template is the dangerous version. *How we'll settle it*: T7; if a pack can override the template, the model-pack scope exclusion is revisited.
 9. **Risk: T9 is unsizable at plan time.** *Mitigation*: its file list freezes at Wave 0 exit with a line count; >3,000 lines splits into numbered subtasks in SERIES before reading starts. *How we'll settle it*: the frozen list is a Wave 0 exit artifact.
 10. **Risk: tasks larger than a session die mid-flight with nothing committed.** *Mitigation*: the ≤1,500-line commit-slice rule; T6 and T11 pre-split. *How we'll settle it*: one commit per slice, each carrying its manifest rows.
-11. **Risk: audit helpers break the gate** (shebang-first counting vs the "Expected counts" line — **owner: `RULES.md` § *The gate***, which enumerates the two sets and carries both numbers. This row cites that owner rather than restating the pair: it held `3 b`/`3 b` for a day after the count moved to `5 b`, which is precisely Rule E.7's failure mode — "an agent who sees it disagree with the live tool concludes drift rather than staleness"). *Mitigation*: inline commands; any unavoidable helper lands with the RULES counts bump in the same commit, and **a new script is linted before it is `git add`ed** — an untracked file is invisible to every gate step. *How we'll settle it*: gate step 1b in each commit's Evidence, and its identity guard (`FAIL(1b) missing product bash: …`) firing rather than a count matching by luck.
+11. **Risk: audit helpers break the gate** (shebang-first counting vs the "Expected counts" line — **owner: `RULES.md` § *Project gate* → Expected counts**, which carries both numbers; membership is *derived* by 1b's class-and-path glob, and 2b's printed list is the check on who is in the set, so this row does not restate either). This row cites that owner rather than restating the pair: it held `3 b`/`3 b` for a day after the count moved to `5 b`, which is precisely Rule E.7's failure mode — "an agent who sees it disagree with the live tool concludes drift rather than staleness"). *Mitigation*: inline commands; any unavoidable helper lands with the RULES counts bump in the same commit, and **a new script is linted before it is `git add`ed** — an untracked file is invisible to every gate step. *How we'll settle it*: gate step 1b in each commit's Evidence, and its identity guard (`FAIL(1b) missing product bash: …`) firing rather than a count matching by luck.
 12. **Risk: blocked docker steps become silent passes.** *Mitigation*: the Gate status block names which steps are owner-only; a task whose only verifier is blocked is not `done`. *How we'll settle it*: commit messages that name skipped steps.
 13. **Risk: effort overrun (14–19 sessions, T5 on the critical path behind an owner-run build).** *Mitigation*: T11's mechanical pass is command-generated; the verdict can be issued at Tier-B completeness with the depth table explicit, and Plan 04 picked up later. *How we'll settle it*: the coverage ledger's time series.
 

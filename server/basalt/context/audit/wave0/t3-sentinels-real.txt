@@ -8,7 +8,16 @@ ever disagree, the paste loses.**
 Command, from `server/basalt`:
 
     PYTHONDONTWRITEBYTECODE=1 LC_ALL=C context/audit/scripts/t3-census.sh vendor/basalt real \
-      > t3-sentinels-real.txt 2> stderr.txt        →  exit 0, stderr 0 bytes
+      > /tmp/opencode/census-final.txt 2> /tmp/opencode/census-final.err   →  exit 0, stderr 0 bytes
+
+which is what actually ran; the transcript below was then **copied here whole**. The redirect is not
+cosmetic: an earlier draft of this line said `2> stderr.txt`, **and that draft was executed** — leaving a
+0-byte `server/basalt/stderr.txt` (untracked, not ignored by `server/basalt/.gitignore`, which only
+ignores `/vendor/`) until it was found and removed on 2026-11-05. Inside this project an untracked stray
+is visible to `git status`; inside `vendor/basalt` it would be invisible *and* counted by the freeze
+check's file leg. So: write scratch to `/tmp/opencode`, always. `/tmp/opencode` is itself scratch, so
+neither file will survive for a later reader — the reproducibility anchor is the
+`REPRODUCIBILITY PROVED, NOT CLAIMED` block below, not these two paths.
 
 `TAG=real` means the audited tree itself; every other tag (`negctl`, `fixture`) is a planted or
 mutated tree — see `t3-census-controls.txt`. `PYTHONDONTWRITEBYTECODE` is not decoration: see
