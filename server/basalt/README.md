@@ -15,9 +15,10 @@ owner's choices, not measured winners.
 ## Prerequisites
 
 - Docker 29+ with BuildKit and the NVIDIA runtime, used as yourself (no `sudo`).
-- The pack, downloaded by the owner:
-  `models/vllm/jesdga/Qwen3.8-FN-NVFP4-DQ6_K.basalt` (131.7 GB; `models` →
-  `/mnt/noir/scratch/ai/llm/models`).
+- The pack on a local disk: `models.local/Qwen3.8-FN-NVFP4-DQ6_K.basalt` (131.7 GB, gitignored).
+  Basalt loads weights with `O_DIRECT`, which over the NFS copy
+  (`models/vllm/jesdga/…`, `models` → `/mnt/noir/scratch/ai/llm/models`) ran at ~5–10 MB/s.
+  `PACK=<path> ./run` serves any other copy.
 - Nothing else on `:8700`: stop `vllm` (`../vllmcustom`), `../ninfer` or `../ignis` first.
 
 ## Pins
@@ -52,7 +53,7 @@ name the model `cosmo-6000`; any other name gets a 404. Stop the server with Ctr
 
 | Knob (env) | Default | Basalt setting |
 |---|---|---|
-| `PACK` / first argument | `models/vllm/jesdga/Qwen3.8-FN-NVFP4-DQ6_K.basalt` | `serve <pack>`; its directory is mounted read-only at `/models` |
+| `PACK` / first argument | `models.local/Qwen3.8-FN-NVFP4-DQ6_K.basalt` | `serve <pack>`; its directory is mounted read-only at `/models` |
 | `PARALLEL` | `4`; `1` with `--single` | `--parallel` (1..8) |
 | `SLOT_FULL_CONTEXT` | `1` (only when `PARALLEL` > 1) | `--slot-full-context`: every slot gets `MAX_CONTEXT`, at N× the KV cache |
 | `MAX_CONTEXT` | `262144` | `--max-context` |

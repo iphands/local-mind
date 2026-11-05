@@ -2,6 +2,7 @@
 
 > **Status**: in-progress
 > **Created**: 2026-11-04
+> **Revised**: 2026-11-04 — owner: `./run`'s default pack is the local NVMe copy `models.local/Qwen3.8-FN-NVFP4-DQ6_K.basalt` (gitignored), not the NFS path; boot 2 from NFS loaded at ~5–10 MB/s (T6).
 > **Depends on**: N/A
 > **Goal**: `./run` boots the owner's `Qwen3.8-FN-NVFP4-DQ6_K.basalt` pack in our own pinned Basalt image on `:8700` — four full-context slots by default, one with `--single` — and a real chat reply comes back through the name clients use (`cosmo.lan:8700`, model `cosmo-6000`).
 > **Agent**: implementation agent

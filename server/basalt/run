@@ -6,7 +6,8 @@
 #   DRY_RUN=1 ./run …     every check, then print the docker command; starts and creates nothing
 #
 # Knobs (env)        default                                    Basalt setting
-#   PACK / $1        models/vllm/jesdga/Qwen3.8-FN-NVFP4-DQ6_K.basalt   serve <pack> (its dir mounted :ro at /models)
+#   PACK / $1        models.local/Qwen3.8-FN-NVFP4-DQ6_K.basalt   serve <pack> (its dir mounted :ro at /models)
+#                    (local NVMe; the NFS copy, models/vllm/jesdga/…, loads at ~5–10 MB/s: O_DIRECT)
 #   PARALLEL         4; 1 with --single                         --parallel (1..8)
 #   SLOT_FULL_CONTEXT 1 (only when PARALLEL > 1)                --slot-full-context (each slot gets MAX_CONTEXT)
 #   MAX_CONTEXT      262144                                     --max-context
@@ -46,7 +47,7 @@ for a in "$@"; do
 done
 
 DRY_RUN=${DRY_RUN:-0}
-PACK=${pack_arg:-${PACK:-$HERE/models/vllm/jesdga/Qwen3.8-FN-NVFP4-DQ6_K.basalt}}
+PACK=${pack_arg:-${PACK:-$HERE/models.local/Qwen3.8-FN-NVFP4-DQ6_K.basalt}}
 if (( single )); then def_parallel=1; else def_parallel=4; fi
 PARALLEL=${PARALLEL:-$def_parallel}
 SLOT_FULL_CONTEXT=${SLOT_FULL_CONTEXT:-1}
@@ -76,7 +77,8 @@ case $PACK in
   *.ninfer) die "$PACK is a NInfer artifact; Basalt loads only .basalt packs." \
                 "  serve it from ../ninfer instead." ;;
 esac
-[[ -f $PACK ]] || die "pack not found: $PACK"
+[[ -f $PACK ]] || die "pack not found: $PACK" \
+                       "  the default is a local copy; copy the pack into models.local/, or name it: PACK=<path> ./run"
 [[ -r $PACK ]] || die "pack not readable: $PACK"
 magic=$(LC_ALL=C head -c 8 -- "$PACK" | tr -d '\0')
 [[ $magic == BASALTMF ]] || die "$PACK is not a .basalt pack (first bytes '$magic', want 'BASALTMF')."

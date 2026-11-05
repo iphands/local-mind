@@ -68,10 +68,14 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-11-04 | owner boot 2: `./run` (default) on `63d25a81f328`, start lines | `engine ctx=262144 kv=int8 batch=4 (from cli)`; `sampling temp=1.0 top_p=0.95 top_k=20 min_p=0.0`; `vision mode=dynamic gpu=0 (RTX PRO 6000 …) load=per-image`; `hosts cosmo.lan,cosmo`; `warning: this CPU has no AVX-512: the expert kernels run on AVX-2 …`; then `loading weights into cuda0 … /67.8 GiB  10 MB/s` → `6 MB/s` | 1 | in progress |
 | 2026-11-04 | host view of boot 2: `ps -L` on the engine, `/proc/<pid>/io` over 5 s, `vmstat` | 6 threads in `nfs_file_direct_read` (D state), main thread `futex_wait`; rchar +26 MiB / 5 s; host 99–100 % idle | 1 | — |
 | 2026-11-04 | `dd` from the pack during boot 2: `iflag=direct bs=16M count=16`, `iflag=direct bs=1M count=64`, buffered `bs=16M count=16` (uncached offsets) | 17.4 MB/s, 4.1 MB/s, 28.9 MB/s | 1 each | taken while the engine's 6 direct readers ran — NFS link vs read pattern not separated |
+| 2026-11-04 | boot 2 end: watcher (docker logs once a minute); `storage/cache/basalt/aefd5d98dc650ed4/engine.log`; `dmesg` | last progress 17:41 `7.4/67.8 GiB` into cuda0, container gone by 17:42; engine log stops mid-load with no error line; no OOM or Xid — an outside stop, consistent with the owner switching to a local copy | 1 | — |
+| 2026-11-04 | owner's `rsync -avPS noir40.lan:…/Qwen3.8-FN-NVFP4-DQ6_K.basalt` into `models.local/` (ssh, not the NFS mount), size sampled 10 s apart | 310 MB/s | 1 | the server and link deliver; the slow boot was Basalt's `O_DIRECT` reads over the NFS mount |
 | 2026-11-04 | T1 guards: `DOCKER='sudo docker'`, `DOCKER=/usr/bin/nonexistent-docker` sourcing `lib/common.sh` | both refuse, rc=1, with the fix line | 1 each | — |
 
 ## Notes / Deviations
 
+- **Revised (owner, 2026-11-04): default pack → `models.local/` (local NVMe, btrfs `compress-force=zstd:1`).**
+  Boot 2 was stopped at 7.4/67.8 GiB. `/models.local/` is gitignored.
 - **Boot 2 loads at ~5–10 MB/s from NFS** (plan Q9 assumed vLLM-like ~57 s loads). Basalt uploads
   weights with `O_DIRECT` (`include/basalt/core/direct_upload.hpp`), no switch or env var, built for
   local NVMe; but buffered NFS reads were also only 28.9 MB/s during the boot. The owner chose to let
