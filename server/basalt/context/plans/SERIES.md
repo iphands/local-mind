@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `02`.** <!-- hp:next-free -->
+**Next free plan number: `05`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-11-04):** serve Qwen3.8-Flash-Next through
 > [Basalt](https://github.com/jesdga95/basalt), source-built from a pinned commit in our own
@@ -39,6 +39,32 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
 | 01 | Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700 | — | in-progress | Pins + Dockerfile + `./build` + `./run` (4×262144 slots; `--single`); owner builds and boots the DQ6_K pack; real reply via `cosmo.lan`. |
+| 02 | Basalt vendor audit: leak / theft / keylog / phone-home in `vendor/basalt` | — | pending | Boundary-first audit of all 862 files at the pin; manifest + canary-proven census; Tier A ≈34k lines read, engine bulk triaged not read. Owner-chosen two-stage depth. |
+| 03 | Basalt audit, runtime half: observed egress, exec and input capture | 02 | pending | Owner-run: `--network none` vs a monitored netns under strace/tcpdump, plus `strings`/`nm`/`readelf` on the shipped binary. **The gate on Plan 02's verdict.** Blocked on the owner's `./build`. |
+| 04 | Basalt audit, engine bulk line-by-line: `src/kernels` + `src/core` + `include/` | 02 | pending | The deferred half of "line by line" (~92k lines, 20–30 sessions). Plan 02 gives each file a census result + triage reason; none is read. |
+
+## Dependency Chain <!-- hp:chain -->
+
+```text
+01_flashnext_container ──(builds the image Plan 03 observes)──┐
+                                                              ├── 03_audit_runtime  ← gates 02's verdict
+02_basalt_vendor_audit ──(manifest + census + verdict)────────┤
+                                                              └── 04_audit_engine_bulk
+```
+
+## Backlog Rationale <!-- hp:backlog -->
+
+- **02 — Vendor audit.** The owner asked whether the vendored engine does anything beyond being a
+  nice LLM server. Recon (2026-11-05) says clean and security-conscious; the plan's job is to make
+  that *provable* rather than plausible — a manifest so coverage is countable and a planted-canary
+  census so "the grep found nothing" cannot be laundered into "audited".
+- **03 — Runtime half.** Every static method has the same blind spot (`dlopen`+`dlsym`, raw
+  `syscall()`, venv C extensions opening their own sockets); only observed syscalls and network
+  state close it. Split from 02 deliberately: Standing Constraints make it owner-run and Plan 01 is
+  already stalled on owner boots, so the code verdict must land without inheriting that stall.
+- **04 — Engine bulk.** 125k lines of C++/CUDA cannot be read line-by-line in one plan at honest
+  adversarial speed. Owner chose boundary-first now, this later (Plan 02 § Scope, dated 2026-11-05),
+  so the deferral is a numbered plan rather than an invisible gap.
 
 <!-- Add these sections when they earn their place:
 
