@@ -1,0 +1,81 @@
+# Distilled — confirmed facts for basalt
+
+Compact, confirmed learnings: formats, protocols, tool/library behavior, measured limits. Read
+before new work; add an entry whenever something is confirmed — **above the `## Open Questions`
+section**, which always stays last. Keep it dense.
+
+**Provenance discipline:** every entry carries a tag — `[SOURCE]` (upstream code, cite
+`path:line`), `[DOC]` (documentation), `[REPO]` (this repo's own code/config), `[LIVE YYYY-MM-DD]`
+(observed on a running system). **Do not upgrade a tag without doing the work.**
+
+<!-- Entry shape:
+
+## <Topic — the rule in one line> [TAG][TAG]
+
+- The fact, stated so it can be checked.
+- The evidence: command + verbatim output, or `path:line`.
+- What it means for this project.
+-->
+
+## Basalt loads only Qwen3.8-Flash-Next, from single-file `.basalt` packs [DOC 2026-11-04]
+
+- Basalt (jesdga95/basalt, a fork of Strata, MIT) is "a local inference engine for the
+  **Qwen3.8-Flash-Next** mixture-of-experts model" (`README.md` at `bbf2f5bb7`). A pack is one
+  `.basalt` file: weights, tokenizer, MTP drafter, 8-bit hyper-connection copies, vision
+  projector. Expert profiles ship with the engine (`data/profiles/qwen4exp-48x512.prof`), keyed
+  `<general.architecture>-<block_count>x<expert_count>` (`docs/model-file.md:83`).
+- Ready packs: HF `jesdga/Qwen3.8-Flash-Next-Basalt` — `Qwen3.8-FN-NVFP4-DQ6_K` (default, faster),
+  `-NVFP4-DQ8` (~7% slower on prose, lower KLD), `-UD-Q4/5/6_K_XL`, `-Q8_0`, `-GSQ-RCO-*`.
+- **Not loadable:** `models/vllm/jesdga/Qwen3.8-27B-QUASAR-DFlash2-nvfp4-NInfer/qwen3_8_27b_quasar.ninfer`
+  (19,624,516,612 bytes) — a dense Qwen3.8-27B artifact for NInfer (its `README.md`:
+  `library_name: ninfer`, tested at NInfer `d44ab584`). Same HF author, different engine. It belongs
+  in `../ninfer`.
+- No `.basalt` file exists under `/mnt/noir/scratch/ai/llm/models` yet
+  (`find … -iname '*basalt*'`, 2026-11-04).
+
+## Building Basalt: CUDA 13, sm_120, CMake ≥ 3.24, GCC ≥ 13, Python ≥ 3.10; nothing fetched [DOC 2026-11-04]
+
+- Requirements: Linux x86-64 with AVX2 (AVX-512 used when present), compute capability 12.0,
+  CUDA 13, CMake 3.24+, GCC 13+ (`bbf2f5bb7` "docs: the Linux build needs GCC 13 or newer"),
+  Python 3.10+ (`README.md`).
+- Build: `cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && cmake --build build -j` →
+  `bin/basalt`, `bin/basalt-bench`, `bin/basalt-probe`, `bin/basalt-vision`. Server deps:
+  `pip install -r requirements.txt` (pinned: numpy, jinja2, regex, pillow, psutil, …).
+- "The build needs nothing outside this repository and fetches nothing" (`docs/building.md`).
+- An install or container image **ships `data/` with the binaries, `serve/` and `tools/`**
+  (`docs/building.md`); `--expert-profile FILE` names the profile explicitly (0.2.1).
+- `basalt-vision` is built for one card at configure time (`-DCMAKE_CUDA_ARCHITECTURES=<cc>`,
+  `docs/running.md:247`).
+- Releases: tags `vX.Y.Z`, no binaries; 0.2.1 on 2026-11-03. Upstream keeps **no shims**: a
+  removed or renamed flag is just an unknown-flag error (`AGENTS.md`, changelog index).
+
+## Serving: `bin/basalt serve --config basalt_config.json`, binds 127.0.0.1 by default [DOC 2026-11-04]
+
+- Config shape (`README.md`): `{"server": {"model": "<pack>", "gpu": "0", "port": 8080},
+  "engine": {"expert-cache": "auto", "prefill": "auto", "kv": "int8", "resident-experts": true}}`.
+  Every setting: upstream `docs/configuration/index.md`.
+- "The server listens on 127.0.0.1 by default" — inside a container that means unreachable from
+  the host unless it binds `0.0.0.0` or the container uses host networking.
+- OpenAI- and Anthropic-compatible API plus a web UI/stats page (`serve/`).
+- Experts that do not fit in VRAM live in system RAM (optionally a second Blackwell GPU as a peer
+  tier). `--gpu auto` uses every visible Blackwell GPU (`docs/building.md`).
+
+## This host: one sm_120 card, 125 GiB RAM [LIVE 2026-11-04]
+
+- `nvidia-smi`: GPU 0 RTX PRO 6000 Blackwell Workstation, 97,887 MiB, cc 12.0; GPU 1 RTX 4060,
+  8,188 MiB, cc 8.9 (not usable by Basalt). `free -g`: 125 GiB total.
+- docker 29.8.1, shellcheck 0.11.0, python3 3.14.10; no `gh`, no `hadolint`.
+
+---
+
+## Open Questions
+
+- Does an NVFP4 Flash-Next pack fit entirely in 96 GiB VRAM, or which share lands in RAM, and
+  what `ulimit -l` / `--ulimit memlock` does the container need for the RAM tier to page-lock?
+  (`docs/running.md` covers RAM floors; `platform_memory_test` notes the locked-memory limit.)
+  Settle in the first plan.
+- Which of the image's upstream defaults (`expert-cache`, `prefill`, `kv`, `--spec` depth) are
+  already right for this card? `bin/basalt-probe` "suggests values" (`docs/probe.md`) — owner run.
+
+<!-- Things we believe but have not confirmed. Check here before trusting a related assumption;
+     move an item up (with its tag) once it is confirmed, or into pitfalls.md if it bit. -->
