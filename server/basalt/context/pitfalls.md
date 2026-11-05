@@ -779,3 +779,237 @@ blame output and the all-404 endpoint sweep are the same shape.
 - related items in this file: § *Shell idioms that report green…* items 10–11 (the all-404
   endpoint sweep, abbreviated SHAs) and the blame false zero recorded during T2
 - observed during Plan 02 T3, 2026-11-05, while correcting a P0 — `vendor/basalt` @ `dc047a7`
+
+---
+
+# An apostrophe in a comment inside a single-quoted `awk '…'` body is still inside the quotes
+
+## Problem
+
+**[OBSERVED 2026-11-05]** `context/audit/scripts/t3-census.sh` carries a ~40-line `awk` program
+written as a single-quoted argument. Adding an English comment *inside the body* — `# rows that do
+not have a site row` — closed the quote early, so bash resumed parsing the rest of the awk program as
+shell. Cost: two `bash -n` cycles nine minutes apart in the **same block** (first at line 1056, then
+at 1120) and one wrong diagnosis.
+
+What makes it non-obvious is where it hid and what it pointed at:
+
+- The offending character was in a **comment**. Prose inside a quoted program is still inside the
+  quotes; nothing about `#` makes a byte inert to the shell that is quoting it.
+- `shellcheck` reported **`SC1011: This apostrophe terminated the single quoted string`** against a
+  line of *prose*, three screens away from the construct that broke. That reads like a false positive
+  about punctuation and is not one — it is the exact defect, in a file that is otherwise clean.
+- `bash -n` was precise (`syntax error near unexpected token 'obs'`) and both times it **failed
+  loudly**. It never produced a plausible-but-wrong count, which is why this is not an instance of
+  § *Shell idioms that report green on the thing they did not check*.
+
+The worse cousin has **not** been observed here and is recorded as a hazard only: an apostrophe that
+merely re-splits the body into tokens that are still valid `awk` (a comment word absorbed into a
+concatenation, say) parses clean and computes something different. That variant would go green.
+
+## How to avoid
+
+- Grep anchors for this trap: `awk '`, `apostrophe`, `SC1011`, `bash -n`.
+- **No apostrophes inside a quoted `awk`/`sed` body — comments included.** Write `do not`, `it is`,
+  `cannot`. Same rule for `case` arms and here-doc-free `-c` programs.
+- `shellcheck` `SC1011` landing on a comment **is the tell**, not noise to suppress.
+- `bash -n` is free, takes a second, and is already gate step 1a — run it after *every* edit to a
+  quoted multi-line program, not once before the commit. It caught both instances; nothing else did.
+- For prose-heavy `awk`, stop inlining: write the program to a file and use `awk -f prog.awk`, or a
+  quoted here-doc fed to `awk -f /dev/stdin`. Then apostrophes are just English.
+
+## Sources
+
+- both instances: `context/audit/scripts/t3-census.sh`, 2026-11-05, during the defect-4 labelling
+  edit (the block that emits the three-state column-8 labels)
+- related: § *Shell idioms that report green on the thing they did not check* — this is the same
+  quoting family, but it failed closed, and recording which of the two it did is the useful part
+
+---
+
+# A control run under a real tag wipes the baseline every later compare reads
+
+## Problem
+
+**[OBSERVED 2026-11-05]** The census harness keeps a per-tag namespace,
+`/tmp/opencode/basalt-audit/t3/run-$TAG`, and **`rm -rf`s it as its first action**. `run-real` is not
+just an output directory: it holds the four freeze tokens (`generator`/`predicate`/`inputs`/`universe`)
+that every cross-run assertion reads as its *expected* leg.
+
+Two ways to destroy it, both by running a **control**:
+
+1. **Tag reuse.** One assertion — `SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR` — is gated on
+   `[ "$TAG" = real ]`, so the only way to fire it is to run a mutated copy under `tag=real`. It ran,
+   failed correctly, and in doing so replaced `run-real/generator.sha256` with the **mutant's** own
+   hash (`b75fd2f0…`). Eight subsequent controls then printed that contaminated value as the
+   "expected" side of `GENERATOR_SHA_SAME_AS_REAL`. The FAILs were still valid — a mutant differs from
+   another mutant — but every *baseline* figure from that window is poisoned.
+2. **Dying after the wipe.** An earlier batch launched its copies from the wrong cwd, so the script
+   resolved `MAN`/`PROJ` to `/tmp/…` and died at `MANIFEST_DIR_NOT_FOUND`, **exit 2**. Because the
+   `rm -rf` is the *first* statement and the failure is twenty lines later, a run that never produced
+   an assertion still deleted `run-real`. The next batch printed
+   `TREE_DIFF_VS_REAL=unavailable (run-real/universe.txt missing…)`, which reads like dead code in the
+   harness and was in fact my own artifact from four minutes earlier.
+
+The reusable shape: **the destructive statement precedes the validation that would have caught the
+mis-launch.** A control is allowed to fail; a control that silently removes the reference for the
+controls after it is not.
+
+## How to avoid
+
+- **Controls get their own tag namespace, always.** No control ever runs under the tag whose artifacts
+  it compares against. A `real`-gated assertion is executed **last, in a batch whose output is
+  discarded** — or not at all, with the gap disclosed.
+- **A restore is a re-production, not an edit.** `run-$TAG` is regenerable by design, so the claim is
+  never "I salvaged it" but *"a pristine re-run reproduces the pasted evidence byte-for-byte"*:
+  `diff` the new stdout against the paste, excluding the lines that are timestamps by construction
+  (and paste those two lines side by side, so the exclusion is checkable rather than asserted).
+- **Verify the whole token set, not the two you happened to think of.** The first restore proof checked
+  `generator` and `sites`; `predicate` and `inputs` — the expected legs of the *other* two canary
+  compares — had been overwritten too. Enumerate the artifacts, then verify all of them.
+- A mis-launched control is a **broken control, not a fired one** — exit 2 means nothing was asserted.
+  Treat it as an incident: it may still have written, or deleted, something.
+- Related failure already in this file, same root (wrong cwd, empty inputs, a check that inherits the
+  emptiness): § *Shell idioms that report green on the thing they did not check* items 3 and 20. This
+  entry adds only the destructive half.
+
+## Sources
+
+- the controls and the two incidents: `context/audit/wave0/t3-census-controls.txt` § 3 and § 4
+  (including the byte-diff restore anchor and the four-token verification)
+- observed Plan 02 T3, 2026-11-05, `vendor/basalt` @ `dc047a7`
+
+---
+
+# An LC_ALL naming a locale the host does not have falls open to C — no warning, no error
+
+## Problem
+
+**[OBSERVED 2026-11-05]** `locale -a` on this host lists exactly `C`, `C.utf8`, `POSIX`. Setting
+`LC_ALL=en_US.UTF-8` and running `sort` produced `B a b` — **identical to `LC_ALL=C`** — with no
+warning, no error, and no exit code. glibc resolves an unknown locale name to C and keeps going.
+
+The first casualty was the census assertion `SORT_DEFAULT_ORDER_EQ_C`, whose whole purpose is to catch
+a non-C collation being exported into the environment. Its realistic trigger **cannot be produced
+here**: there is no non-C collator to export. So the chk is green for a reason unrelated to what it
+guards, and — worse — **a genuine regression passes**: drop `LC_ALL=C` from a `sort` line and, on this
+box, the output is unchanged and the assertion still prints PASS.
+
+Two scope limits on this entry, both stated rather than smoothed over:
+
+- What was measured is "the output is C-identical". This did **not** separate *locale unavailable, so
+  glibc falls back to C* from *locale present with an identical collation sequence* — the observable
+  here cannot distinguish them, and `locale -a` is the only evidence for the "unavailable" reading.
+- The chk's liveness was proved by a different mutation: feeding the comparator reverse-C order
+  (`actual=bBa`, which is neither C's `Bab` nor a plausible non-C `aBb`). That proves the **comparator
+  is live and compares what it claims**; it does **not** prove the comparator is collation-sensitive.
+  The locale arm remains unproven on this host — say so before treating the chk as coverage.
+
+Seeded hazard, **not observed** here: a `comm -23` / `sort -u` pair whose two sides were sorted under
+*different* collations can silently agree, or silently disagree, because each side is internally
+consistent. Keep `LC_ALL=C` on **both** sides and inside the script, not only at the call site.
+
+## How to avoid
+
+- Grep anchors: `LC_ALL`, `locale -a`, `sort -c`, `comm -23`, `C.utf8`.
+- **`locale -a` before you arm a locale-dependent tripwire.** If the trigger locale is not installed,
+  the check is decorative and says so only to the person who thought to ask.
+- When a chk's realistic trigger cannot be produced on this machine: prove liveness another way,
+  **label that proof for what it covers** (comparator vs export), and record *which arm is unarmed* —
+  in the script comment *and* in the evidence file. Do not let a PASS read as an armed check.
+- Do not install a locale just to make a check exercisable: that changes the environment the check is
+  supposed to police, and the next agent inherits a tripwire only your box can fire.
+- Pin collation **inside** the script (`export LC_ALL=C` at the top, as `t3-census.sh` and
+  `t3-inputs.sh` both do) rather than trusting the invocation, and note in the comment that on this
+  host the export is load-bearing but *unverifiable by that assertion*.
+
+## Sources
+
+- measured: `locale -a`; `printf 'a\nB\nb\n' | LC_ALL=en_US.UTF-8 sort` → `B a b`; the fired comparator
+  control is `t3-census-controls.txt` **C7**, whose `bBa` is reverse-C and must not be read as locale output
+- the assertion: `context/audit/scripts/t3-census.sh` `SORT_DEFAULT_ORDER_EQ_C`
+- the host-shaped half, pruned of this box's locale count, is copied to
+  `../../../context/pitfalls.md` — glibc's silent fall-open is not a basalt fact
+- observed Plan 02 T3, 2026-11-05
+
+---
+
+# A dated fact scoped to a shell I could not enter was declared "stale" — the scope caveat was on the adjacent line
+
+## Problem
+
+**[OBSERVED 2026-11-05]** Grep found `python3 3.14.10` in three files (`RULES.md:456`, this plan's
+tracker `:37`, `distilled.md:162`). My shell reports `3.12.16`. I told the human — in prose, in the
+conversation, one full turn — that **a false fact was sitting in the project's memory**, and started
+writing the correction.
+
+Then I read `±10` lines around the `distilled.md` hit. Its section heading is
+`## This host: one sm_120 card, 125 GiB RAM [LIVE 2026-11-04]`, and **one line below** the number sits:
+
+> **Tool versions here are the 2026-11-04 shell's view, not a host constant** (checked 2026-11-05 from
+> the agent container, which reports docker client 29.9.2 …). Re-check in the shell that will use the
+> answer.
+
+The record was correct, dated, environment-scoped, and carried instructions for exactly the situation I
+had walked into. Nothing was stale about it. The write was averted; **the false claim about the
+project's memory had already been published**, and that ordering — assert first, read second — is the
+bug, not the near-miss.
+
+The same line's sibling number proves the caveat is load-bearing rather than decorative: it records
+`docker 29.8.1` for 2026-11-04, and `docker --version` here reads **29.9.2**. But that cuts both ways,
+and this is the part worth internalising: **my fresh number is not a *better* number.** It is today's
+shell's view in precisely the way theirs was the 2026-11-04 shell's view. The "correction" I proposed
+would have swapped one environment's snapshot for another's and destroyed the older one to do it.
+
+Severity, stated plainly because it is the strongest argument: **this error is silent and leaves no
+trace.** Overwriting a scoped measurement with a value that is true of *your* shell produces a file
+that reads **more** accurate than before — no later check, control or reader ever fails on it. Leaving
+a stale-looking number in place keeps the defect visible. Prefer the visible one.
+
+Two related errors from the same five minutes, both about *inference* rather than reading:
+
+- A reviewer proposed that `3.14.10` was "implausible as a released CPython patch" and that the string
+  was therefore a transcription slip. Checked against python.org: **3.14.10 was released Oct. 25, 2026**
+  (3.14 is in bugfix maintenance). The inference was plausible, confident, and wrong; the primary
+  source is cheap. An unsupported plausibility argument would have manufactured evidence.
+- The one genuine defect in the three hits was `RULES.md:456` — the only copy with **no date and no
+  environment named**, sitting in a gate *Prerequisites* line, i.e. the sole copy that actually
+  asserted universality. See § *A gate prerequisite recorded in RULES.md can silently stop being true*.
+
+## How to avoid
+
+- Grep anchors: `stale`, `outdated`, `correct`, `dated`, `[LIVE`, `host constant`, `scope`.
+- **Before naming any recorded fact stale, read the enclosing scope — the `±10` lines, not the hit
+  line.** A date tag, an environment name, or a "not a constant" clause on an adjacent line changes
+  what the number claims, and therefore whether your measurement can contradict it.
+- **A grep for a value returns lines; scope is not on the line.** A grep-hit list is *candidate sites*,
+  never a list of facts to correct. This is the mirror of the doctrine in `plans/RULES.md` § *Rule E —
+  Evidence over assertion*, item 7 ("grep for the claim, not the phrasing") applied to **values**
+  rather than wording: grep finds copies, **scope decides whether a copy is wrong**.
+- **Correction test:** ask which environment the record claims to describe. If it is not yours, you may
+  only **append a newer dated observation with its own scope** — never replace. Supersede in place:
+  keep `29.8.1 [LIVE 2026-11-04]`, add `29.9.2 measured 2026-11-05, agent container`, leave both.
+- Fix the **unscoped** copy; leave the **scoped** ones alone. A dated, environment-tagged number makes
+  no claim about your shell, so your shell cannot refute it. Only an unqualified one can be corrected.
+- If you must keep an old number you cannot re-derive, record *that* as the datum — "environment not
+  named in the original; not re-derivable" — rather than silently assigning it one.
+- **Say the finding, then verify it, then say it again.** A confident claim about the project's memory
+  that turns out to be wrong is worse than a late correct one. The retraction is the cheapest part of
+  this entry; publishing was not.
+- Cross-reference: § *Provenance that cannot contradict its own claim* is the **instrument** defect
+  (the evidence could not contradict the claim attached to it). This is the **reader** defect — the
+  provenance system worked perfectly and I overrode it anyway. Kept separate on purpose.
+
+## Sources
+
+- the correctly-scoped record I nearly destroyed: `context/distilled.md` **`:158-166`** — heading
+  § *This host: one sm_120 card, 125 GiB RAM* `[LIVE 2026-11-04]`, the number at `:162`, its own caveat
+  at `:163-166` (left untouched; today's python reading appended there as one datum). Cited by line
+  because that file has **two** headings beginning `This host: one sm_120 card` (`:136`, `:158`), so a
+  section-name citation to "§ *This host…*" does not identify one of them.
+- the unqualified copy that *was* wrong for this shell: `context/plans/RULES.md` § *Prerequisites*,
+  corrected 2026-11-05 to a measured value with the environment named
+- the refuted inference: python.org download history, retrieved 2026-11-05
+- the rule this generalises into: `context/AGENTS.md` § *Provenance* — a dated observation scoped to an
+  environment you cannot enter is superseded, never replaced
+- observed Plan 02 T3, 2026-11-05, while preparing `wave0/t3-sentinels-real.txt`

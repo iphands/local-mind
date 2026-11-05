@@ -229,12 +229,18 @@ permission. First invocation was `d388d17`, whose scope check is the `SCOPE_HITS
 
 **1. Syntax + counts.** Files are classified by **shebang first, extension second** — `bash -n`
 happily passes a Python file, and launchers have no extension. Pass: no `FAIL` line, the counts
-match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env` exists).
+match the expected numbers, `env ok` (or the stated `SKIP` before `versions.env` exists), and the
+`INTERPRETER=` line is pasted with the output. That last one is **evidence, not a threshold**: no
+version is *required*, but a gate whose python half ran under an interpreter nobody recorded cannot be
+re-derived, and the version recorded here is the only place a moving toolchain stays visible.
 **Expected counts — two sets, split on 2026-11-05 at Plan 02 T3** (decision recorded below):
 **`3 b` product** (`lib/common.sh` from Plan 01 T1, `build` T2, `run` T3 — no `.py`, no `.json`) and
-**`3 b` audit helpers** (`context/audit/scripts/ledger-grid.sh`, `t2-census.sh`,
-`t3-model-file-poc.sh`). Bump these when a file is added or removed on purpose — a count that
-silently drops is the failure this step exists for.
+**`5 b` audit helpers** (`context/audit/scripts/ledger-grid.sh`, `t2-census.sh`,
+`t3-model-file-poc.sh`, `t3-census.sh`, `t3-inputs.sh`). Bump these when a file is added or removed on
+purpose — a count that silently drops is the failure this step exists for. *(Moved `3 b` → `5 b` on
+2026-11-05 with Plan 02 T3's census generator and input projection; both were `shellcheck -x` clean
+**before** `git add`, which is the only reason 2b had anything to check — see the note at 2b. This line
+is the **owner** of both numbers: cite it, do not restate it, per § *Rule E* item 7.)*
 
 > **The helper-clause decision, 2026-11-05 (T3).** The clause above — "a third script added to this
 > count should not be a third use of the clause: it should trigger the alternative… narrowing step 1a
@@ -250,7 +256,10 @@ silently drops is the failure this step exists for.
 > **(i) both sets must be clean** — 2b is pass/fail like any other step, and an audit generator with a
 > `FAIL` blocks its task; **(ii) 1a is deliberately *not* narrowed** — it still syntax-checks every
 > tracked file, because dropping coverage to tidy a count is the wrong trade; 1a's scope and 1b/2's
-> scope differ on purpose. A fourth audit script just moves `AUDIT_B` from 3 to 4, no clause needed.
+> scope differ on purpose. Another audit script just moves `AUDIT_B` by one against the number that
+> owner line carries, no clause needed. *(De-numbered 2026-11-05: this sentence used to hard-code "from
+> 3 to 4", which was a second authority over the count directly above it and went stale the moment the
+> count moved to 5. The hypothetical is the point; the digits were not.)*
 >
 > What the split did **not** do is catch anything, and the first version of this paragraph said
 > otherwise. Step 2 before the split linted *every* tracked bash file, so a tracked `t3-census.sh`
@@ -262,6 +271,11 @@ silently drops is the failure this step exists for.
 > generators already tracked, are clean (`shellcheck -x` exit 0 each).
 
 ```bash
+# 0 — name the interpreter this gate just ran. A prerequisite stated as an exact version in prose
+#     fails closed when the environment moves; one the gate ECHOES cannot go stale silently. The
+#     python halves of the audit generators (t3-census.sh's S14/S15 procedures) and every `python3 -c`
+#     compile in 1a below run under this interpreter, so "which python3" is part of the record.
+echo "INTERPRETER bash=$BASH_VERSION python=$(python3 -c 'import sys;print(sys.version.split()[0])' 2>/dev/null || echo MISSING) at=$(command -v python3)"
 # 1a — syntax, over tracked files only (in-memory compile: no __pycache__ written).
 #      NOT narrowed: every tracked file, both sets. See the decision note above.
 git ls-files -z . | while IFS= read -r -d '' f; do
@@ -453,8 +467,24 @@ both. A boot of the wrong image or pack passes every check above.
 **Look at it.** `./run` output, the boot log and one real `/v1/chat/completions` reply on `:8700`
 are read, not inferred, before a launcher task is `done`.
 
-**Prerequisites:** `bash`, `git`, `python3` (3.14.10 here), `shellcheck` 0.11.0 (`~/.local/bin`,
-2026-11-05). Later steps add `docker` (29.8.1 here, used as yourself — no `sudo`), which needs the
+**Prerequisites:** `bash`, `git`, `python3`, `shellcheck` 0.11.0 (`~/.local/bin`,
+2026-11-05). **Every version here is a minimum, not a pin, and each is a reading of one named
+shell** — no gate step enforces an exact version, and an unenforced exact prerequisite is what fails
+closed later; **re-check in the shell that will use the answer**, which is what `distilled.md`
+§ *This host: one sm_120 card, 125 GiB RAM* says and where the dated host inventory lives. Measured
+2026-11-05 **in the agent's shell** (`python3 -VV`, `command -v python3`, `pyenv versions`):
+`python3 3.12.16` at `~/.pyenv/versions/3.12.16/bin/python3`, pyenv `3.12.16` active via
+`~/.pyenv/version`. Two other interpreters live on this box and answer different questions:
+`/usr/bin/python3` is **3.15.0**, and the container image's is **3.12.3** (`distilled.md`
+§ *Image build inputs: … the runtime base has no Python*). *(This line read `python3 (3.14.10 here)`
+until 2026-11-05. It named no environment, so it asserted universality, and this shell contradicts it —
+`3.14.10` is a real CPython release (python.org, 2026-10-25), so it may have been a true reading of an
+unspecifiable shell; it is not re-derivable, so it is dropped from the requirement rather than argued
+about. `pitfalls.md` § *A dated fact scoped to a shell I could not enter…* is the trap; the
+`INTERPRETER=` echo added to step 1 is the structural cure.)*
+Later steps add `docker` (**client** 29.9.2 measured here 2026-11-05 by `docker --version`; the
+**daemon** is unverifiable from an agent session — socket owner-only — and `29.8.1` is the owner's
+2026-11-04 reading), used as yourself — no `sudo`, which needs the
 user in the `docker` group: **as of 2026-11-05 an agent session here is not** (`uid=1000
 groups=1000,27`, socket `root:rtkit 660`), so steps 3–6 are **owner-run** — the agent writes the
 command and records the pasted output, and a commit names the gate steps it could not run.

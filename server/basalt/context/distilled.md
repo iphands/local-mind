@@ -161,8 +161,9 @@ section**, which always stays last. Keep it dense.
   8,188 MiB, cc 8.9 (not usable by Basalt). `free -g`: 125 GiB total.
 - docker 29.8.1, shellcheck 0.11.0, python3 3.14.10; no `gh`, no `hadolint`.
 - **Tool versions here are the 2026-11-04 shell's view, not a host constant** (checked 2026-11-05 from
-  the agent container, which reports docker client 29.9.2 and keeps `shellcheck` at `~/.local/bin`, and
-  has no `ss`). Re-check in the shell that will use the answer — see
+  the agent container, which reports docker client 29.9.2, `python3 3.12.16` (`python3 -VV`; pyenv,
+  `~/.pyenv/versions/3.12.16`; the box's `/usr/bin/python3` is 3.15.0) and keeps `shellcheck` at
+  `~/.local/bin`, and has no `ss`). Re-check in the shell that will use the answer — see
   `context/pitfalls.md` § *Empty output from a failed command was recorded as a measurement*.
 
 ---

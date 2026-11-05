@@ -1,0 +1,320 @@
+Target dc047a77beeddf1e91234d983a91d6bf929e9619 / tree 3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4 — if that is not the tree you are looking at, you are in the wrong audit.
+
+# Plan 02 T3 · negative controls on the census harness — every assertion shown capable of firing, 2026-11-05
+
+Subject: `context/audit/scripts/t3-census.sh`, `GENERATOR_SHA256=1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106`
+(the frozen generator; the same token heads [`t3-sentinels-real.txt`](t3-sentinels-real.txt)).
+
+**Read this line first.** All ten controls below fired. The two failures that actually happened in
+this work are **§ 3** (my own batch ate its own evidence) and **§ 4** (a control run under `tag=real`
+destroyed the real run's artifacts). Read those two before trusting any green thing here.
+
+## Why this file exists
+
+RULES.md: a tool's clean output is worthless until it has been shown to report something. `34/34 PASS`
+on the real tree says nothing on its own — one of those 34 was *already known* to be a tautology
+(`SORT_DEFAULT_ORDER_EQ_C`'s first cut compared `sort` output to `"Bab"` inside a process that had
+exported `LC_ALL=C` twelve lines earlier) and three more were strict logical implications of their
+neighbours. Knowing the count and checking the count are different acts; the same goes for knowing an
+assertion *could* fail.
+
+## Method — three rules, each learned by getting it wrong
+
+1. **The repo script is never mutated.** A copy is made **beside the original**
+   (`context/audit/scripts/.neg-<name>.sh`), run from the project root, and deleted after. Reason: the
+   script resolves `MAN`/`PROJ` from its own location (`$SELF`); a copy parked in `/tmp` resolves the
+   manifest to `/tmp/manifest` and dies at `MANIFEST_DIR_NOT_FOUND` (exit 2) **before any assertion
+   runs** — which reads like a control that failed to fire rather than a control that never ran.
+2. **The mutation is an exact-string replacement that must match exactly once**, else the harness
+   refuses with `VACUOUS n=<count>` and runs nothing. A `sed` that silently matches nothing produces a
+   clean run of an *unmodified* script — the worst possible control, because it reports green about
+   green. Byte-difference from the original is therefore guaranteed before execution.
+3. **A control passes only if: exit 1, `T3_CENSUS_VERDICT=FAIL`, and the named assertion's own line
+   reads FAIL.** A run that dies at exit 2 is a broken control, not a fired one.
+
+Scope of what is covered: **10 of the 34 assertions**, all on the `real` path. Scale per control is
+stated in its header (`maximal` = the mutation inverts a whole-set comparison so every row fails; that
+is full-scale liveness, not single-row discrimination). `GENERATOR_SHA=` on each block is the **mutant's
+own** printed token — the only thing that identifies which program emitted that stdout.
+
+## 0 · Index
+
+| # | what it breaks | sentinel it protects |
+|---|---|---|
+| C1 | the generator token's shape | `GENERATOR_SHA_IS_64_HEX` |
+| C2 | the assertion-count floor | `SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR` |
+| C3 | the label pattern that counts declared-file rows | `DECLARED_LABELS_EQ_FILES_COLUMN` |
+| C4 | the collapse-count ↔ column-6 equality | `COLLAPSE_COUNT_MATCHES_HITS_IN_FILE` |
+| C5 | the row-verdict ↔ TN equality | `SITE_ROWS_VERDICT_MATCHES_TN` |
+| C6 | the universe list's sortedness | `UNIVERSE_LIST_IS_SORTED` |
+| C7 | the comparator that checks sort order | `SORT_DEFAULT_ORDER_EQ_C` |
+| C8 | a python half that stopped printing | `S14_DENOM_PY_FILES_GE_1` |
+| C9 | the predicate cross-run compare | `PREDICATE_SHA_SAME_AS_REAL` |
+| C10 | the inputs cross-run compare | `INPUTS_SHA_SAME_AS_REAL` |
+
+---
+
+## 1 · The controls
+
+### C1 — generator token truncated to 8 hex chars  ·  tag=negctl  exit=1  fails=3  ·  scale: shape
+
+    mutate:   SELF_SHA=$(sha256sum "$SELF" | cut -d' ' -f1)   →   SELF_SHA=deadbeef
+    GENERATOR_SHA=deadbeef        ← the printed token IS the poisoned value; the file's real hash is
+                                    not recoverable from this transcript, so this mutant is identified
+                                    by the run, not by its own token (the one control where that is true)
+    FIRED:    SENT GENERATOR_SHA_IS_64_HEX                        actual=1     z     : FAIL
+    SENTINEL_TOTAL=23 SENTINEL_FAILS=3 FAILED: GENERATOR_SHA_IS_64_HEX TREE_DIFF_AVAILABLE PREDICATE_SHA_AVAILABLE
+
+    # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THESE FIGURES ANYWHERE
+
+Note two things in that footer. It ran **before the `run-real` restore** (§ 4), so it took the
+*unavailable* branches rather than the cross-run compares — which is why it reports
+`SENTINEL_TOTAL=23` where every post-restore control reports 28. And it is a live example of the
+asymmetry § 6 forbids reasoning about: `TREE_DIFF_AVAILABLE` and `PREDICATE_SHA_AVAILABLE` added to
+`FAILS` **without adding to `TOTAL`**. Never assert arithmetic between those two counters; four sites
+in the script increment one and not the other.
+
+### C2 — sentinel floor inflated past what the script runs  ·  **tag=real**  exit=1  fails=1  ·  wiring-only
+
+    mutate:   SENT_TOTAL_FLOOR_REAL=34   →   SENT_TOTAL_FLOOR_REAL=999
+    GENERATOR_SHA=b75fd2f0fa0c1097cf6b67181c8920126f302725dc1f3b737c90d54a5e25e7ad   (see § 4 — this is
+                the hash that contaminated run-real's baseline, and it is a MUTANT's hash, not a reference)
+    FIRED:    SENT SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR               actual=34    ge 999  : FAIL
+    SENTINEL_TOTAL=34 SENTINEL_FAILS=1 FAILED: SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR
+
+    # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THESE FIGURES ANYWHERE
+
+**Wiring-only, stated so nobody over-reads it.** This proves the floor's comparison is wired and
+compares what it claims to compare. It does **not** test what a floor is *for*, which is `actual`
+falling below a *correct* constant because a `chk` was deleted. The discrimination version — delete an
+assertion, watch the count drop under 34 — is not run here. This control also had to run as `tag=real`
+because the floor is `[ "$TAG" = real ]`-gated, and that is what caused § 4.
+
+### C3 — the declared-collapse label pattern made unmatchable  ·  tag=negctl  exit=1  fails=2  ·  maximal
+
+    mutate:   $8 ~ /\(declared\): /{c++}   →   $8 ~ /IMPOSSIBLE-TOKEN/{c++}
+    GENERATOR_SHA=9e7af2b86c1b8f65d2c8b62b66af1bb6ab2923a8aea9bc6f76069a5e21bccd1e
+    FIRED:    SENT DECLARED_LABELS_EQ_FILES_COLUMN                actual=0     eq 62   : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL DECLARED_LABELS_EQ_FILES_COLUMN
+
+    # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THESE FIGURES ANYWHERE
+
+This is the assertion that replaced a weaker one: `ge 1` on the same count was satisfiable by a single
+one-hit file, i.e. by something that is not a collapse at all. The equality's right side is a sum of
+per-family `cut -f1 | sed | sort -u | wc -l` file counts — a different expression from the label scan,
+so the two sides part if the labelling branch dies. (The `153 → 91` arithmetic closes by construction
+of the three-way label branch and is *not* independent evidence; it proves the partition is exhaustive,
+not that 62 rows *should* be collapses.)
+
+### C4 — the collapse-count ↔ hits_in_file equality inverted  ·  tag=negctl  exit=1  fails=2  ·  maximal
+
+    mutate:   if (n + 0 != $6 + 0) bad++   →   if (n + 0 == $6 + 0) bad++
+    GENERATOR_SHA=14cc2774effb81a315901abf82aad1232da31c05aab59880c5cf36322c2b1148
+    FIRED:    SENT COLLAPSE_COUNT_MATCHES_HITS_IN_FILE            actual=62    z     : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL COLLAPSE_COUNT_MATCHES_HITS_IN_FILE
+
+    # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THESE FIGURES ANYWHERE
+
+All 62 labelled rows failed together, as an inverted whole-set equality must. What this assertion is
+worth is narrower than its PASS looks like, and the script says so at its own comment: both sides
+derive from the same bytes, so it guards **pipeline order and awk's silent `getline` failure on a
+missing file**, **not coverage**. It cannot catch the defect that motivated it — the original bug was a
+wrong *word* attached to a number that agreed.
+
+### C5 — the row-verdict ↔ assigned-TN equality inverted  ·  tag=negctl  exit=1  fails=2  ·  maximal
+
+    mutate:   $3 != ("needs-" $4)   →   $3 == ("needs-" $4)
+    GENERATOR_SHA=825b8817c71c46562d65306dab7ad9b0ecb2097d6fb3c433586a9cddb1a9ca4e
+    FIRED:    SENT SITE_ROWS_VERDICT_MATCHES_TN                   actual=278   z     : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL SITE_ROWS_VERDICT_MATCHES_TN
+
+    # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THESE FIGURES ANYWHERE
+
+278 = every site row, i.e. the cross-column guard covers the whole row set, and inverting it lights up
+the whole row set.
+
+### C6 — the sortedness check forced to say NO  ·  tag=negctl  exit=1  fails=2  ·  tripwire
+
+    mutate:   SORT_OK=$(LC_ALL=C sort -c "$UNIV" 2>/dev/null && echo yes || echo NO)   →   SORT_OK=$(false && echo yes || echo NO)
+    GENERATOR_SHA=e8160f9a76565480438b544a207735a3435edbb30838dda7f21bcf0a5f8e2461
+    FIRED:    SENT UNIVERSE_LIST_IS_SORTED                        actual=NO    eq yes  : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL UNIVERSE_LIST_IS_SORTED
+
+    # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THESE FIGURES ANYWHERE
+
+Honest framing: the script itself declares this assertion a **pipeline tripwire** (the universe list is
+written `LC_ALL=C sort`ed, so the check is downstream of its own input). Controlling a tripwire is
+still a liveness proof, but it is not a claim about the tree.
+
+### C7 — the sort-order comparator fed reverse-C order  ·  tag=negctl  exit=1  fails=2  ·  comparator only
+
+    mutate:   SORT_DFLT=$(printf 'a\nB\nb\n' | sort | tr -d '\n')   →   SORT_DFLT=$(printf 'b\nB\na\n' | tr -d '\n')
+    GENERATOR_SHA=5a609c12b6642ce0…
+    FIRED:    actual=bBa     eq Bab    : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: SORT_DEFAULT_ORDER_EQ_C GENERATOR_SHA_SAME_AS_REAL
+
+    # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THESE FIGURES ANYWHERE
+
+**`bBa` is not a locale output and must not be read as one.** `LC_ALL=C` gives `Bab`; a realistic
+non-C collation gives `aBb`; `bBa` is simply reverse-C order, so this mutation exercised the
+**comparator**, not the `LC_ALL=C` export the assertion exists to police. The export half is
+**unfireable on this host and a genuine export drop can PASS here**, because glibc resolves an unknown
+locale to C and `LC_ALL=en_US.UTF-8 sort` was measured to emit `B a b`, identical to C. See
+`context/pitfalls.md` § *An LC_ALL naming a locale the host does not have falls open to C — no warning,
+no error*.
+
+### C8 — a python half that stopped printing its denominator  ·  tag=negctl  exit=1  fails=2  ·  discriminating
+
+    mutate:   S14DPY=$(grab S14_PROCEDURE_REAL S14_DENOMINATOR_PY_FILES_WITH_ADD_ARGUMENT_OUTSIDE_CONFIG)   →   S14DPY=
+    GENERATOR_SHA=50815c1e6f7bef3171b8fa933421432dcfb6c0fe05b1fe8e1b05cd5a94004f0b
+    FIRED:    SENT S14_DENOM_PY_FILES_GE_1                        actual=(empty)  ge 1  : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL S14_DENOM_PY_FILES_GE_1
+
+    # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THESE FIGURES ANYWHERE
+
+This is the class the `ge` operators exist for: a procedure half that dies, or whose output line moves,
+must not be able to produce a blank that a comparison shrugs past.
+
+### C9 — the predicate cross-run compare's operator inverted  ·  tag=negctl  exit=1  fails=2  ·  wiring-only
+
+    mutate:   chk PREDICATE_SHA_SAME_AS_REAL    eq "$(cat "$T3/run-real/predicate.sha256")" "$PRED_SHA"
+              →   chk PREDICATE_SHA_SAME_AS_REAL    ne …
+    GENERATOR_SHA=4ce1604a4396c5be…
+    FIRED:    SENT PREDICATE_SHA_SAME_AS_REAL    actual=ededb1159f5477dfb02764f47514e3cd8832fa8d10eede1d00f922164cd137a3
+                                                ne     ededb1159f5477dfb02764f47514e3cd8832fa8d10eede1d00f922164cd137a3  : FAIL
+
+    # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THESE FIGURES ANYWHERE
+
+**Wiring-only, and that is a real limitation.** With both legs equal, the verdict is decided by an
+equality the same process guarantees, so the failure this assertion exists to catch — two genuinely
+*different* predicates meeting an intact `eq` — is never exercised. The better mutation changes the
+*other leg's input* and keeps the operator: one byte in a mutant's `families.tsv` heredoc moves
+`PRED_SHA`. Not run. **C10 below is the model this one should have followed.**
+
+### C10 — the inputs compare fed a real difference  ·  tag=negctl  exit=1  fails=2  ·  discriminating
+
+    mutate:   cmp -s "$T3/run-real/inputs.sha256" "$RUN/inputs.sha256"; INPUTS_DIFF=$?   →   INPUTS_DIFF=1
+    GENERATOR_SHA=0b8a9e9664d3add2…
+    FIRED:    SENT INPUTS_SHA_SAME_AS_REAL                        actual=1     z     : FAIL
+    SENTINEL_TOTAL=28 SENTINEL_FAILS=2 FAILED: GENERATOR_SHA_SAME_AS_REAL INPUTS_SHA_SAME_AS_REAL
+
+    # SENTINEL_FAILURE — KNOWN BAD, DO NOT PASTE THESE FIGURES ANYWHERE
+
+Operator untouched, difference produced in the *inputs* rather than in the check. The three
+`INPUT_SHA256` legs decide the TN routing and the S12/S13 Tier-A filter, so if the manifest moves
+between a `real` run and a canary run, both runs census the identical tree with a **different census**
+and the universe diff cannot see it.
+
+### The compare that controlled itself for free
+
+`GENERATOR_SHA_SAME_AS_REAL` fired on **C3–C10 without being touched**: each mutated copy is a
+different program, so every canary-tag run disagrees with `run-real/generator.sha256`. That is the
+intended signal, and it is why every block above names its own mutant hash. C2 legitimately did not
+fire it — C2 ran as `tag=real`, where there is no self-compare. C1 did not fire it either: it ran while
+`run-real` was missing, and took the `GENERATOR_SHA_AVAILABLE` failure branch instead.
+
+---
+
+## 2 · What is NOT controlled
+
+Stated because an unlisted gap is a gap someone fills by guessing.
+
+- **No canary control exists.** Six planted primitives, one per class, do not exist yet. Until
+  `t3-canary-score.tsv` has 6 rows the census cannot print plain `PASS`. By design, not oversight.
+- **C7's locale arm** (above): unfireable here, and an export drop can pass.
+- **`FIND ENTITY_GRANULAR_ROWS_WITHOUT_LINE_EVIDENCE` has no chk.** The literal `1` that S14/S15/S18
+  write into column 6 (headed `hits_in_file`) is disclosed, not asserted: comparing it against a
+  constant is the tautology this harness has been deleting all cycle, not one it should mint.
+- **`FIND SENTINEL_TOTAL_FLOOR_NOT_MEASURED` has no chk either** — see the next bullet, which is worse.
+- **The canary tag floors nothing.** The floor is `[ "$TAG" = real ]`-gated; on every other tag the
+  script prints a `FIND` line, which is a display and not a failure. Measured: `SENTINEL_TOTAL=28` on
+  `negctl` against 34 on `real`, because the real-only assertions (the manifest gate,
+  `UNIVERSE_*_EQ_PIN`, `LOC_*`, `GRANULARITY_FORCE_IS_FIRED`, the two collapse assertions) are absent
+  there. Consequence, plainly: **a canary run that silently loses assertions still prints PASS.** The
+  floor constant for a canary tag has to be measured on the first real canary run; guessing it would
+  repeat the floor-of-31 mistake below.
+- **`SENT_TOTAL_FLOOR_REAL` was guessed as 31 on the first cut and passed by luck** against a different
+  quantity (the pre-increment `SENT_TOTAL`), printing `SENTINEL_TOTAL=31` above a verdict line saying
+  "32 assertions met". The floor is now compared against `$((SENT_TOTAL+1))` for exactly that reason.
+- **Never assert arithmetic between `SENTINEL_TOTAL` and `SENTINEL_FAILS`.** Four sites (the
+  `TREE_DIFF_AVAILABLE`, `GENERATOR_SHA_AVAILABLE`, `INPUTS_SHA_AVAILABLE`, `PREDICATE_SHA_AVAILABLE`
+  branches) add to `FAILS` without adding to `TOTAL`, so `TOTAL − FAILS` is not a pass count. C1's
+  footer is this asymmetry in the wild.
+- The 24 assertions not covered by C1–C10 are uncontrolled. Most are value-comparisons against a
+  constant measured in the same run (`LOC_EQ_PIN_CONSTANT`, `UNIVERSE_*_EQ_PIN`) and inherit their
+  weakness from the pin's own provenance, recorded in `wave0/t1-freeze-and-manifest.txt`.
+
+---
+
+## 3 · My own batch, and the false alarm it produced  [OBSERVED 2026-11-05]
+
+The first control batch was launched from `context/audit/scripts/` instead of the project root. Every
+run died at `cd "$ROOT"` with **exit 2** — `$ROOT` is `vendor/basalt`, a path relative to the project
+root. Eight "controls" reported nothing at all.
+
+That batch's earlier attempt had parked its copies in `/tmp`, where the script's `MAN`/`PROJ`
+resolution points at `/tmp/manifest` and `/tmp/…/plans/…`; those runs died at
+`MANIFEST_DIR_NOT_FOUND` / `PLAN_NOT_FOUND`, exit 2, before any assertion. Because the census opens
+with `rm -rf "$RUN" "$OUT"`, and because at least one of those mis-launched runs carried `TAG=real`,
+**`run-real`'s artifacts were deleted before the runs died.** The next, correctly-launched batch
+therefore printed:
+
+    TREE_DIFF_VS_REAL=unavailable (run-real/universe.txt missing — run the audit tree first; the canary claim is UNSUPPORTED without it)
+
+which reads like dead code in the harness. It was my own artifact from four minutes earlier. Confirmed,
+not assumed: the same batch's later runs print `TREE_DIFF_VS_REAL=+0/-0` (`label_gone`, `collapse_eq`,
+`tn_invert`, `sort_unsorted`, `nosort`, `s14_empty`, `pred_invert`, `inputs_diff`), and C1 — the one
+run from before the restore — is the only block above that reports the unavailable branches.
+
+## 4 · A control that runs under `tag=real` overwrites the real run's baseline  [OBSERVED 2026-11-05]
+
+`RUN=/tmp/opencode/basalt-audit/t3/run-$TAG` is wiped at start, and `run-real` is what every
+canary-only compare reads as its reference. **C2's floor assertion is `tag=real`-gated**, so C2 had to
+run under that tag — and it replaced `run-real`'s tokens with a **mutant's**:
+
+    run-real/generator.sha256 became  b75fd2f0fa0c1097…   (= C2's own GENERATOR_SHA256, verified above)
+
+That value is the "expected" leg printed in C3–C10's `GENERATOR_SHA_SAME_AS_REAL` failures. **It is a
+contaminated baseline and is quoted as such; it is not a reference.** It does *not* invalidate those
+controls' FAIL results — a mutant differs from another mutant, so liveness is still demonstrated — but
+no baseline figure from that window should be reused.
+
+The rule taken from this: **no control runs under `tag=real` again; a `real`-gated assertion is
+executed last, in a batch whose output is discarded.**
+
+Restore, proved by reproduction rather than by assertion. `run-real` is regenerable by design, so the
+claim is not "I salvaged it" but **"a pristine re-run reproduces the pasted evidence exactly."** After
+the restore, the full token set — all four, not the two I first checked — and a byte-diff:
+
+    run-real/generator.sha256   1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106
+      == GENERATOR_SHA256 of t3-sentinels-real.txt == sha256sum of the script in this commit          ✓
+    run-real/predicate.sha256   ededb1159f5477dfb02764f47514e3cd8832fa8d10eede1d00f922164cd137a3
+      == the PREDICATE_SHA256 line of that paste                                                     ✓
+    run-real/inputs.sha256      6dc0f094ff27b998dc0d879791cbd38abbc006b001c8d3c9e20f756ba668523d …
+      == the three INPUT_SHA256 lines of that paste                                                  ✓
+    run-real/universe.txt       862 lines                                                            ✓
+
+    $ diff <(grep -vE '^== (t3-census\.sh started|finished)=' census-final.txt) \
+           <(grep -vE '^== (t3-census\.sh started|finished)=' census-rerun.txt)
+    $                                                     ← no output: byte-identical
+    (exit 0, rerun stderr 0 bytes. The two excluded lines differ only in their times:
+     06:35:14Z/06:35:27Z against 06:40:55Z/06:41:09Z.)
+
+## 5 · Three-leg freeze check, after every run on this page
+
+The census reads the tree and writes only under `/tmp/opencode/basalt-audit/t3/`; the mutated copies
+were created inside `context/audit/scripts/` as `.neg-<name>.sh` **and deleted** (`git status
+--porcelain` over the repo after each batch: no residue). So the audited tree was never written to —
+which is the claim the plan's single-leg `git diff` version of this check could not actually support:
+
+    $ cd vendor/basalt
+    $ GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 && echo "AUDIT TREE OK (tracked contents)" || echo "AUDIT TREE DRIFTED — STOP"
+    AUDIT TREE OK (tracked contents)
+    $ N=$(find . -type f -not -path './.git/*' | wc -l); [ "$N" -eq 862 ] && echo "TREE FILE COUNT OK (862)" || echo "TREE FILE COUNT=$N — untracked additions — STOP"
+    TREE FILE COUNT OK (862)
+    $ U=$(git status --porcelain --ignored | grep -c .); [ "$U" -eq 0 ] && echo "TREE CLEAN (no untracked/ignored)" || { echo "TREE NOT CLEAN: $U entries — STOP"; git status --porcelain --ignored | head; }
+    TREE CLEAN (no untracked/ignored)
+
+Why three legs and not one: `server/basalt/.gitignore` line 1 is `/vendor/`, so `git diff <pin>`
+compares tracked contents and cannot see an ignored untracked file. That is the whole of
+[`t3-tree-contamination.txt`](t3-tree-contamination.txt).

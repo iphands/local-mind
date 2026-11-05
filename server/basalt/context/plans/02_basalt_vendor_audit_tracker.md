@@ -17,11 +17,24 @@
 
 ## Resume Instructions
 
-1. **Prove the tree has not moved** — use the plan's *one* freeze-check, nothing else:
+1. **Prove the tree has not moved** — the plan's *one* freeze-check, `02_basalt_vendor_audit.md`
+   § *The one freeze-check*. It has **three legs**; run all three, from the project root:
    ```bash
-   cd vendor/basalt && GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 \
-     && echo "AUDIT TREE OK" || echo "AUDIT TREE DRIFTED — STOP"
+   cd vendor/basalt
+   GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 \
+     && echo "AUDIT TREE OK (tracked contents)" || echo "AUDIT TREE DRIFTED — STOP"
+   N=$(find . -type f -not -path './.git/*' | wc -l)
+   [ "$N" -eq 862 ] && echo "TREE FILE COUNT OK (862)" || echo "TREE FILE COUNT=$N — untracked additions — STOP"
+   U=$(git status --porcelain --ignored | grep -c .)
+   [ "$U" -eq 0 ] && echo "TREE CLEAN (no untracked/ignored)" \
+     || { echo "TREE NOT CLEAN: $U entries — STOP"; git status --porcelain --ignored | head; }
+   cd ../..
    ```
+   **This step carried only the first leg until 2026-11-05.** That leg stayed true for a whole working
+   day while thirteen `__pycache__` files — written into the audited tree by this plan's own PoC
+   harness — sat inside it, because `server/basalt/.gitignore` line 1 is `/vendor/`: `git diff <pin>`
+   compares tracked contents and structurally cannot see an ignored untracked file. Full account:
+   `context/audit/wave0/t3-tree-contamination.txt`. Do not shorten this step back to one command.
    A drifted tree is a **blocker row** here and in plan Risk 1, then a re-freeze (T1) — never a
    silent continue. A pin bump by Plan 01 or the owner is exactly how a "clean" verdict becomes false.
 2. **Find where the work actually stands** — two places, in this order: the **last row of
@@ -37,6 +50,17 @@
    - Working: `python3` (3.14.10), `git` (≥2.43, `GIT_NO_LAZY_FETCH`), `g++` (T5 harness),
      `shellcheck` 0.11.0 **at `~/.local/bin/shellcheck`** (installed by T0 on 2026-11-05; RULES.md
      updated), `curl` + `api.github.com` over TLS (unauthenticated, 60 req/h).
+   - **`python3` corrected forward, 2026-11-05 (later session, same plan):** the line above names no
+     environment, and **this** agent's shell reports `python3 3.12.16` at
+     `~/.pyenv/versions/3.12.16/bin/python3` (`python3 -VV`, `pyenv versions`; `/usr/bin/python3` here
+     is 3.15.0). Both readings are kept: `3.14.10` is a real CPython release (python.org, 2026-10-25),
+     so it may have been true of a shell that **cannot be re-entered and is not named** — that
+     non-derivability is the datum, not an omission. Nothing in this plan's work depends on a python
+     version, and the gate's step 1 now **echoes** the interpreter it used
+     (`INTERPRETER=…`, `RULES.md` § *The gate*) so the next session does not have to trust either line.
+     `RULES.md` § *Prerequisites* is corrected in place; `distilled.md` `:162` is **left alone** because
+     it is properly scoped — see `context/pitfalls.md` § *A dated fact scoped to a shell I could not
+     enter…*.
    - **Wrong in this list until T2 (2026-11-05): `gh` is NOT installed** (`command -v gh` → nothing).
      T2's provenance ran on `curl`; the plan's T2 Verify block is rewritten to match. Do not re-add
      `gh` to the plan without installing it first.
@@ -83,7 +107,7 @@
 | 0 | T0: Restore the gate (shellcheck user-local, RULES.md prerequisite) | `context/plans/RULES.md` | **done** | v0.11.0 at `~/.local/bin`, negative control fired SC2115/SC2086; gate 2 `shellcheck ok`; RULES.md steps 2 + Prerequisites corrected in place, dated. Docker (steps 3–6) recorded owner-run, not fixed |
 | 1 | T1: Freeze the pin, manifest all 862 files | `context/audit/manifest/` | **done** | 862 rows / 12 TSVs / 219,247 l; `MISMATCH_COUNT=0` under `GIT_NO_LAZY_FETCH=1`; tree frozen, `VENDOR_DIRTY=0`; 862 objects all `blob` (858×100644, 4×100755 — no gitlinks, no symlinks); 0 paths outside printable ASCII; worktree `sha256sum` == object sha256 for all 862; pipeline byte-deterministic over two runs and `diff`-equal to the committed TSVs. Tier A pre-seeded 75 f / 19,659 l, `B-vendored@T5` 1 f, **786 f `unassigned` for T3**; **0 lines read**. Gate 1a/1b/1c/2 pass, 3–6 docker-blocked (owner). See `context/audit/wave0/t1-freeze-and-manifest.txt` |
 | 2 | T2: Pin provenance + boundary-author census | `manifest/index.md` | **done** | **All 862 blob SHAs match GitHub's tree object `3f7b69ae` for the pin** — `INTERSECT=862 ONLY_IN_API=0 ONLY_IN_LOCAL=0 BLOB_SHA_MISMATCH=0`, `GITLINKS=0`, canonical `sha256(path⇥blob)` equal both sides; sensitivity control against the first parent returns `BLOB_SHA_MISMATCH=1` (one file: `serve/util/telemetry.py`). **Limit, recorded as a limit:** the signature is GitHub's own key (`B5690EEEBB952194`) on a GitHub-made squash merge and is unverifiable here (`No public key`); all 3 of **basalt's own** tags are annotated-**unsigned** (Strata's same-named tags are different objects); SWH has no origin for `jesdga95/basalt` and no revision for the pin → **no non-GitHub anchor for the pinned commit** (it *does* hold the ancestor Strata in 9 visits — 8 `full`, 1 `failed` — and our root commit — see `wave0/t2-lineage.txt` § 7; an earlier draft of this row said SWH "has never archived this project", which was true only of the broken `/get/` endpoint form — `pitfalls.md` item 10). **Pin is untagged `main`, not `v0.3.5`** (that tag does not exist upstream; docs/pyproject claim it → no release artifact to diff, feeds Risk 5); 3 commits since `v0.2.1`; no `SECURITY.md` anywhere. Census of **87 rows / 80 blameable first-party files** (`scripts/t2-census.sh`, which reproduces `wave0/t2-author-census.tsv` byte-identically — *the 80*: 87 rows − 6 `BINARY_SKIPPED` − 1 vendored `stb_image.h`; 69 `A-planned` + 11 `unassigned`): 20,111 blamed lines, 53 authors, core two 81 %; **560 lines (2.78 %) sit on a blame boundary and they are the same 560 credited to the root commit**, per-file identical across 7 files (blame cannot walk past a parentless commit), so this is a **lineage** quantity, not an error bar — `wave0/t2-provenance.txt` § 6. *Corrected 2026-11-05: this row first said "**0** blame-boundary lines", which was a false zero from an unanchored `grep boundary` over blame output — `pitfalls.md` item 13. The file denominator also went 86 → 80, and `tail -n +2` on this headerless TSV dropped `CMakeLists.txt` from two of my own verification commands — item 14.* `serve/engine/image_source.py` 570 l = 1 commit/1 author; `dynlib.cpp` 64 l = 1 commit/1 author; **`jeancmyk` holds the plurality of `process.cpp` 216/321, `file.cpp` 247/456, `direct_file.cpp` 255/455, each majority landing in ONE commit** — read first (T8). Tiering gaps found: `CMakeLists.txt` (287 commits) and `serve/engine/process.py` (1,419 l) are `unassigned`. Two plan errors corrected: `src/server/` does not exist; `gh` is not installed. Raw: `wave0/t2-provenance.txt`, `t2-github-tree-paths.txt`, `t2-boundary-authorship.txt`, `t2-gate-and-checks.txt` |
-| 3 | T3: Census + **6-canary** control + orphan-key + diagnostics-shape | `context/audit/census.md` | pending | 6/6 or census is void; also freezes T9's list |
+| 3 | T3: Census + **6-canary** control + orphan-key + diagnostics-shape | `context/audit/census.md` | in-progress | tooling + first clean `tag=real` run committed (`wave0/t3-sentinels-real.txt`, `wave0/t3-census-controls.txt`) — figures and limits in Notes, 2026-11-05. **Deliverable `census.md` still owed.** Gate: **6/6 or census is void**; also freezes T9's list |
 | 4 | T4: `image_source.py` + `security.py`; **execute** the 9-class bypass list | `serve/engine/image_source.py` | pending | deliverable = delta vs upstream tests |
 | 5 | T5: decode-path **resource bounds + first-party amplification** (stb is 2.30, current — re-scoped 2026-11-05, see Notes); ASan/UBSan + peak-RSS harness + guard-vs-consumer arithmetic | `src/vision/` | pending | P0 kept, justification replaced; harness agent-built, long runs owner-run |
 | 6 | T6a: Logging + `/metrics` disclosure | `serve/util/`, service/handler | pending | ≤1,500-line slice |
@@ -118,7 +142,9 @@ violation and cannot be cited by a later plan.
 | 2026-11-05 | T1 freeze + integrity suite: the one freeze-check; per-path `git hash-object` vs `ls-tree` (printed count); `ls-tree --format='%(objecttype) %(objectmode)' \| uniq -c`; `grep -cvP '^[\x21-\x7e]+$'` on `--name-only`; empty-blob count; `git status --porcelain --ignored \| wc -l`; worktree `sha256sum` pass joined against manifest column 3; `comm -3` manifest↔`ls-tree`; generator run twice + `diff -r`, and `diff -r` vs the committed TSVs | `AUDIT TREE OK` · `MISMATCH_COUNT=0` · 862 × `blob` (858 × `100644`, 4 × `100755`) · non-ASCII/space paths `0` · `EMPTY_BLOBS=0` · `VENDOR_DIRTY=0` · `SHA_MISMATCHES=0` · `comm` = `0` (862 = 862 = 862) · two runs byte-identical and equal to what is committed | 1 (+1 determinism re-run) | Full verbatim: `context/audit/wave0/t1-freeze-and-manifest.txt`. `NO_TRAILING_NL=12` bounds the LOC column |
 | 2026-11-05 | T1 drift-check **negative control**: tamper a LOC digit in a `/tmp` copy of `cmake.tsv`, re-run the `frozen-prefix.sha256` recompute loop | `PREFIX DRIFT cmake.tsv`, `CONTROL_DRIFT_COUNT=1` — the check fires | 1 | Proves the clean `PREFIX_DRIFT_COUNT=0` on the real manifest means something (RULES.md Rule A: a silence that has never been shown to speak is not a pass) |
 | 2026-11-05 | Gate steps 1a/1b/1c/2, re-run **with `context/audit/` present** (3 new `.md`, 12 `.tsv`, 1 `.sha256`) | 1a no `FAIL` · **`3 b`** · `env ok` · `shellcheck ok` | 1 | Rule 5 holds: none of T1's artifacts enters the bash set. Steps 3–6: step 3 re-measured as docker-denied; 4–6 unrun |
-| — | T3 canary capture (target **6/6**, one per planted class) | — | | **Wave 0 gate** |
+| 2026-11-05 | T3 census, pristine: `PYTHONDONTWRITEBYTECODE=1 LC_ALL=C context/audit/scripts/t3-census.sh vendor/basalt real` | exit 0, stderr 0 bytes; `SENTINEL_TOTAL=34 SENTINEL_FAILS=0`; `T3_CENSUS_VERDICT=PASS_PENDING_CANARY`; the figures belong to `wave0/t3-sentinels-real.txt`, not to this row | 2 | **`tag=real` only — no canary tag has ever been run.** A second run is byte-identical to the pasted one except the two timestamp lines (`diff` empty): that is the `run-real` restore anchor. Three-leg freeze check clean after both |
+| 2026-11-05 | T3 harness negative controls: 10 exact-string-mutated copies run **beside** the original (`context/audit/scripts/.neg-*.sh`, deleted after) | 10/10 fired — each exit 1, `T3_CENSUS_VERDICT=FAIL`, and its own assertion line `FAIL`; each block records its mutant's `GENERATOR_SHA256` | 10 | **Coverage: 10 of 34 assertions, real path only.** Two are **wiring-only** (C2, C9: they exercise a comparison, not the failure it guards); C4/C5 are maximal (whole-set); C7 proves the comparator, **not** collation sensitivity. No control under `tag=real` again — Notes. Detail: `wave0/t3-census-controls.txt` |
+| — | T3 canary capture (target **6/6**, one per planted class) | — | | **Wave 0 gate.** `t3-canary-score.tsv` must reach 6 rows before the census prints plain `PASS`. A canary tag **floors nothing** today (`SENTINEL_TOTAL=28` on `negctl` vs 34 on `real`; the non-`real` floor line is a `FIND`, not a fail), so a canary run that silently loses assertions still prints PASS — the canary floor is unmeasurable until this row exists |
 | — | T5 ASan/UBSan fuzz, JPEG/PNG/BMP/GIF at request-reachable `max_pixels` | — | | report count, target 0 |
 | — | T11 `LC_ALL=C comm` manifest vs `git ls-files src/ include/` (target 0) | — | | after each directory slice |
 
@@ -640,6 +666,51 @@ violation and cannot be cited by a later plan.
   findings:** that is still the honest summary. F-1..F-4 are ordinary bugs sitting behind a trust
   boundary, and nothing found so far indicates deliberately planted malice — the honest answer to "is
   upstream malicious" remains *no evidence yet, and the vendored third-party tree is unread*.
+- **2026-11-05 — T3's census tooling landed; what it does and does not establish.** Committed:
+  `scripts/t3-census.sh` (the frozen generator, `GENERATOR_SHA256=1bab1ec5…`) and `scripts/t3-inputs.sh`
+  (its inputs, a projection of the 12 tracked manifest TSVs), plus their transcripts in
+  `wave0/t3-sentinels-real.txt` and `wave0/t3-census-controls.txt`. **Established:** the 278 primitive
+  sites, the 862-file universe, and 34 internal consistency assertions that each fired when their
+  harness was mutated. **Not established:** that any pattern would *fire* on a real hidden primitive —
+  that is the 6-canary control, which does not exist, so **`canary=NOT_YET_SCORED`** is the single
+  condition keeping row 3 `in-progress`; when it closes, the census prints plain `PASS` for the first
+  time. **T3's deliverable `context/audit/census.md` is not written**, and every figure above stays
+  unsigned until it is. The controls cover **10 of 34 assertions** on the `real` path, two of them
+  wiring-only — that count is not coverage of the census's claims.
+- **2026-11-05 — a self-imposed constraint retired: "row 3 may not move off `pending`".** Replaced by
+  `in-progress`. Reason, recorded because the wrong instrument was used: the constraint meant to protect
+  honesty by **understating existence**, and `pending` tells the next agent that nothing exists — which
+  invites re-running a 1,600-line census against the pin. RULES rule 6 ("never mark a task `done` on
+  unverified work") binds `done`, not `in-progress`; `blocked` was also wrong, since RULES reserves
+  `BLOCKED` for environmentally unrunnable steps with a paste-able denial, and an unscored canary set is
+  undone work, not a wall. **The drift guard is the row's Notes and the void clause, not the status
+  word**: "6/6 or census is void" is preserved verbatim in the cell.
+- **2026-11-05 — the collapse rows' third column state (defect 4): labelled, not un-collapsed.**
+  `sites.tsv` column 8 now carries three states — `file-granular (forced: test|unowned):`,
+  `file-granular (declared):`, `line-hit` — and the census counts labelled rows against an *independent*
+  expression (`DECLARED_LABELS_EQ_FILES_COLUMN`: a per-family `cut | sed | sort -u | wc -l` file-count
+  sum, measured 62) rather than against a constant. What was **not** done, deliberately: un-collapsing
+  the S12/S13 file-granular families into per-line rows. That changes `SITES` (278), which every
+  tn-budget figure in this plan and the frozen 91/62 arithmetic in the amendment are stated against —
+  so the fix names what a row is instead of re-cutting the table. The per-line evidence is still kept
+  (each family's `<name>.sites-linelevel.tsv` is preserved by the run); `raw_rows` is reported as
+  `line_hits`. The `153 → 91` partition closes **by construction** of the three-way branch and is not
+  evidence that 62 rows *should* be collapses.
+- **2026-11-05 — `AUDIT_B` moved `3 b` → `5 b`; the owner is `RULES.md` § *The gate*.** Stamped captures
+  in this tracker and in `plans/completed/01_*` that still read `3 b` are **not errors** and are not
+  rewritten — rewriting one retro-dates the helpers into the task that captured it. Cite the owner line;
+  `plans/02_…md`'s Gate status row and Risk 11 were converted from restatements to citations in this
+  commit for exactly that reason. `RULES.md` § *Rule E* item 7 is the doctrine.
+- **2026-11-05 — nearly "corrected" a correct fact; the lesson is about reading, not provenance.**
+  Three files recorded `python3 3.14.10`; this shell measures `3.12.16`; I asserted a false fact was in
+  the project's memory a full turn before reading `distilled.md:163-166`, where the number's own scope
+  caveat sits. Only the copy with **no environment named** (`RULES.md` § *Prerequisites*) was actually
+  wrong-for-here, and it is fixed in place; the scoped snapshot is untouched. A reviewer's confident
+  "3.14.10 is implausible as a CPython patch" was also wrong — python.org lists it (2026-10-25), so
+  plausibility arguments about artifacts get checked against the artifact. Rules taken: **a
+  measurement's scope is part of the measurement**, and the gate step now echoes `INTERPRETER=` so no
+  future session has to trust a prose version at all. See `pitfalls.md` § *A dated fact scoped to a
+  shell I could not enter…* and `context/AGENTS.md` § *Provenance*.
 
 ## Follow-ups
 

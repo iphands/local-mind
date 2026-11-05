@@ -47,6 +47,12 @@ Tag every new fact with how it is known, and **never upgrade a tag without doing
   observed on a running system: a boot you watched, a bench row, a probe you ran.
 - Pitfalls that actually bit are tagged `[OBSERVED YYYY-MM-DD]`, to tell them apart from hazards
   seeded from reading.
+- **A dated observation scoped to an environment you cannot enter is superseded, never replaced.**
+  Append your measurement with its own date and shell and leave theirs; a newer dated fact may
+  contradict it, but you cannot "correct" it — you were not there. Read the `±10` lines for a scope
+  qualifier before calling any recorded number stale: **a measurement's scope is part of the
+  measurement**, and grep returns lines, not qualifiers
+  (`pitfalls.md` § *A dated fact scoped to a shell I could not enter…*).
 
 ## House Style <!-- hp:context-style -->
 

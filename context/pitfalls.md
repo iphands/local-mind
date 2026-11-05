@@ -154,3 +154,58 @@ answer "not our ref"), and an **API route that returns a uniform value for every
 - local-mind: `server/basalt/context/high_level.md` § *Attesting the Basalt pin `dc047a77`* (the options
   table with each method's verdict); `server/basalt/context/audit/index.md` § *If you are about to run
   something against upstream* (the commands)
+
+---
+
+# A locale name the host does not have falls open to `C` — no warning, no error, no exit code
+
+## Problem
+
+**[OBSERVED 2026-11-05]** glibc resolves an unknown `LC_ALL` value to the `C` locale and continues
+silently. Setting a locale that is not installed and running `sort` produced **byte-identical output to
+`LC_ALL=C`**, exit status 0, nothing on stderr. Nothing about the environment says the guard you just
+put on did not apply.
+
+Two consequences that matter to any script in this tree that pins collation, character classes or
+numeric formatting:
+
+- **A locale-dependent assertion can be permanently green without being armed.** If the collation the
+  check exists to detect is not installed on the machine running it, the check compares `C` output to
+  `C` output forever. It passes on every run and covers nothing.
+- **A real regression passes.** Deleting `export LC_ALL=C` from a script that sorts, joins or `comm`s
+  may change nothing on such a host, so the failure you built the check for cannot be produced locally
+  and the diff you expected never appears.
+
+Related, and the reason the pinning matters: a `comm -23` / `sort -u` pair whose two sides were sorted
+under *different* collations can silently agree or silently disagree, because each side is internally
+consistent. This half is **seeded from reading, not observed** here.
+
+Scope, honestly: what was observed is "output identical to `C`, no diagnostic". That observable cannot
+distinguish *locale unavailable so glibc falls back* from *locale present with an identical collation
+sequence* — `locale -a` is the only evidence for the first reading, and it is a property of the
+particular image, so it is deliberately not recorded here.
+
+## How to avoid
+
+- Grep anchors: `LC_ALL`, `LANG`, `locale -a`, `sort -c`, `comm -23`, `sort -u`, `cut -f1 | sort -u`.
+- **`locale -a` before arming any locale-dependent tripwire**, in the image that will actually run the
+  check — not the host, since these sub-projects run in containers whose locale sets differ from each
+  other and from the box.
+- **Pin collation inside the script** (`export LC_ALL=C` near the top, not only at the call site), and
+  put both sides of any set operation under it.
+- Where a check's purpose is to detect a *non-C* environment, prove liveness by mutating the comparator
+  rather than the environment, then **label that proof for what it covers**: it shows the comparison is
+  wired, not that it is collation-sensitive. Record which arm is unarmed, in the script comment and in
+  the evidence.
+- Do not install a locale merely to make a check exercisable: that mutates the environment the check
+  exists to police, and the next agent inherits a tripwire only your image can fire.
+- A check whose trigger is unavailable is a **finding to write down, not a pass to bank**.
+
+## Sources
+
+- local-mind: `server/basalt/context/pitfalls.md` § *An LC_ALL naming a locale the host does not have
+  falls open to C — no warning, no error* (the fuller version, with this box's locale list, the census
+  assertion involved and the comparator mutation — all deliberately omitted above)
+- local-mind: `server/basalt/context/audit/wave0/t3-census-controls.txt` control **C7** and its
+  "not a locale output" caveat
+- observed in `server/basalt` during Plan 02 T3, 2026-11-05

@@ -188,8 +188,31 @@ debt. Quote 19,659 or quote the grid, never a sum of the two.
 - **`primitives`**: comma-separated, no spaces, alphabetical, from T3's census sections —
   `net-socket` · `dns` · `exec-spawn` · `dlopen` · `raw-syscall` · `file-write-outside` ·
   `fingerprint-read` · `credential-store` · `proc-sys` · `persistence` · `input-capture` ·
-  `parser-network-bytes` · `vendored-third-party` · `orphan-config-key` · `diagnostics-shaped`.
+  `parser-network-bytes` · `vendored-third-party` · `orphan-config-key` · `diagnostics-shaped` ·
+  `net-library-import` · `model-instruction`.
+  Two **plumbing tokens** are also legal in column 6 and are not primitives: `none` (looked, nothing
+  found — only T3 may write it) and `unassigned` (nobody looked). Declared on these lines so the census
+  need not inject them into its own comparison set: a checker that adds tokens to the vocabulary it is
+  policed against is the party inventing a token catching itself inventing it. Added here 2026-11-05 by
+  T3 for the same reason `model-instruction` and `net-library-import` were.
+  <!-- The 19 tokens above are the machine-readable set: t3-census.sh extracts this line range
+       (from this bullet to the Histogram line) at run time and FAILS on any column-6 token not in
+       it, so a token cannot be introduced by the script that invents it. Keep new tokens ON these
+       lines, not only in the prose below. The script used to append `none` and `unassigned` itself
+       and to exempt one invented token (`UNASSIGNED-NOT-SCANNED`) from its own comparison; both are
+       removed, so this range is the ONLY place a legal column-6 token can come from. -->
   Histogram: `cut -f6 *.tsv | tr ',' '\n' | LC_ALL=C sort | uniq -c | sort -rn`.
+  - **The last two were added 2026-11-05 by T3**, because no earlier section could route them:
+    `net-library-import` marks a module that *imports* a network-capable standard-library module.
+    Not a call site — the eleven keyword families look for calls, so a file that imports `urllib`
+    and reaches it only through a helper carries no call-site token. File-granular; its rows are
+    leads for the call-site families, never evidence on their own. Added because S16 (imports) is
+    substrate and otherwise surfaced these files nowhere.
+    `model-instruction` marks text in the audited tree addressed to an AI assistant (`AGENTS.md`,
+    `.github/copilot-instructions.md`, plus imperative prose matching the census's phrase pattern).
+    A boundary because it is instructions the repo *gives* rather than code it runs, and no plan
+    `File:` owns it — routed to T14 and recorded there as a named GAP, never folded into a
+    code-reading task's LOC budget.
 - **`unassigned` ≠ `none`.** `unassigned` = nobody looked. `none` = looked, nothing found. Only T3
   may write `none`. Collapsing the two is how "the grep found nothing" becomes "audited".
 - **`pending`** in both `status` and `reviewed-in` means the work has not happened. It is deliberately

@@ -1,0 +1,181 @@
+Target dc047a77beeddf1e91234d983a91d6bf929e9619 / tree 3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4 — if that is not the tree you are looking at, you are in the wrong audit.
+
+# Plan 02 T3 · the gate and the freeze pairing, run as published, 2026-11-05
+
+Companion to [`t3-sentinels-real.txt`](t3-sentinels-real.txt) (the census run) and
+[`t3-census-controls.txt`](t3-census-controls.txt) (the controls). This file answers a different
+question: *was the commit that landed those two allowed to land, and is the script it committed the
+same program that produced them?*
+
+Nothing here was hand-copied. Steps 0/1a/1b/1c and 2/2b were **extracted from `plans/RULES.md`'s own
+fenced blocks** with `sed -n '274,330p'` / `sed -n '351,369p'` and executed, so the thing that ran is
+the thing that is published — not a paraphrase of it. Same for the scope producer (`:155,163`). Run
+from the project root (`server/basalt`), `diff.relative` unset, `LC_ALL=C`.
+
+---
+
+## 1 · Steps 0 / 1a / 1b / 1c
+
+`RULES.md` § *Project gate*, block 1 (`# 0` … `# 1c`). The `INTERPRETER=` line is new in this commit;
+see § 6 for why.
+
+```text
+INTERPRETER bash=5.3.15(1)-release python=3.12.16 at=/home/iphands/.pyenv/shims/python3
+PRODUCT_B=3 AUDIT_B=5 TOTAL_B=8
+  product b:
+    build
+    lib/common.sh
+    run
+  audit b:
+    context/audit/scripts/ledger-grid.sh
+    context/audit/scripts/t2-census.sh
+    context/audit/scripts/t3-census.sh
+    context/audit/scripts/t3-inputs.sh
+    context/audit/scripts/t3-model-file-poc.sh
+CLASSIFIED=8
+env ok
+```
+
+Exit 0. **No `FAIL` line**, so 1a passed over every tracked file (both sets, deliberately not
+narrowed). `PRODUCT_B=3 AUDIT_B=5` **matches the owner line** — `RULES.md` § *Expected counts*, bumped
+`3 b` → `5 b` in this same commit for `t3-census.sh` and `t3-inputs.sh`. The identity guard printed no
+`FAIL(1b) missing product bash: …`, which is the point: the product number is 3 *over three named
+launchers*, not 3 over nothing from the wrong cwd.
+
+`AUDIT_B=5` is only true **after** `git add`: 1b enumerates `git ls-files`, so an untracked script is
+invisible to 1a, 1b and 2/2b alike. That is why the sequence for this commit was *lint both scripts by
+hand → `git add` → run this gate* rather than the reverse, and why both `shellcheck -x` invocations
+below are confirmations rather than first passes.
+
+## 2 · Steps 2 and 2b — shellcheck
+
+```text
+shellcheck ok (product)
+  audit file: context/audit/scripts/ledger-grid.sh
+  audit file: context/audit/scripts/t2-census.sh
+  audit file: context/audit/scripts/t3-census.sh
+  audit file: context/audit/scripts/t3-inputs.sh
+  audit file: context/audit/scripts/t3-model-file-poc.sh
+shellcheck ok (audit)
+```
+
+Exit 0 for both. 2b names all five files, which is the guard: `git ls-files <path>` is cwd-dependent,
+so from a directory where `context/audit/scripts` is not a path it enumerates **nothing**, `xargs -r`
+runs nothing, and the step prints `ok` having linted zero files. `t3-inputs.sh` was linted **on its own
+terms** before staging (`shellcheck -x` exit 0, `bash -n` clean) — the census script being clean says
+nothing about its sibling.
+
+## 3 · Steps 3–6 — `BLOCKED`, owner-run
+
+| Step | State | Evidence |
+|---|---|---|
+| 3 `PREFLIGHT_ONLY=1 ./build` | **BLOCKED** | docker socket `permission denied`, recorded in plan § *Gate status* |
+| 4 `./run` dry run | **BLOCKED** | docker |
+| 5 flags vs image | **BLOCKED** | docker, and needs an image for the pin |
+| 6 server imports | **BLOCKED** | docker |
+
+Carve-out conditions, per `RULES.md` § *Named carve-out*: **(1)** the four steps above are the
+owner-only set, **(2)** the plan's Gate status block names them, **(3)** the scope line is § 4 below,
+machine-checked and pasted rather than asserted, **(4)** behaviour class **`none`** — permitted only
+because (3) printed `SCOPE_HITS=0`.
+
+This commit changes no launcher, no Dockerfile, no `versions.env` and no flag; the audit tooling cannot
+affect a boot. That claim is *why* the class is `none`, but the **permission** to use it is the printed
+`SCOPE_HITS=0`, not the argument.
+
+## 4 · Scope evidence (condition (3))
+
+Producer is `RULES.md`'s own pre-commit twin, run against the **staged** set. Two passes, because this
+file stages after the first reading — every number below is a printed line, and the pair is what makes
+the self-exclusion checkable rather than asserted:
+
+```text
+PASS 1  (12 paths staged, this file not among them)
+FILES=11 SCOPE_HITS=0
+PATTERNS=^(run|build|Dockerfile|Dockerfile\.dockerignore|versions\.env|lib/|models|\.gitignore)
+
+PASS 2  (this file staged as well)
+FILES=12 SCOPE_HITS=0
+PATTERNS=^(run|build|Dockerfile|Dockerfile\.dockerignore|versions\.env|lib/|models|\.gitignore)
+```
+
+`PATTERNS` is pasted as run output, not copied from the definition: if the list is amended later, this
+line says which list these hits were computed against.
+
+Two scope limits on those lines, both measured rather than assumed:
+
+- **They count this project's files only.** The producer strips `^server/basalt/`, so a commit touching
+  the monorepo root is under-counted by design — 11 of 12 in pass 1, 12 of 13 in pass 2. This commit
+  does touch it: `context/pitfalls.md` (the locale host-limit copy) is invisible to the strip. So the
+  whole-commit variant was run too, and `SCOPE_HITS=0` is **not** an artifact of the narrower input:
+
+  ```text
+  PASS 1  FILES_ALL=12 SCOPE_HITS_ALL=0
+  PASS 2  FILES_ALL=13 SCOPE_HITS_ALL=0
+  ```
+
+  with the strip-excluded path tested against `PAT` on its own returning `hits=0`. The machine
+  condition behind the carve-out therefore holds over every path in the commit; only the *file count*
+  is project-scoped.
+- **Neither pass can measure the commit object**, and pass 1 cannot see the file carrying it.
+  `t2-gate-and-checks.txt` § 8 is the precedent for recording the staged passes and letting the next
+  commit carry the landed one. A third run, after § 4 itself was widened to carry these numbers, printed
+  `FILES=12 SCOPE_HITS=0` again — measured, not inferred, though inference would have been safe here:
+  editing a staged file changes no path and removes none.
+
+## 5 · The freeze pairing — committed script vs the run that cites it
+
+`t3-sentinels-real.txt` is worthless as evidence if the `t3-census.sh` next to it is a different
+program. Verified on the **index**, which is what git writes into the commit tree:
+
+```text
+staged t3-census.sh = 1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106
+staged t3-inputs.sh  = 327bf7c3f4460a0a3fdb60a3e1782ac25317babb3b80426aefe91929b4251d5e
+paste                = GENERATOR_SHA256=1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106
+```
+
+Equal for `t3-census.sh`. Re-check in one line from the commit object (any later session):
+
+```bash
+git cat-file blob <sha>:server/basalt/context/audit/scripts/t3-census.sh | sha256sum
+# must equal the GENERATOR_SHA256= line of t3-sentinels-real.txt
+```
+
+`t3-inputs.sh` has no token in the paste — it is the *producer* of the three `INPUT_SHA256=` legs, so
+its pairing is indirect: re-running `scripts/t3-inputs.sh && scripts/t3-census.sh vendor/basalt real`
+must reproduce those three hash lines. Its own hash is recorded here so a later edit is attributable.
+
+Note the shape of that pairing: **it is a pairing, not a proof.** If the two scripts and the paste all
+change together they stay mutually consistent while describing neither the tree nor any run anyone
+watched. What anchors them to the world is the third leg — the tree — in § 6.
+
+## 6 · Three-leg freeze check, run immediately before the commit
+
+```text
+$ cd vendor/basalt
+$ GIT_NO_LAZY_FETCH=1 git diff --quiet dc047a77beeddf1e91234d983a91d6bf929e9619 && echo "AUDIT TREE OK (tracked contents)" || echo "AUDIT TREE DRIFTED — STOP"
+AUDIT TREE OK (tracked contents)
+$ N=$(find . -type f -not -path './.git/*' | wc -l); [ "$N" -eq 862 ] && echo "TREE FILE COUNT OK (862)" || echo "TREE FILE COUNT=$N — untracked additions — STOP"
+TREE FILE COUNT OK (862)
+$ U=$(git status --porcelain --ignored | grep -c .); [ "$U" -eq 0 ] && echo "TREE CLEAN (no untracked/ignored)" || { echo "TREE NOT CLEAN: $U entries — STOP"; git status --porcelain --ignored | head; }
+TREE CLEAN (no untracked/ignored)
+```
+
+Three legs, all three required — the reason is [`t3-tree-contamination.txt`](t3-tree-contamination.txt),
+and the tracker's Resume step 1 now carries all three for the same reason.
+
+**The interpreter, and the fact this replaces.** `INTERPRETER=… python=3.12.16` above is the reason
+`RULES.md` § *Prerequisites* stopped reading `python3 (3.14.10 here)`: an exact version in prose is a
+prerequisite that fails silently closed when the shell moves, whereas the echo above is part of the
+gate's own record every commit. `3.14.10` is a real CPython release (python.org, 2026-10-25) — the
+defect was that the line named **no environment**, not that the number was impossible. `distilled.md`'s
+dated, scoped copy of the same number was **left untouched**; see
+`context/pitfalls.md` § *A dated fact scoped to a shell I could not enter…*.
+
+## 7 · What this commit did to the counts it documents
+
+`AUDIT_B` moved 3 → 5 (the two new scripts) and the owner line in `RULES.md` moved with it, in this
+commit, as plan Execution rule 5 requires. Restatements of that number in the plan's Gate status row
+and Risk 11 were converted to **citations** rather than renumbered, per `RULES.md` § *Rule E* item 7;
+stamped captures in this tracker and in `plans/completed/01_*` were **not** touched and are annotated
+forward in the tracker's Notes instead.
