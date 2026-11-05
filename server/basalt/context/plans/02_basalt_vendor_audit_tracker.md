@@ -145,7 +145,7 @@ violation and cannot be cited by a later plan.
 | 2026-11-05 | Gate steps 1a/1b/1c/2, re-run **with `context/audit/` present** (3 new `.md`, 12 `.tsv`, 1 `.sha256`) | 1a no `FAIL` · **`3 b`** · `env ok` · `shellcheck ok` | 1 | Rule 5 holds: none of T1's artifacts enters the bash set. Steps 3–6: step 3 re-measured as docker-denied; 4–6 unrun |
 | 2026-11-05 | T3 census, pristine: `PYTHONDONTWRITEBYTECODE=1 LC_ALL=C context/audit/scripts/t3-census.sh vendor/basalt real` | exit 0, stderr 0 bytes; `SENTINEL_TOTAL=34 SENTINEL_FAILS=0`; `T3_CENSUS_VERDICT=PASS_PENDING_CANARY`; the figures belong to `wave0/t3-sentinels-real.txt`, not to this row | 2 | **`tag=real` only — no canary tag has ever been run.** A second run is byte-identical to the pasted one except the two timestamp lines (`diff` empty): that is the `run-real` restore anchor. Three-leg freeze check clean after both |
 | 2026-11-05 | T3 harness negative controls: 10 exact-string-mutated copies run **beside** the original (`context/audit/scripts/.neg-*.sh`, deleted after) | 10/10 fired — each exit 1, `T3_CENSUS_VERDICT=FAIL`, and its own assertion line `FAIL`; each block records its mutant's `GENERATOR_SHA256` | 10 | **Coverage: 10 of 34 assertions, real path only.** Two are **wiring-only** (C2, C9: they exercise a comparison, not the failure it guards); C4/C5 are maximal (whole-set); C7 proves the comparator, **not** collation sensitivity. No control under `tag=real` again — Notes. Detail: `wave0/t3-census-controls.txt` |
-| — | T3 canary capture (target **6/6**, one per planted class) | — | | **Wave 0 gate.** `t3-canary-score.tsv` must reach 6 rows before the census prints plain `PASS`. A canary tag **floors nothing** today — the non-`real` floor line is a `FIND`, not a fail — so a canary run that silently loses assertions still prints PASS. `SENTINEL_TOTAL` reads **28** on `tag=negctl` against **34** on `real`: the **gap** is the tag (11 assertions real-only, 5 non-real-only, so 28 − 5 + 11 = 34) but the **value** is not — all twelve `negctl` runs were mutants, so **do not seed `SENT_TOTAL_FLOOR_<tag>` from 28**; measure it on this row's first clean run and land the floor line **in the same commit**, because editing the generator mints a new `GENERATOR_SHA256` and `real` must then be re-run (`wave0/t3-census-controls.txt` § 2) |
+| — | T3 canary capture (target **6/6**, one per planted class) | — | | **Wave 0 gate.** `t3-canary-score.tsv` must reach 6 rows before the census prints plain `PASS`. A canary tag **floors nothing** today — the non-`real` floor line is a `FIND`, not a fail — so a canary run that silently loses assertions still prints PASS. `SENTINEL_TOTAL` reads **28** on `tag=negctl` against **34** on `real`; the **gap** is the tag and is source-checkable (11 real-only, 5 non-real-only, so 28 − 5 + 11 = 34 — see `wave0/t3-census-controls.txt` § 2 for the two guard idioms that must both be checked). **28 is now measured clean**, not mutant-borne: an unmutated `tag=negctl` run of the frozen generator printed `SENTINEL_TOTAL=28 SENTINEL_FAILS=0` exit 0 — but **that is `negctl`, not a canary tag**, so **do not carry 28 to `SENT_TOTAL_FLOOR_<canary-tag>`**: measure it on this row's own first clean run, and land the floor line **in the same commit**, because editing the generator mints a new `GENERATOR_SHA256` and `real` must then be re-run. **Fixture constraint found by pre-flight:** the universe is a path set, so canaries must be **new files** with `CANARY\|SENTINEL\|canary` in the path, in ordinary directories; there is no modified-path leg (`wave0/t3-census-controls.txt` § 2) |
 | — | T5 ASan/UBSan fuzz, JPEG/PNG/BMP/GIF at request-reachable `max_pixels` | — | | report count, target 0 |
 | — | T11 `LC_ALL=C comm` manifest vs `git ls-files src/ include/` (target 0) | — | | after each directory slice |
 
@@ -764,6 +764,91 @@ violation and cannot be cited by a later plan.
   - Gate-block provenance: the `sed` line ranges that cut steps 0/1a/1b/1c and 2/2b out of `RULES.md` are
     pinned to the blob they were cut from (`3d296696…`) plus each block's sha256, because a bare line
     range is this plan's own named defect and `RULES.md` is a file this plan edits.
+- **2026-11-05 — review round 3: I ran the claim instead of defending it, and it overturned a sentence I
+  had committed that morning.** Both reviewers joined `9697d89`. neckbeard flagged the last surviving clause
+  of my withdrawn invariant — *"enough for anyone to re-make the mutation and watch the same assertion
+  fail"* — as "a prediction about a program you proved was not the one you ran", with the name churn in
+  `t3-tree-contamination.txt` as the reason not to assume it, and said: run it (not under `tag=real`) or
+  downgrade it. **I ran it.** Re-applying each `mutate:` pair to the frozen `1bab1ec5…` script under
+  `tag=negctl`: **9 of the 9 testable controls fire** — exit 1, `T3_CENSUS_VERDICT=FAIL`, the named
+  assertion's own line reading FAIL. **C2 is the named limit**: its target is one of the 11 real-only
+  assertions, so re-firing it needs a `tag=real` mutant, which is § 4's defect; the answer is no and the gap
+  is disclosed. Two things fell out that I did not expect: `GENERATOR_SHA_SAME_AS_REAL` fails alongside all
+  nine (correct — a mutant is not the baseline), which is also **proof `run-real` held the pristine token
+  through the whole batch** — verified again afterwards, 209 files, `generator.sha256 = 1bab1ec5…`, and
+  `vendor/basalt` still AUDIT TREE OK / 862 files / 0 untracked; and my **ellipsis-completed C9 recipe
+  reproduces the original transcript's output line byte-for-byte**, the one place in these files where a
+  hand-typed value actually got a machine comparison. (The first attempt at this came back **9/9 exit 126**:
+  my mutant copies were `644` where the original is `755`. A permission failure is a broken control, not a
+  fired one, and the rule about that is already in this file — it bit as a *setup* bug this time, and `chmod
+  --reference` is now part of making a copy.)
+  - **And the free measurement was the one that mattered.** The controls file had said since this morning:
+    *"no unmutated run of any non-`real` tag has ever been made; 28 is a property of twelve mutants, not a
+    measurement of a tag."* Preparing the canary batch made me check whether such a run was **forbidden** —
+    it was not: `tag=negctl` writes only `run-negctl`. It had simply never been attempted. **Made one: exit
+    0, `SENTINEL_TOTAL=28 SENTINEL_FAILS=0`, the same 28-name set** (identical to the nine mutants' and to
+    the pre-freeze one). So the sentence was false the way the last one was — right about the population,
+    wrong to treat an unmade measurement as a limitation — and 28 is now a **cleanly measured property of a
+    non-`real` tag on the frozen cut**. What survives of the warning: a mutant's totals are still not a
+    floor, and **28 must not be carried to a canary tag** (the guards test only `= real` / `!= real`, so a
+    canary tag should print 28, but that is an inference about an invocation nobody has run, and `:1566` asks
+    for a measurement). Recorded in controls § 2 with the paste, in the canary row, and as a new pitfalls
+    lesson: *before writing "no clean measurement of X exists", check whether anybody merely failed to make
+    one.*
+  - **neckbeard's better warrant, adopted.** The 11/5 partition no longer rests on a transcript diff: a
+    stack walk of `t3-census.sh` matching each `chk` to its enclosing tag conditional puts **15 of 16** under
+    a guard, and the 16th (`TREE_FREE_OF_BUILD_ARTIFACTS`, `:222`) is gated by the **one-line idiom**
+    `[ "$TAG" != real ] || chk …`. Naming the second idiom matters: a reader who greps `if [ "$TAG"` finds 15
+    and concludes the partition is wrong. The mirror went into `pitfalls.md`'s Sources too, per his warning
+    that a moved warrant left behind in one file launders the asymmetry into the general corpus. His other
+    three went in as written: `28 − 5 + 11 = 34` now labelled a **consistency check between two name-sets**
+    rather than a derivation (it was quietly re-legitimising the number the next bullet disowned); § 4's
+    "byte-equal" → "**matches as typed**", since both strings were transcribed and no comparison was run —
+    while C9, which *was* compared, now says "identical"; and both unresolved "**in this commit**" scopings
+    (controls § 4, the paste's PAIRING) now name `dd94598` and its command, because an unresolved one goes
+    **silently false at the first generator edit**. His `RULES.md` clause went in: a *Pass* list that
+    demands the `INTERPRETER=` line beside a sentence saying nothing fails will get re-litigated, so "a paste
+    without the line is not a step failure — re-paste, don't mark the gate red" is now written down.
+  - **A harness limit found by pre-flight, not by being burned.** The canary question in the Notes was "does
+    a modified-path leg exist?" **It does not.** `universe.txt` is one path per line (`:225` says the hash
+    covers the path set, *not* contents), `:260-261` is `comm` over those lists, and `:271` filters
+    `tree-added.txt` alone — so a content edit to a pre-existing path is invisible to the **entire tree
+    layer**, and such a canary would print `TREE_DIFF_VS_REAL=+0/-0`. The fixture is therefore constrained by
+    the harness's key: **six new files, `CANARY|SENTINEL|canary` in the path, ordinary directories**. Also:
+    `DISP UNIVERSE_SHA_MATCHES_PIN`'s caption claims a comparison to `run-real` that **no `chk` performs** —
+    a display wearing the format of an assertion and describing itself as one. Both are generator edits, so
+    they ride the floor commit rather than minting shas individually; the limit itself is recorded in controls
+    § 2 and a new pitfalls entry, and the six-canary control states it as a limit rather than hiding it under
+    a naming trick.
+  - **A third kind of cause for a census total, found while checking the second.** Verifying neckbeard's
+    guard-walk claim properly (my first pass mixed `chk` lines with guard lines and put one name in the wrong
+    block — both wrong in my own citation, caught by re-running the scan against the source) turned up
+    `MANIFEST_COL6_RESIDUE_EQ_BINARIES`: real-gated **and** state-gated, a `DISP` while column 6 is unassigned
+    and a `chk` after T3's fill (`:1448-1452`). It is a **12th real-only name that exists only post-fill**, and
+    it reconciles with both transcripts only because both are pre-fill. So a `SENTINEL_TOTAL` is identified by
+    **(program, tag, state)** — I had published a partition naming two coordinates and it was correct only for
+    the state I happened to hold. Corrected in three places (controls § 2, the tree-contamination blockquote,
+    the pitfalls collision bullet), and it has a live consequence: the column-6 fill commit makes `real` print
+    **35** where every pasted figure says 34, and the floor of 34 passes it silently.
+  - **Overridden: hoodie's § 3/§ 4 split, deferred rather than declined.** He is right that **143 lines
+    elapse before the first control block** (measured: `### C1` at `:144` of 494; his estimate was 108, mine
+    was 133 until the edits I made while writing this sentence moved it again — which is itself the reason to
+    prefer a structural claim over a line count) and that "when a fix requires its own experiment before it's
+    allowed into the file, you have switched states from producing evidence to auditing descriptions of
+    evidence" is the sharpest thing said about this cycle. But the specific move doesn't do the job: § 3 and
+    § 4 are the **last two sections of the file** (now `:416` and `:436`, and they were `:347`/`:367` when I
+    measured them an hour ago — cite the position, not the number), **after** every control block, so moving
+    them cannot pull the first firing
+    toward line 45 — the preamble is the header, Method rule 4, and the index, all three of which neckbeard
+    wants adjacent to the tokens they govern. And it renumbers sections that `RULES.md`, `pitfalls.md:883` and
+    this tracker cite, while the floor edit is about to touch the same file. Logged as a Follow-up with the
+    arithmetic in the "why" so the next agent doesn't repeat the estimate. The cheap half of his cut **did**
+    go in: the drafting apology at `19-21` and the table-restated-as-prose at `39-42` are gone (−7 lines), and
+    his pointer nit is fixed by **broadening the pitfalls entry's title** to cover the stray-file bullet it
+    already carried, since a grep for "stray" could not find it. He also rejected `wave0/t3-integrity.md` and
+    the § 2a-into-tracker fold, which closes the centralisation question, and told me to **close the set
+    here** — fourth-round phrasing goes to Notes, artifacts get edited only for factual error. This commit is
+    factual error and measurement only.
 - **2026-11-05 — review round 2: an apparatus claim of my own, killed by running it.** Both reviewers
   joined `1e3cc9f`. The finding that mattered was mine, not theirs: I had added an invariant to the controls
   file — *"every mutant is the frozen base plus exactly one exact-string replacement, so any token is
@@ -823,12 +908,17 @@ violation and cannot be cited by a later plan.
     `COLUMN6_TOKENS_ALL_DECLARED` runs on **every** tag (`:1531`) and is policed against `manifest/index.md`,
     so a canary whose column-6 token is not in that declared vocabulary turns the run red for a reason
     unrelated to the canary — pick primitives whose tokens are already declared, or declare them first,
-    dated, in their owner file. The STRAY gate (`:271`) requires *added* paths to match
-    `CANARY|SENTINEL|canary`, which tempts the whole fixture into six files named `CANARY-*`; but canaries
-    #4–#6 (cross-file assembly, token-count or latency, a log→`/metrics` second hop) must live in
-    **ordinary paths**, because their point is that no keyword in the taxonomy finds them — so the
-    modified-path side of that check has to be confirmed to exist at all, and if it does not, that is a
-    **stated limit of the six-canary control**, not something to hide by renaming files. And `run-real` is
+    dated, in their owner file. **The STRAY/modified-path question is ANSWERED: there is no modified-path
+    leg.** `universe.txt` is a path list (`:225`), `:260-261` is `comm` over two path lists, and `:271`
+    filters `tree-added.txt` alone — so a content edit to a pre-existing path is invisible to the entire tree
+    layer, and such a canary would print `TREE_DIFF_VS_REAL=+0/-0`. **The six canaries are therefore NEW
+    files whose paths match `CANARY|SENTINEL|canary`, living in ordinary directories** (`src/…`, `include/…`)
+    with the token in the filename: the fixture keeps its point (nothing finds it by location) while staying
+    observable. Stated as a limit of the six-canary control rather than routed around by renaming — see
+    `wave0/t3-census-controls.txt` § 2 and `pitfalls.md` § *A census keyed on a path set cannot see a
+    modified file*. Riding the floor commit below: that section also records that
+    `DISP UNIVERSE_SHA_MATCHES_PIN`'s caption claims a comparison to `run-real` that no `chk` performs, and a
+    caption fix is a generator edit. And `run-real` is
     load-bearing state in scratch: re-run the pristine `real` census immediately before the canary batch,
     and refuse to read any canary block whose `TREE_DIFF_VS_REAL` or `*_SAME_AS_REAL` leg prints
     `unavailable` — those branches print and continue.
@@ -843,12 +933,19 @@ violation and cannot be cited by a later plan.
     census.md's routing (T9 or T11c), not in a backlog. And the parallel column-6 commit moves the
     `786 f / 191,600 l` roll-up that `audit/index.md` and `coverage_ledger.md` quote verbatim, so
     `census.md` states that roll-up **as of a named pre-fill run** and points at `ledger-grid.sh` for the
-    live one.
+    live one. **That commit also changes a census total**: `MANIFEST_COL6_RESIDUE_EQ_BINARIES` is a `DISP`
+    while column 6 is unassigned and becomes a `chk` after the fill (`t3-census.sh:1448-1452`), so a post-fill
+    `real` run prints **35** where every pasted `real` figure here says 34 — and `SENT_TOTAL_FLOOR_REAL=34`
+    passes it silently. The fill commit carries the dated forward-annotations on the three copies of the
+    roll-up **and** a note on the floor; both belong in it, not after it.
 
 ## Follow-ups
 
 | Follow-up | Why | Lands in |
 |-----------|-----|----------|
+| **Supersede `t3-sentinels-real.txt`, do not replace it**: when the floor edit mints a new `GENERATOR_SHA256`, add a dated supersession stamp to that paste's PAIRING block naming both shas, land the post-edit `real` run as a **new file**, and fix the **pointers** in the same commit — `audit/index.md`'s wave0 row, this tracker's Evidence row, the paste's own `:19` | The pairing check (`git cat-file blob dd94598:… \| sha256sum`) keeps passing while the file stops being the run anyone cites: a pairing, not a proof (`wave0/t3-gate-and-checks.txt` § 5). Overwriting also destroys the only artifact that pairs with `1bab1ec5…`, which is § 4's incident base. Supersession written only at the file is invisible to a reader arriving through the map | T3, the floor-line commit |
+| **Split the two incidents (§ 3, § 4) out of `t3-census-controls.txt`** into their own `wave0` file, leaving one pointer line | hoodie's legibility finding: **143 lines elapse before the first control block** and the file reads as a tribunal before it reads as a control panel. Deferred because § 3/§ 4 are the file's **last two sections, after every control block** — so moving them cannot shorten that preamble, and the move renumbers sections that `RULES.md`, `pitfalls.md:883` and this tracker cite. Needs its own citation sweep, and the floor edit is about to move these sections again | T3, before `census.md` |
+| **Decide the content-leg question before the floor commit**: fix `DISP UNIVERSE_SHA_MATCHES_PIN`'s caption ("compared to run-real", compared by nothing) or add the `chk`; and decide whether the census needs a per-file content hash at all | The path-set universe means no harness assertion can see a modified file — fine for a frozen-tree audit, a real gap for the canary claim (`wave0/t3-census-controls.txt` § 2, `pitfalls.md` § *A census keyed on a path set…*). Both options are generator edits, so they ride the floor commit rather than minting a sha each | T3, the floor-line commit |
 | **Plan 03 — runtime observation** (owner-run): boot + real chat + `/metrics` + image fetch under `--network none` **and** in a monitored netns (`tcpdump`, `ss -tunap`, `strace -f -e trace=network,connect,execve,openat,ptrace` on both `python -m serve.server` and `bin/basalt`); keylog checks (`/dev/input`, `EVIOCGRAB`, XRecord, `uinput`); `strings -a -t x` / `nm -D` / `readelf -d` (DT_NEEDED, RUNPATH, hash every resolved `.so`) on the **shipped** binary; venv `.pth`/`sitecustomize` (U8) | The only non-foolable leg: every static blind spot (`dlopen`+`dlsym`, raw `syscall()`, venv C extensions opening their own sockets, true link deps) closes only here. Split out because Standing Constraints make it owner-run and Plan 01 already stalls on owner boots, so the code verdict must land without inheriting that stall. **It is the gate on Plan 02's verdict, not a formality.** Blocked on an image for the pin — an owner-side fact, since docker is unreachable from the agent session. | Plan 03 |
 | **Plan 04 — engine bulk line-by-line**: `src/kernels/` 38,745 · `src/core/` 19,976 · `src/program/` minus `serve/` 15,432 · `include/` 18,224 ≈ 92k lines, 20–30 sessions | The deferred half of "line by line". Plan 02 gives each file a census result and a triage reason; none is read. On the books so the deferral is not invisible. | Plan 04 |
 | Hash-pinned deps: `pip-compile --generate-hashes` → `pip install --require-hashes` in our `Dockerfile` | Unpinned wheels mean the audited source is **not provably** the built artifact — the verdict is conditional until this exists. A pin/build change, so its own plan per RULES.md's gate table. | Plan 05-ish (owner) |

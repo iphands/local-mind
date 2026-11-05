@@ -827,7 +827,7 @@ concatenation, say) parses clean and computes something different. That variant 
 
 ---
 
-# A control run under a real tag wipes the baseline every later compare reads
+# A control run's blast radius — the baseline its tag wipes, and the stray files its command block leaves
 
 ## Problem
 
@@ -1129,22 +1129,32 @@ once before (as 31) already printed a green over the wrong quantity.
   prints that is *not* the assertion it was built to fire is a mutant property and gets labelled as
   one at its own block, not promoted to a section-level fact.
 - **State the population, then the count.** "Thirteen mutant runs, twelve under `negctl` and one under
-  `real`; no clean non-`real` run exists" is the sentence that makes 28 harmless. "28" without it is a
-  seed waiting to happen. **And name the population by the field you actually read** (`TAG=`), not by the
-  field you were reasoning about (`GENERATOR_SHA256=`) — mine conflated the two, which is how "13 non-real
-  runs" got written for 12.
+  `real`" is the sentence that makes 28 harmless. "28" without it is a seed waiting to happen. **And name
+  the population by the field you actually read** (`TAG=`), not by the field you were reasoning about
+  (`GENERATOR_SHA256=`) — mine conflated the two, which is how "13 non-real runs" got written for 12.
+- **Before writing "no clean measurement of X exists", check that nobody has simply failed to make one.**
+  The clause above carried "*and no unmutated non-`real` run has ever been made*" — true when written, and
+  hours later false because the run had never been *forbidden*, only never *attempted* (`tag=negctl` writes
+  its own namespace). The cheap version of this check: read the cleanup line in the script and ask what the
+  run would actually destroy. If the answer is "nothing I care about", make the measurement instead of
+  recording its absence — an unmade measurement is a to-do, not a limitation, and writing it as a limitation
+  understates your own evidence *and* overstates the gap.
 - **Where a value will seed a threshold, record its provenance in the same place as the threshold.**
   The floor-constant instruction lives in the script; the would-be value lived in two prose files, and
   the two never met. Write "do not seed from this" next to the number, not next to the rule.
-- **Same-identifier collisions are a separate trap in the same grep.** `SENTINEL_TOTAL=` appears in
-  `wave0/` with **five** distinct values — 34, 28, 27, 23, 31 — and they have **two different kinds of
-  cause**, which is the part I got wrong first: 34 vs 27 is **program identity** (the census on two cuts
-  of the generator), while 34 vs 28 is the **tag** (one program, a block of assertions behind
-  `[ "$TAG" = real ]`). All five come from the census; the PoC harness has never printed this identifier,
-  it prints `POC_VERDICT` — my earlier text here said otherwise, and the fix it proposed (renaming the
-  PoC's counter) had no target. When a grep returns several values, sort them by *kind of cause* before
-  naming producers; annotate at the line rather than renaming a committed script, because renaming one
-  orphans that script's own evidence.
+- **Same-identifier collisions are a separate trap in the same grep — and sort by *kind of cause*, not by
+  value.** `SENTINEL_TOTAL=` appears in `wave0/` with **five** distinct values — 34, 28, 27, 23, 31 — and
+  they have **three different kinds of cause**, which is the part I got wrong twice. 34 vs 27 is **program
+  identity** (the census on two cuts of the generator); 34 vs 28 is the **tag** (one program, a block of
+  assertions behind `[ "$TAG" = real ]`); and a **third I found only while checking the tag claim** is run
+  **state** — one more assertion is real-gated *and* conditional on data (a `DISP` while a column is
+  unassigned, a `chk` after it is filled), so a post-fill run of the same program on the same tag prints a
+  different total. **A run total is identified by (program, tag, state) — three coordinates; I published a
+  partition naming two and it was correct only for the state I happened to have measured.** All five values
+  come from the census; the PoC harness has never printed this identifier, it prints `POC_VERDICT` — my
+  earlier text here said otherwise, and the fix it proposed (renaming the PoC's counter) had no target. When
+  a grep returns several values, sort them by *kind of cause* before naming producers; annotate at the line
+  rather than renaming a committed script, because renaming one orphans that script's own evidence.
 - Cross-references: § *Provenance that cannot contradict its own claim* is the case where the evidence
   cannot refute the claim attached to it; § *A dated fact scoped to a shell I could not enter…* is
   reading a scope qualifier that was there. **This is the case where the qualifier was never recorded at
@@ -1152,12 +1162,21 @@ once before (as 31) already printed a green over the wrong quantity.
 
 ## Sources
 
-- the laundered figure and its correction: `context/audit/wave0/t3-census-controls.txt` § 2 ("Scope of
-  that `28`") and the tracker's canary Evidence row, both 2026-11-05
-- the population check: each `/tmp` control transcript's `TAG=` and `GENERATOR_SHA256=` lines — scratch,
-  so re-derive by re-making a mutant, not by reading my logs. The in-tree half of the same check is the
-  assertion-name diff (`negctl` prints 28 names, `real` 34, delta 11 + 5) recorded in
-  `wave0/t3-census-controls.txt` § 2, which establishes the tag half of the gap without any scratch file
+- the laundered figure and its correction: `context/audit/wave0/t3-census-controls.txt` § 2 ("What the `28`
+  is actually worth" — retitled from "Scope of that `28`" on 2026-11-05, when the claim it made was falsified
+  by the clean run described below) and the tracker's canary Evidence row, both 2026-11-05
+- **the warrant, in the order it should be reached.** (i) **The partition is source-checkable and needs no
+  scratch**: walk `t3-census.sh` matching each `chk` to its enclosing tag conditional — 15 of the 16 names
+  sit under `if [ "$TAG" = real ]` / `!= real` blocks, and the 16th
+  (`TREE_FREE_OF_BUILD_ARTIFACTS`, `:222`) is gated by the **one-line idiom**
+  `[ "$TAG" != real ] || chk …`, which a grep for `if [ "$TAG"` misses. Two idioms, both checked. *(I first
+  offered this warrant as a transcript diff; that was the weaker evidence and it was the part a later reader
+  could not reproduce.)* (ii) **The totals need a run**, and now have a clean one: an unmutated
+  `tag=negctl` invocation of the frozen generator prints `SENTINEL_TOTAL=28 SENTINEL_FAILS=0`, exit 0, and
+  nine single-mutation runs of that same cut print an identical 28-name set. Both are re-runnable by anyone
+  holding the tree. (iii) The `TAG=` / `GENERATOR_SHA256=` lines in the `/tmp` transcripts remain the record
+  of the *earlier* population finding — 12 `negctl` + 1 `real` — and are scratch, so re-make a mutant rather
+  than trying to read my logs
 - the instrument's own instruction: `context/audit/scripts/t3-census.sh`, the per-tag
   `SENT_TOTAL_FLOOR_$TAG` comment
 - the earlier sibling in this plan: `SENT_TOTAL_FLOOR_REAL` guessed as 31 and passing over the wrong
@@ -1244,3 +1263,70 @@ sentence nothing had to.
   (`ba991abf…`, identical at new coordinates) sits beside one that genuinely **changed**
   (`2ed67035…` → `7a3e901a…`)
 - observed Plan 02 T3, 2026-11-05
+
+---
+
+# A census keyed on a path set cannot see a modified file — and the gate that looks like a content check is not one
+
+## Problem
+
+**[OBSERVED 2026-11-05, found by reading the harness before planting the canaries rather than by being
+burned]** `t3-census.sh` defines its universe as **one path per line** and hashes that list
+(`:225`: "a hash of the sorted path set, NOT git's tree hash: the tree hash covers contents and this one
+does not"). Every tree-level assertion inherits that blindness:
+
+| Assertion | What it actually compares | Blind to |
+|---|---|---|
+| `UNIVERSE_SHA_MATCHES_PIN` | hash of the sorted **path** list | content edits, and it is a `DISP` on non-`real` tags anyway |
+| `TREE_DIFF_NO_REMOVED_PATHS` / `TREE_DIFF_ADDITIONS_ARE_PLANTED` | `comm` over two **path** lists (`:260-261`) | any path present on both sides, whatever its bytes |
+| the stray test at `:271` | `awk '!/CANARY\|SENTINEL\|canary/'` over `tree-added.txt` | everything that was not **added** |
+
+So a file whose path is unchanged and whose bytes differ is **invisible to the whole tree layer** — not
+weakly evidenced, unobserved. Two specific deceptions in that shape:
+
+- **A gate that reads like a content check.** `TREE_DIFF_ADDITIONS_ARE_PLANTED` names a property of the
+  *planted* files, so it invites the belief that the harness validates what the tree now contains. It
+  validates which paths exist. The name is about additions; the word "planted" supplies the rest.
+- **A display that reads like a comparison.** The non-`real` branch prints
+  `DISP UNIVERSE_SHA_MATCHES_PIN … (canary tree: hash compared to run-real, not to the pin)` — and **nothing
+  compares it**. The file's own convention (`DISP` is not `SENT`, so it does not increment
+  `SENTINEL_TOTAL`) says the line is a display; the parenthetical inside it says the opposite in prose. A
+  skimmer reads the parenthetical.
+
+The cost, if found late: the canary fixture's shape is dictated by this. A canary planted by **editing** an
+existing ordinary file would be caught — if at all — only by the primitive sections that grep file *bodies*,
+never by the "the tree differs only by the planted files" claim, and the run would print
+`TREE_DIFF_VS_REAL=+0/-0` as if nothing happened.
+
+## How to avoid
+
+- Grep anchors: `universe`, `path set`, `comm -13`, `tree-added`, `ADDITIONS`, `STRAY`, `DISP`, and in any
+  harness: `sort -u` feeding a `sha256sum`, `git ls-files` as a "what changed" source.
+- **Ask what the universe of a scan is keyed on — paths, contents, or symbols — before trusting any
+  statement that a tree "differs only by" something.** A path-keyed universe plus a path-keyed diff is a
+  statement about *filenames*, however it is phrased. If content matters, the key must be a content hash per
+  file (`find … -print0 | xargs -0 sha256sum | sort`), and that is a different assertion.
+- **Design fixtures to the harness's key, not to the taxonomy.** Under a path-keyed harness, planted
+  fixtures must be **new files**, so they land in `tree-added.txt` where some assertion can see them. Keep
+  their *directories* ordinary (that is the point of the fixture — nothing should find them by location) and
+  put the required token in the **filename**. What you cannot keep is a purely in-place edit: state that as
+  a limit of the fixture instead of planting a modification and crediting the harness for catching it.
+- **A "not controlled" list is where this belongs, before the fixture, not in a footnote after it.** The
+  controls file's § 2 is the home for "there is no modified-path leg at all"; the tracker's canary row is the
+  home for the fixture constraint it imposes. Recording it after the canaries are scored means the six
+  canaries were designed against an assumption nobody checked.
+- **Where a prose qualifier inside a machine-format line contradicts the format's own convention, fix the
+  prose or add the missing check — never rely on the reader noticing.** `DISP` + "compared to run-real" is
+  the shape; the fix is a `chk` or a caption that says "printed, not compared".
+- Related: § *Shell idioms that report green on the thing they did not check* (a check that returns success
+  because it looked at nothing) — this is the same defect one level up, in the **choice of subject** rather
+  than in the idiom. And § *A number measured on mutated copies got recorded as a property of the tag they
+  ran under*: both are "the evidence is about a different thing than the claim".
+
+## Sources
+
+- the assertion inventory and its consequences for the fixture: `context/audit/wave0/t3-census-controls.txt`
+  § 2, bullet "The universe is a PATH SET, so the harness cannot see a content modification at all"
+- the script lines: `context/audit/scripts/t3-census.sh` `:225` (path-set hash, self-described), `:238-247`
+  (the `DISP` branch), `:259-295` (the tree-diff block), `:271` (the stray test)
+- observed Plan 02 T3, 2026-11-05, during the six-canary pre-flight

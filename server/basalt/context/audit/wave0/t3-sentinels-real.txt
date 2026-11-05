@@ -14,8 +14,9 @@ which is what actually ran; the transcript below was then **copied here whole**.
 `/tmp/opencode`, never into the tree: an earlier draft of that line said `2> stderr.txt`, **it was
 executed**, and it left a stray 0-byte `server/basalt/stderr.txt` on 2026-11-05 (`.gitignore` here ignores
 only `/vendor/`). Why a command block in an evidence file is a hazard, and where the same line would have
-been invisible, is `pitfalls.md` § *A control run under a real tag wipes the baseline every later compare
-reads*.
+been invisible, is `pitfalls.md` § *A control run's blast radius — the baseline its tag wipes, and the stray
+files its command block leaves* (renamed 2026-11-05: the entry already carried this stray-file bullet, but
+its old title promised only the tag-wipe, so a grep for "stray" missed it).
 
 `TAG=real` means the audited tree itself; every other tag (`negctl`, `fixture`) is a planted or
 mutated tree — see `t3-census-controls.txt`. `PYTHONDONTWRITEBYTECODE` is not decoration: see
@@ -32,8 +33,13 @@ FIRE on a planted primitive. The 10 negative controls that do exist are in
 HEADLINE for skimmers: `grep -m1 -E 'T3_CENSUS_VERDICT|^SITES=' ` in this file. Figures not restated here.
 
 PAIRING — three identifiers, each owned elsewhere, none restated as a claim here:
-- script: `GENERATOR_SHA256` below equals `sha256sum context/audit/scripts/t3-census.sh` **in this
-  same commit**, re-checked against the commit object (the check is in `t3-gate-and-checks.txt`).
+- script: `GENERATOR_SHA256` below equals `sha256sum context/audit/scripts/t3-census.sh` **as committed in
+  `dd94598ae6562fa723c70666b225269a3f29cc2b`** — named, because "in this commit" is unresolved and goes
+  **silently false the moment the generator is edited**: the pairing stays green while the paste stops being
+  the run a later document cites. Re-checked against the commit object
+  (`t3-gate-and-checks.txt` § 5). **If the generator is edited again** (the per-tag floor line is such an
+  edit), this paste keeps its identity as the `1bab1ec5…` run, gets a dated supersession stamp here, and the
+  new run lands as a **new file** — see the tracker's Follow-ups entry "supersede, do not replace".
 - tree: the pin above, verified by the plan's three-leg freeze check after this run — tracked
   contents OK, 862 files, `git status --porcelain --ignored` empty — pasted in
   `t3-census-controls.txt` § 5.

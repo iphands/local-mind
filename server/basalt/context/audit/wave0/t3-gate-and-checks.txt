@@ -23,7 +23,9 @@ re-check commands are § 2a**, because a bare line range would not have survived
 
 ## 1 · Steps 0 / 1a / 1b / 1c
 
-`RULES.md` § *Project gate*, block 1 (`# 0` … `# 1c`). The `INTERPRETER=` line is new in this commit;
+**The output pasted below is the output of the block digest `2ed67035…` — `RULES.md` as committed in
+`dd94598` — and is *not* the output of that block as it now reads** (it has since grown; § 2a carries both
+cuts and the digests). `RULES.md` § *Project gate*, block 1 (`# 0` … `# 1c`). The `INTERPRETER=` line is new in this commit;
 see § 6 for why. The `at=` leg is the **pyenv shim**; `t3-sentinels-real.txt` names the interpreter by
 its resolved path (`…/versions/3.12.16/bin/python3`) — same interpreter, shim versus target, so the two
 files disagree only in which name they print.
@@ -57,6 +59,10 @@ hand → `git add` → run this gate* rather than the reverse, and why both `she
 below are confirmations rather than first passes.
 
 ## 2 · Steps 2 and 2b — shellcheck
+
+**Unlike § 1, this paste IS still the output of the published block as it now reads**: block 2's content is
+unchanged (`ba991abf…` under both cuts — it only moved, § 2a), so the only thing that rotted here was its
+line range. `shellcheck -x`, over the tracked audit set.
 
 ```text
 shellcheck ok (product)

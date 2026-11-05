@@ -16,9 +16,8 @@ Unlike `t3-sentinels-real.txt`, which is a machine paste, the `mutate:` and `GEN
 were **typed from terminal output**, and the terminal truncated some of them. In `dd94598` **three**
 controls lost their own token — C7, C9, C10 — plus one ellipsised cross-reference line in § 4. All
 values are full 64-hex now, re-checked block by block against their transcripts. What each control's
-identification is worth is the table below, not a summary: the sentence I shipped in `1e3cc9f` ("**seven
-of the ten** controls kept full identification") was one of two arithmetically compatible readings of
-these facts, and a bare count hid which controls were the ones affected.
+identification is worth is the table below — a count, which is what I published in `1e3cc9f`, hides which
+controls it applies to.
 
 **Which token `dd94598` carried, per control.** "Identified" here means: from this file alone, can you
 tell *which program* printed the block?
@@ -36,10 +35,9 @@ tell *which program* printed the block?
 | C9 | **truncated** | yes, on weaker authority | as C7 |
 | C10 | **truncated** | yes, on weaker authority | as C7 |
 
-So: **six** carried full identification in the bad commit (C2–C6, C8), **three** lost it there and carry
-it now on transcript authority, and **C1 never had it and cannot** — it is the one control whose
-identification is prose. The § 4 ellipsis cost nothing, because C2's own block already printed that value
-in full, which is why § 4 can afford to cross-reference it.
+The § 4 ellipsis cost nothing, because C2's own block already printed that value in full — which is why
+§ 4 can afford to cross-reference it. C1 is the one control whose identification is prose, and no table can
+fix that: its token *is* the poisoned value.
 
 **Count disclosure.** Ten controls are documented; **thirteen** mutant runs happened. The three not
 written up, named with their disposition: `locale_break` and `locale_real` were fired to design **C6**
@@ -95,12 +93,24 @@ How the truncated hashes above got past a check that appeared to catch them is
    Consequence, stated where the tokens are used: **they are witnessed, not re-derivable.** What carries
    them is the transcripts' `ARGV=` (which names the mutant, `.neg-<name>.sh`) and `GENERATOR_SHA256=`
    line, and `/tmp/opencode/neg-*.txt` is scratch that will not exist for a later reader. What *does*
-   survive in this file is the recipe, the assertion that fired, and its verdict — enough for anyone to
-   re-make the mutation and watch the same assertion fail, which is the point of a control; not enough to
-   reproduce a hash. That is the honest ceiling on "which program printed this", and it is weaker than
-   what I first wrote. One corroboration that the tokens are **program** identities rather than run
-   identities: `label_gone` and `retry` are different transcripts carrying the **same** `GENERATOR_SHA256`
-   (see the count disclosure above) — one program, two runs.
+   survive in this file is the recipe, the assertion that fired, and its verdict — and **that half was put
+   to the test rather than asserted.** **[MEASURED 2026-11-05]** Re-applying each `mutate:` pair to the
+   frozen `1bab1ec5…` script and running it under `tag=negctl` fires the named assertion in **9 of the 9**
+   controls that can be tested on that tag: exit 1, `T3_CENSUS_VERDICT=FAIL`, and the target assertion's own
+   line reading FAIL (`GENERATOR_SHA_SAME_AS_REAL` fails alongside every one of them, which is correct — a
+   mutant is not the baseline generator — and is itself proof that `run-real` was still holding the pristine
+   token throughout). **C2 is the stated limit**: its target,
+   `SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR`, is one of the 11 real-only assertions, so it cannot be re-fired
+   without running a mutant under `tag=real` — which is § 4's defect, and § 4 is why the answer is no. So
+   the sentence "re-make the mutation and watch the same assertion fail" is now backed by a run rather than
+   being a prediction about a program that no longer exists, which is what it was when neckbeard flagged it.
+   Not enough to reproduce a hash, though: that half stays withdrawn. Two corroborations worth keeping: the
+   tokens are **program** identities, not run identities — `label_gone` and `retry` are different
+   transcripts carrying the **same** `GENERATOR_SHA256` (see the count disclosure above); and C9's recipe
+   lost its argument to the terminal ellipsis, so the pair above had to be **completed by inference** — that
+   inference reproduces the original transcript's output line **byte-for-byte**, which is the only machine
+   comparison of a hand-typed value in this file, and the reason § 4 says "matches, as typed" where this
+   one can say "identical".
 
 Scope of what is covered: **10 of the 34 assertions**, all on the `real` path. Scale per control is
 stated in its header (`maximal` = the mutation inverts a whole-set comparison so every row fails; that
@@ -296,6 +306,27 @@ Stated because an unlisted gap is a gap someone fills by guessing.
 
 - **No canary control exists.** Six planted primitives, one per class, do not exist yet. Until
   `t3-canary-score.tsv` has 6 rows the census cannot print plain `PASS`. By design, not oversight.
+- **The universe is a PATH SET, so the harness cannot see a content modification at all.** **[OBSERVED
+  2026-11-05, found while pre-flighting the canary fixture]** `universe.txt` is one path per line —
+  `UNIVERSE_SHA256` is flagged as such at `t3-census.sh:225` ("a hash of the sorted path set, NOT git's tree
+  hash: the tree hash covers contents and this one does not"), and the tree-diff at `:260-261` is `comm`
+  over those two path lists, so a file whose **path** is unchanged but whose **bytes** differ appears in
+  neither `tree-added.txt` nor `tree-removed.txt`. Consequences, all three of them load-bearing for the
+  canary design: **(1)** `TREE_DIFF_ADDITIONS_ARE_PLANTED`'s stray test (`:271`) inspects *added paths*
+  only — **there is no modified-path leg to confirm**, which is the question the tracker's pre-flight asked;
+  the answer is no, and it is a limit of the six-canary control, not something to route around by renaming
+  files. **(2)** Therefore **planted canaries must be new files whose paths match `CANARY|SENTINEL|canary`**
+  (the `:271` vocabulary) — a canary planted by *editing* an existing ordinary path would be invisible to
+  every tree assertion, and could only ever be evidenced by the primitive sections, which is a weaker claim
+  than "the harness caught it". Canaries #4–#6 keep their ordinary **directories** (`src/…`, `include/…`)
+  with the required token in the **filename**; what they cannot keep is a purely in-place edit. **(3)** The
+  `DISP UNIVERSE_SHA_MATCHES_PIN` line a non-`real` run prints (`:246`) says "hash compared to run-real, not
+  to the pin" — **nothing compares it**; the line is a display, by the file's own rule that `DISP` is not a
+  `SENT`. So on a canary run the only thing that pins the input tree is the path-set diff. Noted here rather
+  than fixed in the script because fixing it means editing the generator, which mints a `GENERATOR_SHA256`
+  and orphans the paste in [`t3-sentinels-real.txt`](t3-sentinels-real.txt): the fix belongs in the same
+  commit as the per-tag floor line, and if a content-leg assertion is added it must be **measured on that
+  tag**, not seeded from 28 (above).
 - **C7's locale arm** (above): unfireable here, and an export drop can pass.
 - **`FIND ENTITY_GRANULAR_ROWS_WITHOUT_LINE_EVIDENCE` has no chk.** The literal `1` that S14/S15/S18
   write into column 6 (headed `hits_in_file`) is disclosed, not asserted: comparing it against a
@@ -303,34 +334,72 @@ Stated because an unlisted gap is a gap someone fills by guessing.
 - **`FIND SENTINEL_TOTAL_FLOOR_NOT_MEASURED` has no chk either** — see the next bullet, which is worse.
 - **The canary tag floors nothing.** The floor is `[ "$TAG" = real ]`-gated; on every other tag the
   script prints a `FIND` line, which is a display and not a failure. `SENTINEL_TOTAL` reads **28** on
-  `negctl` against **34** on `real`. That gap is **the tag, not the program**, and it is now arithmetic
-  rather than an explanation: diffing the assertion names a `negctl` run prints against the ones the
-  `real` paste prints gives **11 real-only** (`MANIFEST_ROWS_EQ_862`, `MANIFEST_TIER_UNASSIGNED_NONZERO`,
-  `CENSUS_SITES_ON_UNASSIGNED_ROWS_NONZERO`, `TN_TOKENS_WITHOUT_A_PLAN_TASK`, `UNIVERSE_COUNT_EQ_PIN`,
-  `UNIVERSE_SHA_MATCHES_PIN`, `LOC_EQ_PIN_CONSTANT`, `LOC_WORKTREE_EQ_MANIFEST`,
-  `SENTINEL_TOTAL_AT_OR_ABOVE_FLOOR`, `GRANULARITY_FORCE_IS_FIRED`, `TREE_FREE_OF_BUILD_ARTIFACTS`) and
-  **5 non-`real`-only** (`GENERATOR_SHA_SAME_AS_REAL`, `INPUTS_SHA_SAME_AS_REAL`,
-  `PREDICATE_SHA_SAME_AS_REAL`, `TREE_DIFF_NO_REMOVED_PATHS`, `TREE_DIFF_ADDITIONS_ARE_PLANTED`). So
-  28 − 5 + 11 = **34**. *(An earlier cut of this bullet also listed the two collapse assertions and
-  `DECLARED_LABELS_EQ_FILES_COLUMN` as real-only. Wrong, and corrected 2026-11-05: all three run on both
-  tags — C4 above is a collapse assertion firing under `tag=negctl`.)* Consequence, plainly: **a canary
-  run that silently loses assertions still prints PASS.** The floor constant for a canary tag has to be
-  measured on the first real canary run; guessing it would repeat the floor-of-31 mistake below.
-- **Scope of that `28` — read before you seed a floor from it.** **[OBSERVED 2026-11-05]** The gap above
-  is a genuine property of the tag; **the value 28 is not.** Every `28` in this file was printed by a
-  **mutated copy** of the generator that happened to carry `tag=negctl`. Population, measured from the
-  thirteen transcripts' `TAG=` lines: **12 ran under `tag=negctl`, 1 under `tag=real`** (`neg-floor_high`,
-  which is C2 — and that one is § 4's incident, since it overwrote the `real` baseline). So: **thirteen
-  mutant runs, and no unmutated run of any non-`real` tag has ever been made**; 28 is a property of twelve
-  mutants, not a measurement of a tag. `t3-census.sh:1566` already refuses the shortcut this prose was
-  taking ("measure this line on the first canary run"), so: **do not seed
-  `SENT_TOTAL_FLOOR_<canary-tag>` from 28.** Seed it from the first *clean, unmutated* canary run, which
-  also retires 28 as a datum. C1's `23` is the same class of artifact and is labelled as one at its own
-  block. And the `27` in `wave0/t3-tree-contamination.txt` is **not** a second producer — it is the census
-  itself on an earlier cut of the generator (that file's § 4 carries the assertion-name diff that proves
-  it); the PoC harness has **never** printed `SENTINEL_TOTAL`, it prints `POC_VERDICT`. Grep
-  `SENTINEL_TOTAL=` across `wave0/` and you get five values — 34, 28, 27, 23, 31 — all from the census,
-  from three cuts of it plus two labelled bad artifacts, and none of them is drift.
+  `negctl` against **34** on `real`. That gap is **the tag, not the program**, and the warrant for it is
+  **the generator's own source, not any transcript**: walking `t3-census.sh` and matching each `chk` to its
+  enclosing tag conditional puts **15 of the 16** names under a guard. The 11 real-only ones sit inside five
+  `if [ "$TAG" = real ]; then` blocks — guard lines `:238` (2 names), `:251` (2), `:1156` (1), `:1435` (4),
+  `:1561` (1) — and the 5 non-`real`-only ones inside two `if [ "$TAG" != real ]; then` blocks, `:259` (the
+  four `TREE_DIFF_*` / `GENERATOR_SHA_*` / `INPUTS_SHA_*`) and `:401` (`PREDICATE_SHA_SAME_AS_REAL`, whose
+  guard is **not** the tree-diff block — a fifth real-guard and a second non-real one, so there is no single
+  place to look). The 16th, `TREE_FREE_OF_BUILD_ARTIFACTS`, is gated by a **different idiom** entirely — the
+  one-line `[ "$TAG" != real ] || chk …` at `:222` — so a reader who greps only for `if [ "$TAG"` finds 15
+  and concludes the partition is wrong. **Two idioms, six guard blocks, all must be checked.** So the
+  *partition* — 11 vs 5, and *which* names — is checkable by anyone with the script; only the *totals* need a
+  run. **State-qualified**:
+  see the "third kind of cause" bullet below — one more name is real-gated but exists only after the
+  column-6 fill.
+  The totals: **34** is in [`t3-sentinels-real.txt`](t3-sentinels-real.txt); **28** is now measured on a
+  clean run, below. `28 − 5 + 11 = 34` is a **consistency check between the two name-sets**, not a derivation
+  of 34 from a tag. Consequence, plainly: **a canary run that silently loses assertions still prints PASS.**
+  The floor constant for a canary tag has to be measured on that tag's first run; guessing it would repeat
+  the floor-of-31 mistake below. *(An earlier cut of this bullet also listed the two collapse assertions and
+  `DECLARED_LABELS_EQ_FILES_COLUMN` as real-only. Wrong, corrected 2026-11-05: all three run on both tags —
+  C4 above is a collapse assertion firing under `tag=negctl`.)*
+- **What the `28` is actually worth — and a claim of mine that today's run killed.** **[OBSERVED 2026-11-05]**
+  The bullet I committed six hours ago said: *"no unmutated run of any non-`real` tag has ever been made; 28
+  is a property of twelve mutants, not a measurement of a tag."* **That is now false, and I made it false by
+  running the thing** — `tag=negctl` writes only `run-negctl`, so an unmutated non-`real` run was never
+  forbidden, simply never attempted. Current state of the measurement:
+
+  ```text
+  $ PYTHONDONTWRITEBYTECODE=1 LC_ALL=C context/audit/scripts/t3-census.sh vendor/basalt negctl   # excerpt
+  GENERATOR_SHA256=1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106
+  TREE_DIFF_VS_REAL=+0/-0  added_list=tree-added.txt removed_list=tree-removed.txt
+  FIND SENTINEL_TOTAL_FLOOR_NOT_MEASURED tag=negctl total=28 — no measured floor exists for a canary tag
+  SENTINEL_TOTAL=28 SENTINEL_FAILS=0
+  T3_CENSUS_VERDICT=PASS_PENDING_CANARY (28 assertions compared and passed; 0 of 14 site sections carry a scored canary)
+  exit=0  stderr=0 bytes  names printed=28 (set identical to the nine mutants' set, and to the pre-freeze one)
+  ```
+
+  So **28 is a measured property of a non-`real` tag on the frozen generator**, witnessed by one clean run
+  *and* nine single-mutation runs of that same cut, all printing an identical 28-name set. What survives of
+  the old warning, and why it still matters: (a) the **population** finding stands as history — of the
+  thirteen earlier mutant runs, **12 carried `tag=negctl` and 1 carried `tag=real`** (`neg-floor_high` = C2,
+  which is § 4's incident: it overwrote the `real` baseline), and I had written "13 non-real" by stating the
+  population from the field I was reasoning about (`GENERATOR_SHA256`) instead of the one I had read
+  (`TAG=`); (b) **a mutant's totals are still not a floor** — the clean run is what licenses 28, not the
+  twelve; and (c) **do not carry 28 to a canary tag.** The guards tested are all `= real` / `!= real`, so a
+  canary tag should print 28 too, but that is an inference about an invocation nobody has run, and `:1566`
+  asks for the measurement, not the inference: **measure `SENT_TOTAL_FLOOR_<canary-tag>` on that tag's own
+  first clean run.** C1's `23` is a mutant artifact and is labelled as one at its own block. And the `27` in
+  `wave0/t3-tree-contamination.txt` is **not** a second producer — it is the census itself on an earlier cut
+  of the generator (that file's § 4 carries the assertion-name diff that proves it); the PoC harness has
+  **never** printed `SENTINEL_TOTAL`, it prints `POC_VERDICT`. Grep `SENTINEL_TOTAL=` across `wave0/` and
+  you get five values — 34, 28, 27, 23, 31 — all from the census, from three cuts of it plus two labelled bad
+  artifacts, and none of them is drift.
+- **A third kind of cause: the assertion SET is conditional on run STATE, not only on program and tag.**
+  **[OBSERVED 2026-11-05, found by re-walking the guards]** `MANIFEST_COL6_RESIDUE_EQ_BINARIES` (`:1451`) is
+  inside the `:1435` real-gate **and** inside `if [ "$col6un" = "862" ]; then DISP … else chk … fi`
+  (`:1448-1452`): while column 6 is untouched the harness prints a `DISP` (`MANIFEST_COL6_STATE`,
+  deliberately not a `SENT`), and only **after T3's column-6 fill** does the comparison become a real
+  assertion. So it is a **12th real-gated name that exists only post-fill** — which is why both transcripts
+  diffed above, the pre-fill `real` paste (34) and today's pre-fill `negctl` run (28), agree that it is
+  absent. Consequences: **(1)** the partition published above (11 real-only / 5 non-`real`-only,
+  `28 − 5 + 11 = 34`) is **the pre-fill state of `1bab1ec5…`** — re-derive it after the fill, do not assume
+  it survives; **(2)** the column-6 fill commit will make a `real` run print **35**, and
+  `SENT_TOTAL_FLOOR_REAL=34` will pass it silently — a floor that stays green while the set it counts has
+  grown is measuring the floor, not the set; **(3)** generally, **a `SENTINEL_TOTAL` is comparable to another
+  one only when they share program, tag and state.** Three coordinates; the earlier write-up named two.
 - **`SENT_TOTAL_FLOOR_REAL` was guessed as 31 on the first cut and passed by luck** against a different
   quantity (the pre-increment `SENT_TOTAL`), printing `SENTINEL_TOTAL=31` above a verdict line saying
   "32 assertions met". The floor is now compared against `$((SENT_TOTAL+1))` for exactly that reason.
@@ -371,7 +440,9 @@ canary-only compare reads as its reference. **C2's floor assertion is `tag=real`
 run under that tag — and it replaced `run-real`'s tokens with a **mutant's**:
 
     run-real/generator.sha256 became  b75fd2f0fa0c1097cf6b67181c8920126f302725dc1f3b737c90d54a5e25e7ad
-      (= C2's own GENERATOR_SHA256, byte-equal to the token printed in C2 above)
+      (= C2's own GENERATOR_SHA256; the two strings MATCH AS TYPED — both were transcribed from terminal
+       output, so no byte-comparison was ever performed between them. The comparison that WAS machine-run
+       is C9's, described in § Method rule 4.)
 
 That value is the "expected" leg printed in C3–C10's `GENERATOR_SHA_SAME_AS_REAL` failures. **It is a
 contaminated baseline and is quoted as such; it is not a reference.** It does *not* invalidate those
@@ -386,7 +457,11 @@ claim is not "I salvaged it" but **"a pristine re-run reproduces the pasted evid
 the restore, the full token set — all four, not the two I first checked — and a byte-diff:
 
     run-real/generator.sha256   1bab1ec5e7933c90a80a97aa875218351052280445d585bfce6645f036128106
-      == GENERATOR_SHA256 of t3-sentinels-real.txt == sha256sum of the script in this commit          ✓
+      == GENERATOR_SHA256 of t3-sentinels-real.txt == sha256sum of the script AS COMMITTED IN dd94598     ✓
+         (named rather than "in this commit": `git cat-file blob
+         dd94598ae6562fa723c70666b225269a3f29cc2b:server/basalt/context/audit/scripts/t3-census.sh
+         | sha256sum` is the check. An unresolved "this commit" goes silently false the first time the
+         generator is edited — see the note under the PAIRING block of that paste.)
     run-real/predicate.sha256   ededb1159f5477dfb02764f47514e3cd8832fa8d10eede1d00f922164cd137a3
       == the PREDICATE_SHA256 line of that paste                                                     ✓
     run-real/inputs.sha256      6dc0f094ff27b998dc0d879791cbd38abbc006b001c8d3c9e20f756ba668523d …

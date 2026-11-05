@@ -237,7 +237,9 @@ re-derived, and the version recorded here is the only place a moving toolchain s
 it, because a guard that reddens a commit over a missing informational line trades a real risk (silent
 degradation) for the worse one this series documents (a red that must be explained, so a red that gets
 explained away). Rationale and the two other limits in `context/audit/wave0/t3-gate-and-checks.txt` § 6;
-if the line is ever used as a *threshold*, it needs a guard first.
+if the line is ever used as a *threshold*, it needs a guard first. **A paste without the line is therefore
+not a step failure**: it is an incomplete evidence file, and the remedy is to re-paste, not to mark the gate
+red. Do not infer redness from the absence of a `FAIL` that was never written.
 **Expected counts — two sets, split on 2026-11-05 at Plan 02 T3** (decision recorded below):
 **`3 b` product** (`lib/common.sh` from Plan 01 T1, `build` T2, `run` T3 — no `.py`, no `.json`) and
 **`5 b` audit helpers** (`context/audit/scripts/ledger-grid.sh`, `t2-census.sh`,
