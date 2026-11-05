@@ -38,7 +38,7 @@
 | 3 | T3: `./run` + its dry-run gate step | `run`, `README.md`, RULES gate | done | Gate step 4 added and passing with `image: stub:none` (no image yet); negative control `KV=fp16` → 2 FAIL lines; busy/ninfer/missing/not-a-pack all rc=1. |
 | 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | done | Owner built `cu1343-sm120-dc047a7` (420 s compile, 0 warnings); label = pin; `--help` runs without a GPU; mock-engine serve proves layout, Host check (403 for unknown names) and alias (404). |
 | 5 | T5: Check `./run`'s flags against the built image | RULES gate step 5 | done | Uses the image's own `serve.config` (the startup check), not `--help` text; `flags ok (2 engine, 8 server)`, 9 with `API_KEY`; `--no-such-flag` → FAIL. `./run` needed no change. |
-| 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | pending | owner boots |
+| 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | blocked | Waiting on the owner's boots (SERIES Standing Constraints). Image, flags, Host check and alias already verified without a GPU (T4, T5). T7 depends on it. |
 | 7 | T7: Harvest | `context/*.md`, `README.md` | pending | |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
