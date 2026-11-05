@@ -670,3 +670,67 @@ made a fork look better-attested than it is.
 - mirrored for reuse across the monorepo: `../../../context/pitfalls.md` § *Cross-repo git forensics*
 - observed during Plan 02 T2, 2026-11-05, against `Niko1221/Strata` and `jesdga95/basalt`
 
+
+---
+
+# Provenance that cannot contradict its own claim
+
+## Problem
+
+**[OBSERVED 2026-11-05]** Plan 02 carried a **P0 finding for days** on a version number that was
+wrong, and the wrongness survived *two* separate reviews — including one whose whole subject was
+whether the version claim was right. The claim was "`stb_image.h` is 2.21 (2019-02-25), and the
+missing `STB_IMAGE_RELEASE` macro is the version evidence." The file is **2.30**. Three failures
+compounded, and none of them is "didn't check":
+
+1. **A line range was used as a version oracle.** `sed -n '60,62p'` printed
+   `2.23 / 2.22 / 2.21` — the *middle* of a descending `RECENT REVISION HISTORY` block whose top
+   entry is `2.30` nine lines above. A **range silently relocates when the premise is wrong**; a
+   pattern either matches or the claim dies loudly. The tell was structural and sitting in the
+   quoted output: **a 2.21 copy cannot list 2.23 below the ceiling.**
+2. **A fact was invented to fit the conclusion.** `STB_IMAGE_RELEASE` is not a macro in *any*
+   stb_image release — stb records its version only in the banner comment and the changelog. A
+   0-hit grep on it is exactly as consistent with 2.09 as with 2.30: **zero information.** The
+   only version-ish macro in the file is the unrelated ABI constant `STBI_VERSION 1`.
+3. **Negative results were drawn from invented identifiers.** Two of five "discriminating"
+   greps — `stbi__vertical_flip_pixels`, `stbi__jpeg_decode_block_to_dc_values` — **exist in no
+   stb release**. The real names are `stbi__vertical_flip` (7 hits) and
+   `stbi__jpeg_decode_block_prog_dc` (3). A 0-hit grep on a paraphrased name "confirms" anything,
+   and five greps that all agreed with 2.21 looked like convergent evidence. It was one wrong
+   premise echoed.
+
+The shape to notice: every number in that chain *could not contradict the claim attached to it*.
+That is this audit's recurring defect, not this one bug — the false-zero `grep boundary` over
+blame output and the all-404 endpoint sweep are the same shape.
+
+## How to avoid
+
+- **Identity claims quote a pattern whose match *is* the claim.** Never a bare line range.
+  Right: `grep -n 'stb_image - v' src/vision/stb_image.h` → `1:/* stb_image - v2.30 …`. Wrong:
+  `sed -n '60,62p'`. A claim that needs a hardcoded offset is a claim about a coordinate, not
+  about the artifact, and coordinates move under you.
+- **Negative claims are the expensive ones; show the token and the 0 hits.** Any
+  "missing / absent / unfixed / because it is old" assertion must name the identifier it grepped
+  for and prove the identifier is *real* — confirm against the file's own vocabulary, not from
+  memory of upstream. `psize == 0` at `:5564`/`:5601`, `extra_read` at `:5419`, and the
+  `IDAT section larger than 2^30` string at `:5182` each return hits and would have collapsed the
+  whole CVE table before it entered a plan.
+- **Ask whether the quoted output contradicts the sentence above it.** Half a line, every time.
+  Descending lists, version tables and sorted histograms are where this hides: the artifact
+  bounds itself.
+- **Never write a bare version number without the command that produced it.** This entire error
+  was one un-sourced line range, quoted confidently, twice.
+- **Prefer code markers to comment banners** when a version matters. Comments can be edited;
+  `#define STBI_MAX_DIMENSIONS (1 << 24)` at `:796` and `stbi__pnm_is16` at `:7624` are
+  introduced-at-2.27 facts that no re-labelled banner can fake.
+
+## Sources
+
+- the corrected claim and its evidence: `context/plans/02_basalt_vendor_audit.md` § *Pre-Identified
+  Bug/Issue* **1** (rewritten 2026-11-05, with a dated note preserving the falsified version so
+  nobody re-derives it)
+- the reasoning that caught it: `context/plans/02_basalt_vendor_audit_tracker.md` § Notes/Deviations,
+  the two dated 2026-11-05 stb entries (the second corrects the first)
+- related items in this file: § *Shell idioms that report green…* items 10–11 (the all-404
+  endpoint sweep, abbreviated SHAs) and the blame false zero recorded during T2
+- observed during Plan 02 T3, 2026-11-05, while correcting a P0 — `vendor/basalt` @ `dc047a7`

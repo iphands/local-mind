@@ -63,7 +63,7 @@
 |---|---|---|---|
 | U1 | Can an HTTP request field reach an `argv` element or a `dlopen` soname, **in either language**? (The argv is assembled in `serve/`, consumed in `src/platform/`.) | every "the engine cannot exec" claim | T8's argv table |
 | U2 | Does request-supplied content reach Jinja2 as a **template** (exec) or only render **data**? Can a pack override the template? | the code-exec question | T7 |
-| U3 | Do the JPEG/GIF/BMP/PNG fixes since 2.21 (CVE-2022-28041/28042, GHSL-2023-145/148/150, the 2.28 BMP offset hardening) actually trigger in *this* build, given the `max_pixels` guard — and is that guard evaluated against the same product `out.rgb.assign` consumes? | the decode-path ranking (P0) | T5 |
+| U3 | ~~Do the JPEG/GIF/BMP/PNG fixes since 2.21 actually trigger in this build?~~ **Voided 2026-11-05: the copy is 2.30, so those fixes are present.** Replaced by: what is the **measured peak RSS** of one worst-case legal image through `decode_image → fit_size → to_canvas → normalize_planar → patchify`, is the `:24-33` header guard re-checked against the dims `:34` returns, and does anything cap concurrent `_encode_pinned`? | the decode-path ranking (P0) | T5 |
 | U4 | Is `stb_image.h` the only vendored third-party source in `src/`+`include/`? | Tier B completeness | T11 |
 | U5 | ~~Does `connect()` re-resolve?~~ **RESOLVED at plan creation (2026-11-05)**: `_PinnedConnection.connect()` iterates the *pre-checked* `self.addresses` and does not re-resolve; Host header and TLS check stay on the original host (`image_source.py:422-460`). Residual: is that address *set* ever built from anything unvalidated, and the non-DNS spoofs. | the SSRF verdict | T4 |
 | U6 | Is the cross-card "loans" path purely intra-process? Check **API names**, not tier names: `cudaMemcpyPeer`, `cudaDeviceEnablePeerAccess`, `cuMemExportToShareableHandle`, `shm_open`, `libfabric`. | the engine comms claim | T9 |
@@ -85,7 +85,7 @@
 | 2 | T2: Pin provenance + boundary-author census | `manifest/index.md` | **done** | **All 862 blob SHAs match GitHub's tree object `3f7b69ae` for the pin** — `INTERSECT=862 ONLY_IN_API=0 ONLY_IN_LOCAL=0 BLOB_SHA_MISMATCH=0`, `GITLINKS=0`, canonical `sha256(path⇥blob)` equal both sides; sensitivity control against the first parent returns `BLOB_SHA_MISMATCH=1` (one file: `serve/util/telemetry.py`). **Limit, recorded as a limit:** the signature is GitHub's own key (`B5690EEEBB952194`) on a GitHub-made squash merge and is unverifiable here (`No public key`); all 3 of **basalt's own** tags are annotated-**unsigned** (Strata's same-named tags are different objects); SWH has no origin for `jesdga95/basalt` and no revision for the pin → **no non-GitHub anchor for the pinned commit** (it *does* hold the ancestor Strata in 9 visits — 8 `full`, 1 `failed` — and our root commit — see `wave0/t2-lineage.txt` § 7; an earlier draft of this row said SWH "has never archived this project", which was true only of the broken `/get/` endpoint form — `pitfalls.md` item 10). **Pin is untagged `main`, not `v0.3.5`** (that tag does not exist upstream; docs/pyproject claim it → no release artifact to diff, feeds Risk 5); 3 commits since `v0.2.1`; no `SECURITY.md` anywhere. Census of **87 rows / 80 blameable first-party files** (`scripts/t2-census.sh`, which reproduces `wave0/t2-author-census.tsv` byte-identically — *the 80*: 87 rows − 6 `BINARY_SKIPPED` − 1 vendored `stb_image.h`; 69 `A-planned` + 11 `unassigned`): 20,111 blamed lines, 53 authors, core two 81 %; **560 lines (2.78 %) sit on a blame boundary and they are the same 560 credited to the root commit**, per-file identical across 7 files (blame cannot walk past a parentless commit), so this is a **lineage** quantity, not an error bar — `wave0/t2-provenance.txt` § 6. *Corrected 2026-11-05: this row first said "**0** blame-boundary lines", which was a false zero from an unanchored `grep boundary` over blame output — `pitfalls.md` item 13. The file denominator also went 86 → 80, and `tail -n +2` on this headerless TSV dropped `CMakeLists.txt` from two of my own verification commands — item 14.* `serve/engine/image_source.py` 570 l = 1 commit/1 author; `dynlib.cpp` 64 l = 1 commit/1 author; **`jeancmyk` holds the plurality of `process.cpp` 216/321, `file.cpp` 247/456, `direct_file.cpp` 255/455, each majority landing in ONE commit** — read first (T8). Tiering gaps found: `CMakeLists.txt` (287 commits) and `serve/engine/process.py` (1,419 l) are `unassigned`. Two plan errors corrected: `src/server/` does not exist; `gh` is not installed. Raw: `wave0/t2-provenance.txt`, `t2-github-tree-paths.txt`, `t2-boundary-authorship.txt`, `t2-gate-and-checks.txt` |
 | 3 | T3: Census + **6-canary** control + orphan-key + diagnostics-shape | `context/audit/census.md` | pending | 6/6 or census is void; also freezes T9's list |
 | 4 | T4: `image_source.py` + `security.py`; **execute** the 9-class bypass list | `serve/engine/image_source.py` | pending | deliverable = delta vs upstream tests |
-| 5 | T5: stb 2.21 decode path; ASan/UBSan + CVE PoC corpus + guard arithmetic | `src/vision/` | pending | P0; harness agent-built, long runs owner-run |
+| 5 | T5: decode-path **resource bounds + first-party amplification** (stb is 2.30, current — re-scoped 2026-11-05, see Notes); ASan/UBSan + peak-RSS harness + guard-vs-consumer arithmetic | `src/vision/` | pending | P0 kept, justification replaced; harness agent-built, long runs owner-run |
 | 6 | T6a: Logging + `/metrics` disclosure | `serve/util/`, service/handler | pending | ≤1,500-line slice |
 | 7 | T6b: Exec trust boundaries → argv table | `serve/config.py`, `service.py` | pending | feeds T8 |
 | 8 | T6c: Input-capture + credential negative sweep | `serve/` | pending | one command, sentinel-terminated |
@@ -147,9 +147,36 @@ violation and cannot be cited by a later plan.
   first-party arithmetic in `preprocess.cpp` (`(int) std::min<size_t>(len, 0x7fffffff)`,
   `out.rgb.assign(px, px + w*h*3)`) is a second, non-diffable half no version comparison can settle —
   hence T5's guard-vs-consumer check.
+- **2026-11-05 (later the same day) — the note above is WRONG about the version, and so was the
+  note it was "correcting". Both are superseded by the plan's Key Facts § 1, rewritten today.**
+  `src/vision/stb_image.h` is **2.30**, not 2.21. Settled offline by pattern-matched greps, not a
+  line range: `grep -n 'stb_image - v'` → `1:/* stb_image - v2.30 …`; `sed -n '50,54p'` → the TOP of
+  `RECENT REVISION HISTORY`, `2.30 (2024-05-31)`; and a floor of **≥2.27 from code**, `STBI_MAX_DIMENSIONS
+  (1 << 24)` at `:796` and `stbi__pnm_is16` at `:963/:7624/:7685`. Three specific errors to stop
+  re-making: (i) **`STB_IMAGE_RELEASE` does not exist in any stb release** — stb versions itself only
+  in the banner and changelog — so "the missing macro *is* the version evidence" was a fabricated fact
+  fitted to a conclusion, and the only version-ish macro here is the unrelated `STBI_VERSION 1` at `:374`;
+  (ii) the `sed -n '60,62p'` citation landed **mid-list** on the 2.23/2.22/2.21 rows — and the output
+  contradicted the claim sitting above it, since a 2.21 copy cannot have 2.23 listed *below* the ceiling;
+  (iii) two of the five "discriminating" greps (`stbi__vertical_flip_pixels`,
+  `stbi__jpeg_decode_block_to_dc_values`) used **identifiers that exist in no stb release** — the real
+  names are `stbi__vertical_flip` (7 hits) and `stbi__jpeg_decode_block_prog_dc` (3) — so a 0-hit grep
+  on an invented name "confirmed" anything. Consequences: the plan's CVE table is **void, not reversed** —
+  the BMP 2.28 hardening is *present in the shipped file* at `:5564`/`:5601`, `extra_read` at
+  `:5419/:5458/:5496`, the IDAT limit string at `:5182` — and the honest claim is only *"2.30 is the
+  latest public release, so what upstream fixed by ≤2.30 is fixed here; what is still open upstream is
+  inherited."* T5 keeps its P0 slot **re-priced**: the justification was bought with a version error,
+  but the subject matter survives on first-party grounds — `preprocess.cpp:34` rewrites `w,h` after the
+  `:24-33` header guard, `:41` then sizes `out.rgb.assign` from the rewritten dims, `:20` silently
+  truncates `len` rather than refusing, there is no `STBI_MALLOC` ceiling or decode timeout, and
+  **`stbi_set_flip_vertically_on_load*` is called from nowhere** (0 sites outside the header). Exact
+  identity to a pristine upstream 2.30 is **unproven** — the `sha256` above has no local oracle; the
+  hash comparison is an owner step. `context/pitfalls.md` carries the two provenance rules.
 - **2026-11-05 — two review claims checked before being trusted; both needed correcting.**
-  (a) "unversioned stb" → it is versioned 2.21, and three of its four compiled-in formats have
-  named security fixes since; recorded above. (b) "partial clone is a corruption risk" → it is not:
+  (a) "unversioned stb" → I "corrected" it to **2.21**, and three of its four compiled-in formats have
+  named security fixes since; recorded above. **Both halves of (a) are now wrong: the copy is 2.30**
+  (see the later note the same day) — I replaced one unverified version claim with another, which is the
+  reason the provenance rules went into `pitfalls.md`. (b) "partial clone is a corruption risk" → it is not:
   `git diff HEAD` clean, no `alternates`, no `core.objectsfile`; the partial clone is kept as
   **procedure** (`GIT_NO_LAZY_FETCH=1`, the single freeze-check) against silent skips only.
   A third reviewer point — that the argv is assembled in Python and consumed in C++ — was **right and
@@ -556,7 +583,7 @@ violation and cannot be cited by a later plan.
 | **Plan 03 — runtime observation** (owner-run): boot + real chat + `/metrics` + image fetch under `--network none` **and** in a monitored netns (`tcpdump`, `ss -tunap`, `strace -f -e trace=network,connect,execve,openat,ptrace` on both `python -m serve.server` and `bin/basalt`); keylog checks (`/dev/input`, `EVIOCGRAB`, XRecord, `uinput`); `strings -a -t x` / `nm -D` / `readelf -d` (DT_NEEDED, RUNPATH, hash every resolved `.so`) on the **shipped** binary; venv `.pth`/`sitecustomize` (U8) | The only non-foolable leg: every static blind spot (`dlopen`+`dlsym`, raw `syscall()`, venv C extensions opening their own sockets, true link deps) closes only here. Split out because Standing Constraints make it owner-run and Plan 01 already stalls on owner boots, so the code verdict must land without inheriting that stall. **It is the gate on Plan 02's verdict, not a formality.** Blocked on an image for the pin — an owner-side fact, since docker is unreachable from the agent session. | Plan 03 |
 | **Plan 04 — engine bulk line-by-line**: `src/kernels/` 38,745 · `src/core/` 19,976 · `src/program/` minus `serve/` 15,432 · `include/` 18,224 ≈ 92k lines, 20–30 sessions | The deferred half of "line by line". Plan 02 gives each file a census result and a triage reason; none is read. On the books so the deferral is not invisible. | Plan 04 |
 | Hash-pinned deps: `pip-compile --generate-hashes` → `pip install --require-hashes` in our `Dockerfile` | Unpinned wheels mean the audited source is **not provably** the built artifact — the verdict is conditional until this exists. A pin/build change, so its own plan per RULES.md's gate table. | Plan 05-ish (owner) |
-| Upstream report: stale `stb_image` 2.21 with JPEG/GIF/BMP CVEs + the `preprocess.cpp` guard question | Now a sourced, dated finding, not a hunch. Upstream's `AGENTS.md` forbids publishing without maintainer approval, so this is a draft for the owner, not an issue. | `context/audit/findings.md` → owner |
+| Upstream report: ~~stale `stb_image` 2.21~~ → **not stale (2.30)**; the live items are the `preprocess.cpp` guard-vs-consumer gap, the missing `STBI_MALLOC` ceiling/timeout, `:20`'s silent truncation, `fit_size`'s aspect-ratio overshoot, and `stbi_set_flip_vertically_on_load*` never being called | Re-scoped 2026-11-05. Draft for the owner, not an issue — upstream's `AGENTS.md` forbids publishing without maintainer approval. | `context/audit/findings.md` → owner |
 | Re-audit policy on `BASALT_SHA` bumps | Upstream is ~2194 commits in six weeks; a verdict at `dc047a7` decays fast. Decide what re-triggers Plan 02's Wave 0. | `context/high_level.md` |
 | Model-pack (`.basalt`) weight-file audit | Out of Plan 02 scope; only the loaders are covered. Worth opening only if T7 shows pack metadata can alter server behaviour. | backlog |
 | Host hygiene: `docker.sock` group is `root:rtkit` | An odd owner:group for a docker socket, and it is why the agent cannot reach docker. Off-scope for Plan 02 (it is not vendor code) but it surfaced during the audit and the owner may want to look. | owner |

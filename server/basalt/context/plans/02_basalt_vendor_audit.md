@@ -126,16 +126,45 @@ Recon says **clean, actively maintained, security-conscious**: 2194 commits 2026
 
 ### Pre-Identified Bug/Issue
 
-**1 — CONFIRMED FINDING (P0): a vendored image decoder from 2019, compiled with exactly the formats that have had security fixes since, fed by request bytes.**
+**1 — CONFIRMED FINDING (P0): a vendored image decoder fed by request bytes, with a ≥30× memory amplification and no per-decode memory ceiling.**
 
-`vendor/basalt/src/vision/stb_image.h`, 7,988 lines. Its own changelog tops out at **2.21 (2019-02-25)**; upstream is 2.30 (2024-05-31). `STB_IMAGE_RELEASE` is absent because that macro first appears in 2.26 — the missing macro *is* the version evidence.
+> **Corrected 2026-11-05 — the version claim in every earlier draft of this section was FALSE,
+> and so was its evidence.** This section said the copy was **2.21 (2019-02-25)** and that
+> "`STB_IMAGE_RELEASE` is absent because that macro first appears in 2.26 — the missing macro
+> *is* the version evidence." **`STB_IMAGE_RELEASE` is not a macro in any stb_image release**;
+> stb records its version only in the banner comment and the changelog (the one version-ish
+> macro here is the unrelated ABI constant `STBI_VERSION 1` at `:374`), so a 0-hit grep on it
+> carried *no* information. The `sed -n '60,62p'` "quote" landed **mid-list** on the
+> 2.23/2.22/2.21 rows of the `RECENT REVISION HISTORY` block, whose top entry (line 52) is
+> 2.30. Method failure recorded in `context/pitfalls.md`. The falsified claim is kept here, in
+> this note, so nobody re-derives it. Everything below that argued CVEs are missing *because the
+> copy is old* is void — see the replacement table.
+
+`vendor/basalt/src/vision/stb_image.h`, 7,988 lines, `sha256 594c2fe35d49488b4382dbfaec8f98366defca819d916ac95becf3e75f4200b3`.
+It is **2.30 (2024-05-31)** — the banner and the head of its own history block, and a floor of
+**≥2.27 provable from code rather than comments**:
 
 ```console
-$ sed -n '60,62p' vendor/basalt/src/vision/stb_image.h
-      2.21  (2019-02-25) fix typo in comment
-      2.20  (2019-02-07) support utf8 filenames in Windows; fix warnings and platform ifdefs
-      2.19  (2018-02-11) fix warning
+$ grep -n 'stb_image - v' vendor/basalt/src/vision/stb_image.h
+1:/* stb_image - v2.30 - public domain image loader - http://nothings.org/stb
+
+$ sed -n '50,54p' vendor/basalt/src/vision/stb_image.h        # TOP of RECENT REVISION HISTORY
+      2.30  (2024-05-31) avoid erroneous gcc warning
+      2.29  (2023-05-xx) optimizations
+      2.28  (2023-01-29) many error fixes, security errors, just tons of stuff
+
+$ grep -n 'define STBI_MAX_DIMENSIONS\|stbi__pnm_is16' vendor/basalt/src/vision/stb_image.h
+796:#define STBI_MAX_DIMENSIONS (1 << 24)     # introduced 2.27
+963:static int      stbi__pnm_is16(stbi__context *s);   # 16-bit PNM, attributed 2.27
+7624:static int stbi__pnm_is16(stbi__context *s)
 ```
+
+Identity to a pristine upstream 2.30 is **not** established offline — only the banner, the
+changelog and the structural markers, plus this `sha256` (the only `stb_image.h` on this disk,
+so there is no local oracle). Comparing that hash against upstream's `v2.30` tag blob is an
+**owner step**; a fork may also patch a vendored header, so hash-equality is not guaranteed even
+at a true 2.30. `stbi__pnm_is16` proves the *file* is ≥2.27 but is `#ifdef`-ed out of this
+binary; the ≥2.27 floor that is *live* comes from `STBI_MAX_DIMENSIONS`.
 
 It is compiled into the engine and fed remote-supplied bytes:
 
@@ -153,17 +182,36 @@ $ sed -n '7,14p;34p' vendor/basalt/src/vision/preprocess.cpp
 
 Path in: request `image_url` → `serve/engine/image_source.py` (32 MiB / 60 s) → `src/program/serve/vision.cpp:45` → `basalt::vision::decode_image` → `stbi_load_from_memory`.
 
-Which post-2019 fixes matter **depends on which decoders are compiled in**, and four are (`STBI_NO_STDIO` also guarantees no decoder opens a file):
+Which fixes matter **depends on which decoders are compiled in**, and four are (`STBI_NO_STDIO` also guarantees no decoder opens a file):
 
-| Compiled **in** | Post-2.21 security work in that decoder (verified against upstream sources 2026-11-05) |
+| Compiled **in** | Status of the post-2019 work once credited to "the copy is old" (re-verdict 2026-11-05) |
 |---|---|
-| **JPEG** | CVE-2022-28041 (signed-integer overflow UB in DC decode / delta accumulation), CVE-2022-28042 (invalid Huffman tables → **out-of-bounds writes**) — both fixed in 2.28; also the resampler OOB read in `stbi__jpeg_load` (nothings/stb#1178, fixed post-2.26) |
-| **GIF** | GHSL-2023-145 (`stbi__gif_load_next` wild read), GHSL-2023-148 (double-free `stbi__load_gif_main_outofmem`), GHSL-2023-150 (double-free/leak `stbi__load_gif_main`) — reported **against 2.28**, so later than this copy too |
-| **BMP** | the 2.28 `stbi__bmp_load` `psize == 0` hardening (header/offset bounds so the derived size cannot overflow) |
-| **PNG** | 2.28 added an IDAT size limit (`> 2^30` rejected) and header-scan changes |
+| **JPEG** | CVE-2022-28041, CVE-2022-28042 (fixed 2.28) and the nothings/stb#1178 resampler OOB (post-2.26) are **inherited as fixed by construction** — this copy is 2.30. Not independently re-verified here. |
+| **GIF** | GHSL-2023-145/148/150 were reported **against 2.28**, i.e. before this copy. Of the four formats this is the one whose per-frame descriptor could disagree with the screen descriptor, so it is the most legitimate residual concern — but it is 2.28+, not 2.21. |
+| **BMP** | the 2.28 `psize` hardening is **present in the shipped file**, at two sites: `:5564` `if (psize == 0) {` and `:5601` `if (psize == 0 \|\| psize > 256) { STBI_FREE(out); … }`; the 2.28-era `extra_read` field is at `:5419/:5458/:5496`. |
+| **PNG** | the 2.28 IDAT limit is present (`IDAT section larger than 2^30` string at `:5182`). |
 | Compiled **out** | TGA, PNM/PGM, PSD, PIC, HDR, PBM — so CVE-2021-42715 (HDR), CVE-2021-42716 (16-bit PGM OOB read) and GHSL-2023-147 (TGA uninitialised disclosure) **do not apply to our build**. Do not re-raise them. |
 
-Partially mitigating, and T5 must weigh rather than assume: `preprocess.cpp:24-33` refuses images whose header claims more than `max_pixels` (`kMaxImagePixels`, `include/basalt/vision/preprocess.hpp:42`) at `stbi_info_from_memory`, **before** the decode allocates; the 2.21 copy does carry `STBI_MAX_DIMENSIONS` (23 hits) — but that guard caps *dimensions*, not the per-decoder arithmetic the CVEs above live in. Also `stbi_set_flip_vertically_on_load` relevance: 9 `flip_vertically` hits in `src/` — check whether the server path sets it (GHSL-2023-146 / CVE-2023-45662 is `stbi__vertical_flip`).
+The honest claim is therefore narrow and checkable: **the copy is 2.30, the latest public stb_image release, so whatever upstream fixed by ≤2.30 is fixed here; whatever is still open upstream as of 2.30 is inherited here.** Per-CVE adjudication offline was not done and must not be asserted either way.
+
+Mitigating, and genuinely good code — hoodie read it before I did: `preprocess.cpp:24-33` calls
+`stbi_info_from_memory` and refuses on `(int64_t) w * h > max_pixels` **before any pixel buffer
+exists**, with an actionable message, and `serve/engine/vision.py:25` mirrors the same
+`IMAGE_MAX_PIXELS = 64 << 20` as `kMaxImagePixels` (`preprocess.hpp:37`). Four nested ceilings
+bound the damage: **32 MiB** compressed per image (`image_source.py:30`), **256 MiB** per request
+body (`handler.py:33`), **64 MP** declared pixels, `1<<24` per side (stb's own default, never
+overridden here). So: **can 32 MiB become gigabytes? Yes, roughly 1 GiB — and no, not
+unboundedly.** What is missing is not a version bump but (a) a **re-check of the decoded
+dimensions**, since the guard trusts the header while `:41` sizes `out.rgb.assign(px, px + w*h*3)`
+from the dims `stbi_load_from_memory` rewrote at `:34`, (b) any **per-decode memory ceiling or
+timeout** (`STBI_MALLOC` is not overridden, so a guard-legal but expensive image costs what it
+costs, on a box whose design is system RAM holding the expert tier), (c) `preprocess.cpp:20`
+`const int n = (int) std::min<size_t>(len, 0x7fffffff)` which **silently truncates** an oversized
+buffer instead of refusing it, and (d) `stbi_set_flip_vertically_on_load*` **never being called**
+(0 call sites outside the vendored header) — if the encoder/mmproj path expects bottom-up, every
+image is vertically mirrored, and neither a fuzzer nor the PPL/KLD gate would notice without a
+vision parity case. `fit_size` (`:46-64`) has a further resource overshoot at extreme aspect
+ratios; it is **unmeasured** and is recorded under T5, not here.
 
 **2 — A config-supplied shell command runs with `shell=True`** — operator-side today; it becomes a backdoor only if config is influenceable from a request:
 
@@ -481,7 +529,7 @@ cd /tmp/opencode/basalt-audit/canary && <the identical census commands> | grep -
 
 **Commit**: `[basalt][P2][T4][audit] read the image fetcher and execute the SSRF and peer-spoof bypass list`
 
-### T5: The decode path — vendored stb 2.21, sanitized and fuzzed
+### T5: The decode path — resource bounds and first-party amplification (stb is 2.30, current)
 
 **File**: `src/vision/preprocess.cpp` and the rest of `src/vision/` (1,584 l, Tier A); `src/program/serve/vision.cpp`; `src/vision/stb_image.h` as **Tier B `vendored-third-party`** — diffed as a dependency version, not read as first-party.
 
@@ -495,7 +543,7 @@ grep -c 'STBI_ONLY' vendor/basalt/src/vision/preprocess.cpp; echo "— expect 4"
 ```
 **Expected observation**: **Confirms if** zero ASan/UBSan reports across the four formats at the request-reachable `max_pixels`, and the guard is shown to bound the same product the `assign` consumes. Then the finding stands as 🟠 *stale vendored dependency with known CVEs in compiled-in decoders, mitigated by an upstream guard we verified*. **Refutes if** **any** ASan/UBSan report on a malformed JPEG/PNG/BMP/GIF — that is memory corruption reachable from an unauthenticated LAN socket and it **overtakes every exfil question as the plan's headline**. **Within noise if** an absurd allocation refused by the `max_pixels` guard (the guard working; record it) — never an OOM *inside* a decoder.
 
-**Commit**: `[basalt][P2][T5][audit] fuzz the stb 2.21 decode path and check the pixel guard against its own consumer`
+**Commit**: `[basalt][P2][T5][audit] bound the decode path's memory and check the pixel guard against its own consumer`
 
 ### T6a–T6c: The server surface, in three ≤1,500-line slices
 
@@ -632,7 +680,7 @@ LC_ALL=C comm -13 <(LC_ALL=C cut -f1 context/audit/manifest/src.tsv context/audi
 
 | File | Change | Priority |
 |------|--------|----------|
-| `vendor/basalt/src/vision/stb_image.h` + `preprocess.cpp` | **2.21 vendored decoder; JPEG/GIF/BMP/PNG carry post-2019 CVEs and all four are compiled in**; fuzz + version diff + first-party guard arithmetic | **P0** |
+| `vendor/basalt/src/vision/stb_image.h` + `preprocess.cpp` | vendored decoder **at 2.30, current** — the risk is **resource amplification (≥30× analytic, unmeasured) and first-party guard arithmetic**, not a stale version; all four formats compiled in | **P0** |
 | `vendor/basalt/serve/engine/image_source.py` | Only outbound channel; executed bypass list, delta vs upstream's tests | **P0** |
 | `vendor/basalt/src/platform/` (10 files) + `context/audit/argv-table.md` | Every raw OS call, and the C++↔Python argv proof | **P0** |
 | `context/audit/manifest/` + `census.md` | The completeness apparatus; if weak, the verdict is theatre | **P0** |
