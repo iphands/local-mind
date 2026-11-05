@@ -405,10 +405,13 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
    and the OS. *Mitigation*: Basalt sizes `resident` from free RAM above its floor and falls back to
    a file mapping (`index.md:76,149`); `refuse_busy` keeps vLLM (which pins host RAM too) down.
    T6 records the `auto … resident=` and `RAM floor` lines.
-4. **Question: does `bin/basalt --help` run without a GPU?** *How we'll settle it*: T4 runs it with
-   `--network none` and no `--gpus`; if not, T5's gate step passes `--gpus device=0` and says so.
+4. ~~**Question: does `bin/basalt --help` run without a GPU?** *How we'll settle it*: T4 runs it with
+   `--network none` and no `--gpus`; if not, T5's gate step passes `--gpus device=0` and says so.~~
+   RESOLVED (T4): yes, rc=0 with no `--gpus` (tracker Evidence).
 5. **Risk: Host-name check.** Clients use `cosmo.lan:8700`; anything else (e.g. a FQDN) gets
    refused. *Mitigation*: `ALLOWED_HOSTS` knob; T6 tests the client name and an IP.
+   Partly settled (T4, mock engine): `cosmo.lan`/`cosmo`/`localhost` → 200, an unlisted name → 403.
+   T6 still checks it on the real server through `cosmo.lan`.
 6. **Risk: one alias.** vLLM also served `cosmo-proxy`, `claude-heavy`, `claude-light`,
    `claude-haiku-4-5-20251001` (`../vllmcustom/common/_run-lib.sh:420`); Basalt answers one name, so
    requests naming those get 404. *Mitigation*: `ALIAS` knob; deferred — a client that needs another
@@ -431,7 +434,7 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
 - [x] T1: both CUDA digests resolve; `load_pins` prints `pins ok dc047a77…`; `DOCKER='sudo docker'` → rc=1; gate shows `1 b`, `env ok`
 - [x] T2: `PREFLIGHT_ONLY=1 ./build` → `preflight ok`, `vendor/basalt` at `dc047a77…`, a dirty checkout → rc=1, no image built
 - [x] T3: `DRY_RUN=1 ./run` / `--single` print commands carrying every default; a `.ninfer` path and a missing pack → rc=1 before docker starts anything; nothing created
-- [ ] T4: the built image's `ai.basalt.ref` = `dc047a77…`; `bin/basalt --help` and `serve.server --help` print usage; `data/profiles/qwen4exp-48x512.prof` present
+- [x] T4: the built image's `ai.basalt.ref` = `dc047a77…`; `bin/basalt --help` and `serve.server --help` print usage; `data/profiles/qwen4exp-48x512.prof` present
 - [ ] T5: gate step 5 → `flags ok`; an injected bogus flag → `FAIL(flags)`
 - [ ] T6: both modes boot; start blocks recorded; `cosmo.lan` chat → reply from `cosmo-6000`; wrong model → 404; `docker stop` clean
 - [ ] All: the project gate (Rule A) passes on the final commit

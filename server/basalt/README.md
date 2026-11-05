@@ -8,9 +8,9 @@ API.
 Basalt loads only Flash-Next `.basalt` packs. `.ninfer` artifacts (for example the QUASAR 27B)
 belong in `../ninfer`.
 
-**Status (2026-11-04):** `./build` and `./run` are written and pass their dry runs (Plan 01). No
-image has been built and nothing has booted yet — the defaults below are the owner's choices, not
-measured winners.
+**Status (2026-11-04):** the image `iphands/basalt-blackwell:cu1343-sm120-dc047a7` is built and
+checked without a GPU (Plan 01 T4); the pack has not been booted yet. The defaults below are the
+owner's choices, not measured winners.
 
 ## Prerequisites
 

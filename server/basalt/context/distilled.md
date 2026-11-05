@@ -60,6 +60,27 @@ section**, which always stays last. Keep it dense.
 - Experts that do not fit in VRAM live in system RAM (optionally a second Blackwell GPU as a peer
   tier). `--gpu auto` uses every visible Blackwell GPU (`docs/building.md`).
 
+## The built image: `iphands/basalt-blackwell:cu1343-sm120-dc047a7` [LIVE 2026-11-04]
+
+- Owner build (Plan 01 T4): 3.42 GB, `ai.basalt.ref=dc047a77…`; Basalt's compile is 507 ninja steps
+  (≈ 420 s at `JOBS=16`, 0 warnings) — `BUILD_TESTING=OFF` still builds the parity programs, but
+  only `bin/` ships. `bin/basalt` is 94.1 MB.
+- `bin/basalt --help` and `serve.server --help` run with **no GPU** (`--network none`, no `--gpus`),
+  so flag checks need no card.
+- `basalt serve --mock-engine` runs the whole server with a scripted engine and no model or GPU —
+  the cheapest end-to-end check of the image layout, the Host check and the alias.
+
+## Host check and alias behave as documented [LIVE 2026-11-04]
+
+- With `--host 0.0.0.0 --allowed-host cosmo.lan --allowed-host cosmo`: `Host: cosmo.lan:8700`,
+  `cosmo:8700`, `localhost:8700` → 200; `evil.example:8700` → **403** (mock engine, T4).
+- With `--alias cosmo-6000`, `/v1/models` lists only `cosmo-6000`; a chat naming `claude-heavy` →
+  **404**.
+- The start line prints `ready http://127.0.0.1:8700/v1` even when bound to `0.0.0.0`; the
+  `network` line gives the container address. Without `--api-key`:
+  `[server] warning  no api key, open to the network (--api-key KEY)`.
+- `docker stop` ends the server in < 1 s (SIGTERM handled; `serve/server.py:301`).
+
 ## Image build inputs: BuildKit honors `Dockerfile.dockerignore`; the runtime base has no Python [LIVE 2026-11-04]
 
 - The build context is `vendor/basalt`, which has no `.dockerignore`. BuildKit reads
