@@ -422,15 +422,32 @@ carve-out*. It is repeated here on purpose: if `PATTERNS` is amended later, this
 | commit | FILES | SCOPE_HITS | behaviour class (condition (4)) | note |
 |---|---|---|---|---|
 | `aab418e` | 3 | 0 | none | first invocation **under** the rule; measured from the commit object |
-| *(the commit adding this row)* | 4 | 0 | none | 4 files: `RULES.md`, `02_basalt_vendor_audit.md`, the tracker, this file |
+| `fe5bcdc` | 4 | 0 | none | named after the fact by this section's heading anchor (`git log -S` on its title); measured staged, matched the object |
+| *(the commit adding this row)* | 3 | 0 | none | `RULES.md`, this file, the tracker — **measured before this row was written**, and `FILES` counts files, so adding this row to a file already in the set cannot change it |
 
-**On the second row's namelessness.** It cannot carry its own SHA — it is written before the object exists. It
-is *locatable* instead: `git log -S'Scope evidence for carve-out invocations' -- context/audit/wave0/t2-gate-and-checks.txt`,
-and its **measurement time is stated** because that is the part a reader cannot otherwise recover: the `FILES=4
-SCOPE_HITS=0` below this line was taken against the **index while staged**, immediately before `git commit`,
-and re-checkable afterwards from the commit object with the same strip and the same `PATTERNS`. A self-
-referential row is admissible when it is a *file count* (cannot drift with content) and its producer is
-named; it is the `1,690` defect only when neither is.
+**On the newest row always being nameless, and the anchor that fixes it.** A row cannot carry its own SHA — it
+is written before the object exists — and a SHA backfill regenerates the problem one row down, because every
+docs commit in this plan invokes the carve-out and so needs a row. The terminating trick is that **each row's
+`note` is written with a phrase no other row uses**, which makes the row its own pickaxe anchor. So the newest
+row is named by searching for *its own* note rather than the section heading, e.g.
+`git log --format=%h -S'measured before this row was written' -- context/audit/wave0/t2-gate-and-checks.txt`.
+`fe5bcdc` was named this way after it landed, from the heading anchor that introduced it — which is how the
+locator was proven rather than assumed. Each row also carries its **measurement time**: the numbers above were
+taken against the **index while staged**, immediately before `git commit`, and re-derivable from the commit
+object with the same strip and the same `PATTERNS`. A self-referential row is admissible when it is a *file
+count* (cannot drift with content), its producer is named, and its own text names it; it is the `1,690` defect
+only when none of those hold.
+
+> **Anchor strings in those commands are load-bearing.** `git log -S` matches a literal and reports commits
+> where the occurrence **count changed**, so an anchor resolves only while the phrase survives verbatim; a
+> rename silently degrades it from one commit to a set. Measured, not theorised: the § 6a heading in
+> `t2-boundary-authorship.txt` was renamed during this plan, and its old phrase now resolves to **two**
+> commits (`6dbb312` introduced it, `d388d17` deleted it) where each anchor here resolves to exactly one.
+> Two housekeeping facts, checked rather than assumed: this file carries the **heading** anchor once (the § 8
+> heading) and the **row-note** anchor twice (the row itself, and the command above that cites it) — so if a
+> row's note text is ever reworded, its example command must be reworded with it, or that row loses its name.
+> Both anchors appearing in the same commit is harmless: `-S` counts the net change, so it still names one
+> commit. Cite by section name, never by line number: `RULES.md` Rule E.5.
 
 All rows are `SCOPE_HITS=0`, so `none` is admissible for condition (4) in each. **The `9a56c8d` row from § 7 is
 not repeated here**: that commit predates the carve-out, and its `FILES=` under this producer is

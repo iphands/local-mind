@@ -434,6 +434,44 @@ violation and cannot be cited by a later plan.
   output** and `RULES.md`'s is the **definition**, and if the list is amended later the § 8 line is the only
   record of which list those `SCOPE_HITS` were computed against, which is exactly the provenance the rest of
   this file exists to keep. § 8 now says so inline.
+- **2026-11-05 · T2 round eight — signed off at eight commits; the reviewer who lost an argument supplied the
+  best catch of the exercise.** Neckbeard retracted his gitlink MUST-fix in full and closed T2 with no
+  MUST-fix, then conceded the regress point outright (*"my SHA ask was wrong… backfilling regenerates the
+  defect one row down"*). Three durable changes came out of the sign-off. **(i) `.gitignore` is now on the
+  scope surface** — his replacement observation: the ignore file *defines* why `vendor/` is invisible to
+  `git show --name-only` yet was not itself in `PATTERNS`, so the realistic route to a stale surface is an
+  ignore-file edit that nothing would catch. Control that proves it earns its place: `1eafda7` ("[P1][T1][pins]
+  add Basalt dc047a…", editing `.gitignore` **and** the pin) moves `SCOPE_HITS` 3 → 4; `5f8890d` 1 → 2; the
+  seven T2 commits re-verified at 0. **(ii) `SCOPE_HITS=0` now needs `FILES>=1`** (hoodie), because the empty
+  case is reachable by three ordinary mistakes — running the block after `git commit`, after `git commit -a`,
+  after a `git reset`. His "optional" `diff.relative` note turned out to be the same hole in different
+  clothes, and measuring it rather than reasoning about it is what made that clear: forcing the config makes
+  the strip match nothing and `aab418e` goes `FILES=3 → 0`, so **the floor is precisely what converts that
+  misconfiguration from a green into a FAIL**. **(iii) Rule E.5 was rewritten, not appended to** — it told
+  readers to cite as `path:line`, which is the rot mechanism neckbeard was warning about, so it now prefers
+  the producing command, allows `path:line` for code, and demands **section names in prose**, with the anchor
+  fragility demonstrated on my own rename: `-S` on the old § 6a phrase resolves to **two** commits where the
+  § 8 anchor resolves to one. That anchor is now declared load-bearing in § 8, where it appears twice (as the
+  heading and inside the locator quoting it). **(iv) hoodie's flag, which is the one that bites later:** a
+  commit touching `.gitignore` can no longer satisfy (3) and must be written `BLOCKED` even for a
+  scratch-hygiene line. That fails closed, so `RULES.md` now states the two legitimate remedies (land it in
+  an owner-run commit — the owner has docker and needs no carve-out — or split it out), because an
+  unexplained forced `BLOCKED` is what an agent under deadline routes around, and smuggling one ignore-file
+  line into a docs commit to recover a green is exactly what a published surface exists to prevent.
+  Also caught in my own text while writing the locatability paragraph: it said the `FILES=4 SCOPE_HITS=0`
+  figure was *"below this line"* when the table sits **above** it — a wrong directional reference in the one
+  paragraph about how to find things.
+- **2026-11-05 · the E.5 rewrite tested against the files it governs, before shipping.** A new rule that
+  forbids line citations is worth nothing if the tree is full of them, so the nine remaining
+  `line <n>` hits were classified rather than assumed benign, and **none is a violation**: three are the
+  retired `(line 83)` defect being *quoted by the corrections that name it* (tracker ×2, § 7 of the gate
+  artifact); one is a Python **traceback** (`serve/engine/modelfile.py, line 14`), where the line number is
+  intrinsic to the evidence; one is a **code** citation, which E.5 still permits, and it was checked to
+  resolve — `t2-census.sh:47` is exactly the header `printf` the claim says it is; and four are
+  `t1-freeze-and-manifest.txt` pointing at **its own transcript lines** (26 / 75 / 85 / 199), which is the
+  safe case by construction because a committed transcript is append-only and its earlier lines never
+  shift. The distinction that makes this a short job rather than a mass edit: a line number is rotting only
+  when the document it points into is still being edited.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every

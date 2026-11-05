@@ -204,6 +204,16 @@ Verified under this `PATTERNS`: the seven Plan-02 T2 commits (`9a56c8d` `93b6bd5
 `0c7517d` `d388d17` `aab418e`) all score `SCOPE_HITS=0`; `b2e5fa4` and `4ca31ae` score `1`, `5f8890d` `2`,
 `1eafda7` `4`.
 
+**A commit that touches the surface cannot use the carve-out — and that is by design, so here is the
+remedy.** Now that `\.gitignore` is on the surface, a commit editing it — even a scratch-hygiene line no
+build step reads — scores `SCOPE_HITS>=1`, fails (3), and must be written `BLOCKED` with the task left
+`in_progress`. It fails closed deliberately; the answer is not to argue the edit is harmless. Two legitimate
+routes: **land it in a commit the owner runs gate 3–6 for** (the owner is in the `docker` group, so no
+carve-out is needed at all), or **split it out** of the docs commit and hand that commit to the owner. The
+reason the remedy is written down rather than left implied: an unexplained forced `BLOCKED` is what an agent
+under deadline routes around, and smuggling one `.gitignore` line into an unrelated docs commit to recover a
+green is exactly the outcome a published surface list exists to make impossible.
+
 **(4) Behaviour class, selected and bound to (3).** Name which of the four classes the task changes —
 **3** vendor management/build preflight, **4** image build, **5** boot and `./run` output and flags,
 **6** `serve.*` imports inside the image — or `none`. **`none` is legal only when (3) printed
@@ -476,7 +486,13 @@ A plan is not done when the code works. It is done when what you learned is on d
 3. **Below the bar is a row, not a silence.** Anything left unfinished, unverified or
    disagreeing gets a Follow-ups row in the tracker, naming this plan or a later one.
 4. "Inconclusive" is a valid, recordable outcome. Never round it up to a win.
-5. Cite the source of a fact as `path:line` or the exact command that showed it.
+5. **Cite the source of a fact by the exact command that showed it**, or by `path:line` for code. In prose
+   this project keeps editing (plans, artifacts, knowledge pages) cite the **section name, never a line
+   number** — a line citation rots on the next edit. The same holds for a `git log -S<anchor>` locator: it
+   resolves only while the anchor string survives verbatim, and measured on 2026-11-05 a heading renamed
+   mid-plan turned its own old anchor from one commit into a **2-commit set** (`6dbb312` introduced the
+   phrase, `d388d17` deleted it). When you publish a locator, name the anchor **load-bearing** so that a
+   future rename carries it with you.
 6. **A measurement taken over an explicit path list must carry its own total.** A path in
    `git diff --numstat -- <paths>` (or any `-- <paths>` form) that matches nothing contributes **nothing and
    reports nothing**, so a hand-assembled list silently under-counts: print the same sum with **no** pathspec
