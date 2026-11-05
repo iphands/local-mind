@@ -1502,3 +1502,27 @@ Three things this hid, each found only when the guard went in and the file ran t
   the `TREE_NEEDLE` table (Plan 02 T3, adopted after the OOM, 2026-11-05)
 - tree-only run `PROBLEMS=0` exit 0; tree-only self-test `fired 9/9`, clean exit 0, `NOT RUN: 13 of 22` —
   `context/plans/02_basalt_vendor_audit_tracker.md` Evidence, 2026-11-05
+
+# A census that drops wide-only hits cannot see a hard-coded URL
+
+## Problem
+
+**[OBSERVED 2026-11-05]** Plan 02's primitive census (`t3-census.sh`) has 15 families — sockets, DNS, exec,
+`dlopen`, file writes, credentials, input capture and so on — and **none matches a URL literal or an encoded
+string**. Its wide patterns do see them, but a wide hit is promoted to a site only when the same file also has a
+narrow hit. Planted canaries proved it: a raw `socket()`/`connect()` became a site; a base64 blob decoding to an
+`https://` URL and a literal `https://` in a header both landed in `*.wide.tsv` and were dropped
+(`column6 = none`). A file whose only suspicious content is a beacon URL would never have reached a reader.
+
+## How to avoid
+
+- **Predict canary outcomes from the detector's family list before planting.** Here the prediction (1–2 missed)
+  came straight from `families.tsv`, and the run confirmed it in one go.
+- **A wide hit that is never promoted is a silent drop.** Treat "seen by a wide pattern but not a site" as
+  its own output, or add a narrow family for it.
+- Closing it does not require editing a frozen generator: a separate one-command sweep with its own
+  canary control (`census.md` § *The URL/encoded sweep*) is cheaper and keeps the census's identity stable.
+
+## Sources
+
+- `context/audit/census.md` § Canaries 1–3, `context/audit/wave0/t3-census-rerun.txt` (Plan 02 T3, 2026-11-05)

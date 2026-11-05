@@ -91,7 +91,7 @@ forked from (`Niko1221/Strata`) were run here, gave confident answers, and were 
 | [`manifest/index.md`](manifest/index.md) | **Schema, column ownership, vocabulary, invariants, per-TSV map, definition limits, pin + clone config.** Read it before editing a TSV. | T1 |
 | `manifest/*.tsv` | 862 rows, one per tracked file, 12 TSVs, headerless | T1 |
 | `manifest/frozen-prefix.sha256` | Per-TSV hash of columns 1–4 (the frozen half of every row) | T1 |
-| [`census.md`](census.md) | Primitive census + the 6-canary run | T3 — not written |
+| [`census.md`](census.md) | Every boundary call site and the task that reads it (278 sites, + `census-sites.tsv`); canaries 1–3; the URL/encoded sweep (`census-urls.tsv`) that closes the census's URL blind spot. Raw runs: `wave0/t3-census-rerun.txt` | T3 (re-scoped), 2026-11-05 |
 | [`argv-table.md`](argv-table.md) | Every exec/spawn/`dlopen` site in C++ **and** Python | T8 — not written |
 | [`findings.md`](findings.md) | Capability-ranked findings (🔴🟠🟡⚪) | from T4 |
 | [`coverage_ledger.md`](coverage_ledger.md) | Lines read vs present; the grid block is generated, the prose is hand-written | T1 seed written (0 lines read) |

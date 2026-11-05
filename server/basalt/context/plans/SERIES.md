@@ -30,10 +30,10 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 3/15 tasks done
-  (T0–T2; 5 skipped by the **2026-11-05 re-scope**); next **T3, narrowed** — keep the census's real-run site
-  list (278 sites, all assigned) as `census.md` and run canaries 1–3 — then T13 and the boundary reading
-  (≈14.9k lines). The re-scope cut seven commits' worth of evidence-about-evidence work and the bug-hunting
+- **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 4/15 tasks done
+  (T0–T3; 5 skipped by the **2026-11-05 re-scope**); next **T13** (our own `./run`/Dockerfile posture), then
+  the boundary reading (≈14.9k lines) in the order `census.md` routes it. T3's canaries found the census blind
+  to hard-coded URLs; a URL/encoded sweep closes it (`census.md`). The re-scope cut seven commits' worth of evidence-about-evidence work and the bug-hunting
   tasks; plan § *Re-scope* and execution rule 7 (3-commit stop rule) govern. T2's findings stand: the pin's
   862 blobs equal GitHub's tree; `jesdga95/basalt` and `Niko1221/Strata` share 0 SHAs — trust hashes,
   not narrative history (`context/distilled.md`).

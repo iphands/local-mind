@@ -1,0 +1,214 @@
+.github/workflows/ci.yml	80	T12	wget -q https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2404/x86_64/cuda-keyring_1.1-1_all.deb
+assets/basalt-mark.svg	1	T10	<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="basalt">
+include/basalt/ggml/ggml.h	5	T11	// (https://github.com/ggml-org/llama.cpp).  Copyright (c) 2023-2026 The ggml authors.  MIT licence: see
+include/basalt/ggml/ggml_common.h	3	T11	// llama.cpp commit 3cf03257f219afbe7334045ff7c6a06ac68c627d (https://github.com/ggml-org/llama.cpp).
+include/basalt/ggml/ggml_common.h	1008	T11	// ref: https://www.opencompute.org/documents/ocp-microscaling-formats-mx-v1-0-spec-final-pdf
+serve/api/responses.py	91	T4	return json.loads(base64.b64decode(enc[len(ENCRYPTED_PREFIX):], validate=True).decode("utf-8"))["text"]
+serve/engine/image_source.py	167	T4	return base64.b64decode(payload, validate=True)
+serve/engine/image_source.py	564	T4	if low.startswith(("http://", "https://")):
+serve/security.py	225	T4	raise SystemExit(f"[server] error: {key}: {x!r} is not an origin like https://chat.example.com"
+serve/server.py	283	T4	print(tagged("ready", f"http://{here}:{a.port}/v1  openai+anthropic  stats http://{here}:{a.port}/"
+serve/server.py	291	T4	print(tagged("network", f"http://{ip}:{a.port}/v1"), flush=True)
+serve/server.py	299	T4	open_when_ready(svc, f"http://{'127.0.0.1' if a.host in ('0.0.0.0', '') else a.host}:{a.port}/",
+serve/tests/test_concurrency.py	62	test-only	req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", data=json.dumps(body).encode(),
+serve/tests/test_concurrency.py	68	test-only	with urllib.request.urlopen(f"http://127.0.0.1:{self.port}{path}", timeout=10) as r:
+serve/tests/test_config.py	142	test-only	a, *_ = parse([], {"server": {"cors-origin": ["http://a"]}})
+serve/tests/test_config.py	143	test-only	self.assertEqual(a.cors_origin, ["http://a"])
+serve/tests/test_config.py	144	test-only	a, *_ = parse(["--cors-origin", "http://b"], {"server": {"cors-origin": ["http://a"]}})
+serve/tests/test_config.py	145	test-only	self.assertEqual(a.cors_origin, ["http://b"])
+serve/tests/test_content_fences.py	81	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_detok.py	125	test-only	lambda: "https://example.com/" + "/".join(run(0x61, 0x7A, rng.randint(1, 12))
+serve/tests/test_detok.py	240	test-only	"https://example.com/" + "a/b-c_d.e?f=g&h=i#j" * 60,
+serve/tests/test_engine_err_status.py	51	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_fatal_recovery.py	69	test-only	base=f'http://127.0.0.1:{http.server_address[1]}'
+serve/tests/test_grammar.py	39	test-only	cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+serve/tests/test_image_sources.py	252	test-only	self.assertRefused(self.chat("https://images.example/a.png", host=addresses[0]), "--image-url-host")
+serve/tests/test_image_sources.py	275	test-only	self.assertRefused(self.chat(str(self.image), {"Host": "127.0.0.1", "Origin": "http://127.0.0.1",
+serve/tests/test_image_sources.py	314	test-only	client = openai.OpenAI(base_url=f"http://127.0.0.1:{self.port}/v1", api_key="unused")
+serve/tests/test_image_sources.py	321	test-only	EVIL = {"Origin": "https://evil.example", "Sec-Fetch-Site": "cross-site", "Sec-Fetch-Mode": "cors"}
+serve/tests/test_image_sources.py	327	test-only	self.assertRefused(self.chat("http://169.254.169.254/latest/meta-data/", self.EVIL), "--image-url-host")
+serve/tests/test_image_sources.py	332	test-only	for origin in ("https://evil.example", "http://localhost:3000", "http://127.0.0.1:9999", "null",
+serve/tests/test_image_sources.py	333	test-only	"chrome-extension://abcdef", "app://.", f"https://127.0.0.1:{{port}}", f"http://127.0.0.2:{{port}}",
+serve/tests/test_image_sources.py	334	test-only	f"http://LOCALHOST.evil:{{port}}", ""):
+serve/tests/test_image_sources.py	362	test-only	own = {"Origin": "https://evil.example", "Sec-Fetch-Site": "none"}
+serve/tests/test_image_sources.py	369	test-only	own = {"Origin": f"http://127.0.0.1:{self.port}", "Sec-Fetch-Site": "same-origin", "Sec-Fetch-Mode": "cors",
+serve/tests/test_image_sources.py	370	test-only	"Referer": f"http://127.0.0.1:{self.port}/"}
+serve/tests/test_image_sources.py	393	test-only	page = {"Host": "evil.example:8080", "Origin": "http://evil.example:8080", "Sec-Fetch-Site": "same-origin"}
+serve/tests/test_image_sources.py	399	test-only	c.request("OPTIONS", "/v1/chat/completions", headers={"Origin": "https://evil.example",
+serve/tests/test_image_sources.py	414	test-only	self.assertRefused(self.chat("http://127.0.0.1:1/a.png"), "--image-url-host")
+serve/tests/test_image_sources.py	461	test-only	("http://169.254.169.254/latest/meta-data/", "--image-url-host"),
+serve/tests/test_image_sources.py	462	test-only	("https://images.example/a.png", "--image-url-host")):
+serve/tests/test_image_sources.py	614	test-only	with Web() as proxy, mock.patch.dict(os.environ, {"http_proxy": f"http://127.0.0.1:{proxy.port}", "no_proxy": ""}):
+serve/tests/test_image_sources.py	615	test-only	self.assertEqual(load_image("http://images.example/a.png", LOCAL), PNG)
+serve/tests/test_image_sources.py	616	test-only	self.assertEqual(proxy.requests[0][0], "http://images.example/a.png")
+serve/tests/test_image_sources.py	629	test-only	self.assertReadIt(self.chat(f"http://localhost:{web.port}/a.png"))
+serve/tests/test_image_sources.py	637	test-only	self.assertReadIt(self.chat(f"http://{addresses[0]}:{web.port}/a.png"))
+serve/tests/test_image_sources.py	650	test-only	self.assertIn("could not be read", self.chat("http://127.0.0.1:1/a.png")[1])
+serve/tests/test_image_sources.py	651	test-only	self.assertIn("an image must be", self.chat("ftp://127.0.0.1/a.png")[1])
+serve/tests/test_image_sources.py	669	test-only	self.send_header("Location", "http://169.254.169.254/latest/meta-data/")
+serve/tests/test_image_sources.py	774	test-only	for bad in ("", "*", "*.example.com", ".example.com", "https://a.example", "a.example/x", "a.example:http",
+serve/tests/test_image_sources.py	787	test-only	for url in ("http://169.254.169.254/latest/meta-data/", "http://[fd00:ec2::254]/", "http://127.0.0.1:8080/",
+serve/tests/test_image_sources.py	788	test-only	"https://images.example/a.png"):
+serve/tests/test_image_sources.py	792	test-only	for url in ("http://images.example.evil.test/", "http://evil.test/images.example", "http://sub.images.example/",
+serve/tests/test_image_sources.py	793	test-only	"http://images.example./", "http://images.example:8080/", "https://images.example:8443/",
+serve/tests/test_image_sources.py	794	test-only	"http://images.example@evil.test/", "http://evil.test#@images.example/",
+serve/tests/test_image_sources.py	795	test-only	"http://evil.test?@images.example/", "http://images.example:80@evil.test/",
+serve/tests/test_image_sources.py	796	test-only	"http://user:pw@images.example/", "http://evil.test\\@images.example/",
+serve/tests/test_image_sources.py	797	test-only	"http://images.example\\.evil.test/", "http://images.exam\tple/", "http://images.example\r\nX: y/",
+serve/tests/test_image_sources.py	798	test-only	"http://images.example/ x", "http://[::ffff:127.0.0.1]/", "http://2130706433/", "http://0x7f.1/",
+serve/tests/test_image_sources.py	799	test-only	"http://127.1/", "http://0177.0.0.1/", "http://images.example:99999/", "http://\u0456mages.example/"):
+serve/tests/test_image_sources.py	810	test-only	self.refused_before_any_lookup(f"http://[::ffff:127.0.0.1]:{web.port}/a.png", (f"127.0.0.1:{web.port}",))
+serve/tests/test_image_sources.py	813	test-only	for url in ("http://@images.example/", "http://:@images.example/", "http:///images.example/", "http://",
+serve/tests/test_image_sources.py	814	test-only	"http:// images.example/", "http://images.example%2f.evil.test/", "http://images%2eexample/",
+serve/tests/test_image_sources.py	815	test-only	"http://[images.example]/", "http://[::1", "http://images.example:80:80/",
+serve/tests/test_image_sources.py	816	test-only	"http://images.example:-1/", "http://images.example:0x50/", "http://%69mages.example/"):
+serve/tests/test_image_sources.py	821	test-only	for source in ("ftp://images.example/a.png", "gopher://images.example/", "dict://images.example/",
+serve/tests/test_image_sources.py	842	test-only	load_image("http://images.example/a.png", remote(("images.example",)))
+serve/tests/test_image_sources.py	866	test-only	data = load_image(f"http://images.example:{web.port}/a.png", remote((f"images.example:{web.port}",)))
+serve/tests/test_image_sources.py	880	test-only	data = load_image(f"http://images.example:{checked.port}/a.png",
+serve/tests/test_image_sources.py	898	test-only	load_image("http://images.example/a.png", remote(("images.example",)))
+serve/tests/test_image_sources.py	915	test-only	load_image(f"http://images.example:{web.port}/a.png", remote((f"images.example:{web.port}",)))
+serve/tests/test_image_sources.py	919	test-only	with Web() as web, mock.patch.dict(os.environ, {"http_proxy": "http://127.0.0.1:1", "HTTP_PROXY": "http://127.0.0.1:1"}):
+serve/tests/test_image_sources.py	947	test-only	data = load_image(f"https://images.example:{web.port}/a.png", remote((f"images.example:{web.port}",)))
+serve/tests/test_image_sources.py	1002	test-only	load_image(f"http://127.0.0.1:{httpd.server_address[1]}/", allowed)
+serve/tests/test_image_sources.py	1312	test-only	load_image(f"http://127.0.0.1:{port}/x", allowed)
+serve/tests/test_image_sources.py	1331	test-only	load_image(f"https://127.0.0.1:{port}/x", allowed)
+serve/tests/test_image_sources.py	1362	test-only	load_image(f"http://127.0.0.1:{port}/x", allowed)
+serve/tests/test_image_sources.py	1418	test-only	with mock.patch.object(image_source.base64, "b64decode", side_effect=AssertionError("decoded")), \
+serve/tests/test_image_sources.py	1619	test-only	for source in (f"https://{self.SIGNED}", "https://images.example/private/a.png?sig=SIGSECRET"):
+serve/tests/test_image_sources.py	1648	test-only	f"http://u:SIGSECRET@127.0.0.1:{web.port}/nothing"):
+serve/tests/test_image_sources.py	1687	test-only	reply = self.chat("https://other.example/a.png")
+serve/tests/test_image_sources.py	1691	test-only	self.assertEqual(reply, self.chat("http://10.1.2.3:8000/x.png"))
+serve/tests/test_image_sources.py	1696	test-only	self.assertRefused(self.chat("https://other.example/a.png"), "needs --image-url-host HOST on the server")
+serve/tests/test_image_sources.py	1700	test-only	a = self.chat("http://10.1.2.3:8000/x.png")
+serve/tests/test_image_sources.py	1701	test-only	self.assertEqual(a, self.chat("https://images.example/a.png"))
+serve/tests/test_image_sources.py	1711	test-only	reply = self.chat("http://images.example/a.png")
+serve/tests/test_image_sources.py	1723	test-only	reply = self.chat("http://images.example/a.png")
+serve/tests/test_image_sources.py	1732	test-only	for source in (evil, "http://evil.test/\n[server] forged\x1b[31m", "file:///x\n[server] forged", "http://h\x1b[0m/"):
+serve/tests/test_image_sources.py	1758	test-only	for source in ("/x/\ud800.png", "http://images.example/\ud800", "file:///\ud800"):
+serve/tests/test_image_sources.py	1800	test-only	for words in (("--image-url-host", "https://a.example/x"), ("--image-url-host", "*.a.example"),
+serve/tests/test_lifecycle.py	104	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_lifecycle.py	162	test-only	"Origin": "https://other.example"})[0], 403)
+serve/tests/test_loading.py	70	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_loading.py	140	test-only	open_when_ready(self.svc, "http://x/", opener=opened.append)
+serve/tests/test_loading.py	147	test-only	self.assertEqual(opened, ["http://x/"])
+serve/tests/test_loading.py	151	test-only	open_when_ready(self.svc, "http://x/", opener=opened.append)
+serve/tests/test_loading.py	164	test-only	open_when_ready(self.svc, "http://x/", now=True, opener=opened.append)
+serve/tests/test_loading.py	165	test-only	self.assertEqual(opened, ["http://x/"])
+serve/tests/test_logit_bias.py	72	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_metrics.py	52	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_parallel.py	244	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_quiet_cancel.py	121	test-only	req = urllib.request.Request(f'http://127.0.0.1:{port}/v1/chat/completions', data=data,
+serve/tests/test_responses.py	272	test-only	code, r = self.post({"model": "qwen3.8-flash-next", "input": "hi"}, headers={"Origin": "https://evil.example.com"})
+serve/tests/test_security.py	40	test-only	self.assertEqual(allowed_hosts_of(["https://a.example.com:8443/x", ".example.org", "*", "box", "nas.lan"]),
+serve/tests/test_security.py	42	test-only	for bad in (["bad name"], 5, [3], "http://"):
+serve/tests/test_security.py	55	test-only	names = host_names_for("127.0.0.1", ["host.example.com", "*"], ["https://chat.example.net"])
+serve/tests/test_security.py	79	test-only	self.assertTrue(origin_allowed("http://127.0.0.1:8095", "127.0.0.1:8095", names))      # the server's own page
+serve/tests/test_security.py	80	test-only	self.assertTrue(origin_allowed("http://192.168.1.20:8095", "192.168.1.20:8095", names))  # ... by LAN IP
+serve/tests/test_security.py	81	test-only	self.assertTrue(origin_allowed("http://localhost:3000", "127.0.0.1:8095", names))      # a local app
+serve/tests/test_security.py	82	test-only	self.assertTrue(origin_allowed("http://[::1]:3000/", "127.0.0.1:8095", names))
+serve/tests/test_security.py	83	test-only	self.assertTrue(origin_allowed("https://box", "127.0.0.1:8095", names))
+serve/tests/test_security.py	84	test-only	self.assertTrue(origin_allowed("https://chat.example.com", "x", names, ["https://chat.example.com"]))
+serve/tests/test_security.py	85	test-only	self.assertTrue(origin_allowed("https://any.example.com", "x", names, ["*"]))           # cors_origins ["*"]
+serve/tests/test_security.py	92	test-only	for origin in ("http://evil.example.com", "http://1.2.3.4", "http://192.168.1.99:8095", "null", "",
+serve/tests/test_security.py	93	test-only	"http://localhost.evil.com", "https://box.evil.com", "://x"):
+serve/tests/test_security.py	94	test-only	self.assertFalse(origin_allowed(origin, "127.0.0.1:8095", names, ["https://chat.example.com"]), origin)
+serve/tests/test_security.py	192	test-only	self.start(trusted_origins=["https://host.example.com"])
+serve/tests/test_security.py	209	test-only	{"Content-Type": ctype, "Origin": "http://evil.example.com"})
+serve/tests/test_security.py	219	test-only	for origin in (f"http://127.0.0.1:{self.port}", "http://localhost:3000", "chrome-extension://abcdef"):
+serve/tests/test_security.py	224	test-only	{"Content-Type": "text/plain", "Origin": f"http://127.0.0.1:{self.port}"})[0], 415)
+serve/tests/test_security.py	227	test-only	self.start(cors_origins=["https://chat.example.com"], trusted_origins=["https://host.example.com"],
+serve/tests/test_security.py	229	test-only	for origin in ("https://chat.example.com", "https://host.example.com", "http://webui.lan:3000"):
+serve/tests/test_security.py	235	test-only	headers = {"Content-Type": "text/plain", "Origin": "http://evil.example.com"}
+serve/tests/test_security.py	273	test-only	"Origin": "http://evil.example.com"})[0], 403, path)
+serve/tests/test_security.py	276	test-only	"Origin": f"http://127.0.0.1:{self.port}"})[0], 200)
+serve/tests/test_server.py	51	test-only	cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+serve/tests/test_server.py	195	test-only	cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+serve/tests/test_server.py	530	test-only	cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+serve/tests/test_server.py	724	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}/status"
+serve/tests/test_server.py	804	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_server.py	887	test-only	cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+serve/tests/test_server.py	1125	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_server.py	1363	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_server.py	1399	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_server.py	1442	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_server.py	2004	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_server.py	2034	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_server.py	2236	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_server.py	2263	test-only	cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+serve/tests/test_server.py	2283	test-only	code, _ = self.req("/load", {}, {"Origin": "http://evil.example"})
+serve/tests/test_server.py	2286	test-only	code, _ = self.req("/load", {}, {"Origin": "http://" + host})
+serve/tests/test_server.py	2302	test-only	code, _ = self.req("/load", {}, {"Origin": "https://proxy.example.com", **extra})
+serve/tests/test_server.py	2305	test-only	code, _ = self.req("/load", {}, {"Origin": "http://127.0.0.1:1"})
+serve/tests/test_server.py	2310	test-only	self.svc.trusted_origins = ["https://host.example.com"]
+serve/tests/test_server.py	2312	test-only	code, _ = self.req("/load", {}, {"Origin": "https://host.example.com"})
+serve/tests/test_server.py	2314	test-only	code, _ = self.req("/load", {}, {"Origin": "https://evil.example.com"})
+serve/tests/test_server.py	2329	test-only	cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+serve/tests/test_server.py	2489	test-only	cls.base = f"http://127.0.0.1:{cls.httpd.server_address[1]}"
+serve/tests/test_server.py	2511	test-only	def preflight(self, path, origin="https://chat.example.com"):
+serve/tests/test_server.py	2527	test-only	self.svc.cors_origins = ["https://chat.example.com"]
+serve/tests/test_server.py	2530	test-only	self.assertEqual((status, h.get("Access-Control-Allow-Origin")), (204, "https://chat.example.com"))
+serve/tests/test_server.py	2533	test-only	self.assertIsNone(self.preflight("/v1/chat/completions", "https://evil.example.com")[1]
+serve/tests/test_server.py	2537	test-only	req = urllib.request.Request(self.base + "/v1/models", headers={"Origin": "https://chat.example.com"})
+serve/tests/test_server.py	2539	test-only	self.assertEqual(r.headers.get("Access-Control-Allow-Origin"), "https://chat.example.com")
+serve/tests/test_server.py	2541	test-only	self.assertEqual(self.preflight("/v1/messages", "https://any.example.com")[1]
+serve/tests/test_server.py	2557	test-only	self.assertEqual(origins_of("https://a.example.com/", "k", False), ["https://a.example.com"])
+serve/tests/test_server.py	2558	test-only	self.assertEqual(origins_of(["*", "http://localhost:3000"], "k", True), ["*", "http://localhost:3000"])
+serve/tests/test_server.py	2559	test-only	for bad in ("*", "a.example.com", "https://a.example.com/path", "https://*.example.com", 5):
+serve/tests/test_server.py	2606	test-only	req = urllib.request.Request(f"http://127.0.0.1:{httpd.server_address[1]}/v1/chat/completions", data=data,
+serve/tests/test_server.py	2656	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_server.py	2812	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_server.py	3327	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_server.py	3343	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_server.py	3469	test-only	base = f"http://127.0.0.1:{httpd.server_address[1]}"
+serve/tests/test_sleep.py	60	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_stopping.py	24	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_structured.py	57	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_structured.py	108	test-only	remote = {"type": "object", "$ref": "https://other.example/schema"}
+serve/tests/test_tool_choice.py	98	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_tool_result_images.py	369	test-only	for source in (str(secret), secret.as_uri(), "http://169.254.169.254/latest/meta-data/"):
+serve/tests/test_vram.py	81	test-only	self.base = f"http://127.0.0.1:{self.httpd.server_address[1]}"
+serve/tests/test_vram.py	112	test-only	self.assertEqual(self.request("/v1/vram", {"reserve_mib": 1}, {"Origin": "https://other.example"})[0], 403)
+serve/web/fonts/OFL.txt	1	T10	Copyright 2024 The Geist Project Authors (https://github.com/vercel/geist-font)
+serve/web/fonts/OFL.txt	5	T10	https://openfontlicense.org
+serve/web/mark.svg	1	T10	<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Basalt">
+site/index.html	193	T10	const SVGNS = "http://www.w3.org/2000/svg";
+src/kernels/cpu/ggml/ggml_cpu_dots.c	4	T11	// 3cf03257f219afbe7334045ff7c6a06ac68c627d (https://github.com/ggml-org/llama.cpp), with the other instruction
+src/kernels/cpu/ggml/ggml_impl.h	27	T11	// ref: https://github.com/Maratyszcza/FP16
+src/kernels/cpu/ggml/ggml_quants.c	4	T11	// llama.cpp commit 3cf03257f219afbe7334045ff7c6a06ac68c627d (https://github.com/ggml-org/llama.cpp).
+src/platform/basalt.exe.manifest	10	T11	<activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+src/platform/basalt.exe.manifest	11	T11	<longPathAware xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">true</longPathAware>
+src/prefill/mmq/mma.cuh	3	T11	// 3cf03257f219afbe7334045ff7c6a06ac68c627d (https://github.com/ggml-org/llama.cpp), trimmed to the I-major int32
+src/prefill/mmq/mmq.cuh	4	T11	// llama.cpp commit 3cf03257f219afbe7334045ff7c6a06ac68c627d (https://github.com/ggml-org/llama.cpp),
+src/prefill/mmq/mmq.cuh	399	T11	// The mul_mat_q kernel implements "stream-k" work partitioning as described in https://arxiv.org/abs/2301.03598
+src/prefill/mmq/mmq_common.cuh	3	T11	// https://github.com/ggml-org/llama.cpp): the error and shared-memory helpers, fast integer division, vector copy,
+src/prefill/mmq/mmq_common.cuh	89	T11	// See https://gmplib.org/~tege/divcnst-pldi94.pdf figure 4.1.
+src/prefill/mmq/mmq_config.cuh	3	T11	// llama.cpp commit 3cf03257f219afbe7334045ff7c6a06ac68c627d (https://github.com/ggml-org/llama.cpp).
+src/prefill/mmq/mmq_load_tiles.cuh	3	T11	// llama.cpp commit 3cf03257f219afbe7334045ff7c6a06ac68c627d (https://github.com/ggml-org/llama.cpp),
+src/prefill/mmq/mmq_vec_dot.cuh	3	T11	// llama.cpp commit 3cf03257f219afbe7334045ff7c6a06ac68c627d (https://github.com/ggml-org/llama.cpp),
+src/prefill/mmq/quantize.cu	3	T11	// llama.cpp commit 3cf03257f219afbe7334045ff7c6a06ac68c627d (https://github.com/ggml-org/llama.cpp),
+src/prefill/mmq/quantize.cuh	2	T11	// llama.cpp commit 3cf03257f219afbe7334045ff7c6a06ac68c627d (https://github.com/ggml-org/llama.cpp),
+src/prefill/mmq/vecdotq.cuh	3	T11	// llama.cpp commit 3cf03257f219afbe7334045ff7c6a06ac68c627d (https://github.com/ggml-org/llama.cpp),
+src/vision/stb_image.h	1	T12	/* stb_image - v2.30 - public domain image loader - http://nothings.org/stb
+src/vision/stb_image.h	36	T12	http://gist.github.com/urraka/685d9a6340b26b830d49
+src/vision/stb_image.h	717	T12	// See https://github.com/nothings/stb/issues/81 for more information.
+src/vision/stb_image.h	6332	T12	// See http://softimage.wiki.softimage.com/index.php/INFO:_PIC_file_format
+src/vision/stb_image.h	6333	T12	// See http://ozviz.wasp.uwa.edu.au/~pbourke/dataformats/softimagepic/
+src/vision/stb_image.h	7485	T12	// PGM: http://netpbm.sourceforge.net/doc/pgm.html
+src/vision/stb_image.h	7486	T12	// PPM: http://netpbm.sourceforge.net/doc/ppm.html
+tests/program/grammar_batch_test.py	50	test-only	self.base = f"http://127.0.0.1:{self.port}"
+tests/program/grammar_llama_accept_test.cpp	903	test-only	// "{}", // NOTE: This string passes for this schema on https://www.jsonschemavalidator.net/ -- should it?
+tests/program/grammar_llama_accept_test.cpp	904	test-only	// "[]", // NOTE: This string passes for this schema on https://www.jsonschemavalidator.net/ -- should it?
+tests/program/grammar_llama_accept_test.cpp	906	test-only	//R"""(["2012-04-23","12345678-1234-1234-1234-1234567890ab"])""", // NOTE: This string passes for this schema on https://www.jsonschemavalidator.net/ -- should it?
+tests/program/grammar_llama_accept_test.cpp	907	test-only	//R"""({"foo": "bar"})""", // NOTE: This string passes for this schema on https://www.jsonschemavalidator.net/ -- should it?
+tests/program/grammar_llama_accept_test.cpp	1201	test-only	// Properties (from: https://json-schema.org/understanding-json-schema/reference/object#properties)
+tests/program/grammar_llama_accept_test.cpp	1261	test-only	// Properties (from: https://json-schema.org/understanding-json-schema/reference/object#properties)
+tests/program/grammar_llama_accept_test.cpp	1354	test-only	// NOTE: Example from https://json-schema.org/learn/getting-started-step-by-step#define-required-properties
+tests/program/grammar_llama_accept_test.cpp	1359	test-only	"$schema": "https://json-schema.org/draft/2020-12/schema",
+tests/program/grammar_llama_accept_test.cpp	1360	test-only	"$id": "https://example.com/product.schema.json",
+tests/program/grammar_llama_schema_test.cpp	1247	test-only	"mix of allOf, anyOf and $ref (similar to https://json.schemastore.org/tsconfig.json)",
+tools/convert/checkpoint.py	550	T4	kv[f"general.base_model.{i}.repo_url"] = f"https://huggingface.co/{b}"
+tools/convert/convert.py	350	T4	"Download them from https://huggingface.co/jesdga/Qwen3.8-Flash-Next-Basalt")
+tools/convert/mtp_fetch.py	31	T4	HF_ENDPOINT = (os.environ.get("HF_ENDPOINT") or "").strip().rstrip("/") or "https://huggingface.co"
+tools/convert/test_mtp_fetch.py	146	test-only	inv["repo"] = "https://huggingface.co/Qwen/Qwen3.8-Flash-Next/resolve/main/"
+tools/convert/test_mtp_fetch.py	167	test-only	with mock.patch.object(M, "REPO", "https://huggingface.co/Qwen/Qwen3.8-Flash-Next/resolve/main/"):
