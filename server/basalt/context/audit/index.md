@@ -68,6 +68,12 @@ forked from (`Niko1221/Strata`) were run here, gave confident answers, and were 
   have already queried: lazy-fetch makes our own objects look like shared ancestry.
 - **Do not** expect a merge-base. The two repos share **0** commit SHAs, have different roots, and
   `git log upstream/main..pin` runs and returns a plausible wrong answer instead of an error.
+- **REST metadata is not free of source.** `GET /repos/{repo}/pulls/{n}/files` embeds the **patch**
+  for every file in the PR, so a call made "just to check review status" downloads Tier-A source into
+  your context and off your reading-slice budget. Use `GET /pulls/{n}` (scalars only) plus
+  `merge_commit_sha`, then fetch blobs deliberately and count them. The 17 lines of
+  `src/platform/memory.cpp` this task charged itself for exactly that mistake:
+  [`wave0/t3-github-pr-metadata.txt`](wave0/t3-github-pr-metadata.txt) § 5.
 - **Sound method:** a pristine `git fetch --filter=tree:0 --no-tags origin <branch>` into scratch, the
   **promisor full-40-hex** probe (`cat-file -e <full-sha>^{commit}` → `upload-pack: not our ref`) and
   matching on the content key `(tree, author-date, committer-date, subject)`. **Never compare *commit* SHAs
@@ -92,7 +98,7 @@ forked from (`Niko1221/Strata`) were run here, gave confident answers, and were 
 | [`verdict.md`](verdict.md) | Channel matrix, depth table, three-sentence answer | T14 — not written |
 | [`scripts/ledger-grid.sh`](scripts/ledger-grid.sh) | The **only generator of coverage figures** here: derives every coverage figure from the TSVs and pins `ROWS`/`LOC`/tier/wave/binary counts. Exits 3 on any FAIL. | T1 |
 | [`scripts/t2-census.sh`](scripts/t2-census.sh) | The author census: blame attribution + history breadth per file, at a named pin, with the expected-row-count gate **inside** the producer and an `ERR_BYTES=0` assertion. `OK` certifies line accounting, **not** author identity. | T2 |
-| `wave<N>/` | **Raw command output. Paste it here, never into a tracker.** `wave0/` = T1 (`t1-ledger-grid.txt`, the `ledger-grid.sh` negative controls) **+ T2** (`t2-provenance.txt`, `t2-github-tree-paths.txt`, `t2-author-census.tsv`, `t2-boundary-authorship.txt` — **§ 6a is T3's zero-API pre-flight: run its two commands before opening any file**, `t2-lineage.txt` — **read `t2-lineage.txt` § 0 before re-running any upstream comparison**, `t2-gate-and-checks.txt`) | T1, T2 |
+| `wave<N>/` | **Raw command output. Paste it here, never into a tracker.** `wave0/` = T1 (`t1-ledger-grid.txt`, the `ledger-grid.sh` negative controls) **+ T2** (`t2-provenance.txt`, `t2-github-tree-paths.txt`, `t2-author-census.tsv`, `t2-boundary-authorship.txt` — **§ 6a is T3's zero-API pre-flight: run its two commands before opening any file**, `t3-github-pr-metadata.txt` — **U11's answer + the pin's own 212-second provenance**, `t3-ai-trailer-classes.txt` — **corrects § 10's trailer figures**, `t2-lineage.txt` — **read `t2-lineage.txt` § 0 before re-running any upstream comparison**, `t2-gate-and-checks.txt`) | T1, T2 |
 
 ## Coverage at T1 — nothing has been read
 

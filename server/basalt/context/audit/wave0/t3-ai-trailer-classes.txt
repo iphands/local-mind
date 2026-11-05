@@ -1,0 +1,303 @@
+Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.
+
+# T3 · AI co-authorship trailer **classes** — the published census under-counts by four tool families
+
+Asked by: the T2 sign-off review, which noted that PR #47 carries `Co-Authored-By: opencode` and
+that `t2-provenance.txt` § 10 tallies only Claude, human and Codex. A fourth class is now known to
+exist, so the published figures had to be re-derived rather than trusted. Nothing here was typed:
+every number below is emitted by the computation this file was generated from.
+
+## 1 · The published figures reproduce **exactly** under their own pattern
+
+The owner of these numbers is `t2-provenance.txt` § 10 (*What the corpus's own metadata says wrote*
+*), which states its pattern as:
+
+```text
+co-authored-by: (claude|openai|chatgpt|copilot)  |  claude-session:  |  generated-with: (claude|copilot)
+```
+
+```text
+COMMITS  published-pattern reproduced = 1881   (published: 1,881)   MATCH=True
+```
+
+So the arithmetic in § 10 was right. The defect is in the **net**, not the count — which matters,
+because it means § 10's careful caveats were all sound and only its denominator was narrow.
+
+## 2 · A wider net is a **strict superset**: nothing is lost, 26 commits are gained
+
+```text
+A  published pattern                           1881
+B  any Co-Authored-By naming a tool family     1907
+A|B corrected                                  1907 of 2194 = 86.9%   (published 85.7%)
+A\\B  published catches, wider net misses          0   <- 0 means B is a strict superset of A
+B\\A  wider net catches, published misses         26
+```
+
+`A\\B = 0` is the load-bearing line: the correction cannot be dismissed as a different measurement
+that trades one set of omissions for another. Every commit § 10 counted is still counted.
+
+## 3 · The mechanism: the alternation is anchored to the token **after the colon**
+
+```text
+True   Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+False  Co-Authored-By: Codex <noreply@openai.com>
+True   Co-Authored-By: OpenAI Codex <codex@openai.com>
+False  Co-Authored-By: codex <noreply@openai.com>
+```
+
+`Codex <noreply@openai.com>` is an OpenAI-family trailer that § 10's own family **fails to catch**,
+because the token immediately after the colon is `Codex`, not `openai`. Anchoring on the **domain**
+instead catches all four lines. So § 10 under-counts even the two families it set out to count.
+
+## 4 · What escaped, and which tool families the published taxonomy never named
+
+```text
+distinct COMMITS carrying each family (a commit may carry several; union = 1907)
+  Claude / Anthropic        1880
+  Codex / OpenAI              16
+  DeepSeek                     4
+  opencode                     3
+  Antigravity (Google)         2
+  Qwen-named                   2
+  Hermes orchestrator          1
+```
+
+Five families beyond Claude/Codex are present in this history — **DeepSeek, opencode, Antigravity,
+a Qwen-named co-author, and a 'Hermes orchestrator'** — none of which § 10's pattern could see.
+The 26-commit escape decomposes as:
+
+```text
+  +13  Codex <noreply@openai.com>                     08f6f4ff 12625bd4 18528fac
+  +3  opencode <noreply@opencode.ai>                 1fe89c92 5c48f59e 9a49e6b1
+  +3  DeepSeek Flash <noreply@deepseek.com>          260ffb98 3d9e4a01 864529b2
+  +2  Antigravity <noreply@google.com>               b1de13be f6ca037a
+  +2  Codex (gpt-6-astra-medium) <noreply@openai.com 5467b1a8 fb2f9831
+  +2  Swift 1.5 Qwen3.8-Flash-Next <UkisAI@users.nor 7d516ee0 9c45af8f
+  +1  Regina (Hermes orchestrator) <regina@teamzmart 5d28effb
+  --
+  TOTAL 26
+```
+
+## 5 · The paired **line** figures move too, and by more
+
+Denominator first, because I got it wrong once here: the 80 census files come from
+`t2-author-census.tsv` as **87 rows − 6 `BINARY_SKIPPED` − 1 vendored `stb_image.h`**. The status
+marker is in **field 13**, not field 8 (field 8 is a top-author name); filtering on field 8 yields
+86 files and a figure that is not comparable to § 10's. With the correct filter:
+
+```text
+census files               80   (published 80)
+blamed lines           20111   (published 20,111)  MATCH=True
+distinct blamed commits   367   (published 367)     MATCH=True
+AI-trailed lines     published-pattern 19035 = 94.6%   (published 19,035 / 94.6%)  MATCH=True
+AI-trailed lines     corrected         19682 = 97.9%
+blamed commits AI-trailed: published 329, corrected 342, of 367
+```
+
+The line share moves **more** than the commit share (+3.2 points against +1.2) because the escaped
+families sit on substantive commits, not on trivia. § 10's headline — that the censused first-party
+surface is overwhelmingly AI-trailed — is therefore **stronger** than published, not weaker.
+
+```text
+heaviest files under the corrected set:
+  serve/tests/test_image_sources.py               1853
+  CMakeLists.txt                                  1491
+  serve/engine/process.py                         1419
+  serve/service.py                                1337
+  src/platform/memory.cpp                          865
+```
+
+## 6 · Do the escaped families touch anything this audit reads?
+
+```text
+  1fe89c92  Co-Authored-By: opencode <noreply@opencode.ai>       include/basalt/core/conversation_cache.hpp, src/program/gene
+  5c48f59e  Co-Authored-By: opencode <noreply@opencode.ai>       src/core/conversation_cache_test.cpp
+  9a49e6b1  Co-Authored-By: opencode <noreply@opencode.ai>       docs/platforms.md, src/platform/memory.cpp, src/platform/mem
+  7d516ee0  Co-authored-by: Swift 1.5 Qwen3.8-Flash-Next <UkisAI include/basalt/core/expert_source.hpp, include/basalt/platfo
+  9c45af8f  Co-authored-by: Swift 1.5 Qwen3.8-Flash-Next <UkisAI src/program/generate.cpp
+  b1de13be  Co-authored-by: Antigravity <noreply@google.com>     CMakeLists.txt, docs/precision/index.md, include/basalt/kern
+  260ffb98  Co-Authored-By: DeepSeek Flash <noreply@deepseek.com CMakeLists.txt, src/kernels/cuda/dequant_s2.cu, tests/artifa
+```
+
+Two of the three `opencode` commits are unremarkable core/cache work, but the third is **`9a49e6b1`
+= PR #47**, which is the Tier-A `src/platform/memory.cpp` seam that § 6 row 4 sends the census to
+and that `t3-github-pr-metadata.txt` § 1 just resolved. And the Qwen-named co-author appears on
+`7d516ee0`, which touches `include/basalt/platform/direct_file.hpp` — read-order row 2's header.
+So the escaped classes are not a curiosity: they are the trailer signature on commits this census
+is already scheduled to read closely.
+
+## 7 · What this changes, and what it does not
+
+- **Changes:** the two published figures are corrected in place at their owner, § 10 of
+  `t2-provenance.txt`, and in the two places that restate them (`t2-lineage.txt`, the plan's
+  finding table). Corrected values: **1,907 of 2,194 (86.9 %)** and **19,682 of 20,111 lines
+  (97.9 %)**.
+- **Does not change:** the lineage finding — but the ancestor side had to be re-measured to be
+  allowed to say so, and that measurement is § 8 below. `3 of 5,637` was produced by the same
+  name-anchored pattern, so leaving it uncorrected while correcting ours would have compared a
+  repaired numerator against an unrepaired denominator on the *other* side of the contrast.
+- **Does not change:** any reading-priority ranking. Trailer class is disclosure, not authorship
+  (§ 10's own first limit), and § 10's limits survive this correction intact.
+- **Direction of the error is worth naming:** the published numbers **understated** the audit's own
+  headline finding. An under-count that flatters the conclusion is the class of error nobody
+  notices, because every downstream check agrees with it.
+
+## 8 · The ancestor corpus, measured with the **same** classifier
+
+Ours was wrong by +26; the same pattern produced `3 of 5,637` on the ancestor side of the lineage
+contrast, so that figure had to be re-derived before the contrast could be quoted at its corrected
+value. Run offline against the pristine `Niko1221/Strata` clone this audit already holds — **no
+network access**, reading local objects only.
+
+```bash
+git -C <strata-pristine-clone> log -z --format='%H%x00%B' refs/remotes/origin/main > bodies.bin
+# then the identical A / B computation used in § 1-2 above
+```
+
+```text
+STRATA COMMITS=5637            (published denominator 5,637)
+  published-pattern reproduced      3   MATCH=True   <- § 10's figure is exact for its pattern
+  domain-anchored                   8
+  A\B=0   B\A=5                    <- again a strict superset
+    added  Codex <noreply@openai.com>                      2
+    added  Codex (gpt-6-astra-medium) <noreply@openai.com> 2
+    added  Strata qwen3.8-flash-next-iq3_s <strata@local…> 1
+```
+
+**Corrected contrast, both sides on one classifier: ours 1,907 / 2,194 = 86.9 % against theirs
+8 / 5,637 = 0.14 %.** The finding is untouched in kind — a factor of ~600 in the same direction — and
+`U14` is closed the day it would have been opened. Two notes worth keeping. The escaped families on the ancestor side are the *same* families (`Codex`
+order-inverted, plus a Qwen-named co-author), which is evidence the two projects used overlapping
+tooling rather than evidence about anyone.
+
+### 8a · Per-record proof: the matched **field** and **substring** for every one of the 8
+
+A count that argues *upstream did disclose AI involvement* has to show which text was matched, or a
+single identity string sitting in the wrong field inflates it. Each of the eight is shown with the
+field it matched in and the substring that fired. **All eight matched inside a `Co-Authored-By:`
+trailer line** — none is an author/committer name or an email-domain coincidence — so the count is
+**8, not 7**; the Qwen-named one that most invites suspicion is a genuine trailer.
+
+```text
+field matched = the value of a Co-Authored-By: line, in every case
+substring     full SHA                                  commit subject
+
+Codex         08f8d591dabd64eb43716ec9a900f21777ca47e9   serve: add llama.cpp-compatible discovery endp
+                 line: Co-Authored-By: Codex (gpt-6-astra-medium) <noreply@openai.com>
+Copilot       12d6af092b4d39f48e0e2b19267b3bf603fccab3   Refactor architecture check for tuning compati   [in A]
+                 line: Co-Authored-By: Copilot Autofix powered by AI <175728472+Copilot@users.noreply…>
+qwen          3b2e14cc11ae2f7860d0ddda4559433d28887210   setup: the low-RAM and KV-streaming decisions
+                 line: Co-Authored-By: Strata qwen3.8-flash-next-iq3_s <strata@localhost>
+Copilot       86b283e1eb14db15d9db0bb1a6144dcadfc47a84   docs: record RTX 8000 existing runtime switch    [in A]
+                 line: Co-Authored-By: Copilot <223556219+Copilot@users.noreply.github.com>
+Codex         94329dd8014cc1b0013a1a95d93f7c7c328d7f47   prefill: use active QSA top-k bounds on Turing
+                 line: Co-Authored-By: Codex <noreply@openai.com>
+Codex         9c139846d598164f1385aebdd1f717849359b173   GPT6-CACHE-Salva un checkpoint opzionale vicin
+                 line: Co-Authored-By: Codex <noreply@openai.com>
+Codex         ba1c8099482ccd2cc6cc38c881a606bc0a1acd36   Show prefill speed alongside decode speed in d
+                 line: Co-Authored-By: Codex (gpt-6-astra-medium) <noreply@openai.com>
+Copilot       cfe6021eb2778f11cf968793756d583c4fdf7e7b   Update AMD HIP documentation for hipBLASLt 1.5   [in A]
+                 line: Co-Authored-By: Copilot Autofix powered by AI <175728472+Copilot@users.noreply…>
+```
+
+Three things fall out of the listing. The three the narrow pattern *did* catch are all **Copilot**,
+which is the one family name in § 10's alternation that appears as the first token — so the ancestor's
+published `3` was never a Codex count at all. The five escapes are **four `Codex` plus one `qwen`**.
+And their side's `Codex` trailers are the same two spellings as ours, including
+`Codex (gpt-6-astra-medium)`, which is the clearest single piece of evidence that the two histories
+were produced with overlapping tooling.
+
+**Control, because a substring match across a whole message body would be worthless:** a *body-wide*
+family search over this corpus returns **558** commits rather than **8** — 550 additions that are
+model names in subject lines and prose (`DeepSeek engine: …`, `Strata: Qwen3.8-Flash-Next on a 12-24 GB
+NVIDIA GPU`). Restricting to `Co-Authored-By:` lines is what makes the 8 mean anything, and it is the
+difference between a trailer census and a keyword grep. Per-commit, each of the eight has exactly
+**one** trailer line, so no commit is double-counted across families.
+
+### 8b · Making the ancestor measurement checkable without trusting this scratch store
+
+The clone in `/tmp` is scratch: it is not evidence and it can rot. So the measurement is stated with
+its full inputs, and a reader who re-fetches can confirm they landed on the same corpus before
+believing the `8`.
+
+```bash
+# exact fetch (public, unauthenticated, ~4 MiB)
+git init strata-pristine && cd strata-pristine
+git remote add origin https://github.com/Niko1221/Strata
+git fetch --filter=tree:0 origin main:refs/remotes/origin/main
+
+# the producer of this section
+git log -z --format='%H%x00%B' refs/remotes/origin/main > bodies.bin
+# then the identical A / B computation from sections 1-2 above (A = § 10's pattern, B = domain-anchored)
+```
+
+Composition of the store this was measured against, so a re-fetch can be verified as equivalent:
+
+```text
+ref           refs/remotes/origin/main
+tip           ffa80d73133ea5c548aefe57889a16e8085a938f   2026-11-02T23:37:27+01:00   Niko1221
+commits       5637                     <- reproduces § 10's published denominator exactly
+objects       6347 commit / 3131 tree / 0 blob           (partial clone: filter=tree:0, promisor=true)
+in-pack       13180 across 4 packs, 3.80 MiB
+```
+
+Two properties of that composition matter for reproducibility. The clone is **partial** (`tree:0`,
+promisor): blobs are fetched on demand, so `git log` over commit objects works offline but reading a
+*blob* would touch the network — which this measurement never does, it reads commit messages only.
+And **commit 6,347 against 5,637 reachable** is not a contradiction: the store holds objects from
+more than one fetch, and the count that matters is the reachable `rev-list --count`, which is 5,637.
+Given the tip and the reachable count matching, a reader who re-fetches and gets `A = 3` has the same
+corpus § 10 measured, and `B = 8` is then a one-line recomputation.
+
+## 9 · Derived comparisons: what the repair moves, and what it does not
+
+Correcting two rates is not the same as correcting every claim computed *from* them: a ratio of two
+rates moves non-linearly, so sweeping the figures alone cannot find it. Each derived claim was
+re-derived instead.
+
+```text
+whole-corpus asymmetry   published   85.734 % / 0.0532 % = 1,611x   (log10 3.21)
+                         corrected   86.919 % / 0.1419 % =   612x   (log10 2.79)   -> 2.63x narrower
+```
+
+**No text anywhere in `context/` states that ratio**, searched for `[N]×`, `× N`, `times`,
+`orders of magnitude`, `factor of`, `asymmetry`, `stark`, `disproportionate` across every prose file
+(the `×` hits are KV-slot arithmetic and file-mode histograms). So nothing to correct — and the ratio
+is recorded here rather than added elsewhere, because 612× is a *derived* figure that should be
+re-computed from the two rates at their owner rather than restated. "**Two orders of magnitude**"
+survives: 3.21 → 2.79 rounds to the same order of magnitude on both sides of the repair.
+
+The pair-level table that the lineage finding actually rests on (`t2-lineage.txt` § 5) was re-derived
+from scratch — **the two repositories joined across two separate object stores** by the
+`(tree, author-date, committer-date, subject)` key, which is an independent replication of a table
+T2 produced from one combined store:
+
+```text
+join          |ours|=2194  |theirs|=5637  duplicates 0 both sides  |A∩B|=844   MATCH=published 844
+
+trailer LINES across the 844 pairs      ours    theirs     published § 5
+  Claude / Anthropic                    1049        0      1,049 / 0        EXACT
+  Codex/OpenAI + Copilot                   4        4      3 / 3            +1 both sides (see note)
+  human Co-Authored-By                    21       21      22 / 22          -1 both sides (same note)
+  all trailer lines                     1074       25
+```
+
+*The `22/22` vs `21/21` and `3/3` vs `4/4` are one line on each side, the same line: one `Copilot
+Autofix` trailer that § 5's buckets count as human and this split counts as AI. Totals agree exactly
+(1,074 both ways), the discrepancy is symmetric, and it moves nothing.*
+
+```text
+pairs where OURS discloses AI and THEIRS does not    narrow net = 595      domain net = 595    UNCHANGED
+pairs where THEIRS discloses and ours does not           0                      0
+escaped-class trailer lines anywhere in the 844 pairs    ours = 0             theirs = 0
+```
+
+**That last row is why the lineage finding is untouched.** The 26-commit under-count lives entirely in
+**basalt-era, post-fork history that has no content twin upstream** — zero escaped-class trailers
+exist inside the shared corpus on either side, so the pair table could not have been inflated by the
+narrow pattern in the first place. `1,049 vs 0` reproduces exactly, and the asymmetry that
+`t2-lineage.txt` § 5 uses to rule out a cosmetic rebase survives the repair untouched.
+
+**One more derived claim checked and cleared:** the plan's calibration rule and `SERIES.md` cite the
+line share as a *ranking* argument ("97.9 % of the censused lines"), which is a restatement of a rate,
+not a ratio — corrected with the rates, nothing non-linear to chase.

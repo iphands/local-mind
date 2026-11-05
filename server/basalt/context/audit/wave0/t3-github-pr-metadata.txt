@@ -1,0 +1,608 @@
+Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.
+
+> **Answer, before any capture.** U11 — **PR #47 was not self-approved**: a fork PR
+> (`jeancmyk/basalt`, author id 229388648) with **`reviews = 0`**, **merged by the repo owner**
+> (`jesdga95`, id 778141); the owner's two requested tweaks were made in *issue* comments and
+> complied with by a **stacked** commit `178d8150`, not an amend. The two seam-**creating** commits
+> (`c487d17f`, `7e040829`) have **no PR association surviving in the current object graph** — filed
+> as a process observation, not an attribution flag; both are the owner's own. **Our pin is PR #242**:
+> fork author `polygizer` (id 2723985), `reviews = 0`, **created→merged in 212 seconds** — a scope
+> condition on the whole audit (§ 4). Base rate that defuses all of it: **0 of 14** sampled merged PRs
+> have any review (§ 2). Raw evidence for every field cited: **§ 8**.
+
+# T3 · GitHub PR metadata for the boundary-authorship seams (U11, and the pin's own provenance)
+
+Fetched: 2026-11-05T05:08:58Z   core quota before this block: 30/60   unauthenticated.
+**Mutable fields** (GitHub can change these under us): PR title/body, the 'login' string,
+the 'merged_by' identity, review state, comment bodies, PR state. **Immutable handles** are
+recorded beside every mutable value: the numeric user 'id' (survives a rename), 'head.sha',
+'merge_commit_sha', 'merged_at', and the raw 'sha256' of each response body. Re-run the
+commands below to re-derive; if a hash differs, the record below was true at the timestamp
+above and the world moved -- say which moved and re-date it.
+
+Repo remote: https://github.com/jesdga95/basalt.git
+Audited pin: dc047a77beeddf1e91234d983a91d6bf929e9619
+Local join commits: 9a49e6b1 (#47 landing), dc047a77 (#242 landing = the pin itself)
+
+## The exact requests
+
+```bash
+curl -s https://api.github.com/repos/jesdga95/basalt/pulls/47
+curl -s https://api.github.com/repos/jesdga95/basalt/pulls/47/reviews
+curl -s https://api.github.com/repos/jesdga95/basalt/pulls/47/files
+curl -s https://api.github.com/repos/jesdga95/basalt/issues/47/comments
+curl -s https://api.github.com/repos/jesdga95/basalt/pulls/242
+curl -s https://api.github.com/repos/jesdga95/basalt/pulls/242/reviews
+# full 40-hex SHAs, expanded locally from the abbreviated ones this task already uses:
+curl -s "https://api.github.com/repos/jesdga95/basalt/commits/$(git -C vendor/basalt rev-parse c487d17f)/pulls"
+curl -s "https://api.github.com/repos/jesdga95/basalt/commits/$(git -C vendor/basalt rev-parse 7e040829)/pulls"
+curl -s "https://api.github.com/repos/jesdga95/basalt/commits/$(git -C vendor/basalt rev-parse 9a49e6b1)/pulls"
+curl -s "https://api.github.com/repos/jesdga95/basalt/commits/$(git -C vendor/basalt rev-parse dc047a77)/pulls"
+curl -s "https://api.github.com/repos/jesdga95/basalt/pulls?state=all&per_page=60&sort=created&direction=desc"
+curl -s "https://api.github.com/users/jeancmyk"      ; curl -s "https://api.github.com/users/polygizer"
+curl -s "https://api.github.com/search/issues?q=repo:jesdga95/basalt+is:pr+author:jeancmyk&per_page=1"
+curl -s "https://api.github.com/search/issues?q=repo:jesdga95/basalt+is:pr+author:polygizer&per_page=1"
+```
+
+## Re-run of every request above, in this session, piped straight from the wire
+
+Each block is: the endpoint, the HTTP status, the sha256 of the **full** body, then a projection
+of named fields. The projection command is printed so the fields are re-derivable; the bodies
+themselves are hashed rather than committed (one is 22 KB and most of it is avatar URLs).
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/pulls/47
+  bytes=22671  sha256=91c64f2c69918d2fe8f0690bfc903315d7605e277698cd56e9809750f0bf989d
+  number            47
+  state             "closed"
+  title             "platform: set the working-set minimum as the hard limit, so the table can be locked"
+  merged            true
+  created_at        "2026-10-24T15:22:05Z"
+  merged_at         "2026-10-24T16:41:20Z"
+  closed_at         "2026-10-24T16:41:20Z"
+  commits           4
+  comments          2
+  review_comments   0
+  changed_files     3
+  additions         21
+  deletions         7
+  merge_commit_sha  "9a49e6b17c08e19eb9021a5f9880b18b8b271ecb"
+  user              {"login": "jeancmyk", "id": 229388648}
+  merged_by         {"login": "jesdga95", "id": 778141}
+  head              {"ref": "fix/windows-lock-quota", "sha": "178d8150404c2b4fbf08805c09fb470ef7cc994f", "repo": "jeancmyk/basalt"}
+  pr_id             4996631345
+```
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/pulls/47/reviews
+  bytes=5  sha256=2ba33ca0557f1bb5b7ba88d67f9d0093c7185a36ec51fe2b7bd9372d3e001d6d
+  ARRAY_LEN=0
+```
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/pulls/47/files
+  bytes=6189  sha256=f32cc82fc18676c95f21066287c38251132ab6106382ac55fa6def2f3d15fdfe
+  ARRAY_LEN=3
+```
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/issues/47/comments
+  bytes=4356  sha256=26fc7aca774dc1ab070d111327005a7e31f675a4befaff9b83f7b5e915c69237
+  ARRAY_LEN=2
+```
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/pulls/242
+  bytes=20832  sha256=3637b023c062f9f842dabcd4cfb447765a261c92f87382880d3c35df73bfe062
+  number            242
+  state             "closed"
+  title             "serve: read NVML from nvml.dll on Windows so /metrics reports the GPU"
+  merged            true
+  created_at        "2026-11-05T00:44:52Z"
+  merged_at         "2026-11-05T00:48:24Z"
+  closed_at         "2026-11-05T00:48:24Z"
+  commits           1
+  comments          0
+  review_comments   0
+  changed_files     1
+  additions         7
+  deletions         0
+  merge_commit_sha  "dc047a77beeddf1e91234d983a91d6bf929e9619"
+  user              {"login": "polygizer", "id": 2723985}
+  merged_by         {"login": "jesdga95", "id": 778141}
+  head              {"ref": "fix/telemetry-nvml", "sha": "cbdd11c6ad35a1de87e0ff2afec1183c8a57f87b", "repo": "polygizer/basalt"}
+  pr_id             5164069875
+```
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/pulls/242/reviews
+  bytes=5  sha256=2ba33ca0557f1bb5b7ba88d67f9d0093c7185a36ec51fe2b7bd9372d3e001d6d
+  ARRAY_LEN=0
+```
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/commits/c487d17f8c11909935fdd6e567efe99de6146f18/pulls
+  bytes=5  sha256=2ba33ca0557f1bb5b7ba88d67f9d0093c7185a36ec51fe2b7bd9372d3e001d6d
+  ARRAY_LEN=0
+```
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/commits/7e04082937c604edc5beafb09eeaa9e3df5bfbb5/pulls
+  bytes=5  sha256=2ba33ca0557f1bb5b7ba88d67f9d0093c7185a36ec51fe2b7bd9372d3e001d6d
+  ARRAY_LEN=0
+```
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/commits/9a49e6b17c08e19eb9021a5f9880b18b8b271ecb/pulls
+  bytes=22115  sha256=2913046023b76482948fe41af499ff70a4d99b0209e9f4aaf84eb1ccc38a85a1
+  ARRAY_LEN=1
+    pr: {'login': 'jeancmyk', 'id': 229388648} closed
+```
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/commits/dc047a77beeddf1e91234d983a91d6bf929e9619/pulls
+  bytes=20277  sha256=fac27ee318728fb79d48f156ff217a8861ad58b27e95edd8fa8b6263ff8f992b
+  ARRAY_LEN=1
+    pr: {'login': 'polygizer', 'id': 2723985} closed
+```
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/pulls?state=all&per_page=60&sort=created&direction=desc
+  bytes=1294682  sha256=20374c081e8e6e201fb211d11ec6e4fdfcede454a03c4043df032632e1ffba57
+  ARRAY_LEN=60
+    pr: {'login': 'pngen', 'id': 33773594} open
+    pr: {'login': 'polygizer', 'id': 2723985} open
+    pr: {'login': 'polygizer', 'id': 2723985} closed
+    pr: {'login': 'polygizer', 'id': 2723985} open
+    pr: {'login': 'cloudfinapps', 'id': 346098474} open
+    pr: {'login': 'f1zz1ec0ke', 'id': 220638765} open
+```
+
+```text
+GET https://api.github.com/users/jeancmyk
+  bytes=1312  sha256=5ec1eabb7f6432580599e7ef0187b3989633467c87bbcc768f9679f56e1a239a
+  created_at        "2025-08-29T19:42:50Z"
+  id                229388648
+  login             "jeancmyk"
+  type              "User"
+  site_admin        false
+```
+
+```text
+GET https://api.github.com/users/polygizer
+  bytes=1328  sha256=4e9b038a3f5f9e5a08065948dcdca316f0c2c9799d51aa79a91f1bec159b85e8
+  created_at        "2012-11-05T04:31:26Z"
+  id                2723985
+  login             "polygizer"
+  type              "User"
+  site_admin        false
+```
+
+```text
+GET https://api.github.com/search/issues?q=repo:jesdga95/basalt+is:pr+author:jeancmyk&per_page=1
+  bytes=6815  sha256=6b06845f0cb84ebdb6c39f0cfa0613697296922791933b3bfe1e7a8a62dc9f87
+  total_count       11
+```
+
+```text
+GET https://api.github.com/search/issues?q=repo:jesdga95/basalt+is:pr+author:polygizer&per_page=1
+  bytes=7356  sha256=4c7ed40ff648f13ec3aebb49445c1c3a7f54b22fe5bfc599171c5d98ed65b88c
+  total_count       3
+```
+
+
+> **Projection labels corrected after capture, by me, and disclosed here rather than silently.**
+> My projection helper printed `review:` for array items from `/pulls?state=all` and from
+> `commits/<sha>/pulls`, but those endpoints return **pull-request** objects, not reviews. Left as
+> printed, a line reading `review: jeancmyk closed` would have sat two lines below
+> `pulls/47/reviews ARRAY_LEN=0` and read as evidence that a review exists. The wire bodies are
+> unaffected and the `sha256` above is the anchor for each; only my formatting string changed. A
+> PR-level `id` is now written `pr_id` so it cannot be confused with the numeric **user** id.
+
+## 1 · U11 — the plan's self-approval hypothesis is refuted, and the surviving finding is different
+
+The tracker carried U11 as "was PR #47 self-approved?". It was not.
+
+| field | value |
+|---|---|
+| author | `jeancmyk` (numeric id **229388648**) |
+| head | `jeancmyk/basalt:fix/windows-lock-quota`, `head.sha 178d8150404c2b4f…` |
+| merged by | `jesdga95` (numeric id **778141**) — the repo owner, not the author |
+| merged_at | `2026-10-24T16:41:20Z`; open→merge **4,755 s** |
+| join to our tree | `merge_commit_sha 9a49e6b17c08e19e…` == local `9a49e6b1` ✓ |
+| reviews | `ARRAY_LEN=0`; `requested_reviewers=[]`; `review_comments=0` |
+| files | 3: `docs/platforms.md` +4/−3, `src/platform/memory.cpp` +5/−4, `src/platform/memory_test.cpp` +12/−0 |
+
+What actually happened: a fork contributor's four-commit PR touched a **Tier-A platform seam**
+(`src/platform/memory.cpp`, read-order row 4) with **no formal review artifact**, and the owner merged
+it after two *issue* comments requesting comment tweaks. The contributor complied in `178d8150`,
+authored `2026-10-24T16:29:57Z` — **11 minutes after** the request, with parent `1f83746f`, i.e.
+**stacked on the existing three commits rather than amending them**. That is transaction data about
+the merge, taken from the already-fetched `/pulls/47/commits` array, not an inference.
+
+Two precision requirements on how this may be written elsewhere:
+
+1. `ARRAY_LEN=0` on `/reviews` plus an empty `requested_reviewers` proves **no formal review
+   artifact exists**. It does **not** prove nobody looked: the two issue comments, where the owner
+   named two specific tweaks and the contributor made them, are **affirmative evidence of owner
+   attention**. Write "no formal review", never "unreviewed".
+2. The contributor is **not a drive-by stranger**: 11 PRs filed in this repository
+   (`search … author:jeancmyk → total_count=11`), account created `2025-08-29`. What the U11
+   criterion actually matched is the *file's* history (24 commits, 2 by this outsider), not a
+   one-PR account.
+
+## 2 · Base rate — zero reviews is repo-wide practice, so it discriminates about nothing
+
+| measurement | value | producer |
+|---|---|---|
+| sampled merged PRs with **any** review | **0 of 14** | `/pulls/N/reviews`, #164 #167 #168 #169 #173 #180 #181 #194 #198 #202 #204 #208 #215 #242 |
+| history carrying any PR suffix at all | 178 / 2,194 = **8.1 %** | § 6a command 2, `t2-boundary-authorship.txt` |
+
+The 14 were spread across the 60 newest PRs, not drawn from all 242 (unauthenticated listing returns
+one page of 60; a full-corpus sweep is a follow-up, not this record). **Consequence:** "no formal
+review artifact" carries almost **no** discriminating weight for any individual PR in this repository.
+It raises the value of reading the source line by line, and it is not evidence about a contributor.
+Anyone tempted to read PR #47's zero reviews as suspicious has to explain 14 of 14 zeros first.
+
+## 3 · The two "no PR" seam creators — a process observation, deliberately **not** an attribution flag
+
+`c487d17f8c11909935fdd6e567efe99de6146f18` created `serve/engine/image_source.py` (the audit's only
+outbound channel). `7e04082937c604edc5beafb09eeaa9e3df5bfbb5` created `src/platform/dynlib.cpp` (the
+`dlopen` boundary). Premise checks, before any claim: both **HTTP 200** on the remote, both
+**ancestors of `origin/main`**, both **post-fork** (2026-11-03 and 2026-10-18 against the cut
+2026-10-05T00:00:00Z), each the **only commit ever to touch its file**, and both authored by
+**Jesus Gulfo — the repo owner**.
+
+`commits/<sha>/pulls → []` means **no PR association survives in the current object graph**. It is
+**not** equivalent to "never reviewed": GitHub derives that association from merge lineage, and this
+audit has already established that a history rewrite of exactly this commit family happened upstream
+(`t2-lineage.txt` § 5). A `filter-repo` run would sever PR association without erasing any review
+that had occurred. The claim is scoped to what the API can see.
+
+Filed as **process observation**, not an attribution flag: the two highest-consequence boundary
+files each have exactly one commit and no surviving review linkage. The consequence is about *our*
+reading depth — both go to the census and to T8 with no revision history to diff against — and
+nothing at all about concealment, which the 8.1 % base rate already rules out as a reading.
+
+## 4 · The pin's own provenance — a **scope condition on the whole audit**, not a finding
+
+| field | value |
+|---|---|
+| our pin `dc047a77` | = PR **#242**, `pr_id 5164069875` |
+| author | `polygizer` (numeric id **2723985**), account created **2012-11-05** |
+| PRs filed here by that author | **3** (`search total_count=3`) — a repeat contributor, 14-year account |
+| head | `polygizer/basalt:fix/telemetry-nvml`, `head.sha cbdd11c6ad35a1de…` |
+| merged by | `jesdga95` (id **778141**) |
+| created → merged | `2026-11-05T00:44:52Z` → `2026-11-05T00:48:24Z` = **212 seconds** |
+| size | 1 file, **+7 / −0**; reviews `ARRAY_LEN=0` |
+
+**Scope condition the eventual verdict must carry: every line T2–T14 reads arrives at a commit that
+reached `main` in 212 seconds with no formal review artifact.** Keep the number — "212 s" is the most
+legible fact in this record; do not soften it to "same-day". Equally, it must be carried *with* the
+adjacent fact: this was a 14-year-old account with three PRs in the repo, so a fast merge is
+consistent with a known contributor and is not, by itself, anomalous.
+
+**Priority, never a finding.** #242 changes what `/metrics` reports. That is why `/metrics` gets a
+**named boundary row inside the diagnostics-shaped outbound census section** (not a 19th section),
+and why the live `/metrics` instance is handed to **T6a** as a named lead with this SHA. An
+unreviewed fork PR touching a metrics endpoint makes `/metrics` worth more reading time; it does not
+make `/metrics` a finding.
+
+## 5 · Charges against the reading-slice cap, self-caught
+
+- **Already fetched, and it returned source.** `/pulls/47/files` embeds per-file patches. Body:
+  6,189 bytes, `sha256 f32cc82f…`, 3 files. Of its contents, **17 added / 7 removed lines are vendor
+  source**, and **two of the three files are Tier-A census files** (`src/platform/memory.cpp` +5/−4,
+  `src/platform/memory_test.cpp` +12/−0). I never printed the `patch` fields into this session — my
+  projection printed only status/filename/counts — but the bytes were downloaded to scratch by a call
+  I had logged as "metadata". Charged here so the census slice cap accounts for them.
+- **Deliberately *not* fetched.** `/pulls/242/files`. It would have returned the pin's own 7 added
+  lines as Tier-A source. The hunk waits for the census pass, where reading it is the assigned work
+  and gets counted. The point of recording this is that a pin's diff must not enter the audit through
+  a metadata call nobody costed.
+
+## 6 · A check of mine that failed open, caught before it was written down
+
+Aggregating over the `/pulls?state=all` response I first wrote `(p.get("comments") or 0) > 0` and
+printed "with issue comments>0: 0/15" alongside an empty `merged_by` map. Both are **false in
+direction**: the list endpoint does not return `comments`, `review_comments` or `merged_by` at all
+(verified: `present=False` for all three), so `or 0` converted three **absent** fields into three
+confident zeros — and a zero is what reads as a result. Only the **0-of-14** review tally survives,
+because it comes from the dedicated `/pulls/N/reviews` endpoint rather than a list projection. The
+same trap in a different costume as pitfalls item 15: absence scored as a value.
+
+## 7 · Environment note on the § 6a reproduction
+
+Both § 6a commands were run from a scratch working directory with `context` and `vendor` **symlinked**
+to this project's real directories, so every path in them resolved **through a symlink**. That is how
+the artifact's relative paths could be replayed verbatim without retyping them. The limit: a
+path-spelling or case-sensitivity bug that a real `server/basalt` cwd would surface could hide behind
+those links. Nothing here re-checks path spelling in the real cwd; the reproduction is of the
+published commands, in a mirrored-but-linked tree.
+
+---
+
+## 8 · Raw evidence for the conclusion-bearing endpoints (appendix, added after the first review)
+
+Every number in sections 1-4 was read out of a **projection** - a script printing selected fields. A
+projection you cannot inspect is a claim about bytes you cannot see, and a sha256 of a body that is
+not in this file proves nothing to a reader who cannot re-project it. So the endpoints carrying
+conclusions are pasted here as **canonical `jq -S` subsets of the exact bytes that produced the
+hashes in the capture blocks above**, recovered from saved response bodies and re-verified
+byte-identical against their capture block before pasting (15 of 15 matched). **No request was
+re-sent to produce this appendix**, deliberately: a fresh capture of mutable fields could legitimately
+differ from what sections 1-4 assert, and re-hashing would have quietly substituted a second,
+different observation for the evidence.
+
+Two hashes per block: the **wire anchor** (sha256 of the full raw body, the value the capture block
+above publishes) and the **paste check** (sha256 of the fenced text below it, so a later edit of this
+appendix is detectable). The limit, plainly: the paste check shows this text has not been edited
+since it was produced; it does **not** let you re-derive a subset from the wire without the raw body.
+The reproducible path is to re-run the commands in "The exact requests" and compare the **mutable**
+fields against the table in section 1.
+
+*(One instrument slip, recorded: the first generation of these paste checks hashed jq's stdout*
+*including its trailing newline, i.e. one byte more than the fenced text, so all nine failed their own*
+*verification. Recomputed against the file as written, 9 of 9 now re-hash. Caught before commit; the*
+*wire anchors were never affected.)*
+
+**One caveat the hashes would otherwise hide:** four distinct endpoints - `pulls/47/reviews`,
+`pulls/242/reviews`, `commits/c487d17f…/pulls`, `commits/7e040829…/pulls` - returned the
+**byte-identical** 5-byte body, so they share one wire anchor (`2ba33ca0…1d6d`). That hash proves
+*these four responses are identical to each other*, not that any one came from a named endpoint; the
+endpoint label plus the fetch timestamp is what anchors provenance. Their bytes are pasted once, at
+the end of this section.
+
+**`merged_by: null` is an absent field, not a finding.** In the two `commits/<sha>/pulls` subsets
+below, `merged_by` and `login` come back null because that endpoint returns PR *list* items, which do
+not carry `merged_by` at all - the same absent-field trap as section 6. The merged-by identity in
+section 4 comes from `pulls/242`, where the field **is** present.
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/pulls/47
+  raw body: 22671 bytes   wire anchor sha256=91c64f2c69918d2fe8f0690bfc903315d7605e277698cd56e9809750f0bf989d
+  command:  jq -S '{number,state,title,merged,created_at,merged_at,closed_at,commits,comments,review_comments,changed_files,additions,deletions,merge_commit_sha,user:{login:.user.login,id:.user.id},merged_by:{login:.merged_by.login,id:.merged_by.id},head:{ref:.head.ref,sha:.head.sha,repo:.head.repo.full_name},base:{ref:.base.ref,sha:.base.sha,repo:.base.repo.full_name},requested_reviewers:[.requested_reviewers[]?|.login]}'
+```
+```json
+{
+  "additions": 21,
+  "base": {
+    "ref": "main",
+    "repo": "jesdga95/basalt",
+    "sha": "095528e342ec4c5ff54bf05b1cc8c4417ec5a701"
+  },
+  "changed_files": 3,
+  "closed_at": "2026-10-24T16:41:20Z",
+  "comments": 2,
+  "commits": 4,
+  "created_at": "2026-10-24T15:22:05Z",
+  "deletions": 7,
+  "head": {
+    "ref": "fix/windows-lock-quota",
+    "repo": "jeancmyk/basalt",
+    "sha": "178d8150404c2b4fbf08805c09fb470ef7cc994f"
+  },
+  "merge_commit_sha": "9a49e6b17c08e19eb9021a5f9880b18b8b271ecb",
+  "merged": true,
+  "merged_at": "2026-10-24T16:41:20Z",
+  "merged_by": {
+    "id": 778141,
+    "login": "jesdga95"
+  },
+  "number": 47,
+  "requested_reviewers": [],
+  "review_comments": 0,
+  "state": "closed",
+  "title": "platform: set the working-set minimum as the hard limit, so the table can be locked",
+  "user": {
+    "id": 229388648,
+    "login": "jeancmyk"
+  }
+}
+```
+    paste check sha256=efd877e2412f6ce08cb686550dc87acb2d299eaf267fe9b0b5decbd5c0da853d
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/pulls/47/commits
+  raw body: 9647 bytes   wire anchor sha256=1ede6b6b450055fea14897bb1e1c66482259073de0b48cbba74e11357125f806
+  command:  jq -S '[.[]|{sha,author_date:.commit.author.date,committer_date:.commit.committer.date,author_name:.commit.author.name,parents:[.parents[]|.sha]}]'
+```
+```json
+[
+  {
+    "author_date": "2026-10-24T15:12:27Z",
+    "author_name": "jeancmyk",
+    "committer_date": "2026-10-24T15:12:27Z",
+    "parents": [
+      "3d48edbca395db1e1b67195b5656ca2de80d3745"
+    ],
+    "sha": "0d3e3e20e5b14625317a7bf8587028d6f6ad37f5"
+  },
+  {
+    "author_date": "2026-10-24T15:12:39Z",
+    "author_name": "jeancmyk",
+    "committer_date": "2026-10-24T15:12:39Z",
+    "parents": [
+      "0d3e3e20e5b14625317a7bf8587028d6f6ad37f5"
+    ],
+    "sha": "8491442d66c03d76aa4fd0a2e8930437276e2eb1"
+  },
+  {
+    "author_date": "2026-10-24T15:20:19Z",
+    "author_name": "jeancmyk",
+    "committer_date": "2026-10-24T15:21:38Z",
+    "parents": [
+      "8491442d66c03d76aa4fd0a2e8930437276e2eb1"
+    ],
+    "sha": "1f83746f739a7f5ca5d92a0164926ce27ab288af"
+  },
+  {
+    "author_date": "2026-10-24T16:29:57Z",
+    "author_name": "jeancmyk",
+    "committer_date": "2026-10-24T16:29:57Z",
+    "parents": [
+      "1f83746f739a7f5ca5d92a0164926ce27ab288af"
+    ],
+    "sha": "178d8150404c2b4fbf08805c09fb470ef7cc994f"
+  }
+]
+```
+    paste check sha256=965a41aaae64a68bf752169e36a2c2ed474605b007bbd081f08ca35451f0496a
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/pulls/242
+  raw body: 20832 bytes   wire anchor sha256=3637b023c062f9f842dabcd4cfb447765a261c92f87382880d3c35df73bfe062
+  command:  jq -S '{number,state,title,merged,created_at,merged_at,closed_at,commits,comments,review_comments,changed_files,additions,deletions,merge_commit_sha,user:{login:.user.login,id:.user.id},merged_by:{login:.merged_by.login,id:.merged_by.id},head:{ref:.head.ref,sha:.head.sha,repo:.head.repo.full_name},base:{ref:.base.ref,sha:.base.sha,repo:.base.repo.full_name},requested_reviewers:[.requested_reviewers[]?|.login]}'
+```
+```json
+{
+  "additions": 7,
+  "base": {
+    "ref": "main",
+    "repo": "jesdga95/basalt",
+    "sha": "bbf2f5bb783adc5ffe5b49043f82c9399313bb46"
+  },
+  "changed_files": 1,
+  "closed_at": "2026-11-05T00:48:24Z",
+  "comments": 0,
+  "commits": 1,
+  "created_at": "2026-11-05T00:44:52Z",
+  "deletions": 0,
+  "head": {
+    "ref": "fix/telemetry-nvml",
+    "repo": "polygizer/basalt",
+    "sha": "cbdd11c6ad35a1de87e0ff2afec1183c8a57f87b"
+  },
+  "merge_commit_sha": "dc047a77beeddf1e91234d983a91d6bf929e9619",
+  "merged": true,
+  "merged_at": "2026-11-05T00:48:24Z",
+  "merged_by": {
+    "id": 778141,
+    "login": "jesdga95"
+  },
+  "number": 242,
+  "requested_reviewers": [],
+  "review_comments": 0,
+  "state": "closed",
+  "title": "serve: read NVML from nvml.dll on Windows so /metrics reports the GPU",
+  "user": {
+    "id": 2723985,
+    "login": "polygizer"
+  }
+}
+```
+    paste check sha256=864f935388cdeee4220d537852d8e90e7e24411c73b608fa1a4a1035d47ed9c4
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/commits/9a49e6b17c08e19eb9021a5f9880b18b8b271ecb/pulls
+  raw body: 22115 bytes   wire anchor sha256=2913046023b76482948fe41af499ff70a4d99b0209e9f4aaf84eb1ccc38a85a1
+  command:  jq -S '[.[]|{number,state,merged_at,merge_commit_sha,merged_by:{login:.merged_by.login,id:.merged_by.id},title}]'
+```
+```json
+[
+  {
+    "merge_commit_sha": "9a49e6b17c08e19eb9021a5f9880b18b8b271ecb",
+    "merged_at": "2026-10-24T16:41:20Z",
+    "merged_by": {
+      "id": null,
+      "login": null
+    },
+    "number": 47,
+    "state": "closed",
+    "title": "platform: set the working-set minimum as the hard limit, so the table can be locked"
+  }
+]
+```
+    paste check sha256=0af5311166a3f0aab8f22ffb437c5d7f98b7a3822f6820520e617d552cd8928d
+
+```text
+GET https://api.github.com/repos/jesdga95/basalt/commits/dc047a77beeddf1e91234d983a91d6bf929e9619/pulls
+  raw body: 20277 bytes   wire anchor sha256=fac27ee318728fb79d48f156ff217a8861ad58b27e95edd8fa8b6263ff8f992b
+  command:  jq -S '[.[]|{number,state,merged_at,merge_commit_sha,merged_by:{login:.merged_by.login,id:.merged_by.id},title}]'
+```
+```json
+[
+  {
+    "merge_commit_sha": "dc047a77beeddf1e91234d983a91d6bf929e9619",
+    "merged_at": "2026-11-05T00:48:24Z",
+    "merged_by": {
+      "id": null,
+      "login": null
+    },
+    "number": 242,
+    "state": "closed",
+    "title": "serve: read NVML from nvml.dll on Windows so /metrics reports the GPU"
+  }
+]
+```
+    paste check sha256=c04482a91a52bc44f4b845e1ef5b1f5ed34fc8c510f4f5a91756759afa43a302
+
+```text
+GET https://api.github.com/users/jeancmyk
+  raw body: 1312 bytes   wire anchor sha256=5ec1eabb7f6432580599e7ef0187b3989633467c87bbcc768f9679f56e1a239a
+  command:  jq -S '{login,id,type,created_at,site_admin}'
+```
+```json
+{
+  "created_at": "2025-08-29T19:42:50Z",
+  "id": 229388648,
+  "login": "jeancmyk",
+  "site_admin": false,
+  "type": "User"
+}
+```
+    paste check sha256=1b05bed27abbcce78dc1a98673207d3350fd605de59c625eccbb5e92d8569216
+
+```text
+GET https://api.github.com/users/polygizer
+  raw body: 1328 bytes   wire anchor sha256=4e9b038a3f5f9e5a08065948dcdca316f0c2c9799d51aa79a91f1bec159b85e8
+  command:  jq -S '{login,id,type,created_at,site_admin}'
+```
+```json
+{
+  "created_at": "2012-11-05T04:31:26Z",
+  "id": 2723985,
+  "login": "polygizer",
+  "site_admin": false,
+  "type": "User"
+}
+```
+    paste check sha256=874bb212e49d0849f749ea47b958c4f4243796ce7c3abe68c780396cfeae7303
+
+```text
+GET https://api.github.com/search/issues?q=repo:jesdga95/basalt+is:pr+author:jeancmyk&per_page=1
+  raw body: 6815 bytes   wire anchor sha256=6b06845f0cb84ebdb6c39f0cfa0613697296922791933b3bfe1e7a8a62dc9f87
+  command:  jq -S '{total_count}'
+```
+```json
+{
+  "total_count": 11
+}
+```
+    paste check sha256=45a7de1d781587e84e70c8605e6856a55e11d4c3c6747ee115a673ef35913172
+
+```text
+GET https://api.github.com/search/issues?q=repo:jesdga95/basalt+is:pr+author:polygizer&per_page=1
+  raw body: 7356 bytes   wire anchor sha256=4c7ed40ff648f13ec3aebb49445c1c3a7f54b22fe5bfc599171c5d98ed65b88c
+  command:  jq -S '{total_count}'
+```
+```json
+{
+  "total_count": 3
+}
+```
+    paste check sha256=4ebfbca17d04a9df8d280baeda8b11bc89a716fa483ece7374f17cb09b774d5c
+
+```text
+GET  repos/jesdga95/basalt/pulls/47/reviews
+GET  repos/jesdga95/basalt/pulls/242/reviews
+GET  repos/jesdga95/basalt/commits/c487d17f8c11909935fdd6e567efe99de6146f18/pulls
+GET  repos/jesdga95/basalt/commits/7e04082937c604edc5beafb09eeaa9e3df5bfbb5/pulls
+  all four: 5 bytes, identical body   wire anchor sha256=2ba33ca0557f1bb5b7ba88d67f9d0093c7185a36ec51fe2b7bd9372d3e001d6d
+  exact bytes, od -An -c:  [  \n  \n   ]  \n
+  -> an empty JSON array: zero review artifacts, and no PR association survives on the two seam commits.
+```
+    paste check sha256=2ba33ca0557f1bb5b7ba88d67f9d0093c7185a36ec51fe2b7bd9372d3e001d6d
+    (this paste check hashes the **5 response bytes themselves**, not the od text above it, so it
+     equals the wire anchor by construction: the block shows the entire body, nothing is projected.)
+

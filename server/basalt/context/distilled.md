@@ -222,13 +222,13 @@ Command-level traps: `pitfalls.md` § *Cross-repo git forensics*.
 - The fork's own metadata is intact: 0 files under `src/`, `include/` or `cmake/` mention Strata, so
   lineage is invisible in the build and visible only in git.
 
-## In this history, 71 % of pre-fork commits and 95 % of basalt-era commits self-declare AI co-authorship — disclosure, not authorship [LIVE 2026-11-05]
+## In this history, 71 % of pre-fork commits and 97 % of basalt-era commits self-declare AI co-authorship — disclosure, not authorship [LIVE 2026-11-05]
 
 **Read the qualifier before the numbers.** Basalt's own `AGENTS.md` **instructs** contributors to end each
 commit message with the co-author line their tool specifies, so these trailers are a **house convention**
 that records what the committer *claimed* about how the commit was made. A trailer is **disclosure, not
 authorship**: the defensible sentence is *"this history self-identifies as substantially AI co-authored"*.
-It is never a statement that AI wrote the code, and it is never a share of *code originality* — 94.6 % is a
+It is never a statement that AI wrote the code, and it is never a share of *code originality* — 97.9 % is a
 share of lines in 80 files under one blame pass, and code originality has no denominator here.
 
 Method: `git log -z --format='%H\t%B'` (NUL between records, tab inside them — the other form silently
@@ -242,19 +242,19 @@ the set is **census-derived, not tier-derived**, and its provenance is that file
 
 | Population (each row is a different denominator) | With an AI trailer | Share |
 |---|---|---|
-| Commits reachable from `dc047a77` (whole history) | 1,881 / 2,194 | 85.7 % |
-| … **pre-2026-10-05 UTC** — the inherited pre-fork line | 612 / 861 | **71.1 %** |
-| … **post-2026-10-05 UTC** — work in `jesdga95/basalt`'s own repo | 1,269 / 1,333 | **95.2 %** |
-| Blamed lines in the **80 first-party census files** (9 % of the 219,247 audited lines) | 19,035 / 20,111 | 94.6 % |
+| Commits reachable from `dc047a77` (whole history) | 1,907 / 2,194 | 86.9 % |
+| … **pre-2026-10-05 UTC** — the inherited pre-fork line | 615 / 861 | **71.4 %** |
+| … **post-2026-10-05 UTC** — work in `jesdga95/basalt`'s own repo | 1,292 / 1,333 | **96.9 %** |
+| Blamed lines in the **80 first-party census files** (9 % of the 219,247 audited lines) | 19,682 / 20,111 | 97.9 % |
 | Distinct commits those blames credit | 329 / 367 | 89.6 % |
-| `Niko1221/Strata refs/remotes/origin/main`, as fetched 2026-11-05 | **3 / 5,637** | 0.05 % |
+| `Niko1221/Strata refs/remotes/origin/main`, as fetched 2026-11-05 | **8 / 5,637** | 0.14 % |
 
-- **The pre/post split is the point.** 85.7 % is a property of *inherited* history two-thirds of the way
-  through; the share inside basalt's own repository is **95.2 %**, and the ancestor's own pre-rewrite line
-  was already **71.1 %**. So this is not "basalt is 86 % AI-generated", and it is emphatically not "Strata
+- **The pre/post split is the point.** 86.9 % is a property of *inherited* history two-thirds of the way
+  through; the share inside basalt's own repository is **96.9 %**, and the ancestor's own pre-rewrite line
+  was already **71.4 %**. So this is not "basalt is 86 % AI-generated", and it is emphatically not "Strata
   was human-written".
 - **The last row is a trap, not a contrast.** That line was rewritten (next entry), so post-edit it is not
-  a disclosure record at all; the 3 remaining trailers were not individually characterised. Read it as
+  a disclosure record at all; the 8 remaining trailers were not individually characterised. Read it as
   *AI involvement established in our line, unresolved in theirs where the disclosure was removed.*
 - **Capability rank is unaffected** — a metadata finding has no capability dot; it is recorded for
   **evidential weight**. **Canonical figures, owned by** `audit/wave0/t2-provenance.txt` § 10 (it prints

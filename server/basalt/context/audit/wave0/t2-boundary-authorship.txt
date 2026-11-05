@@ -24,8 +24,10 @@ Two limits that apply to every number here:
 - Git author names and emails are **self-declared and spoofable**. 139 distinct names vs 144
   distinct emails over 2,194 commits: the two keys disagree, so neither is a person count, and the
   frequency tables below count *commits*, not contributors.
-- And a third limit T2 discovered after this page was first written: **85.7 % of the commits in this
-  history carry an AI co-authorship trailer** (1,881 of 2,194; 94.6 % of these very 20,111 lines).
+- And a third limit T2 discovered after this page was first written: **86.9 % of the commits in this
+  history carry an AI co-authorship trailer** (1,907 of 2,194; 97.9 % of these very 20,111 lines — the
+  owner of both figures is `t2-provenance.txt` § 10, which corrected them on 2026-11-05 after its first
+  pattern was found to miss five tool families; the values here are a restatement and may lag).
   An author field therefore records who committed and *claimed* how, not who typed. Read every
   concentration below as a statement about a **commits-and-claims aggregate**, never as one person's
   fingerprint — including § 2's, which may equally describe one human directing agents.
@@ -338,9 +340,10 @@ as **scratch-with-known-regeneration**, never as a retained artifact — the com
 `t2-author-census.tsv`, not the copy that reproduced it.
 
 
-1. **A calibration rule, written before there is any temptation to use it.** 94.6 % of the lines in the
-   80 first-party census files (19,035 of 20,111 — 9 % of the audited corpus, not all of it) sit under
-   commits that self-declare AI co-authorship, and inside basalt's own repository that share is 95.2 %.
+1. **A calibration rule, written before there is any temptation to use it.** 97.9 % of the lines in the
+   80 first-party census files (19,682 of 20,111 — 9 % of the audited corpus, not all of it; **canonical
+   figures, owned by** `t2-provenance.txt` § 10) sit under commits that self-declare AI co-authorship, and
+   inside basalt's own repository that share is 96.9 %.
    Which supplies a plausible innocent story for exactly the
    pattern T3's orphan-config-key section calls its highest-signal residue. So: **"AI residue" may
    never be the reason a row goes `benign`.** It may only be the reason a row is ranked *lower* after

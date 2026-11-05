@@ -151,8 +151,12 @@ On byte-identical content, the **only** trailer difference anywhere in the share
 absence of Claude attribution upstream. Human co-authorship and Codex co-authorship are preserved
 *exactly* (22/22, 3/3). That rules out a cosmetic rebase (which preserves all or changes all) and a
 DCO/sign-off sweep (which touches `Signed-off-by`): the edit is **specific to one tool's attribution**.
-Whole-repository trailer counts: **1,881 of our 2,194 commits** carry an AI co-authorship trailer;
-**3 of their 5,637** do.
+Whole-repository trailer counts: **1,907 of our 2,194 commits** carry an AI co-authorship trailer, against
+**8 of their 5,637** (0.14 %). **Canonical figures, owned by** `t2-provenance.txt` § 10; both sides were
+re-derived on one classifier, because this file's first pair of figures came from a pattern anchored to
+the token after the colon and so missed `Codex`, DeepSeek, opencode, Antigravity and two other families
+on *either* side (`t3-ai-trailer-classes.txt` re-derives ours, § 8 theirs, § 9 shows this table's pair
+counts are unaffected).
 
 Reading (inference, not observation): **the ancestor project rewrote its published mainline and the
 effect was to remove Claude co-authorship disclosure, then moved its release tags onto the rewritten
@@ -179,7 +183,9 @@ commit set. Comparator verified non-zero.
 
 ```text
 AUDITED_LINES                    = 20111
-LINES_UNDER_AI_TRAILED_COMMITS   = 19035   (94.6 %)
+LINES_UNDER_AI_TRAILED_COMMITS   = 19035   (94.6 %)   # superseded 2026-11-05 by 19682 (97.9 %):
+    # § 10's narrow name-anchored pattern missed five tool families (t3-ai-trailer-classes.txt).
+    # The capture is kept as run; this inline note is the correction, not an edit of the bytes above.
 distinct commits blame credits   = 367      AI-trailed among them: 329  (89.6 %)
 heaviest: serve/tests/test_image_sources.py 1853 · serve/engine/process.py 1419
           CMakeLists.txt 1325 · serve/service.py 1302 · src/platform/memory.cpp 860

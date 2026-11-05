@@ -71,9 +71,10 @@
 | U8 | `.pth` / `sitecustomize.py` / `usercustomize.py` in the built image's venv. **Unreachable from the agent session** (docker); even whether an image for the pin exists is an owner-side fact. | the install-hook claim | Plan 03 / owner |
 | U9 | Did anything from the removed remote-expert tier (`97ff061`) survive as a **plumbed-but-sinkless** `host`/`port`/`url`/`token` key in the config schema or the GGUF/profile key space? | the highest-signal malice-residue check | T3 (census section) + T9 |
 | U10 | Does the server path call `stbi_set_flip_vertically_on_load`? (GHSL-2023-146 / CVE-2023-45662 is in `stbi__vertical_flip`.) | T5's format exposure list | T5 |
-| U11 | Was **basalt PR #47** (`9a49e6b1 … (#47)`, the outside-authored `src/platform/memory.cpp` work) self-approved, and did the seam-*creating* commits go through a PR at all or land by direct push? | a census of **review**, which outranks any blame plurality as a priority argument; public record in the audited repo | **T3 first action** on read-order items 1–4. Half of it is now **local** — `wave0/t2-boundary-authorship.txt` § 6a censuses the `(#<n>)` subject suffix with no API (178/2,194; basalt-era 4.8 %, so *absence is the base rate and proves nothing*); only **self-approval** still needs the PR page. `9a49e6b1` = `(#47)` ✓, pin `dc047a77` = `(#242)`, `c487d17f` and `7e040829` carry no suffix |
+| U11 | **RESOLVED 2026-11-05, and inverted.** PR #47 was **not** self-approved: author `jeancmyk` (id 229388648) from fork `jeancmyk/basalt`, **merged by `jesdga95` (id 778141)**, **no formal review artifact** (`/reviews` len 0, `requested_reviewers=[]`), owner requested two comment tweaks in *issue* comments and the contributor complied in a stacked commit `178d8150` (11 min later, parent `1f83746f`, not an amend). The seam-*creating* commits `c487d17f` / `7e040829` have **no PR association surviving in the current object graph** — by the repo owner, post-fork, single-commit files; that is a **process observation, not an attribution flag**. Base rate that defuses both: **0 of 14** sampled merged PRs have any review, and only 8.1 % of history carries a PR suffix. Our own pin `dc047a77` is PR **#242**, fork author `polygizer` (14-year account, 3 PRs), **created→merged in 212 s**, reviews 0 — a **scope condition on the verdict**. Evidence: [`wave0/t3-github-pr-metadata.txt`](../audit/wave0/t3-github-pr-metadata.txt).
 | U12 | Are the *bytes* of the seven `basalt-line only` seam files original, or a squashed import from a rewritten ancestor? Commit absence proves neither way. | the only open question that could turn the lineage finding into a code-provenance one; needs blob-SHA and `git patch-id --stable` joins against `Niko1221/Strata`, not ancestry | **T2b** (registered in the plan) |
 | U13 | What is in `refs/remotes/origin/multimodel` — 105 commits ahead of the pin (merge-base `1b3f6964`), in no manifest row, no tier, unread? | the audit covers one ref at one commit; a second published branch is a scope hole, and T13's bump path runs through it | T13 at the next pin bump, or a scoped T11e if the owner wants it now |
+| U14 | **CLOSED 2026-11-05, the day it was opened.** `3 of 5,637` *was* a floor: measured with the domain-anchored classifier the ancestor carries **8 of 5,637 (0.14 %)** — their 3 reproduces exactly under the narrow pattern, `A\B=0` again a strict superset, and the 5 additions are the *same* escaped families (`Codex` order-inverted ×4, one Qwen-named co-author). Measured offline against the pristine `Niko1221/Strata` clone — **no network**. Producer: `wave0/t3-ai-trailer-classes.txt` § 8. | the lineage contrast, now **86.9 % vs 0.14 %** with both sides counted on one classifier | closed |
 
 ## Progress
 
@@ -520,6 +521,29 @@ violation and cannot be cited by a later plan.
   be refused. **T13 is the first such task**; there a `class none` row would be flatly wrong rather than merely
   uninformative, and condition (3)'s refusal is what should fire. Recorded now because T13 is task 18 of 19 and
   the tracker is what a reader has in front of them at T13, not T3's notes fifteen tasks early.
+
+- **2026-11-05, T3 — a published figure in this plan was an under-count, and the error flattered us.**
+  The AI co-authorship trailer census (`audit/wave0/t2-provenance.txt` § 10, restated in the plan's finding
+  table, in `t2-boundary-authorship.txt` and in `t2-lineage.txt`) reported **1,881 of 2,194** commits and
+  **19,035 of 20,111** blamed lines. Both figures **reproduce exactly** under the pattern § 10 states, so the
+  arithmetic was never wrong — the *net* was: its alternation is anchored to the token **immediately after the
+  colon**, so `Co-Authored-By: Codex <noreply@openai.com>` escapes while `OpenAI Codex <codex@openai.com>`
+  matches. Anchoring on the **domain** instead: **1,907 of 2,194 (86.9 %)** and **19,682 of 20,111 (97.9 %)**,
+  with `|published − wider| = 0` proving the wider set is a strict superset rather than a different
+  measurement. Five tool families were invisible to § 10 — **DeepSeek, opencode, Antigravity, a Qwen-named
+  co-author, a 'Hermes orchestrator'** — and one of the three `opencode` commits is `9a49e6b1`, i.e. **PR #47**,
+  the Tier-A `memory.cpp` seam § 6 row 4 sends the census to. Corrected at the owner and annotated forward
+  there rather than rewritten, since the original block is a capture; the restatements now cite § 10 instead of
+  repeating numbers (Rule E.7). **The ancestor's figure was re-measured the same day too**: `3 of 5,637` came
+  from the same narrow pattern and is really **8 of 5,637 (0.14 %)**, so the lineage contrast stands at 86.9 %
+  against 0.14 % with both sides finally counted alike — correcting our numerator while leaving their denominator
+  unrepaired would have been the subtler half of the same mistake (offline, against the pristine clone, no
+  network; `t3-ai-trailer-classes.txt` § 8, U14 closed on the day it opened). Two self-caught errors en route, both in my own
+  instruments: I filtered the 80-file blame denominator on TSV **field 8** (a top-author name) instead of
+  **field 13** (`BINARY_SKIPPED`) and got **86 files**, which would have been compared against § 10's 80 as if
+  equivalent; and an aggregation wrote `(p.get("comments") or 0) > 0` over an endpoint that does not return
+  `comments` at all, turning three absent fields into three confident zeros. Recorded as
+  `context/pitfalls.md` item 19.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every

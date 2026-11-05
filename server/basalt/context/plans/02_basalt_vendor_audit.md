@@ -80,6 +80,18 @@ row above. Steps 4–6 remain unrun for every T1 commit.
 - **Runtime observation** (strace/tcpdump/netns, keylogger probes, `strings`/`nm`/`readelf` on the built binary, venv hook files) — **Plan 03**, owner-run. See Risk 4.
 - The model pack's weight **bytes** (its loaders that parse them are in scope). Upstream commits after the pin. Anything reachable only through the CUDA driver or GPU we do not control.
 
+> **Scope condition on the verdict — this repository has single-reviewer provenance everywhere.**
+> Measured 2026-11-05: **0 of 14** sampled merged PRs carry any review artifact, only **8.1 %** of the
+> 2,194 commits carry a PR suffix at all, and our own pin reached `main` as a fork PR merged in
+> **212 seconds** with no review (`wave0/t3-github-pr-metadata.txt` §§ 2, 4). So "no formal review
+> artifact" is **not** a finding about any individual commit, file or contributor here and must not be
+> used as one; it is a property of how this repository is run, and it applies uniformly to every line
+> T3–T14 reads. The correct use is the inverse: because no review beyond one person's eyes stands
+> behind any of it, **the reading done in this plan is the only review these bytes will ever get**,
+> which raises the required depth rather than singling anything out. Do not soften the 212 s into
+> "same-day", and do not let a contributor's account age answer the process point — it answers the
+> *identity* point only.
+
 **Depth decision — owner-attributed** (2026-11-05; the owner asked for "file by file, line by line", was shown that blanket line-by-line over `src/`+`include/` is 40–70 focused sessions, and chose):
 
 > **Two-stage: boundary-first now, kernel sweep as a follow-up you can start later.**
@@ -182,7 +194,7 @@ Values are as measured; the **How confirmed** column states the method *and its 
 | Pin under audit | `dc047a77…` = `main` 2026-11-04; tree `3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4` | `git rev-parse HEAD HEAD^{tree}` 2026-11-05 |
 | **The pin = basalt's own `v0.2.1` + docs + `serve/`; the C++ engine is byte-identical to that tag** | 3 commits, 9 changed files, **0** under `src/`/`include/`/`cmake/`/`tools/`/`CMakeLists.txt`; engine blobs 553/553 shared, symmetric diff 0 | T2 2026-11-05, local `ls-tree` blob identity + `comm`; independently confirms Plan 01's row (GitHub `compare`), and a third method agrees (`v0.2.1..pin = 3` by local `rev-list` in the one-store probe, `audit/wave0/t2-lineage.txt` § 11b). **Consequence:** Plan 01's engine characterisation carries to this pin; the stalest read is `CMakeLists.txt` (287 commits) |
 | **The two upstream names are not comparable** | `jesdga95/basalt` and `Niko1221/Strata` share **0** commit SHAs, have **no merge-base**; 844 commits match on `(tree, author-date, committer-date, subject)`. Both publish `v0.1.0`/`v0.2.1` at **different** objects (Strata: 95 tags to `v0.2.10`) | T2 2026-11-05 vs a pristine `--filter=tree:0` fetch. **Never diff these repos by SHA**; unqualified `v0.2.1` in this repo means **basalt's**. `audit/wave0/t2-lineage.txt` |
-| **The audited history self-identifies as substantially AI co-authored** | 1,881 / 2,194 commits (85.7 %) carry an AI co-authorship trailer; **19,035 / 20,111** blamed lines (94.6 %); upstream's rewritten line shows 3 / 5,637 | `git log -z --format='%H\t%B'` + blame ∩ trailer set, T2 2026-11-05. **Disclosure, not authorship**; ranks nothing by itself; the upstream figure is **not** a human-written control (`audit/wave0/t2-provenance.txt` § 10) |
+| **The audited history self-identifies as substantially AI co-authored** | **1,907 / 2,194 commits (86.9 %)** carry an AI co-authorship trailer; **19,682 / 20,111** blamed lines (97.9 %); **Canonical figures, owned by** `wave0/t2-provenance.txt` § 10; evidence `wave0/t3-ai-trailer-classes.txt`; upstream's rewritten line shows **8 / 5,637** | `git log -z --format='%H\t%B'` + blame ∩ trailer set, T2 2026-11-05. **Disclosure, not authorship**; ranks nothing by itself; the upstream figure is **not** a human-written control (`audit/wave0/t2-provenance.txt` § 10) |
 | **Tier A is not all text, and the plan's T2 file list is not the manifest's** | the census is 87 rows = **80 blameable first-party** (69 `A-planned` + 11 `unassigned`) + 6 binary Tier A assets + 1 vendored `stb_image.h` (`B-vendored@T5`); the 12 census paths beyond the manifest's 75 Tier A are `CMakeLists.txt` + ten `serve/engine/` modules + `stb_image.h` | T2 2026-11-05. `CMakeLists.txt` and the ten `serve/engine/` modules are still **`unassigned` in the manifest** — they need a `File:` amendment to be owned, and until then **T11 owns zero `A-planned` rows** |
 | **The audited repo publishes a second, unaudited branch** | `refs/remotes/origin/multimodel`, 105 commits ahead of the pin (merge-base `1b3f6964`); clone object hygiene otherwise clean: 2,299 commit objects, present-but-unreachable **0** | T2 2026-11-05 `for-each-ref` + `cat-file --batch-all-objects` set-minus `rev-list`. Every "the whole repo is accounted for" claim must name its ref; goes to `verdict.md` conditions and T13 |
 | Working tree matches the commit | `git diff --quiet HEAD` → clean | 2026-11-05. **Limit:** run *without* `GIT_NO_LAZY_FETCH`, so it does not prove blobs were local — only that worktree == index == commit. T1 re-proves both under `GIT_NO_LAZY_FETCH=1`; `git cat-file -e` proves object *existence*, never that the working file matches it (only `git hash-object` does) |
@@ -418,7 +430,7 @@ was edited after the fork.
 
 **Three additions to this task's scope, handed over by T2** (`audit/wave0/t2-boundary-authorship.txt` § 6):
 
-1. **A calibration rule, written before there is any temptation to use it.** 94.6 % of the audited lines
+1. **A calibration rule, written before there is any temptation to use it.** 97.9 % of the censused lines
    sit under commits that self-declare AI co-authorship, which supplies a ready innocent story for
    exactly the pattern this task's orphan-config-key section calls its highest-signal residue. So:
    **"AI residue" may never be the reason a row goes `benign`.** It may only be the reason a row is

@@ -398,13 +398,43 @@ LINES  (git blame --line-porcelain over the 80 first-party censused files, blame
 
 The comparator was verified non-zero before being believed: `|AI-trailed ∩ blamed| = 329`.
 
+> **CORRECTED 2026-11-05 (T3) — this section is the owner of these figures, and its pattern was too
+> narrow.** The block above is left byte-identical: it is the capture, and rewriting it would assert
+> that a wider pattern ran on 2026-11-05 when it did not. What was wrong is the **classifier**, not the
+> arithmetic — every figure above reproduces *exactly* under the pattern as stated. That pattern anchors
+> its alternation to the token **immediately after the colon**, so `Co-Authored-By: Codex
+> <noreply@openai.com>` escapes even though `OpenAI Codex <codex@openai.com>` matches: the same family,
+> inverted order. Measured again with the family anchored on the **domain** instead
+> ([`t3-ai-trailer-classes.txt`](t3-ai-trailer-classes.txt), which carries the mechanism proof and the
+> per-family decomposition):
+>
+> ```text
+> COMMITS  1,907 of 2,194 = 86.9 %   (was 1,881 / 85.7 %; the wider set is a STRICT SUPERSET —
+>                                     |published minus wider| = 0, so nothing is lost, 26 are gained)
+>   pre-fork   615 of  861 = 71.4 %  (was 612 / 71.1 %)      PARTITION 861+1333=2194, unchanged
+>   basalt-era 1,292 of 1,333 = 96.9 % (was 1,269 / 95.2 %)  <- 23 of the 26 escapes are basalt-era
+> LINES    19,682 of 20,111 = 97.9 % (was 19,035 / 94.6 %; the 80-file denominator and the 367 blamed
+>                                     commits both re-verified unchanged)
+> ```
+>
+> Five tool families are present in this history that the pattern above could not see: **DeepSeek,
+> opencode, Antigravity, a Qwen-named co-author, and a 'Hermes orchestrator'**. The § 6a-era figures
+> restated in `t2-boundary-authorship.txt` and `t2-lineage.txt` and in the plan's finding table are
+> corrected to cite this section rather than restate it. **Two limits survive the correction:**
+> Both sides of the lineage contrast were then re-measured on one classifier:
+> **theirs = 8 of 5,637 (0.14 %)** — their published 3 reproducing exactly under the narrow pattern first
+> (`t3-ai-trailer-classes.txt` § 8; offline against the pristine clone, no network). A trailer is still
+> **disclosure, not authorship**: this changes counts, not the reading-priority ranking, and the lineage
+> finding's direction is untouched (86.9 % against 0.14 %). The error ran in the direction that *flattered*
+> this audit's own headline, which is the direction no downstream check ever catches.
+
 Two limits that bound what this can be used for, both load-bearing:
 
 1. **A trailer is disclosure, not authorship.** It records what the committer claimed about how the
    commit was made. The defensible sentence is *"the audited history self-identifies as substantially
-   AI co-authored"*, never "AI-authored the code". `85.7 %` is a share of commits, `94.6 %` a share of
-   blamed lines; neither is a share of *code originality*.
-2. **The upstream `3 of 5637` is not evidence that upstream is human-written.** That line of history
+   AI co-authored"*, never "AI-authored the code". `86.9 %` is a share of commits, `97.9 %` a share of
+   blamed lines (both the corrected values above); neither is a share of *code originality*.
+2. **The upstream `8 of 5637` is not evidence that upstream is human-written.** That line of history
    was rewritten, and the only measured delta of the rewrite is the removal of exactly this trailer
    family ([`t2-lineage.txt`](t2-lineage.txt) § 5: on 844 byte-identical commit pairs, Claude trailers
    1,049 ours vs 0 theirs, human co-authors 22 vs 22, Codex 3 vs 3). Post-edit, upstream's trailer

@@ -48,7 +48,7 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   declares itself forked from share **0** commit SHAs and have **no merge-base**, yet 844 commits match on
   content — two rewritten variants of one history, and the only measured difference between the identical
   pairs is that ours carry AI co-authorship trailers (1,049 vs 0) while every other trailer is preserved;
-  **94.6 %** of the audited lines sit under commits that self-declare AI co-authorship. Consequence for
+  **97.9 %** of the censused lines sit under commits that self-declare AI co-authorship. Consequence for
   every later task: **narrative history in this supply chain is editable and has been edited — trust hash
   pins, trees, blobs and patch-ids** (`context/audit/wave0/t2-lineage.txt`; `context/distilled.md`).
   **T2b** is registered for the one question T2 could not answer — whether the `src/platform/` seam's

@@ -460,8 +460,8 @@ and have no merge-base.** Full evidence, controls and four refuted hypotheses:
 - **The ancestor rewrote its published mainline, and the only measured delta is AI-attribution
   metadata.** Across those 844 byte-identical-content pairs: Claude trailers **1,049 ours / 0 theirs**,
   human co-authors **22 / 22**, Codex **3 / 3** — one tool's attribution removed, every other trailer
-  preserved exactly. Whole-repo: **1,881 of our 2,194 commits (85.7 %)** carry an AI co-authorship
-  trailer vs **3 of their 5,637**. Software Heritage's 2026-10-05 visit records **Strata's
+  preserved exactly. Whole-repo: **1,907 of our 2,194 commits (86.9 %)** carry an AI co-authorship
+  trailer vs **8 of their 5,637**. **Canonical figures, owned by** `wave0/t2-provenance.txt` § 10. Software Heritage's 2026-10-05 visit records **Strata's
   `refs/tags/v0.1.0` at our trailer-bearing root**, where today that tag is the trailer-free twin; and
   `jesdga95/basalt` was created `2026-10-06T22:17:02Z`, **after** that record, so the trailer-bearing
   line was the ancestor's published release before our fork's repository existed. **Motive is not

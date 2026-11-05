@@ -490,6 +490,54 @@ docker step looks like in this convention. Two variants of that are worth naming
     annotated in perpetuity; mistaking the second for the first is how an artifact accretes defensive prose until
     it buries its own payload.
 
+19. **A pattern anchored to the token after a delimiter silently misses order inversions — and an
+    under-count that flatters your own conclusion is invisible to every downstream check.**
+    [MEASURED 2026-11-05, T3] `audit/wave0/t2-provenance.txt` § 10 counted AI co-authorship trailers with
+    `co-authored-by: (claude|openai|chatgpt|copilot)` and published **1,881 of 2,194**. That figure
+    reproduces exactly, so nothing was miscalculated; what was wrong is that the alternation matches the
+    token **immediately after the colon**. `Co-Authored-By: OpenAI Codex <codex@openai.com>` matches.
+    `Co-Authored-By: Codex <noreply@openai.com>` — same family, order inverted — does not. Anchoring on
+    the **domain** instead of the name gives **1,907 (86.9 %)** and **19,682 of 20,111 lines (97.9 %)**
+    against the published 85.7 % / 94.6 %, and it exposed five tool families the pattern could never see
+    (DeepSeek, opencode, Antigravity, a Qwen-named co-author, a 'Hermes orchestrator'). The general
+    shape: whenever a classifier tests `key: (value|…)`, it is really testing *which word comes first*,
+    so **write the pattern against the field that identifies the thing** (the domain, the path, the
+    type) rather than the label a human happened to type first, and **run at least one order-inverted
+    sample through it before publishing a count**. Two corollaries. (a) Verify the subset relation, not
+    just the new number: computing `|old − new| = 0` is what proved the wider net was a strict superset
+    rather than a different measurement trading one omission set for another. (b) The direction of this
+    error *strengthened* this audit's own headline finding, which is precisely why it survived 11 commits
+    and a sign-off — a count that argues against you gets re-derived, and a count that argues for you
+    gets cited. So when a number agrees with your conclusion, re-derive the classifier, not the figure.
+20. **A default value in an aggregation silently manufactures evidence — an absent API field scored as
+    `0` reads exactly like a measured zero.** [MEASURED 2026-11-05, T3] Aggregating GitHub's
+    `/pulls?state=all` response, a check written as `(p.get("comments") or 0) > 0` printed
+    `with issue comments>0: 0/15` next to an empty `merged_by` map. Both looked like findings. They were
+    not: the **list** endpoint does not return `comments`, `review_comments` or `merged_by` at all
+    (verified with `key in obj` → `present=False` for all three), so `or 0` turned three *absent* fields
+    into three confident zeros — and a zero is precisely the thing that reads as a result. Same species
+    as item 15's phantom path, and the `merged_by: null` that reappeared later in the *same* task's
+    `commits/<sha>/pulls` output. Three defences, all cheap: (a) **test field presence, not just value**
+    — print `key in obj` for every field an aggregate reads, once, before believing any count built from
+    it; (b) prefer the **dedicated endpoint** over a list projection when the list omits the field
+    (`/pulls/N/reviews` is authoritative for review counts; the list is not); (c) when a field is absent,
+    write the sentence as "the endpoint does not report X", never as "X is 0" — the first is a fact about
+    an API, the second is a claim about the world. Corollary for **negative controls**: a control that
+    "fires" on an absent field proves nothing, because the default produced the expected answer without
+    any observation taking place.
+21. **Take a denominator from the producer's schema, not from a guess about which column means what.**
+    [MEASURED 2026-11-05, T3] To re-derive a published blame figure over "the 80 census files", the
+    filter was written against `t2-author-census.tsv` **field 8**, which turned out to hold a top-author
+    *name* (`Jesus Gulfo`); the status marker `BINARY_SKIPPED` lives in **field 13**. The filter returned
+    **86** files, and 86 is close enough to 80 that the resulting percentages would have been quoted
+    against § 10's 80 as if the populations matched. Two lessons. (a) **Print the column layout before
+    writing the filter** — `head -1 | awk '{for(i=1;i<=NF;i++) print i, $i}'` plus one known-special row
+    costs seconds and is the only thing that catches a wrong-but-plausible field index; a probe loop
+    that only checks fields 2-10 will report "nothing holds this marker" for a marker in field 13, which
+    is exactly what happened here. (b) **An error caught by unrelated luck still has to be recorded as an
+    error**: this one surfaced only because `git blame --line-porcelain` then hit a non-UTF-8 byte in a
+    binary and raised `UnicodeDecodeError`. Had that file been text, the 86-file denominator would have
+    gone into a table silently. Never treat a lucky crash as a passing check.
 ## How to avoid
 Never let absence-of-output or a trailing `rc` carry a verdict when a **number** can be printed:
 `| wc -l | sed 's/^/PREFIX_DRIFT_COUNT=/'`, `awk 'END{print "ROWS=" NR+0}'`, and assert the expected
