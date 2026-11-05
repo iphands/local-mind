@@ -330,6 +330,20 @@ violation and cannot be cited by a later plan.
   never fired (the injected path did not exist at the pin, so it exited at `MISSING_AT_PIN` first), and the
   published block printed an all-green `PATHS=0 MISSING=0 …` from an empty input, which is why it now refuses
   to report unless it read 10 rows.
+- **2026-11-05 · T2 review round three (the sign-off round) — no blockers from either reviewer; three small
+  durable changes.** (i) `RULES.md` **Rule E.7**: a project-wide rule has one **owner file**; other files cite
+  it plus the consequence for their own reader rather than restating the prohibition, because a shortened
+  restatement loses its qualifier and **an over-broad ban suppresses work instead of corrupting it** — it
+  makes a later task skip a required check, so it fires no control and never self-reports. That asymmetry is
+  why two of three copies of the SHA-comparison rule survived until a phrase grep. (ii) `audit/index.md` §
+  *Where things live* now points at **§ 6a as T3's zero-API pre-flight**, per hoodie's placement ruling: the
+  § *Six commands* list certifies the audit's own state and is pass/fail, so adding a non-diagnostic task
+  pre-flight to it would lend that list a green it cannot earn — a pointer, not a relocation. (iii) The third
+  copy of the ban, `t2-lineage.txt` § *sound methods* item 3, reworded from "SHA comparison … is meaningless"
+  to "commit-SHA *identity* does not track the same work", with the reason for the qualifier stated inline.
+  Generalised from hoodie's point that I searched a **phrasing** rather than a **claim**: `RULES.md` E.7's
+  corollary is grep for the claim. `manifest/index.md`'s "never compare them" (git SHA-1 vs sha256 over the
+  same bytes) is a different family and was left alone.
 
 - **Negative results are expected and welcome.** The likeliest outcome of Plan 02 is *"no malware"*.
   That is only useful if the depth *achieved* is stated beside the depth *requested*, and every

@@ -395,6 +395,15 @@ A plan is not done when the code works. It is done when what you learned is on d
    not grep the value** — ask of each numeral which command reproduces it at this commit, since the stale
    figure that survives a correction is usually one that was never wrong, only unreferenced. Both failure
    modes are recorded in `audit/wave0/t2-gate-and-checks.txt` § 7.
+7. **A project-wide rule has one owner file.** Restate it elsewhere as a citation plus the named consequence
+   for *that* file's reader; do not restate the prohibition itself. The reason is a failure mode, not tidiness:
+   a shortened restatement tends to lose its qualifier, and **a ban that is too broad suppresses work instead
+   of corrupting it** — it makes a later task skip a check it was required to run, so it fires no control,
+   fails no test and never self-reports. (Observed 2026-11-05, T2: "never compare SHAs between these two
+   repositories" was flat in two of three copies and contradicted the blob-SHA / `patch-id --stable` join that
+   T2b and U12 require. Owner: `audit/index.md` § *If you are about to run something against upstream*, routed
+   from `context/AGENTS.md`.) Corollary on hunting such copies: **grep for the claim, not the phrasing** — the
+   third instance read "SHA comparison … is meaningless", which no `never compare` pattern would have found.
 
 ---
 

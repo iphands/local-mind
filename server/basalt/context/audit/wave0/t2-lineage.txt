@@ -35,8 +35,10 @@ R1 also invalidates the sentence "our history contains Strata's": it is false in
    this remote advertises**. Abbreviated SHAs cannot be requested this way (promisor needs full OIDs)
    and produce a *local* `Not a valid object name` that looks identical to a negative — R1 again.
 3. **Content key** `(tree, author-date, committer-date, subject)`, and for files the blob SHA.
-   **SHA comparison between these two repositories is meaningless** (§ 3–5): the same work exists
-   under different hashes.
+   **Commit-SHA *identity* does not track the same work across these two repositories** (§ 3–5): the same
+   work exists under different hashes, which is why items 3 and 4 — not SHA equality — are the join keys.
+   (Not "SHA comparison is meaningless": blob SHA and patch-id comparisons between the two repos are exactly
+   what T2b/U12 must do. The qualifier is the load-bearing part of this sentence.)
 4. **Patch-id** (`git patch-id --stable`) as a third, ancestry-free join key — registered for T2b,
    not yet run.
    Superseded framing, do not reuse: "1,236 of 2,194 commits are after 2026-10-06, therefore

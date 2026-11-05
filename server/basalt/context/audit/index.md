@@ -89,7 +89,7 @@ forked from (`Niko1221/Strata`) were run here, gave confident answers, and were 
 | [`verdict.md`](verdict.md) | Channel matrix, depth table, three-sentence answer | T14 — not written |
 | [`scripts/ledger-grid.sh`](scripts/ledger-grid.sh) | The **only generator of coverage figures** here: derives every coverage figure from the TSVs and pins `ROWS`/`LOC`/tier/wave/binary counts. Exits 3 on any FAIL. | T1 |
 | [`scripts/t2-census.sh`](scripts/t2-census.sh) | The author census: blame attribution + history breadth per file, at a named pin, with the expected-row-count gate **inside** the producer and an `ERR_BYTES=0` assertion. `OK` certifies line accounting, **not** author identity. | T2 |
-| `wave<N>/` | **Raw command output. Paste it here, never into a tracker.** `wave0/` = T1 (`t1-ledger-grid.txt`, the `ledger-grid.sh` negative controls) **+ T2** (`t2-provenance.txt`, `t2-github-tree-paths.txt`, `t2-author-census.tsv`, `t2-boundary-authorship.txt`, `t2-lineage.txt` — **read `t2-lineage.txt` § 0 before re-running any upstream comparison**, `t2-gate-and-checks.txt`) | T1, T2 |
+| `wave<N>/` | **Raw command output. Paste it here, never into a tracker.** `wave0/` = T1 (`t1-ledger-grid.txt`, the `ledger-grid.sh` negative controls) **+ T2** (`t2-provenance.txt`, `t2-github-tree-paths.txt`, `t2-author-census.tsv`, `t2-boundary-authorship.txt` — **§ 6a is T3's zero-API pre-flight: run its two commands before opening any file**, `t2-lineage.txt` — **read `t2-lineage.txt` § 0 before re-running any upstream comparison**, `t2-gate-and-checks.txt`) | T1, T2 |
 
 ## Coverage at T1 — nothing has been read
 
