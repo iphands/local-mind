@@ -60,6 +60,21 @@ section**, which always stays last. Keep it dense.
 - Experts that do not fit in VRAM live in system RAM (optionally a second Blackwell GPU as a peer
   tier). `--gpu auto` uses every visible Blackwell GPU (`docs/building.md`).
 
+## DQ6_K pack on this card: every expert fits in VRAM; 40 s boot from local NVMe [LIVE 2026-11-04]
+
+- Boot 3 (`./run` default: 4 slots × 262144, `kv int8`, `vision dynamic`, pack in `models.local/`):
+  `loaded 67.8GiB 40.1s cuda0=67.8GiB` at ~2.7 GB/s; `expert cache 24576 slots, 63.29 GiB of VRAM` —
+  48 layers × 512 experts, **all of them**, so the decode never touches the CPU tier (start warning:
+  `the device-planned MoE tail is off: every expert is resident`). The 5950X's missing AVX-512 does
+  not matter while that holds.
+- The 4 full-context slots: `kv 1.5/15.2GiB cuda0 elastic slots=4` — 4096 cells per session backed at
+  start; the other 13.73 GiB is the expert cache's last 5,334 slots, taken back as long conversations
+  grow (up to 22% of the experts then run on the CPU).
+- GPU 0 idle after load: 73,091 / 97,887 MiB, 73 W. One short reply: 320.7 t/s, 74% drafts accepted,
+  TTFT 0.1 s (one run — not a benchmark).
+- The local copy loaded fine although cosmo's `/home` (`compress-force=zstd:1`) stored 464,061 of its
+  555,406 extents compressed.
+
 ## Basalt loads weights with `O_DIRECT`, and there is no switch [SOURCE][LIVE 2026-11-04]
 
 - `include/basalt/core/direct_upload.hpp:1-6` at `dc047a77`: a load phase copies file ranges to VRAM

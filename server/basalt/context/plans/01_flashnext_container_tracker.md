@@ -24,6 +24,7 @@
 
 ## Open Unknowns
 
+- VRAM/RAM split — RESOLVED for the default mode (T6 boot 3): all 24,576 experts in VRAM (63.29 GiB), KV elastic 1.5/15.2 GiB; `--single` still to boot.
 - ~~Does `bin/basalt --help` run without a GPU? (plan Q4 — T4)~~ RESOLVED (T4): yes — `docker run --rm --network none … --help` → rc=0, 198 lines, no `--gpus`.
 - Does the RAM tier page-lock inside the container with `--ulimit memlock=-1`? (plan Q2 — T6)
 - VRAM/RAM split and KV size for 4×262144 vs 1×262144 on this card (plan Q1, Q3 — T6)
@@ -38,7 +39,7 @@
 | 3 | T3: `./run` + its dry-run gate step | `run`, `README.md`, RULES gate | done | Gate step 4 added and passing with `image: stub:none` (no image yet); negative control `KV=fp16` → 2 FAIL lines; busy/ninfer/missing/not-a-pack all rc=1. |
 | 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | done | Owner built `cu1343-sm120-dc047a7` (420 s compile, 0 warnings); label = pin; `--help` runs without a GPU; mock-engine serve proves layout, Host check (403 for unknown names) and alias (404). |
 | 5 | T5: Check `./run`'s flags against the built image | RULES gate step 5 | done | Uses the image's own `serve.config` (the startup check), not `--help` text; `flags ok (2 engine, 8 server)`, 9 with `API_KEY`; `--no-such-flag` → FAIL. `./run` needed no change. |
-| 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | in-progress | Boot 1 (default) died before loading: `No module named 'model_file'` — the image lacked `tools/`. Dockerfile fixed + gate step 6; waiting on the owner's rebuild, then boots again. |
+| 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | in-progress | Boot 1: missing `tools/` (fixed). Boot 2: NFS `O_DIRECT` crawl, stopped. **Boot 3 (default, local pack): loaded in 40.1 s, all checks pass, 320.7 t/s.** Left: `./run --single` boot and a timed `docker stop`. |
 | 7 | T7: Harvest | `context/*.md`, `README.md` | pending | |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
@@ -70,6 +71,11 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-11-04 | `dd` from the pack during boot 2: `iflag=direct bs=16M count=16`, `iflag=direct bs=1M count=64`, buffered `bs=16M count=16` (uncached offsets) | 17.4 MB/s, 4.1 MB/s, 28.9 MB/s | 1 each | taken while the engine's 6 direct readers ran — NFS link vs read pattern not separated |
 | 2026-11-04 | boot 2 end: watcher (docker logs once a minute); `storage/cache/basalt/aefd5d98dc650ed4/engine.log`; `dmesg` | last progress 17:41 `7.4/67.8 GiB` into cuda0, container gone by 17:42; engine log stops mid-load with no error line; no OOM or Xid — an outside stop, consistent with the owner switching to a local copy | 1 | — |
 | 2026-11-04 | owner's `rsync -avPS noir40.lan:…/Qwen3.8-FN-NVFP4-DQ6_K.basalt` into `models.local/` (ssh, not the NFS mount), size sampled 10 s apart | 310 MB/s | 1 | the server and link deliver; the slow boot was Basalt's `O_DIRECT` reads over the NFS mount |
+| 2026-11-04 | local copy `models.local/Qwen3.8-FN-NVFP4-DQ6_K.basalt` (owner rsync), checked | 131,681,979,197 bytes (= NFS original), `BASALTMF` + v2; `filefrag`: 555,406 extents, 464,061 `encoded` — `/home` is btrfs `compress-force=zstd:1`, so `+m` would not have helped | 1 | — |
+| 2026-11-04 | owner boot 3: `./run` (default) from `models.local/` on `63d25a81f328` | `loading weights into cuda0 … 2782 MB/s` → `loaded 67.8GiB 40.1s cuda0=67.8GiB`; `auto resident=22.8GB pool-affinity=auto pool=15`; `warning: the device-planned MoE tail is off: every expert is resident`; `kv 1.5/15.2GiB cuda0 elastic slots=4`; `slots par=4 ctx/slot=262144 (slot-full-context)`; `weights loaded, ctx=262144 images=on`; no page-lock or mmap-fallback warning | 1 | — |
+| 2026-11-04 | boot 3 engine log (`storage/cache/basalt/aefd5d98dc650ed4/engine.log`) | `expert cache auto: 87.44 GiB free, 700 MiB reserved … -> 24576 slots`; `expert cache 24576 slots, 63.29 GiB of VRAM` (= 48 × 512: every expert in VRAM); `elastic KV: 4096 cells backed per session, the other 13.73 GiB of KV are the expert cache's last 5334 slots until a request needs them`; MTP draft layer 1317 MiB; hc8 copies 680 MiB; image encoder 862 MiB pinned | 1 | — |
+| 2026-11-04 | boot 3 requests: `curl http://cosmo.lan:8700/v1/models`; chat `cosmo-6000` "Say hi in five words." `max_tokens 512`; model `claude-heavy`; `Host: evil.example:8700` | 200 (`cosmo-6000`, `n_ctx 262144`, text+image); reply `Hi, how are you today?`, `finish stop`, 196 tokens, 0.75 s wall, server `s1 done pp=58/0c 0.1s tg=196 320.7t/s acc=74% ttft=0.1s end=stop`; 404; 403 + `error: refused Host 'evil.example:8700' from 172.17.0.1` | 1 each | single short reply — not a benchmark |
+| 2026-11-04 | `nvidia-smi` with boot 3 idle | GPU 0: 73,091 / 97,887 MiB used, 73 W of a 475 W limit | 1 | — |
 | 2026-11-04 | T1 guards: `DOCKER='sudo docker'`, `DOCKER=/usr/bin/nonexistent-docker` sourcing `lib/common.sh` | both refuse, rc=1, with the fix line | 1 each | — |
 
 ## Notes / Deviations

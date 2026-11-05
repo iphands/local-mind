@@ -394,7 +394,9 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
 
 ## Open Questions / Risks
 
-1. **Risk: four full-context slots squeeze the expert cache.** At `int8`, upstream's example shows
+1. **Risk: four full-context slots squeeze the expert cache.** Measured (T6 boot 3): all 24,576 experts
+   fit in VRAM at start; at full growth the 4×262144 KV takes the cache's last 5,334 slots (13.73 GiB),
+   so long concurrent conversations push up to 22% of the experts to the CPU. Original text: At `int8`, upstream's example shows
    `2.6/16.3GiB` for 4×262144 elastic — backed lazily, but every long conversation takes VRAM from
    experts, which then run from RAM over PCIe on a DDR4 host. *Mitigation*: elastic KV backs only
    what requests use; T6 records the `kv` line and any starvation warning; `--single` is one word
