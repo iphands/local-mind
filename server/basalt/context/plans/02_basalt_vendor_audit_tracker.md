@@ -2,7 +2,8 @@
 
 ## Overview
 
-- Status: 11% complete (1/19 slices done — T0 ✓, T1 ✓; T1's artifacts are in `context/audit/`, nothing read yet)
+- Status: 11% complete (2/19 slices done — T0 ✓, T1 ✓, matching `SERIES.md`; plus one follow-up commit
+  on T1's artifacts, `3c27913`, which moved no manifest row and read nothing. Nothing has been read yet.)
 - Start date: 2026-11-05 (T0)
 - Plan: `context/plans/02_basalt_vendor_audit.md` — **read its Gate status block and Execution rules first**
 - Evidence: `context/audit/` — `index.md` (entry point), `manifest/` (per-dir TSVs, fixed headerless
