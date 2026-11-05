@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 86% complete (6/7 tasks)
+- Status: 100% complete (7/7 tasks)
 - Start date: 2026-11-04
 - Plan: `context/plans/01_flashnext_container.md`
 - Evidence: the table below; build logs in `captures/build_<date>_<sha7>.log` (gitignored); boot
@@ -56,7 +56,7 @@
 | 4 | T4: Owner build; verify the image is the pin | tracker Evidence, `distilled.md` | done | Owner built `cu1343-sm120-dc047a7` (420 s compile, 0 warnings); label = pin; `--help` runs without a GPU; mock-engine serve proves layout, Host check (403 for unknown names) and alias (404). |
 | 5 | T5: Check `./run`'s flags against the built image | RULES gate step 5 | done | Uses the image's own `serve.config` (the startup check), not `--help` text; `flags ok (2 engine, 8 server)`, 9 with `API_KEY`; `--no-such-flag` → FAIL. `./run` needed no change. |
 | 6 | T6: Owner boots — default and `--single` — with a real reply each | tracker Evidence, `distilled.md` | done | Boot 3 (default) and boot 4 (`--single`, run by the host agent session on the owner's go) both load from `models.local/` (40.1 s / 34.4 s), reply via `cosmo.lan` as `cosmo-6000`, 404 on a wrong model; `docker stop` 2.3 s. *Confirms if* "experts split between cuda0 and page-locked RAM" is **invalid as written**: every expert is in VRAM in both modes, with a RAM copy beside it (Notes). |
-| 7 | T7: Harvest | `context/*.md`, `README.md` | pending | |
+| 7 | T7: Harvest | `context/*.md`, `README.md` | done | `distilled.md`: `--single` numbers, the RAM-copy correction, noir's fragmentation + defrag, open question 1 resolved; `pitfalls.md`: the NFS crawl; `high_level.md`: image shape, flags-not-config, local pack; README status. |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
 the last three always carry a reason in the row's Notes cell.
@@ -204,3 +204,5 @@ the last three always carry a reason in the row's Notes cell.
 | Tune past the owner's defaults (`basalt-probe` suggestions, `expert-profile-save`, `prefill-cpu-share`, `spec`, `kv` q4_0/k8v4) | Ordering principle: boot before tune | a later plan |
 | `sm_120a` build A/B | Basalt accepts `120a` but tests only `120` (plan *Rejected Claims*) | a later plan |
 | More than one served model name (vLLM's `claude-*` aliases) | `--alias` takes one name (plan Q6) | later, if a client needs it |
+| RULES § Project gate prerequisites name one environment's paths (shellcheck at `~/.local/bin`; docker "owner-only") | Written from the opencode2 container; on the host shellcheck is `/usr/local/bin` and steps 3–6 run. Make the prerequisites per-environment | owner / Plan 02's session |
+| A boot from the defragmented NFS copy (927 extents) | Would show whether `models.local/` is still needed | a later plan, if wanted |

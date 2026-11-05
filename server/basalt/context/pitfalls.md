@@ -261,3 +261,26 @@ half-reconciled — the same failure as a stale gate prerequisite, which "reads 
 - basalt: `git show b308244` (its subject vs its `--stat`: `01_flashnext_container.md` +30/−2)
 - basalt: `context/plans/01_flashnext_container_tracker.md` § Notes / Deviations, "Two writers, one
   worktree", 2026-11-05
+
+---
+
+# A boot from the NFS copy crawls at 5–10 MB/s
+
+## Problem
+[OBSERVED 2026-11-04] Boot 2 (`./run` with the pack at `models/vllm/jesdga/…`, NFS 4.2 over RDMA from
+noir) printed `loading weights into cuda0 … 4.8/67.8 GiB  6 MB/s` and would have taken hours; the
+owner stopped it at 7.4 GiB. The host was idle; six engine threads sat in `nfs_file_direct_read`.
+Two causes stacked: Basalt reads weights with `O_DIRECT` (no switch — `distilled.md`), and the file
+on noir was shredded into 131,723 extents on spinning RAID. The first guess — "NFS is slow" — was
+half wrong: with the file cached on noir, direct reads ran 749 MB/s.
+
+## How to avoid
+Serve from local NVMe: `./run`'s default pack is `models.local/…` (40 s boots). If a pack must come
+from noir, defragment it there first (`btrfs filesystem defragment -f -t 128M <file>`, check
+`filefrag`), since downloads land fragmented. Diagnose a slow load from the host with
+`ps -L -o tid,stat,wchan:32 -p <engine pid>` — `nfs_file_direct_read` in state `D` is this pitfall.
+
+## Sources
+- basalt: `context/plans/01_flashnext_container_tracker.md` (boot 2 rows, Notes)
+- basalt: `include/basalt/core/direct_upload.hpp:1-6` at `dc047a77`
+

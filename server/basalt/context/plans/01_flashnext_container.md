@@ -1,6 +1,6 @@
 # Plan 01 — Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700
 
-> **Status**: in-progress
+> **Status**: done
 > **Created**: 2026-11-04
 > **Revised**: 2026-11-04 — owner: `./run`'s default pack is the local NVMe copy `models.local/Qwen3.8-FN-NVFP4-DQ6_K.basalt` (gitignored), not the NFS path; boot 2 from NFS loaded at ~5–10 MB/s (T6).
 > **Depends on**: N/A
@@ -487,6 +487,6 @@ Expected: every finding the tracker names is in a `context/` file (Rule D).
 - [x] T4: the built image's `ai.basalt.ref` = `dc047a77…`; `bin/basalt --help` and `serve.server --help` print usage; `data/profiles/qwen4exp-48x512.prof` present
 - [x] T5: gate step 5 → `flags ok`; an injected bogus flag → `FAIL(flags)`
 - [x] T6: both modes boot; start blocks recorded; `cosmo.lan` chat → reply from `cosmo-6000`; wrong model → 404; `docker stop` clean
-- [ ] All: the project gate (Rule A) passes on the final commit
-- [ ] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read
+- [x] All: the project gate (Rule A) passes on the final commit
+- [x] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read
 - [ ] All: plan + tracker `git mv`'d to `completed/`, `SERIES.md` marked done (Rule C)

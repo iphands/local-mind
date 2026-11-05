@@ -64,9 +64,11 @@ section**, which always stays last. Keep it dense.
 
 - Boot 3 (`./run` default: 4 slots × 262144, `kv int8`, `vision dynamic`, pack in `models.local/`):
   `loaded 67.8GiB 40.1s cuda0=67.8GiB` at ~2.7 GB/s; `expert cache 24576 slots, 63.29 GiB of VRAM` —
-  48 layers × 512 experts, **all of them**, so the decode never touches the CPU tier (start warning:
-  `the device-planned MoE tail is off: every expert is resident`). The 5950X's missing AVX-512 does
-  not matter while that holds.
+  48 layers × 512 experts, **all of them** (start warning: `the device-planned MoE tail is off: every
+  expert is resident`). *Fixed 2026-11-04 (T7): this line first said "so the decode never touches the
+  CPU tier" — wrong.* A RAM copy sits beside the cache (`resident RAM: 22.81 GiB of experts in RAM`)
+  and served `201337 blobs` over boot 3's life: the experts whose slots the elastic KV borrows. The
+  5950X's AVX2-only CPU path is used only for those.
 - The 4 full-context slots: `kv 1.5/15.2GiB cuda0 elastic slots=4` — 4096 cells per session backed at
   start; the other 13.73 GiB is the expert cache's last 5,334 slots, taken back as long conversations
   grow (up to 22% of the experts then run on the CPU).
@@ -74,6 +76,11 @@ section**, which always stays last. Keep it dense.
   TTFT 0.1 s (one run — not a benchmark).
 - The local copy loaded fine although cosmo's `/home` (`compress-force=zstd:1`) stored 464,061 of its
   555,406 extents compressed.
+- `--single` (boot 4): `loaded 67.8GiB 34.4s`; still all 24,576 slots / 63.29 GiB in VRAM;
+  `kv 0.7/4.0GiB cuda0 elastic` (32,768 cells backed; the other 3.30 GiB = the cache's last 1,284 slots);
+  `resident RAM: 12.38 GiB`. Client traffic on it: a 26,676-token prompt read at 9,842 t/s, then 9,304
+  tokens at 357 t/s, 67% drafts accepted (one request each; not a benchmark).
+- `docker stop basalt` → 2.3 s, VRAM freed (SIGTERM handled).
 
 ## Basalt loads weights with `O_DIRECT`, and there is no switch [SOURCE][LIVE 2026-11-04]
 
@@ -86,6 +93,14 @@ section**, which always stays last. Keep it dense.
   `nfs_file_direct_read` and a load of ~5–10 MB/s. Buffered `dd` of the same file measured 28.9 MB/s
   during the boot, so the NFS link was slow too that evening (not separated — Plan 01 tracker).
 - Means: expect basalt boots from NFS to be slow; local NVMe is the layout upstream targets.
+- **Cause on noir (2026-11-04, read-only over `ssh helper@noir.lan`):** `/main` is btrfs on a 14.6 TB
+  PERC H710P virtual disk of **spinning** drives (`rotational=1`, `read_ahead_kb=128`); the pack had
+  **131,723 extents**, almost none physically adjacent (125,506 ≤ 1 MiB), from a parallel, out-of-order
+  download — so a cold read is ~125k seeks, worse with Basalt's six readers. With the file in noir's
+  page cache, direct reads from cosmo ran 749 MB/s (16 MiB) / 164 MB/s (1 MiB). The owner then ran
+  `btrfs filesystem defragment -v -f -t 128M` → **927 extents** (128 MiB is btrfs's max extent; ~980
+  is the floor). `+m` was already set; 615 compressed extents (~77 MB) remain, as defrag without `-c`
+  leaves compressed extents alone.
 
 ## The built image: `iphands/basalt-blackwell:cu1343-sm120-dc047a7` [LIVE 2026-11-04]
 
@@ -154,10 +169,10 @@ section**, which always stays last. Keep it dense.
 
 ## Open Questions
 
-- Does an NVFP4 Flash-Next pack fit entirely in 96 GiB VRAM, or which share lands in RAM, and
-  what `ulimit -l` / `--ulimit memlock` does the container need for the RAM tier to page-lock?
-  (`docs/running.md` covers RAM floors; `platform_memory_test` notes the locked-memory limit.)
-  Settle in the first plan.
+- ~~Does an NVFP4 Flash-Next pack fit entirely in 96 GiB VRAM, or which share lands in RAM, and
+  what `ulimit -l` / `--ulimit memlock` does the container need for the RAM tier to page-lock?~~
+  RESOLVED (Plan 01 T6): every expert fits in VRAM (DQ6_K entry above), with a RAM copy beside it;
+  `--ulimit memlock=-1` gives `unlimited` in the container and Basalt printed no fallback warning.
 - Which of the image's upstream defaults (`expert-cache`, `prefill`, `kv`, `--spec` depth) are
   already right for this card? `bin/basalt-probe` "suggests values" (`docs/probe.md`) — owner run.
 

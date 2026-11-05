@@ -8,9 +8,10 @@ API.
 Basalt loads only Flash-Next `.basalt` packs. `.ninfer` artifacts (for example the QUASAR 27B)
 belong in `../ninfer`.
 
-**Status (2026-11-04):** the image `iphands/basalt-blackwell:cu1343-sm120-dc047a7` is built and
-checked without a GPU (Plan 01 T4); the pack has not been booted yet. The defaults below are the
-owner's choices, not measured winners.
+**Status (2026-11-04):** built (`iphands/basalt-blackwell:cu1343-sm120-dc047a7`) and booted in both
+modes from the local pack (Plan 01): `./run` loads in ~40 s, `./run --single` in ~34 s; every expert
+fits in VRAM (63.29 GiB); clients reach it as `cosmo-6000` on `cosmo.lan:8700`. The defaults are the
+owner's choices, not measured winners — tuning is a later plan.
 
 ## Prerequisites
 
