@@ -2,7 +2,8 @@
 # H2O Lightning 4B (Qwen3.5-4B decision model, JevBench) on the RTX 4060 (8 GB).
 #   ./run-jev-4060 [model.gguf]
 # Env overrides: MODEL MMPROJ PORT NAME ALIAS CTX KV UB IMAGE
-#                PARALLEL KV_UNIFIED BATCH METRICS DETACH DRYRUN (defaults keep the card's setup)
+#                PARALLEL KV_UNIFIED BATCH METRICS DETACH DRYRUN
+#   PARALLEL=1 KV_UNIFIED=0 gives the card's original single-slot setup
 #   DETACH=1  run in the background (docker run -d), no docker pull; prints the container id
 #   DRYRUN=1  print the docker command and exit (no pull, no run)
 # ./run-jev-4060-benchmark starts every configuration it tests through this script.
@@ -20,6 +21,21 @@
 #   CTX=40960 UB=2048  3137 t/s pp, peak 7.04 GiB
 #   CTX=65536 UB=1024  3261 t/s pp, peak 7.62 GiB   (fits, if you want more room for chat)
 #   decode ~50 t/s; a 1024px image is ~1040 tokens
+#
+# Slots: ./run-jev-4060-benchmark, 2026-11-06, build 12169, jev-shaped load (bench-results/jev-20261106-134340).
+# "mixed" = an F3-sized gate request every 0.5 s while 2 ask_jev-chunk loopers and 1 F1-review looper run.
+#   NP:KVU:UB:CTX    VRAM   review alone  chunk tok/s C=1/8  mixed gate p50/p95/max  mixed tok/s
+#   1:0:512:40960    6698   5126 ms       4121 / 4061        6.8 / 7.2 / 7.2 s       3900   (card's setting)
+#   2:1:512:40960    6740   3631          3931 / 3889        2.5 / 10.7 / 10.7       4565
+#   4:1:512:40960    6850   1892          3924 / 3836        4.9 / 5.7 / 5.7         6712
+#   6:1:512:40960    6966   1890          3935 / 3822        2.1 / 10.5 / 10.5       6774
+#   8:1:512:40960    7060   1909          3901 / 3829        1.7 / 4.0 / 5.5         6678   <- default
+#   4:1:512:65536    7632   1912          3905 / 3814        4.4 / 5.5 / 5.5         6619
+# /v1/systemone runs a request's questions in separate slots, so a 3-question review is 2.7x faster
+# from 4 slots up. Raw prefill is saturated at one slot (~4.1k tok/s) and 8 slots cost ~5% of it;
+# what slots buy is latency under mixed load. Unified vs per-slot KV and UB 1024 made no difference.
+# Answers drifted <= 0.004 from the single-slot config. Keep jev's ask_jev to one request in flight:
+# chunk throughput is flat from 1 to 8 clients, so more only crowds out the gate.
 set -ue
 
 cd "$(dirname "$(realpath "$0")")"
@@ -40,8 +56,8 @@ CTX=${CTX:-40960}   # card's validated setting: a 32,000-token state plus the qu
 KV=${KV:-f16}       # f16 keeps probabilities close to the card's numbers; q8_0 halves the KV cost
 UB=${UB:-512}
 IMAGE=${IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}  # CUDA 12.8, the image the card tested
-PARALLEL=${PARALLEL:-1}      # card's setting: one slot
-KV_UNIFIED=${KV_UNIFIED:-0}  # 0: each slot owns CTX/PARALLEL tokens; 1: one pool shared by all slots
+PARALLEL=${PARALLEL:-8}      # benchmarked best for jev's mixed load (see Slots above); the card used 1
+KV_UNIFIED=${KV_UNIFIED:-1}  # 1: one CTX-token pool shared by all slots; 0: each slot owns CTX/PARALLEL
 BATCH=${BATCH:-2048}
 METRICS=${METRICS:-0}        # 1: expose Prometheus /metrics
 DETACH=${DETACH:-0}
