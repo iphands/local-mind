@@ -5,7 +5,7 @@ Cross-cutting entries also go up to `../../../context/pitfalls.md`; project-spec
 
 **Read the front sheet before new work; grep the rest by the token you are about to type.** Below this
 page are the six rules everything else cites, then the shell-idiom list (the part you actually look up
-mid-task), then one entry per incident. Nobody reads 26 traps and 20 narratives end to end before a
+mid-task), then one entry per incident. Nobody reads forty-odd traps and entries end to end before a
 task; the front sheet is what makes the rest retrievable. Tag entries that actually bit
 `[OBSERVED YYYY-MM-DD]`, or `[MEASURED …]` when a control produced the number; untagged entries are
 hazards seeded from reading.
@@ -42,7 +42,8 @@ reports green because the thing it checks was never reached, or was looking some
 
 | § | One line |
 |---|---|
-| *Shell idioms that report green on the thing they did not check* | 26 numbered traps, `1`–`26`; grep the idiom |
+| *Shell idioms that report green on the thing they did not check* | numbered traps, `1`–`27` today, **next free: 28** (the bound is asserted by the `items=` field in § *Item numbering* → **Size**, not remembered); grep the idiom. **A new one takes the next free number — never renumber: these numbers are addresses, cited as bare `item N` from `RULES.md`, this project's plans, `context/distilled.md` and `context/audit/index.md`** |
+| *Entry template* — the comment block closing this front sheet | the four labels (`Trap.` / `Guard.` / `Grep:` / `Src:`) and the one-line form for a shell idiom; kept as a comment so documenting the shape does not create a citable entry |
 | *The "NInfer" QUASAR 27B looks like a Basalt model, and is not* | wrong artifact family, caught at `./run` |
 | *The image boots the mock engine but not a real pack: `serve/` imports `tools/model_file.py`* | `tools/` missing from the image; gate step 6 owns it |
 | *Empty output from a failed command was recorded as a measurement* | the founding incident: permission-denied and a missing `ss`, both read as "nothing there" |
@@ -85,20 +86,67 @@ this date: old *How to avoid* `18→23`, `19→24`, `20→25`, `21→26`.
 - The count stays out of the § heading on purpose: it grows, and every heading-based citation then
   goes stale. Prefer the identifier you already have over a string you must maintain (item 18).
 
-**Size, decided 2026-11-05.** This file is **91 KB and stays single** — the owner's call, taken against
+**Size, decided 2026-11-05.** This file **stays single** — the owner's call, taken against
 `context/AGENTS.md` § *House Style*, which read *"a file past ~40 KB is split"* and has been **amended to
 ~120 KB** the same day to say what is actually meant. The warrant, so the amendment can be re-examined
-rather than re-litigated: the rewrite cut 118 KB → 91 KB while keeping **99 % of the payload** — the
-backticked commands, the falsely-reported strings as printed, the evidence numbers: 19,514 of 19,686
+rather than re-litigated: the rewrite cut **118,140 B → 92,306 B** — both re-derivable,
+`git cat-file -s 52b1a13^:context/pitfalls.md` and `git cat-file -s 52b1a13:context/pitfalls.md` — while
+keeping **99 % of the payload** — the backticked commands, the falsely-reported strings as printed, the
+evidence numbers: 19,514 of 19,686
 bytes. What remained was prose at **3.87 : 1** against payload, and this §'s own tightest items (item 2,
 item 21) sit at **4.4 : 1**. The 45 KB target implied **1.38 : 1** — every one of the corpus's 46 units
 tighter than the tightest unit that exists, guards and symptom strings intact. That is deleting the
 *why-it-looked-right* half, which is the only half that transfers to a reader who wasn't there.
 `context/AGENTS.md` also says *never compress so far that a detail is lost*, and that outranks a byte
-count. **The number that matters is the front sheet** — § *The six rules* and § *Index*, ~9 KB: read
-that before work, grep the rest by the token you are about to type. Re-open the split question if the
-file passes ~120 KB, or if the front sheet outgrows ~120 lines (**it is 9,396 B / 113 lines today**, the
-§ below it 27,682 B, the narrative entries 55,137 B).
+count. **The number that matters is the front sheet**: read that before work, grep the rest by the
+token you are about to type. *(Corrected in place 2026-11-05, one commit after it was written. It first
+read "the front sheet — § *The six rules* and § *Index*, ~9 KB … it is 9,396 B / 113 lines", which
+mis-attributed the whole front block to two of its three sections; the count then moved with every edit
+to the note holding it, including the edit that recorded this correction, and one draft was caught wrong
+only by re-running the measurement instead of re-reading the sentence. This note sits inside the block it
+measures, so it now quotes **no size for itself** and gives one command instead. It partitions the file
+at the two § boundaries, and the sum must equal `wc -c` — so the parts cannot drift from the whole,
+which is § *The six rules* → **R2** applied to this file's own arithmetic:)*
+
+`LC_ALL=C awk 'BEGIN{p=1} /^## Shell idioms/{p=2} /^## The "NInfer"/{p=3} p==2&&/^[0-9]+\./{n++; split($1,a,"."); if(a[1]+0>mx)mx=a[1]+0} {s[p]+=length($0)+1} END{if(s[1]==0||s[2]==0||s[3]==0){print "BOUNDARY MISSED - both /^## / patterns must fire"; exit 9} if(n!=mx){printf "NUMBERING NOT DENSE - items=%d max=%d\n", n, mx; exit 8} printf "front=%d shell=%d narratives=%d items=%d sum=%d\n", s[1],s[2],s[3],n,s[1]+s[2]+s[3]}' context/pitfalls.md`
+
+Three arms, three observed exit codes, because **closure proves conservation, not partition identity.**
+`sum == wc -c` says the three buckets tile the file; it says nothing about whether both boundaries *fired*
+— and the second one is made of prose, since § *Item numbering, and what is frozen* freezes item
+**numbers**, never entry titles. Retitle the first narrative `##` and that boundary slides to end-of-file:
+`narratives=0`, `shell` swallows the corpus, and the published assertion stays green. Observed on a copy
+with exactly that retitling: unguarded it prints `sum=97849` against `wc -c` **97849** — conservation
+perfect, partition a lie — while this command prints `BOUNDARY MISSED` and exits **9**. The other arms,
+each run and not assumed: either boundary *pattern* broken → `BOUNDARY MISSED`, **9**; a numbered item
+deleted from the middle → `NUMBERING NOT DENSE - items=26 max=27`, **8**; wrong cwd → `awk`'s own fatal,
+**2**, rather than a plausible zero. Healthy: **0**, `items=27`, `sum` equal to `wc -c`.
+
+That last field is the one a future contributor depends on: **`items=` is the upper bound the Index row
+advertises**, asserted here rather than remembered. Add item 28 and this command prints `items=28` against
+an Index row still saying `1`–`27`, so the row goes visibly stale the moment it is stale, and nobody has to
+recall a rule. If the two ever disagree, the Index row is what is wrong.
+
+The other is **item 27** above, this file's own: `awk`'s `length()` counts **characters**, so an unpinned
+run under-reads. Run it with and without `LC_ALL=C`; the gap is `gap = bytes − chars`, which is the number
+of non-ASCII **continuation bytes** — one per byte past the first in each multi-byte character, so a 3-byte
+character contributes two and a 4-byte one contributes three. It is *not* the number of multi-byte
+characters, and reading it as that is the trap. One paired run on the front block here, 2026-11-05, under
+`LANG=C.UTF-8` with `LC_CTYPE` unset and `AWK=GNU Awk 5.4.1` at `/usr/sbin/awk`, gave a gap of **121**
+against **70** such characters: 51 three-byte (`—` `–` `→` `…`) carrying two each plus 19 two-byte
+(`§` `·` `×`) carrying one, which is where the extra 51 comes from. All five of those numbers have moved
+since that sentence was written; that the gap **exceeds** the character count has not, and the relation is
+the trap, not the reading. Two limits on reproducing it, and § *The six rules* → **R6** is the reason they
+are written down rather than implied: `locale -a` here lists only `C`, `C.utf8` and `POSIX`, so do not reach
+for `en_US.UTF-8` to raise the other side — § *An LC_ALL naming a locale the host does not have falls open
+to C* is exactly that trap, and it hands back a byte-correct-looking green. And on `mawk` or busybox `awk`
+the gap reads **0** whatever the locale, because those count bytes always; there the relation is
+**unobservable, not contradicted**. Record `AWK=` beside `LANG=` when you run it, or the reading you get
+means nothing about which of the three cases you are in.
+
+Re-open the split question if `wc -c` passes ~120 KB, or if `front` in that output exceeds ~15 % of `sum`
+**and** the front sheet has stopped being a sheet. The `and` is deliberate and weaker than an `or`: the
+ratio on its own is satisfied merely by the tail growing, and **stays single** above is an owner's call, so
+that guard is meant to need two independent failures before it fires.
 
 <!-- Entry template (new shape — keep the three labels, quote the symptom verbatim):
 
@@ -114,15 +162,17 @@ For an idiom in the list above: one line, `**N · idiom** → what it falsely re
 
 ## Shell idioms that report green on the thing they did not check
 
-[OBSERVED 2026-11-05, Plan 02 T1–T3] Twenty-six commands that came back *passing* while the measurement
-had not happened, plus one transcript line that recorded output no command ever produced (item 17 —
-the mirror image: not silence but invention). Each item carries its own tag; in aggregate: **1–7** are
-untagged hazards from T1's freeze, manifest and grid controls, **8–18** `[OBSERVED 2026-11-05, T2]`
-(item 14 `twice in one session`), **19–21** `[MEASURED 2026-11-05, T3]`, **22**
-`[OBSERVED 2026-11-05, T3]`, and **23–26** `[OBSERVED 2026-11-05]` — T3's security harness and
-tree-contamination incidents, the four renumbered bullets. Items **25–26** are the two a passing audit
-rested on while wrong: a freeze check blind to an ignored directory, and a file listing that contained
-itself.
+[OBSERVED 2026-11-05, Plan 02 T1–T3 — plus item 27, a docs edit] Twenty-seven commands that came back
+*passing* while the measurement had not happened, plus one transcript line that recorded output no command
+ever produced (item 17 — the mirror image: not silence but invention). Each item carries its own tag; in
+aggregate: **1–7** are untagged hazards from T1's freeze, manifest and grid controls, **8–18**
+`[OBSERVED 2026-11-05, T2]` (item 14 `twice in one session`), **19–21** `[MEASURED 2026-11-05, T3]`,
+**22** `[OBSERVED 2026-11-05, T3]`, **23–26** `[OBSERVED 2026-11-05]` — T3's security harness and
+tree-contamination incidents, the four renumbered bullets — and **27**
+`[OBSERVED 2026-11-05, docs edit — no plan task]`, the one item added after the rebuild, the only one that
+came from *editing this file*, and the only one with no `wave*/` artifact behind it. Items **25–26** are
+the two a passing audit rested on while wrong: a freeze check blind to an ignored directory, and a file
+listing that contained itself.
 
 **Grep this § by the literal you are about to type.** Field order is fixed: the idiom, what it
 falsely reported *as printed*, the guard.
@@ -365,7 +415,24 @@ falsely reported *as printed*, the guard.
     that inflated `FIXTURE_FILES` by one and handed `xargs` a path the following `mv` had just deleted.
     The worse sibling is writing the list *inside the corpus it describes* — on the next run the list is
     a corpus member, and here its absolute paths were greppable by the very family patterns being scored
-    against it → `find … ! -name 'fixlist*'`, and keep derived lists outside what they enumerate. · R2 · `context/audit/scripts/t3-census.sh`
+    against it → `find … ! -name 'fixlist*'`, and keep derived lists outside what they enumerate. · R2 ·
+    [OBSERVED 2026-11-05] · `context/audit/scripts/t3-census.sh`
+
+27. **`+=length($0)+1` in `awk` counts *characters*, not bytes, in a UTF-8 locale — the total disagrees
+    with `wc -c`, downward and silently; pin `LC_ALL=C`.** A byte-size assertion summed from `length($0)+1`
+    read `10066` for a file's own front block while the same program under `LC_ALL=C`, and
+    `head -n 121 | wc -c`, both read `10179` at that instant — 113 bytes short. Nothing downstream noticed:
+    the number merely looked like a slightly smaller size, and nothing in the pipeline fails on a size that
+    is only wrong. Both sides of that pair shared one boundary expression (the same `awk` program, one
+    `LC_ALL` apart), which is the only reason the 113 is pure encoding — **use the same boundary on both
+    sides**, because a mismatched one donates its own bytes to the "gap" and no arithmetic in the report
+    shows it: `sed -n '1,/^## Shell idioms/p'` *keeps* the 66-byte heading that
+    `/^## Shell idioms/{exit}` drops → pin `LC_ALL=C` (or use `wc -c`), print the unit beside the number,
+    and record `AWK=` with it: `mawk` and busybox `awk` count bytes whatever the locale is, so on those the
+    gap reads `0` and this trap is **unobservable** there, not absent. · R1 R3 ·
+    [OBSERVED 2026-11-05, docs edit — no plan task] · `context/pitfalls.md` § *Item numbering, and what is
+    frozen* → **Size** — no `wave*/` artifact: that pair was transient, and the live one comes from the
+    guarded command in that §
 
 ## Sources
 
