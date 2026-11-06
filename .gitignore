@@ -8,6 +8,7 @@
 /opencode-legacy/container_data/claude_transcripts
 /scratch
 /server/llamacpp/vendor
+/server/llamacpp/bench-results
 /server/vllm/*log
 /server/vllm/scratch/
 /server/vllm/server.log

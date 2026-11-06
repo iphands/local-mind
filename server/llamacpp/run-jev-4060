@@ -2,6 +2,10 @@
 # H2O Lightning 4B (Qwen3.5-4B decision model, JevBench) on the RTX 4060 (8 GB).
 #   ./run-jev-4060 [model.gguf]
 # Env overrides: MODEL MMPROJ PORT NAME ALIAS CTX KV UB IMAGE
+#                PARALLEL KV_UNIFIED BATCH METRICS DETACH DRYRUN (defaults keep the card's setup)
+#   DETACH=1  run in the background (docker run -d), no docker pull; prints the container id
+#   DRYRUN=1  print the docker command and exit (no pull, no run)
+# ./run-jev-4060-benchmark starts every configuration it tests through this script.
 #
 # Model card: https://huggingface.co/h2oai/h2o-lightning-4b-gguf
 #   h2o-lightning-4b-Q8_0.gguf        decision metadata -> POST /v1/systemone (needs build >= 11773)
@@ -36,6 +40,12 @@ CTX=${CTX:-40960}   # card's validated setting: a 32,000-token state plus the qu
 KV=${KV:-f16}       # f16 keeps probabilities close to the card's numbers; q8_0 halves the KV cost
 UB=${UB:-512}
 IMAGE=${IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}  # CUDA 12.8, the image the card tested
+PARALLEL=${PARALLEL:-1}      # card's setting: one slot
+KV_UNIFIED=${KV_UNIFIED:-0}  # 0: each slot owns CTX/PARALLEL tokens; 1: one pool shared by all slots
+BATCH=${BATCH:-2048}
+METRICS=${METRICS:-0}        # 1: expose Prometheus /metrics
+DETACH=${DETACH:-0}
+DRYRUN=${DRYRUN:-0}
 
 [[ -f "$MODEL" ]] || { echo "[FATAL] model not found: $MODEL"; exit 1; }
 
@@ -43,8 +53,11 @@ MODEL_PATH=$(realpath "$MODEL")
 MODEL_FOLDER=${MODEL_PATH%/*}
 MODEL_FILE=${MODEL_PATH##*/}
 
+if [[ "$DETACH" == 1 ]]; then RUN_MODE=(-d --rm); else RUN_MODE=(-it --rm); fi
+if [[ "$KV_UNIFIED" == 1 ]]; then KV_MODE=--kv-unified; else KV_MODE=--no-kv-unified; fi
+
 CONTAINER_ARGS=(
-  run -it --rm
+  run "${RUN_MODE[@]}"
   --name "$NAME"
   --gpus '"device=1"'
   -p 0.0.0.0:${PORT}:8799
@@ -58,12 +71,12 @@ LLAMA_ARGS=(
   --port 8799
   --n-gpu-layers 99
   --ctx-size "$CTX"
-  --parallel 1
-  --no-kv-unified           # one slot owns the whole context (card's setting)
+  --parallel "$PARALLEL"
+  "$KV_MODE"                # default --no-kv-unified: one slot owns the whole context (card's setting)
   --flash-attn on
   --cache-type-k "$KV"
   --cache-type-v "$KV"
-  --batch-size 2048
+  --batch-size "$BATCH"
   --ubatch-size "$UB"
   --no-context-shift        # recurrent layers cannot shift anyway; fail loudly instead
   --jinja
@@ -81,6 +94,8 @@ else
   LLAMA_ARGS+=(--no-mmproj)
 fi
 
+if [[ "$METRICS" == 1 ]]; then LLAMA_ARGS+=(--metrics); fi
+
 echo "## Detected settings:
 PORT:   $PORT
 MODEL:  $MODEL_FILE
@@ -90,9 +105,15 @@ ALIAS:  $ALIAS
 CTX:    $CTX
 KV:     $KV
 UB:     $UB
+BATCH:  $BATCH
+SLOTS:  $PARALLEL ($KV_MODE)
 IMAGE:  $IMAGE
 "
 
-docker pull "$IMAGE"
+if [[ "$DRYRUN" == 1 ]]; then
+  echo docker "${CONTAINER_ARGS[@]}" "$IMAGE" "${LLAMA_ARGS[@]}"
+  exit 0
+fi
+[[ "$DETACH" == 1 ]] || docker pull "$IMAGE"   # a detached (benchmark) run uses the local image
 echo docker "${CONTAINER_ARGS[@]}" "$IMAGE" "${LLAMA_ARGS[@]}"
 exec docker "${CONTAINER_ARGS[@]}" "$IMAGE" "${LLAMA_ARGS[@]}"
