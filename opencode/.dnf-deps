@@ -8,6 +8,7 @@ cargo
 clang
 clang-tools-extra
 docker
+emacs-nox
 flatpak
 gcc
 gcc-g++
