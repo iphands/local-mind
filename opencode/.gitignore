@@ -5,3 +5,5 @@
 /container_data/config/opencode/service.json
 # serve / web UI password, written on first run
 /container_data/.opencode-password
+# local reference material (transcripts etc.), never committed
+/vendor
