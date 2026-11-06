@@ -19,7 +19,9 @@ owner's choices, not measured winners — tuning is a later plan.
 - The pack on a local disk: `models.local/Qwen3.8-FN-NVFP4-DQ6_K.basalt` (131.7 GB, gitignored).
   Basalt loads weights with `O_DIRECT`, which over the NFS copy
   (`models/vllm/jesdga/…`, `models` → `/mnt/noir/scratch/ai/llm/models`) ran at ~5–10 MB/s.
-  `PACK=<path> ./run` serves any other copy.
+  `PACK=<path> ./run` serves any other copy. Prefill reads the PLE n-gram table at random, 16 rows a
+  token, so `PLE_IO=direct` from NFS (~2.9k IOPS, 4 KiB random reads, 2026-11-06) stalls a cold
+  121k-token prompt past the engine's 60 s watchdog; the default `PLE_IO=ram` reads it once at boot.
 - Nothing else on `:8700`: stop `vllm` (`../vllmcustom`), `../ninfer` or `../ignis` first.
 
 ## Pins
@@ -73,6 +75,7 @@ name the model `cosmo-6000`; any other name gets a 404. Stop the server with Ctr
 | `SLOT_FULL_CONTEXT` | `1` (only when `PARALLEL` > 1) | `--slot-full-context`: every slot gets `MAX_CONTEXT`, at N× the KV cache |
 | `MAX_CONTEXT` | `262144` | `--max-context` |
 | `KV` | `int8` | `--kv` (`fp16`, `int8`, `q4_0`, `k8v4`) |
+| `PLE_IO` | `ram` | `--ple-io`: `ram` locks the 28.8 GB PLE n-gram table in RAM at boot (~27 GiB, held for the server's life); `direct` reads 16 random 4 KiB rows per prompt token from the pack |
 | `VISION` | `dynamic` | `--vision` (`off`, `dynamic`, `cpu`, a GPU number) |
 | `PORT` | `8700` | `--port`, published on `0.0.0.0` |
 | `ALIAS` | `cosmo-6000` | `--alias`: the one model name requests must use |

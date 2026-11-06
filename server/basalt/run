@@ -12,6 +12,9 @@
 #   SLOT_FULL_CONTEXT 1 (only when PARALLEL > 1)                --slot-full-context (each slot gets MAX_CONTEXT)
 #   MAX_CONTEXT      262144                                     --max-context
 #   KV               int8                                       --kv   (fp16 | int8 | q4_0 | k8v4)
+#   PLE_IO           ram                                        --ple-io (ram | direct): the 28.8 GB PLE n-gram
+#                    table, 16 hashed 4 KiB rows per prompt token. ram locks it in RAM at boot (~27 GiB,
+#                    one sequential read); direct reads it per token, which NFS (~2.9k IOPS) cannot keep up with
 #   VISION           dynamic                                    --vision   (off | dynamic | cpu | <gpu>)
 #   PORT             8700                                       --port, and -p 0.0.0.0:$PORT:$PORT
 #   ALIAS            cosmo-6000                                 --alias   (the one name requests must use)
@@ -53,6 +56,7 @@ PARALLEL=${PARALLEL:-$def_parallel}
 SLOT_FULL_CONTEXT=${SLOT_FULL_CONTEXT:-1}
 MAX_CONTEXT=${MAX_CONTEXT:-362144}
 KV=${KV:-int8}
+PLE_IO=${PLE_IO:-ram}
 VISION=${VISION:-dynamic}
 PORT=${PORT:-8700}
 ALIAS=${ALIAS:-cosmo-6000}
@@ -68,6 +72,7 @@ EXTRA_ARGS=${EXTRA_ARGS:-}
 [[ $MAX_CONTEXT =~ ^[1-9][0-9]*$ ]] || die "MAX_CONTEXT must be a positive integer, got '$MAX_CONTEXT'."
 if ! [[ $PORT =~ ^[1-9][0-9]*$ ]] || (( PORT > 65535 )); then die "PORT must be 1..65535, got '$PORT'."; fi
 [[ -n $ALIAS ]] || die "ALIAS is empty: every request must name the served model."
+[[ $PLE_IO == ram || $PLE_IO == direct ]] || die "PLE_IO must be ram or direct, got '$PLE_IO'."
 
 # ------------------------------------------------------------------ the pack
 
@@ -114,6 +119,7 @@ serve_args+=(
   --gpu 0
   --max-context "$MAX_CONTEXT"
   --kv "$KV"
+  --ple-io "$PLE_IO"
   --parallel "$PARALLEL"
 )
 slots="1 slot × $MAX_CONTEXT"
@@ -153,7 +159,7 @@ done
 
 echo "== image: $RUN_IMAGE"
 echo "== pack:  $pack_real ($pack_bytes bytes, $(( pack_bytes / 1073741824 )) GiB)"
-echo "== mode:  $slots, kv=$KV, vision=$VISION, http://0.0.0.0:$PORT/v1 as '$ALIAS'"
+echo "== mode:  $slots, kv=$KV, ple-io=$PLE_IO, vision=$VISION, http://0.0.0.0:$PORT/v1 as '$ALIAS'"
 echo "== cache: $CACHE_DIR"
 printf '%q ' "${shown[@]}"
 echo
