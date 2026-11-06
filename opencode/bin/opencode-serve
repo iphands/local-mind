@@ -1,5 +1,5 @@
 #!/bin/bash
-# ~/bin/opencode-serve inside the ocli2 container: the `opencode serve` that ~/bin/opencode joins.
+# ~/bin/opencode-serve inside the ocli container: the `opencode serve` that ~/bin/opencode joins.
 #
 # A bare `opencode-serve` runs `start`. `status` is the read-only verb -- use it to check.
 #

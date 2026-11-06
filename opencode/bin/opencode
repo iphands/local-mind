@@ -1,5 +1,5 @@
 #!/bin/bash
-# ~/bin/opencode inside the ocli2 container: join the container's `opencode serve` instead of
+# ~/bin/opencode inside the ocli container: join the container's `opencode serve` instead of
 # the shared background service (a bare `opencode` otherwise discovers
 # ~/.local/state/opencode/service.json, which is the self-started `serve --service`).
 #

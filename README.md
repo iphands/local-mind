@@ -55,11 +55,11 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 ```
 .
 ├── bin/                        # Entry point scripts
-│   ├── opencode                # Launch the dev container
-│   ├── opencode2               # Launch the OpenCode 2 trial container (no omo/ocmonitor)
+│   ├── opencode                # Launch the OpenCode 2 dev container (default, :8082)
+│   ├── opencode-legacy         # Launch the legacy OpenCode 1 + oh-my-opencode container (:8080)
 │   ├── build-container-opencode-base  # Shared base image (ocli-base)
 │   ├── build-container-opencode
-│   ├── build-container-opencode2
+│   ├── build-container-opencode-legacy
 │   ├── model-holder            # Lock model files in memory
 │   ├── model-switcher          # Switch agent models
 │   ├── ocm                     # OpenCode model management
@@ -70,9 +70,18 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 │   ├── config.yaml.default     # Config template
 │   └── README.md               # Full proxy documentation
 │
-├── opencode/                   # Main dev environment
+├── opencode/                   # Main dev environment (OpenCode 2, no omo/ocmonitor)
 │   ├── Dockerfile.base         # Fedora-based shared base (ocli-base)
-│   ├── Dockerfile              # OpenCode 1 + oh-my-opencode on ocli-base
+│   ├── .dnf-deps               # Fedora packages for the base
+│   ├── Dockerfile              # OpenCode 2 on ocli-base (ocli)
+│   ├── bin/                    # In-container ~/bin: opencode joins the serve, opencode-serve runs it
+│   └── container_data/
+│       └── config/opencode/
+│           ├── opencode.jsonc  # Provider & permission config
+│           └── agents/         # Agent definitions (chat, local-mind, neckbeard, hoodie)
+│
+├── opencode-legacy/            # Legacy OpenCode 1 + oh-my-opencode environment
+│   ├── Dockerfile              # OpenCode 1 + oh-my-opencode + ocmonitor on ocli-base (ocli-legacy)
 │   ├── container_data/
 │   │   └── config/opencode/
 │   │       ├── opencode.jsonc  # Provider & permission config
@@ -85,9 +94,6 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 │   │   └── model-switcher/     # Rust: TUI for switching models per agent
 │   ├── vendor/                 # Read-only reference: OpenCode & oh-my-opencode source
 │   └── plans/                  # Planning documents
-│
-├── opencode2/                  # OpenCode 2 trial: Dockerfile on ocli-base, own container_data
-│   └── bin/                    # In-container ~/bin: opencode joins the serve, opencode-serve runs it
 │
 ├── model-holder/               # Rust: mmap + mlock model files to prevent cache thrashing
 │
@@ -149,7 +155,7 @@ The proxy listens on `:8799` by default and routes to the backend LLM servers.
 bin/opencode
 ```
 
-This builds the Docker image (if needed) and drops you into a Fedora container with OpenCode, oh-my-opencode, and all development tools pre-installed. Your `~/prog` directory is mounted read-write.
+This builds the Docker image (if needed) and drops you into a Fedora container with OpenCode 2 and all development tools pre-installed. The legacy OpenCode 1 + oh-my-opencode container is still available as `bin/opencode-legacy`. Your `~/prog` directory is mounted read-write.
 
 ### 4. Start OpenCode Inside the Container
 
@@ -189,7 +195,7 @@ See `llama-proxy/README.md` for full documentation.
 Interactive TUI for switching which LLM model each agent uses:
 
 ```bash
-cd opencode/helpers/model-switcher
+cd opencode-legacy/helpers/model-switcher
 cargo run --release lm        # Switch local-mind's model
 cargo run --release omo       # Switch oh-my-opencode models
 cargo run --release all       # Switch all agents at once

@@ -1,4 +1,4 @@
-# Shared base (ocli-base) for opencode/Dockerfile (ocli) and opencode2/Dockerfile (ocli2)
+# Shared base (ocli-base) for opencode/Dockerfile (ocli) and opencode-legacy/Dockerfile (ocli-legacy)
 # Built by ./bin/build-container-opencode-base
 ARG BASE_IMAGE=iphands/pkgcache-fedora:45
 FROM ${BASE_IMAGE} AS builder

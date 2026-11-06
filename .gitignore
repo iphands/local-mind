@@ -3,9 +3,9 @@
 /llama-proxy/e2e/target
 /llama-proxy/target
 /llama-proxy/trash
-/opencode/container_data/.bash_history
-/opencode/container_data/config/opencode/oh-my-opencode.json.bak
-/opencode/container_data/claude_transcripts
+/opencode-legacy/container_data/.bash_history
+/opencode-legacy/container_data/config/opencode/oh-my-opencode.json.bak
+/opencode-legacy/container_data/claude_transcripts
 /scratch
 /server/llamacpp/vendor
 /server/vllm/*log

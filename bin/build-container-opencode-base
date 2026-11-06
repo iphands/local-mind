@@ -1,5 +1,5 @@
 #!/bin/bash
-# Builds ocli-base, the shared base of ocli (opencode) and ocli2 (opencode2)
+# Builds ocli-base, the shared base of ocli (opencode) and ocli-legacy (opencode-legacy)
 ROOT=`git rev-parse --show-toplevel`
 
 # Container runtime: docker if present, else podman (override with CONTAINER_RUNTIME)

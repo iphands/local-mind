@@ -1,7 +1,7 @@
 # context/ — pitfalls for the whole local-mind tree
 
 Traps that generalize across the sub-projects (`server/basalt`, `server/vllmcustom`, `server/ninfer`,
-`server/ignis`, `opencode2`). Project-specific detail stays in each sub-project's own `context/`.
+`server/ignis`, `opencode`). Project-specific detail stays in each sub-project's own `context/`.
 Shape per `server/basalt/context/AGENTS.md`: Problem / How to avoid / Sources, tagged
 `[OBSERVED YYYY-MM-DD]` when it actually bit.
 

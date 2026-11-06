@@ -1,2 +1,2 @@
 #!/bin/bash
-docker exec -it opencode /home/iphands/bin/ocm "$@"
+docker exec -it opencode-legacy /home/iphands/bin/ocm "$@"

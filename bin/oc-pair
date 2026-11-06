@@ -1,5 +1,5 @@
 #!/bin/bash
-# local-mind/bin/oc-pair, inside the ocli2 container: mint a pairing link for the
+# local-mind/bin/oc-pair, inside the ocli container: mint a pairing link for the
 # `opencode serve` that ~/bin/opencode-serve runs.
 #
 # Lives here rather than in ~/bin because ~/bin is the container's writable layer: a
@@ -11,11 +11,12 @@
 #
 # Callable as `oc-pair` via ~/dotfiles/bin/oc-pair, a symlink here -- dotfiles/init does
 # `ln -sf $PWD/$var ~/bin/` for every file in dotfiles/bin, so it survives rebuilds without
-# putting this directory on PATH. That matters: `opencode` and `opencode2` exist in both
-# ~/bin and here, and they are different programs, so this dir must not join PATH.
+# putting this directory on PATH. That matters: `opencode` exists in both ~/bin (the
+# in-container client) and here (the host launcher), and they are different programs, so
+# this dir must not join PATH.
 #
-# The password itself lives in opencode2/container_data/.opencode-password on the host
-# (mode 600, read by local-mind/bin/opencode2 into the container's env), which is the
+# The password itself lives in opencode/container_data/.opencode-password on the host
+# (mode 600, read by local-mind/bin/opencode into the container's env), which is the
 # authoritative source if you need the value while the serve is down. This script never
 # prints it.
 #
@@ -132,7 +133,7 @@ if [ -z "$pid" ]; then
   if [ -e "${HOME:-/home/iphands}/IM_A_CONTAINER" ]; then
     echo "         start one: opencode-serve start" >&2
   else
-    echo "         run this inside ocli2, or point --port/--url at the server" >&2
+    echo "         run this inside ocli, or point --port/--url at the server" >&2
   fi
   exit 1
 fi

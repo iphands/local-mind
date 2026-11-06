@@ -1,18 +1,18 @@
-# OpenCode 1 + oh-my-opencode + ocmonitor on top of ocli-base (Dockerfile.base)
+# OpenCode 2 (no oh-my-opencode, no ocmonitor) on top of ocli-base (Dockerfile.base)
 # Built by ./bin/build-container-opencode
 FROM ocli-base
 
-# --no-modify-path: ~/bin/opencode symlink below puts it on PATH
-RUN curl -fsSL https://opencode.ai/install | bash -s -- --no-modify-path
-RUN git clone https://github.com/Shlomob/ocmonitor-share.git && cd ocmonitor-share && ./install.sh
-
 ## FAST UPGRADE PATH
-RUN echo bump_008
-RUN /home/iphands/.opencode/bin/opencode upgrade
-RUN if [ "$(uname -m)" = x86_64 ]; then npm install -g oh-my-opencode-linux-x64; else npm install -g oh-my-opencode-linux-arm64; fi
-RUN source /home/iphands/.bash_profile ; source /home/iphands/.bashrc ; ./.bun/bin/bunx oh-my-opencode install --no-tui --claude=no --gemini=no --copilot=no --opencode-zen=no --zai-coding-plan=no
+RUN echo bump_002
+# v2 installs as ~/.opencode/bin/opencode (plus an opencode2 shim); --no-modify-path: ~/bin symlinks below
+RUN curl -fsSL https://opencode.ai/v2/install | bash -s -- --no-modify-path
 
-RUN ln -s /home/iphands/ocmonitor-share/ocmonitor-wrapper.sh /home/iphands/bin/ocm && \
-    ln -s /home/iphands/.opencode/bin/opencode /home/iphands/bin/opencode || true
+# ~/bin/opencode2 is the raw binary; bin/ holds ~/bin/opencode (joins the container's
+# `opencode serve`) and ~/bin/opencode-serve (runs that serve). COPY'd, not symlinked, so
+# neither may already exist as a symlink here
+RUN ln -s /home/iphands/.opencode/bin/opencode /home/iphands/bin/opencode2
+
+COPY --chown=iphands:iphands bin/ /home/iphands/bin/
+RUN chmod 755 /home/iphands/bin/opencode /home/iphands/bin/opencode-serve
 
 CMD [ "/bin/bash", "-l" ]

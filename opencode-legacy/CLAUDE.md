@@ -1,6 +1,8 @@
-# OpenCode Container Setup
+# OpenCode Legacy Container Setup
 
-Containerized OpenCode development environment with multi-agent delegation using local LLMs.
+Legacy containerized OpenCode 1 + oh-my-opencode development environment with multi-agent
+delegation using local LLMs. Launched by `../bin/opencode-legacy` (image `ocli-legacy`); the
+default is now OpenCode 2 in `../opencode/` (`../bin/opencode`, image `ocli`).
 
 ## Project Structure
 
@@ -16,8 +18,7 @@ Containerized OpenCode development environment with multi-agent delegation using
 ├── prompts/               # Prompt templates
 ├── plans/                 # Planning documents
 ├── vendor/                # READ ONLY codebases you can use to understand opencode / oh-my-opencode (sorce code and docs!!)
-├── Dockerfile.base        # Fedora-based base with dev tools (ocli-base, shared with ../opencode2)
-└── Dockerfile             # OpenCode + oh-my-opencode + ocmonitor on ocli-base
+└── Dockerfile             # OpenCode 1 + oh-my-opencode + ocmonitor on ocli-base (../opencode/Dockerfile.base)
 ```
 
 ## Understanding
