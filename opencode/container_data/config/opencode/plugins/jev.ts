@@ -57,6 +57,7 @@ const RISKY_MIN = 0.6 // ask for a full review at or above this
 const VERDICT_MIN = 0.5 // below this the verdict line says "unsure"; a fail hidden by exit 0 scored 0.55
 const RUNNER_UP_MIN = 0.2 // also show the second label when it is at least this likely
 const ESCALATE_MIN = 0.7 // shell allow -> ask at or above this
+const IRREVERSIBLE_MIN = 0.85 // shell allow -> ask on an irreversible answer alone
 const CACHE_MAX = 32
 const TRACE_STATE_CHARS = 800 // state shown in a trace: head + tail
 const TRACE_KEEP = 16 // traces waiting for their tool result
@@ -325,6 +326,20 @@ const RISK_QUESTIONS: Questions = {
       system: "uses sudo, or changes system configuration, services, users, permissions or disks, or kills processes it did not start",
     },
   },
+  // Asked in the same request; it only adds escalations (see the permission hook)
+  reversibility: {
+    type: "choice",
+    criteria: {
+      read_only: "only reads or inspects and changes nothing: ls, cat, grep, find without -delete, git status, git log, git diff",
+      reversible:
+        "changes that git, a rebuild or a reinstall can undo: edits, moves or deletes of project files or build " +
+        "output (rm -rf node_modules, target/, dist/), git add, commit, stash, checkout, installing dependencies",
+      irreversible:
+        "destroys something nothing can restore: deletes in a home, system or root directory or of untracked user " +
+        "data, find -delete or rm -rf outside the project, dd, mkfs, truncating files or databases, " +
+        "git reset --hard, git clean -fd, git push --force",
+    },
+  },
 }
 
 // The model scores any `rm` as destructive (rm -rf target/ 0.94 vs rm -rf ~/x 0.96), so no
@@ -431,7 +446,10 @@ export default {
           })
         const a = r.answers
         if (!a) return
+        // shell_risk decides first and keeps its labels; irreversible alone can only add an escalation
         const hits = flagged(a.shell_risk, ESCALATE_MIN, "routine")
+        const pIrreversible = a.reversibility.probabilities.irreversible ?? 0
+        if (!hits.length && pIrreversible >= IRREVERSIBLE_MIN) hits.push(["irreversible", pIrreversible])
         if (!hits.length) return
         const [label, p] = hits[0]
         e.effect = "ask"
@@ -463,5 +481,7 @@ export const __test = {
   REVIEW_QUESTIONS,
   VERDICT_QUESTIONS,
   RISK_QUESTIONS,
+  IRREVERSIBLE_MIN,
+  ESCALATE_MIN,
   READ_ONLY,
 }

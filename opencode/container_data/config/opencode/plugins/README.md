@@ -115,6 +115,27 @@ scores at least 0.70, the permission changes from `allow` to `ask` with a messag
 jev flagged this command as destructive (p=0.93); confirm to run it
 ```
 
+The same request asks a second question, `reversibility`: `read_only`, `reversible` or
+`irreversible`, with worked examples in each criterion. It can only **add** escalations. If
+`shell_risk` finds nothing but `irreversible` scores at least 0.85, the command asks anyway:
+
+```
+jev flagged this command as irreversible (p=0.96); confirm to run it
+```
+
+When both questions fire, the `shell_risk` label is reported, so its messages stay the same.
+The second question adds about nothing: both answers come back in about 125 ms. Probed against
+the 4060 on 2026-11-06 with 28 labelled commands:
+
+- It catches what the category question split: `dd if=/dev/zero of=/dev/sda` (destructive 0.38,
+  system 0.59, so neither reached 0.70) and `> ~/.bash_history` (0.59 / 0.38). Both score
+  irreversible 0.95–0.96.
+- Everything that should ask scored irreversible ≥ 0.92. The routine commands the model judged
+  (builds, tests, commits, `mv`, `sed -i`, `git stash`, installs, reads) scored ≤ 0.10.
+- It does **not** fix the `rm` problem below: `rm -rf node_modules` scores irreversible 0.89 and
+  `rm -rf target/ dist/` 0.94. Using `reversible` to cancel a `destructive` hit was considered
+  and dropped for that reason, since it would only weaken the gate.
+
 The model scores almost every `rm` as destructive (`rm -rf target/` 0.94, `rm -rf ~/x` 0.96), so
 no threshold separates the two. An `rm` is therefore decided locally, without asking the model,
 when every target is a plain relative path inside the working directory: no `/`, `~`, `$`, `..`,
@@ -277,6 +298,7 @@ Tunables live at the top of `jev.ts` and were set from a calibration run:
 | `VERDICT_MIN` | 0.50 | below this the verdict says `unsure` |
 | `RUNNER_UP_MIN` | 0.20 | show the second verdict label at or above this |
 | `ESCALATE_MIN` | 0.70 | shell `allow` -> `ask` threshold |
+| `IRREVERSIBLE_MIN` | 0.85 | shell `allow` -> `ask` on an `irreversible` answer alone |
 | `TRACE_STATE_CHARS` | 800 | state shown in a trace (head + tail) |
 | `TRACE_KEEP` | 16 | F1/F3 traces waiting for their tool result |
 | `TRACE_MAX_AGE_MS` | 600000 | a waiting trace older than this is dropped |
