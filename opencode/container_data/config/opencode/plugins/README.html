@@ -1,0 +1,463 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>jev Plugin</title>
+<style>
+  :root {
+    --bg: #f7f6f2;
+    --surface: #ffffff;
+    --surface-2: #f1efe9;
+    --text: #1c1b19;
+    --muted: #67645c;
+    --line: #e3e0d7;
+    --accent: #b4430f;
+    --accent-soft: #fbe8dd;
+    --ok: #15803d;
+    --ok-soft: #ddf2e4;
+    --warn: #9a5b06;
+    --warn-soft: #f9eed3;
+    --info: #1d4ed8;
+    --info-soft: #e0e8fb;
+    --code-bg: #f3f1eb;
+    --shadow: 0 1px 2px rgba(0,0,0,.04), 0 4px 18px rgba(0,0,0,.04);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #131312; --surface: #1b1a18; --surface-2: #232220; --text: #ecebe5; --muted: #a29f96;
+      --line: #34322e; --accent: #fb923c; --accent-soft: #3a2416; --ok: #4ade80; --ok-soft: #15301e;
+      --warn: #facc15; --warn-soft: #332a10; --info: #93b4ff; --info-soft: #1c2640; --code-bg: #111110;
+      --shadow: none;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #131312; --surface: #1b1a18; --surface-2: #232220; --text: #ecebe5; --muted: #a29f96;
+    --line: #34322e; --accent: #fb923c; --accent-soft: #3a2416; --ok: #4ade80; --ok-soft: #15301e;
+    --warn: #facc15; --warn-soft: #332a10; --info: #93b4ff; --info-soft: #1c2640; --code-bg: #111110;
+    --shadow: none;
+  }
+
+  * { box-sizing: border-box; }
+  html { -webkit-text-size-adjust: 100%; scroll-behavior: smooth; scroll-padding-top: 64px; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 16px/1.62 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  code, pre, kbd { font-family: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace; }
+  code { font-size: .86em; background: var(--code-bg); padding: .1em .35em; border-radius: 4px; overflow-wrap: anywhere; }
+  pre {
+    margin: 12px 0 0; background: var(--code-bg); border: 1px solid var(--line); border-radius: 8px;
+    padding: 12px 14px; overflow-x: auto; font-size: .8rem; line-height: 1.55;
+  }
+  pre code { background: none; padding: 0; font-size: inherit; overflow-wrap: normal; }
+  a { color: var(--accent); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+
+  nav.top {
+    position: sticky; top: 0; z-index: 5; background: color-mix(in srgb, var(--bg) 88%, transparent);
+    backdrop-filter: blur(8px); border-bottom: 1px solid var(--line);
+  }
+  nav.top .in { max-width: 980px; margin: 0 auto; padding: 10px 16px; display: flex; gap: 6px 16px; flex-wrap: wrap; align-items: center; font-size: .86rem; }
+  nav.top strong { margin-right: 6px; }
+  nav.top a { color: var(--muted); text-decoration: none; }
+  nav.top a:hover { color: var(--text); }
+
+  .wrap { max-width: 980px; margin: 0 auto; padding: 0 16px 80px; }
+  header { padding: 48px 0 8px; }
+  .eyebrow { font-size: .76rem; letter-spacing: .12em; text-transform: uppercase; color: var(--accent); font-weight: 650; }
+  h1 { font-size: clamp(1.9rem, 5vw, 2.7rem); line-height: 1.12; margin: .35rem 0 .8rem; letter-spacing: -.02em; }
+  .lede { font-size: 1.07rem; color: var(--muted); max-width: 72ch; margin: 0; }
+  .lede strong { color: var(--text); font-weight: 600; }
+
+  h2 { font-size: 1.3rem; margin: 56px 0 6px; letter-spacing: -.01em; }
+  h3 { font-size: 1.05rem; margin: 0 0 6px; }
+  .sub { color: var(--muted); margin: 0 0 18px; font-size: .95rem; max-width: 75ch; }
+
+  .principles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 26px; }
+  @media (max-width: 800px) { .principles { grid-template-columns: repeat(2, 1fr); } }
+  @media (max-width: 460px) { .principles { grid-template-columns: 1fr; } }
+  .pr { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 14px; box-shadow: var(--shadow); }
+  .pr b { display: block; font-size: .95rem; margin-bottom: 3px; }
+  .pr span { font-size: .85rem; color: var(--muted); line-height: 1.45; display: block; }
+
+  /* lifecycle flow */
+  .flow { display: grid; grid-template-columns: repeat(4, 1fr); gap: 0; margin-top: 8px; }
+  @media (max-width: 800px) { .flow { grid-template-columns: 1fr; } }
+  .step { position: relative; background: var(--surface); border: 1px solid var(--line); padding: 14px 16px 16px; }
+  .step:first-child { border-radius: 12px 0 0 12px; }
+  .step:last-child { border-radius: 0 12px 12px 0; }
+  .step + .step { border-left: none; }
+  @media (max-width: 800px) {
+    .step:first-child { border-radius: 12px 12px 0 0; }
+    .step:last-child { border-radius: 0 0 12px 12px; }
+    .step + .step { border-left: 1px solid var(--line); border-top: none; }
+  }
+  .step .k { font-size: .7rem; text-transform: uppercase; letter-spacing: .09em; color: var(--muted); font-weight: 650; }
+  .step .h { font-weight: 640; margin: 2px 0 8px; font-size: .95rem; }
+  .step .f { display: flex; flex-wrap: wrap; gap: 6px; }
+  .step p { margin: 8px 0 0; font-size: .84rem; color: var(--muted); line-height: 1.45; }
+  .tag { font-size: .72rem; font-weight: 650; padding: .14rem .5rem; border-radius: 999px; white-space: nowrap; }
+  .t-f1 { background: var(--info-soft); color: var(--info); }
+  .t-f2 { background: var(--ok-soft); color: var(--ok); }
+  .t-f3 { background: var(--accent-soft); color: var(--accent); }
+  .t-tr { background: var(--warn-soft); color: var(--warn); }
+  .t-none { background: var(--surface-2); color: var(--muted); }
+
+  /* feature cards */
+  .feature { background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow); margin-top: 16px; overflow: hidden; }
+  .feature .hd { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: baseline; padding: 18px 22px 0; }
+  .feature .hd h3 { font-size: 1.15rem; margin: 0; }
+  .feature .hd .hook { font-size: .8rem; color: var(--muted); }
+  .feature .bd { padding: 10px 22px 20px; }
+  .feature .bd > p { margin: 0 0 10px; }
+  .kv { display: grid; grid-template-columns: 150px 1fr; gap: 8px 18px; margin: 12px 0 0; font-size: .92rem; }
+  .kv dt { color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .07em; font-weight: 650; padding-top: 2px; }
+  .kv dd { margin: 0; }
+  .kv dd ul { margin: 0; padding-left: 1.1rem; }
+  .kv dd li { margin: 2px 0; }
+  @media (max-width: 640px) {
+    .kv { grid-template-columns: 1fr; gap: 2px; }
+    .kv dd { margin-bottom: 10px; }
+    .feature .hd, .feature .bd { padding-left: 16px; padding-right: 16px; }
+  }
+  .callout { margin-top: 14px; padding: 10px 13px; border-radius: 0 8px 8px 0; font-size: .88rem; border-left: 3px solid var(--info); background: var(--info-soft); }
+  .callout.ok { border-color: var(--ok); background: var(--ok-soft); }
+
+  .tablewrap { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; overflow-x: auto; box-shadow: var(--shadow); margin-top: 12px; }
+  table { width: 100%; border-collapse: collapse; font-size: .89rem; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  tr:last-child td { border-bottom: none; }
+  th { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); font-weight: 650; background: var(--surface-2); }
+  td.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .hit { color: var(--accent); font-weight: 650; }
+  .pass { color: var(--ok); font-weight: 650; }
+
+  .grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 760px) { .grid2 { grid-template-columns: 1fr; } }
+  .panel { background: var(--surface); border: 1px solid var(--line); border-radius: 12px; padding: 16px 18px; box-shadow: var(--shadow); }
+  .panel p { margin: 6px 0 0; font-size: .92rem; }
+  .panel ul { margin: 6px 0 0; padding-left: 1.1rem; font-size: .92rem; }
+
+  .safety { counter-reset: s; display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 12px; }
+  @media (max-width: 760px) { .safety { grid-template-columns: 1fr; } }
+  .safety .panel { position: relative; padding-left: 52px; }
+  .safety .panel::before {
+    counter-increment: s; content: counter(s); position: absolute; left: 16px; top: 15px; width: 24px; height: 24px;
+    border-radius: 50%; background: var(--ok-soft); color: var(--ok); font-weight: 700; font-size: .8rem;
+    display: flex; align-items: center; justify-content: center;
+  }
+
+  footer { margin-top: 56px; color: var(--muted); font-size: .82rem; border-top: 1px solid var(--line); padding-top: 18px; }
+</style>
+</head>
+<body>
+
+<nav class="top"><div class="in">
+  <strong>jev</strong>
+  <a href="#usage">Usage</a>
+  <a href="#lifecycle">Where it hooks in</a>
+  <a href="#f1">F1</a>
+  <a href="#f2">F2</a>
+  <a href="#f3">F3</a>
+  <a href="#trace">Trace view</a>
+  <a href="#safety">Fail-open</a>
+  <a href="#server">Server</a>
+  <a href="#config">Config</a>
+</div></nav>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">OpenCode 2 plugin · <code>plugins/jev.ts</code></div>
+  <h1>jev: decision-model hints for OpenCode</h1>
+  <p class="lede">
+    jev hands small classification jobs to <strong>H2O Lightning 4B</strong>, a 4B decision model running on the RTX 4060.
+    It never asks the model to write text. It sends a block of text (the <em>state</em>) and multiple-choice questions,
+    and the model returns a probability for each option. One answer costs one prefill and no decoding:
+    about <strong>125 ms</strong> for a shell command.
+  </p>
+  <div class="principles">
+    <div class="pr"><b>Only adds</b><span>Hint text on prompts and tool results. Command output is never edited.</span></div>
+    <div class="pr"><b>Only tightens</b><span>A permission can go from <code>allow</code> to <code>ask</code>, never the other way, and never to <code>deny</code>.</span></div>
+    <div class="pr"><b>Never blocks</b><span>No hook throws. Both reviewers always run.</span></div>
+    <div class="pr"><b>Fails open</b><span>If the server is down, slow or wrong, OpenCode behaves as if jev weren't installed.</span></div>
+  </div>
+</header>
+
+<h2 id="usage">Usage</h2>
+<p class="sub">jev loads automatically from <code>~/.config/opencode/plugins/</code> and needs no setup. These are the controls.</p>
+<div class="grid2">
+  <div class="panel">
+    <h3>Trace view on / off</h3>
+    <p>Shows each request and raw response as JSON in the TUI. Off by default. Takes effect on the next call, with no restart.</p>
+<pre><code># inside the ocli container
+touch ~/.config/opencode/jev-trace   # on
+rm    ~/.config/opencode/jev-trace   # off
+
+# from the host
+touch opencode/container_data/config/opencode/jev-trace</code></pre>
+  </div>
+  <div class="panel">
+    <h3>Environment (read at startup)</h3>
+<pre><code>JEV_URL=http://cosmo.lan:8701   # decision server
+JEV_DISABLE=1                   # register no hooks at all
+JEV_TRACE=1                     # trace view always on</code></pre>
+    <p>Set these in the <code>opencode serve</code> environment. Changes need a serve restart.</p>
+  </div>
+  <div class="panel">
+    <h3>What you'll see</h3>
+<pre><code>[jev] verdict: pass p=0.90 (decision-model hint, not a review; exit=0)
+jev flagged this command as irreversible (p=0.96); confirm to run it
+## Decision-model pre-screen (a 4B model's hints, not findings — …)</code></pre>
+  </div>
+  <div class="panel">
+    <h3>Logs (<code>opencode serve</code> log)</h3>
+<pre><code>[jev] decision model at http://cosmo.lan:8701
+[jev] escalated to ask: irreversible p=0.96: dd if=…
+[jev] unavailable (&lt;error&gt;); skipping for 60s</code></pre>
+  </div>
+</div>
+
+<h2 id="lifecycle">Where it hooks in</h2>
+<p class="sub">Three OpenCode 2 hook points along a tool call. Each feature only touches its own step.</p>
+<div class="flow">
+  <div class="step">
+    <div class="k">1 · permission</div>
+    <div class="h"><code>permission</code> → <code>evaluate</code></div>
+    <div class="f"><span class="tag t-f3">F3 shell risk</span></div>
+    <p>Shell commands the config would <code>allow</code>. Can turn the decision into <code>ask</code>.</p>
+  </div>
+  <div class="step">
+    <div class="k">2 · before</div>
+    <div class="h"><code>tool</code> → <code>execute.before</code></div>
+    <div class="f"><span class="tag t-f1">F1 pre-screen</span></div>
+    <p>Reviewer launches (<code>neckbeard</code>, <code>hoodie</code>). Appends hints to the prompt.</p>
+  </div>
+  <div class="step">
+    <div class="k">3 · run</div>
+    <div class="h">the tool runs</div>
+    <div class="f"><span class="tag t-none">untouched</span></div>
+    <p>jev never changes how the tool runs or what it outputs.</p>
+  </div>
+  <div class="step">
+    <div class="k">4 · after</div>
+    <div class="h"><code>tool</code> → <code>execute.after</code></div>
+    <div class="f"><span class="tag t-f2">F2 verdict</span><span class="tag t-tr">traces</span></div>
+    <p>Adds the verdict line and any waiting traces to the result.</p>
+  </div>
+</div>
+
+<!-- F1 -->
+<section class="feature" id="f1">
+  <div class="hd"><span class="tag t-f1">F1</span><h3>Reviewer pre-screen</h3><span class="hook"><code>execute.before</code> on <code>subagent</code> · 15 s timeout</span></div>
+  <div class="bd">
+    <p>When the agent launches <code>neckbeard</code> or <code>hoodie</code>, jev asks three questions about the change in one request.
+       Then it appends a short block to the end of the reviewer's prompt. Each reviewer sees only its own flags.</p>
+    <dl class="kv">
+      <dt>Fires on</dt><dd>a new reviewer launch. A follow-up to a running review (input has a <code>sessionID</code>) is left alone</dd>
+      <dt>State</dt><dd>the fenced code blocks and diffs in the prompt, or the whole prompt if there are none. Over 24k characters (~6k tokens), the start and end are kept</dd>
+      <dt>Questions</dt><dd><ul>
+        <li><code>neckbeard_flag</code>: <code>type_suppression</code>, <code>empty_catch</code>, <code>weakened_test</code>, <code>hardcoded_secret</code>, <code>injection</code>, <code>null_unhandled</code>, <code>logic_bug</code></li>
+        <li><code>hoodie_flag</code>: <code>quadratic</code>, <code>io_in_loop</code>, <code>unbounded_load</code>, <code>missing_cache</code>, <code>blocking_sync</code>, <code>poor_error_message</code></li>
+        <li><code>risk</code>: <code>trivial</code> / <code>standard</code> / <code>risky</code></li>
+      </ul></dd>
+      <dt>Thresholds</dt><dd>flags listed at p ≥ 0.15 · "quick consultation" when trivial ≥ 0.80 <em>and</em> neither reviewer has a flag · "do a full review" when risky ≥ 0.60</dd>
+      <dt>Sharing</dt><dd>both reviewers launch in one message and share one request. The in-flight promise is cached, keyed by a hash of the state</dd>
+    </dl>
+<pre><code>## Decision-model pre-screen (a 4B model's hints, not findings — confirm or refute each flag first)
+- flags: empty_catch p=0.41, logic_bug p=0.18
+- risk: standard p=0.72</code></pre>
+    <div class="callout"><code>neckbeard.md</code> and <code>hoodie.md</code> tell the reviewers to confirm or refute each flag, to treat an empty block as proving nothing,
+      and to ignore "quick consultation" if they find a serious issue.</div>
+  </div>
+</section>
+
+<!-- F2 -->
+<section class="feature" id="f2">
+  <div class="hd"><span class="tag t-f2">F2</span><h3>Shell verdict</h3><span class="hook"><code>execute.after</code> on <code>shell</code> · 8 s timeout</span></div>
+  <div class="bd">
+    <p>Catches commands that exit 0 but didn't really work: test runners behind <code>|| true</code>, scripts that print errors and still exit 0,
+       builds that pass with warnings worth reading. It adds one line to the tool result.</p>
+    <dl class="kv">
+      <dt>Runs when</dt><dd>all of these hold: exit <b>0</b> · output ≥ 200 characters · the command doesn't start with a read-only tool (<code>cat</code>, <code>ls</code>, <code>grep</code>, <code>rg</code>, <code>find</code>, <code>sed -n</code>, <code>jq</code>, <code>diff</code>, <code>git status|log|diff|show|…</code>)</dd>
+      <dt>State</dt><dd>the command, the exit code and the last ~16k characters of output</dd>
+      <dt>Question</dt><dd><code>pass</code> / <code>fail</code> / <code>warnings</code> / <code>inconclusive</code></dd>
+      <dt>Thresholds</dt><dd>below 0.50 the line says <code>unsure (leans …)</code>. A failure hidden behind exit 0 scored 0.55 in calibration · the runner-up is shown at ≥ 0.20</dd>
+      <dt>Read-only check</dt><dd>looks only at the start of the command, so <code>cd dir &amp;&amp; git status</code> still gets a verdict</dd>
+    </dl>
+<pre><code>[jev] verdict: pass p=0.90 (decision-model hint, not a review; exit=0)
+[jev] verdict: fail p=0.71, pass p=0.24 (decision-model hint, not a review; exit=0)
+[jev] verdict: unsure (leans fail) p=0.44 (decision-model hint, not a review; exit=0)</code></pre>
+    <div class="callout"><code>local-mind.md</code> tells the main agent the verdict is a hint, never verification.
+      Command output still goes to both reviewers, verdict line included.</div>
+  </div>
+</section>
+
+<!-- F3 -->
+<section class="feature" id="f3">
+  <div class="hd"><span class="tag t-f3">F3</span><h3>Shell risk escalation</h3><span class="hook"><code>permission</code> <code>evaluate</code> · 8 s timeout</span></div>
+  <div class="bd">
+    <p>For a shell command the config would run without asking, jev asks two questions in one request.
+       If either one is confident the command is dangerous, the permission becomes <code>ask</code> and you confirm it in the TUI.</p>
+    <dl class="kv">
+      <dt>Runs on</dt><dd>shell commands with effect <code>allow</code> only. <code>ask</code> and <code>deny</code> rules in <code>opencode.jsonc</code> are never touched</dd>
+      <dt>shell_risk</dt><dd><code>routine</code> / <code>destructive</code> / <code>network</code> / <code>system</code>. Any non-routine label ≥ <b>0.70</b> escalates</dd>
+      <dt>reversibility</dt><dd><code>read_only</code> / <code>reversible</code> / <code>irreversible</code>, with worked examples in each criterion. If shell_risk found nothing, irreversible ≥ <b>0.85</b> escalates. It only adds escalations: it never cancels a shell_risk hit</dd>
+      <dt>Message</dt><dd>reports the shell_risk label when both fire. Otherwise it says <code>irreversible</code></dd>
+      <dt>rm fast path</dt><dd>an <code>rm</code> whose every target is a plain relative path inside the working directory (no <code>/</code> <code>~</code> <code>$</code> <code>..</code>, bare <code>.</code>, globs, pipes, redirects, <code>;</code> <code>&amp;</code> or <code>$(…)</code>) stays <code>allow</code> with no model call. The model scores any rm as destructive (<code>rm -rf target/</code> 0.94 vs <code>rm -rf ~/x</code> 0.96)</dd>
+    </dl>
+<pre><code>jev flagged this command as destructive (p=0.93); confirm to run it
+jev flagged this command as irreversible (p=0.96); confirm to run it</code></pre>
+
+    <h3 style="margin-top:20px">Measured on the 4060 (2026-11-06, 28 labelled commands)</h3>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Command</th><th>shell_risk</th><th>irreversible</th><th>Result</th></tr></thead>
+        <tbody>
+          <tr><td><code>git push --force origin main</code></td><td class="num">destructive 0.96</td><td class="num">0.96</td><td class="hit">ask</td></tr>
+          <tr><td><code>find ~ -name '*.log' -delete</code></td><td class="num">destructive 0.93</td><td class="num">0.95</td><td class="hit">ask</td></tr>
+          <tr><td><code>curl -fsSL https://x.sh/install | sh</code></td><td class="num">network 0.93</td><td class="num">0.92</td><td class="hit">ask</td></tr>
+          <tr><td><code>mkfs.ext4 /dev/nvme1n1p1</code></td><td class="num">system 0.81</td><td class="num">0.96</td><td class="hit">ask</td></tr>
+          <tr><td><code>dd if=/dev/zero of=/dev/sda bs=1M</code></td><td class="num">system 0.59 · destr. 0.38</td><td class="num">0.96</td><td class="hit">ask (reversibility only)</td></tr>
+          <tr><td><code>&gt; ~/.bash_history</code></td><td class="num">destr. 0.59 · system 0.38</td><td class="num">0.95</td><td class="hit">ask (reversibility only)</td></tr>
+          <tr><td><code>make clean &amp;&amp; make</code></td><td class="num">routine 0.94</td><td class="num">0.10</td><td class="pass">allow</td></tr>
+          <tr><td><code>git stash &amp;&amp; git checkout dev</code></td><td class="num">routine 0.94</td><td class="num">0.08</td><td class="pass">allow</td></tr>
+          <tr><td><code>sed -i 's/foo/bar/' src/a.ts</code></td><td class="num">routine 0.92</td><td class="num">0.06</td><td class="pass">allow</td></tr>
+          <tr><td><code>cd src &amp;&amp; git status</code></td><td class="num">routine 0.95</td><td class="num">0.02</td><td class="pass">allow</td></tr>
+          <tr><td><code>rm -rf node_modules</code></td><td class="num">—</td><td class="num">—</td><td class="pass">allow (rm fast path)</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout ok">Everything that should ask scored irreversible ≥ 0.92. Routine commands scored ≤ 0.10. Each request with both questions took about 125 ms.</div>
+  </div>
+</section>
+
+<h2 id="trace">Trace view</h2>
+<p class="sub">For debugging. While it's on, each request jev sends (a preview of the state plus the questions in full) and the raw response go into the TUI as formatted JSON.</p>
+<div class="grid2">
+  <div class="panel">
+    <h3>Where each trace appears</h3>
+    <ul>
+      <li><span class="tag t-f1">F1</span> on the reviewer's <b>result</b>, matched by tool call id. Never on its prompt, so reviewers get the same input either way</li>
+      <li><span class="tag t-f2">F2</span> on the shell result, after the verdict line</li>
+      <li><span class="tag t-f3">F3</span> on the same shell call's result, matched by command text (the permission event has no call id)</li>
+    </ul>
+    <p>A trace waiting for its result is dropped after 10 minutes, or once 16 others are queued (for example when you reject a command at the <code>ask</code> prompt).</p>
+  </div>
+  <div class="panel">
+    <h3>Reading a trace</h3>
+    <ul>
+      <li><code>request.state</code>: cut to 800 characters (start and end)</li>
+      <li><code>response</code>: the server's body, exactly as received</li>
+      <li><code>error</code> instead of <code>response</code>: the fetch error, <code>HTTP 404: …</code>, <code>malformed answer for …</code>, or <code>skipped: cooling down after a failure (42s left)</code></li>
+      <li><code>ms</code>: request time</li>
+    </ul>
+    <p>A trace is part of the tool result, so the main agent reads it too. An F1 trace is about 3k characters.</p>
+  </div>
+</div>
+<pre><code>[jev trace] F2 shell verdict
+```json
+{
+  "request": {
+    "state": "A coding agent ran a shell command. ...\n$ make test\nexit code: 0\n\n...",
+    "questions": { "verdict": { "type": "choice", "criteria": { "pass": "...", "fail": "..." } } }
+  },
+  "response": {
+    "model": "h2oai/h2o-lightning-4b",
+    "answers": { "verdict": { "type": "choice", "choice": "fail",
+                              "probabilities": { "pass": 0.079, "fail": 0.921 }, "confidence": 0.842 } },
+    "usage": { "input_tokens": 119, "output_tokens": 0 }
+  },
+  "ms": 41
+}
+```</code></pre>
+
+<h2 id="safety">Fail-open: safe when the server is down</h2>
+<p class="sub">If the decision server is down, slow or returns nonsense, OpenCode behaves as if the plugin weren't there. Seven mechanisms guarantee that.</p>
+<div class="safety">
+  <div class="panel"><h3>Every failure is "no answer"</h3><p><code>query()</code> never throws. Connection refused, DNS failure, timeout, a non-2xx status (including a stock GGUF with no <code>/v1/systemone</code>), bad JSON or a missing answer all come back as <code>answers: null</code>, and the hook leaves the call alone.</p></div>
+  <div class="panel"><h3>One failure pauses every feature for 60 s</h3><p>A dead server costs at most one timeout a minute. With connection refused, the pause costs nothing noticeable. Calls during the pause skip the network entirely.</p></div>
+  <div class="panel"><h3>Hooks never throw</h3><p>Every hook body runs inside <code>guard()</code>, which logs <code>[jev] &lt;hook&gt; hook error, passing through</code> and returns. This matters most for F1: a throw from <code>execute.before</code> would block the reviewer launch.</p></div>
+  <div class="panel"><h3>Changes happen last, all at once</h3><p>Each hook builds its change and assigns it in one step at the end (<code>e.input</code>, <code>e.result</code>, <code>e.effect</code>). A failure before that leaves the event untouched.</p></div>
+  <div class="panel"><h3>No answer means no change</h3><p>F1: the prompt is sent unchanged and both reviewers run. F2: no <code>[jev]</code> line. F3: <code>allow</code> stays <code>allow</code>.</p></div>
+  <div class="panel"><h3>Failures are not cached</h3><p>The F1 cache drops failed results, so the next launch after the pause tries again.</p></div>
+  <div class="panel"><h3>Startup doesn't depend on the server</h3><p><code>setup()</code> only registers hooks and logs the URL. It never contacts the server.</p></div>
+</div>
+<div class="callout">What you lose while it's down: F3's extra prompts. Shell permissions fall back to the rules in <code>opencode.jsonc</code>.
+  The worst cost of an unreachable host is one 8 s or 15 s wait, then the 60 s pause.</div>
+
+<h2 id="server">The decision server</h2>
+<div class="tablewrap">
+  <table>
+    <tbody>
+      <tr><th>Model</th><td>H2O Lightning 4B (Qwen3.5-4B decision model), <code>h2o-lightning-4b-Q8_0.gguf</code>, f16 KV</td></tr>
+      <tr><th>Launcher</th><td><code>server/llamacpp/run-jev-4060</code>, on the RTX 4060 (<code>device=1</code>)</td></tr>
+      <tr><th>Endpoint</th><td><code>POST http://cosmo.lan:8701/v1/systemone</code> (llama.cpp build ≥ 11773; probed against b12169)</td></tr>
+      <tr><th>Context</th><td>40960 tokens, one slot</td></tr>
+      <tr><th>Speed</th><td>3337 tok/s prefill on a 35k-token prompt · peak 6.70 GiB</td></tr>
+    </tbody>
+  </table>
+</div>
+<pre><code>// request
+{ "state": "&lt;text to judge, question included&gt;",
+  "questions": { "verdict": { "type": "choice",
+                              "criteria": { "pass": "the command succeeded ...", "fail": "the command failed ..." } } } }
+// response
+{ "answers": { "verdict": { "choice": "pass", "probabilities": { "pass": 0.90, "fail": 0.04 } } } }</code></pre>
+<div class="grid2" style="margin-top:14px">
+  <div class="panel"><h3>The question lives in <code>state</code></h3><p>Unknown keys such as <code>question</code> are ignored by the server.</p></div>
+  <div class="panel"><h3>Criteria carry the meaning</h3><p>The model reads each option's description, so the wording matters more than the label. Each question re-prefills the whole state, so checklists go into one question.</p></div>
+</div>
+
+<h2 id="config">Tunables</h2>
+<p class="sub">Constants at the top of <code>jev.ts</code>.</p>
+<div class="tablewrap">
+  <table>
+    <thead><tr><th>Constant</th><th>Value</th><th>Meaning</th></tr></thead>
+    <tbody>
+      <tr><td><code>TIMEOUT_MS</code></td><td class="num">8000</td><td>F2 and F3 request timeout</td></tr>
+      <tr><td><code>REVIEW_TIMEOUT_MS</code></td><td class="num">15000</td><td>F1 timeout (3 questions over ~6k tokens is ~4.5 s on an idle 4060)</td></tr>
+      <tr><td><code>COOLDOWN_MS</code></td><td class="num">60000</td><td>pause after any failure</td></tr>
+      <tr><td><code>STATE_MAX_CHARS</code></td><td class="num">24000</td><td>~6k tokens of state; start and end are kept</td></tr>
+      <tr><td><code>OUTPUT_TAIL_CHARS</code></td><td class="num">16000</td><td>command output sent to F2</td></tr>
+      <tr><td><code>MIN_OUTPUT_CHARS</code></td><td class="num">200</td><td>shorter shell output gets no verdict</td></tr>
+      <tr><td><code>FLAG_MIN</code></td><td class="num">0.15</td><td>lowest probability listed as a reviewer flag</td></tr>
+      <tr><td><code>TRIVIAL_MIN</code></td><td class="num">0.80</td><td>"quick consultation"</td></tr>
+      <tr><td><code>RISKY_MIN</code></td><td class="num">0.60</td><td>"do a full review"</td></tr>
+      <tr><td><code>VERDICT_MIN</code></td><td class="num">0.50</td><td>below this the verdict says <code>unsure</code></td></tr>
+      <tr><td><code>RUNNER_UP_MIN</code></td><td class="num">0.20</td><td>show the second verdict label</td></tr>
+      <tr><td><code>ESCALATE_MIN</code></td><td class="num">0.70</td><td>shell_risk: <code>allow</code> → <code>ask</code></td></tr>
+      <tr><td><code>IRREVERSIBLE_MIN</code></td><td class="num">0.85</td><td>reversibility: <code>allow</code> → <code>ask</code> on irreversible alone</td></tr>
+      <tr><td><code>TRACE_STATE_CHARS</code></td><td class="num">800</td><td>state shown in a trace</td></tr>
+      <tr><td><code>TRACE_KEEP</code></td><td class="num">16</td><td>traces waiting for their tool result</td></tr>
+      <tr><td><code>TRACE_MAX_AGE_MS</code></td><td class="num">600000</td><td>a waiting trace older than this is dropped</td></tr>
+    </tbody>
+  </table>
+</div>
+
+<h2>Checking it</h2>
+<div class="grid2">
+  <div class="panel">
+    <h3>Probe the server by hand</h3>
+<pre><code>curl -s http://cosmo.lan:8701/v1/systemone \
+  -H 'content-type: application/json' -d '{
+  "state": "A coding agent ran a shell command.\n\n$ make test\nexit code: 0\n\n3 passed, 1 FAILED",
+  "questions": {"verdict": {"type": "choice", "criteria": {
+    "pass": "the command succeeded and its output shows no errors or failures",
+    "fail": "the command failed: errors, failing tests, crashes or panics"}}}}'</code></pre>
+  </div>
+  <div class="panel">
+    <h3>Confirm it fails open</h3>
+    <p>Stop the 4060 container and run a shell command that prints more than 200 characters. No <code>[jev]</code> line comes back,
+       and the log shows one <code>unavailable … skipping for 60s</code>. With the trace view on, the same call shows a trace with an <code>error</code>.</p>
+    <p><code>jev.ts</code> exports <code>__test</code> (the client, state builders, question sets and thresholds) for scripts. The plugin loader reads only <code>default</code>.</p>
+  </div>
+</div>
+
+<footer>
+  <code>container_data/config/opencode/plugins/jev.ts</code> · agent instructions in <code>agents/local-mind.md</code>, <code>agents/neckbeard.md</code>, <code>agents/hoodie.md</code> · plain-text version in <code>README.md</code>.
+</footer>
+
+</div>
+</body>
+</html>
