@@ -20,9 +20,29 @@
 //   - `choice` criteria descriptions are tokenized and carry the meaning of each option
 //
 // Env: JEV_URL (default http://cosmo.lan:8701), JEV_DISABLE=1 turns every feature off.
+//
+// Trace view (off by default): while the file $XDG_CONFIG_HOME/opencode/jev-trace exists, or
+// JEV_TRACE=1 is set, each request (state preview + questions) and the raw response go into the
+// TUI as formatted JSON, attached to the tool result: F2 and F3 to the shell call, F1 to the
+// reviewer's result (never to its prompt). The file is checked on every call, so `touch` and
+// `rm` toggle it without a restart. Traces are part of the tool result, so the agent sees them too.
+
+import { existsSync } from "node:fs"
+import { homedir } from "node:os"
+import { join } from "node:path"
 
 const JEV_URL = (process.env.JEV_URL ?? "http://cosmo.lan:8701").replace(/\/+$/, "")
 const DISABLED = process.env.JEV_DISABLE === "1"
+const TRACE_FILE = join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode", "jev-trace")
+
+function tracing(): boolean {
+  if (process.env.JEV_TRACE === "1") return true
+  try {
+    return existsSync(TRACE_FILE)
+  } catch {
+    return false
+  }
+}
 
 // Tunables: set from the calibration run, see the comment above each
 const TIMEOUT_MS = 8_000 // shell verdict and shell risk
@@ -38,6 +58,9 @@ const VERDICT_MIN = 0.5 // below this the verdict line says "unsure"; a fail hid
 const RUNNER_UP_MIN = 0.2 // also show the second label when it is at least this likely
 const ESCALATE_MIN = 0.7 // shell allow -> ask at or above this
 const CACHE_MAX = 32
+const TRACE_STATE_CHARS = 800 // state shown in a trace: head + tail
+const TRACE_KEEP = 16 // traces waiting for their tool result
+const TRACE_MAX_AGE_MS = 10 * 60_000 // a waiting trace older than this is dropped
 
 type Criteria = Record<string, string>
 type Questions = Record<string, { type: "choice"; criteria: Criteria }>
@@ -50,8 +73,18 @@ const log = (msg: string) => console.warn(`[jev] ${msg}`)
 
 let downUntil = 0
 
-async function ask(state: string, questions: Questions, timeoutMs = TIMEOUT_MS): Promise<Answers | null> {
-  if (DISABLED || Date.now() < downUntil) return null
+// What was sent and what came back, for the trace view. `response` is the raw body.
+type Trace = { request: { state: string; questions: Questions }; response?: unknown; error?: string; ms: number }
+type Result = { answers: Answers | null; trace: Trace }
+
+// Never throws: every failure is { answers: null } with the reason in trace.error
+async function query(state: string, questions: Questions, timeoutMs = TIMEOUT_MS): Promise<Result> {
+  const trace: Trace = { request: { state, questions }, ms: 0 }
+  if (DISABLED) return { answers: null, trace: { ...trace, error: "JEV_DISABLE=1" } }
+  const wait = downUntil - Date.now()
+  if (wait > 0)
+    return { answers: null, trace: { ...trace, error: `skipped: cooling down after a failure (${Math.ceil(wait / 1000)}s left)` } }
+  const t0 = Date.now()
   try {
     const res = await fetch(`${JEV_URL}/v1/systemone`, {
       method: "POST",
@@ -61,6 +94,7 @@ async function ask(state: string, questions: Questions, timeoutMs = TIMEOUT_MS):
     })
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${(await res.text()).slice(0, 200)}`)
     const body = (await res.json()) as { answers?: Record<string, Partial<Choice>> }
+    trace.response = body
     const answers: Answers = {}
     for (const id of Object.keys(questions)) {
       const a = body.answers?.[id]
@@ -68,12 +102,19 @@ async function ask(state: string, questions: Questions, timeoutMs = TIMEOUT_MS):
         throw new Error(`malformed answer for ${id}`)
       answers[id] = { choice: a.choice, probabilities: a.probabilities }
     }
-    return answers
+    trace.ms = Date.now() - t0
+    return { answers, trace }
   } catch (err) {
+    trace.ms = Date.now() - t0
+    trace.error = err instanceof Error ? err.message : String(err)
     downUntil = Date.now() + COOLDOWN_MS
-    log(`unavailable (${err instanceof Error ? err.message : String(err)}); skipping for ${COOLDOWN_MS / 1000}s`)
-    return null
+    log(`unavailable (${trace.error}); skipping for ${COOLDOWN_MS / 1000}s`)
+    return { answers: null, trace }
   }
+}
+
+async function ask(state: string, questions: Questions, timeoutMs = TIMEOUT_MS): Promise<Answers | null> {
+  return (await query(state, questions, timeoutMs)).answers
 }
 
 // Keep the head and tail of long text; the middle of a diff or log matters least
@@ -92,13 +133,13 @@ function hash(s: string): string {
 }
 
 // Caches the promise, not the value, so the two reviewer launches sent in one message share a
-// single request. Failed (null) results are dropped so the next call can retry after cooldown.
-const cache = new Map<string, Promise<Answers | null>>()
-function cached(key: string, run: () => Promise<Answers | null>): Promise<Answers | null> {
+// single request. Failed results are dropped so the next call can retry after cooldown.
+const cache = new Map<string, Promise<Result>>()
+function cached(key: string, run: () => Promise<Result>): Promise<Result> {
   const hit = cache.get(key)
   if (hit) return hit
   const p = run().then((v) => {
-    if (v === null) cache.delete(key)
+    if (v.answers === null) cache.delete(key)
     return v
   })
   cache.set(key, p)
@@ -107,6 +148,52 @@ function cached(key: string, run: () => Promise<Answers | null>): Promise<Answer
 }
 
 const pct = (p: number) => p.toFixed(2)
+
+// ---------------------------------------------------------------- trace view
+
+// Formatted JSON for the TUI; the state is cut to its head and tail
+function traceBlock(label: string, t: Trace): string {
+  const view = {
+    request: { state: cap(t.request.state, TRACE_STATE_CHARS), questions: t.request.questions },
+    ...(t.response === undefined ? {} : { response: t.response }),
+    ...(t.error === undefined ? {} : { error: t.error }),
+    ms: t.ms,
+  }
+  return `[jev trace] ${label}\n\`\`\`json\n${JSON.stringify(view, null, 2)}\n\`\`\``
+}
+
+// Traces made before a tool runs (F1, F3) wait here until its execute.after event arrives
+type Waiting = { match: (event: any) => boolean; label: string; trace: Trace; at: number }
+const waiting: Waiting[] = []
+function park(w: Omit<Waiting, "at">) {
+  waiting.push({ ...w, at: Date.now() })
+  while (waiting.length > TRACE_KEEP) waiting.shift()
+}
+function collect(event: any): string[] {
+  const now = Date.now()
+  const out: string[] = []
+  for (let i = 0; i < waiting.length; ) {
+    const w = waiting[i]
+    if (now - w.at > TRACE_MAX_AGE_MS) waiting.splice(i, 1)
+    else if (w.match(event)) {
+      out.push(traceBlock(w.label, w.trace))
+      waiting.splice(i, 1)
+    } else i++
+  }
+  return out
+}
+
+// Adds text to a tool result as the model and the TUI see it, whatever shape `content` has
+function withText(result: any, text: string): any {
+  const content = result.content
+  return {
+    ...result,
+    content:
+      typeof content === "string"
+        ? `${content}\n${text}`
+        : [...(Array.isArray(content) ? content : []), { type: "text", text }],
+  }
+}
 
 // Labels at or above `min` other than `skip`, most likely first
 function flagged(c: Choice, min: number, skip: string): [string, number][] {
@@ -285,9 +372,23 @@ export default {
         if (!input || typeof input.prompt !== "string" || !REVIEWERS.has(input.agent)) return
         if (input.sessionID) return // a follow-up to a running review: leave it alone
         const state = reviewState(input.prompt)
-        const a = await cached(hash(state), () => ask(state, REVIEW_QUESTIONS, REVIEW_TIMEOUT_MS))
-        if (!a) return
-        e.input = { ...input, prompt: input.prompt + "\n" + preScreen(input.agent, a) }
+        const r = await cached(hash(state), () => query(state, REVIEW_QUESTIONS, REVIEW_TIMEOUT_MS))
+        const prompt = r.answers ? input.prompt + "\n" + preScreen(input.agent, r.answers) : input.prompt
+        if (tracing() && e.id !== undefined) {
+          const callID = e.id // execute.before and execute.after carry the same tool call id
+          park({ label: `F1 reviewer pre-screen (${input.agent})`, trace: r.trace, match: (ev) => ev?.id === callID })
+        }
+        if (r.answers) e.input = { ...input, prompt }
+      }),
+    )
+
+    // F1 traces: shown on the reviewer's result, so the reviewer never reads them
+    await ctx.tool.hook(
+      "execute.after",
+      guard("subagent trace", async (e: any) => {
+        if (e.tool !== "subagent" || !e.result || !waiting.length) return
+        const blocks = collect(e)
+        if (blocks.length) e.result = withText(e.result, blocks.join("\n"))
       }),
     )
 
@@ -297,21 +398,17 @@ export default {
         if (e.tool !== "shell" || e.status !== "completed") return
         const out = e.result?.output
         if (!out || out.status === "running" || typeof out.output !== "string") return
-        if (out.exit !== 0) return // a non-zero exit already says it failed
-        if (out.output.length < MIN_OUTPUT_CHARS) return
         const command = typeof e.input?.command === "string" ? e.input.command : ""
-        if (READ_ONLY.test(command)) return
-        const a = await ask(verdictState(command, out.exit, out.output), VERDICT_QUESTIONS)
-        if (!a) return
-        const line = verdictLine(a, out.exit)
-        const content = e.result.content
-        e.result = {
-          ...e.result,
-          content:
-            typeof content === "string"
-              ? `${content}\n${line}`
-              : [...(Array.isArray(content) ? content : []), { type: "text", text: line }],
+        const lines: string[] = []
+        const traces = waiting.length ? collect(e) : [] // F3, from the permission check
+        // a non-zero exit already says it failed; short or read-only output is not worth a verdict
+        if (out.exit === 0 && out.output.length >= MIN_OUTPUT_CHARS && !READ_ONLY.test(command)) {
+          const r = await query(verdictState(command, out.exit, out.output), VERDICT_QUESTIONS)
+          if (r.answers) lines.push(verdictLine(r.answers, out.exit))
+          if (tracing()) traces.push(traceBlock("F2 shell verdict", r.trace))
         }
+        lines.push(...traces)
+        if (lines.length) e.result = withText(e.result, lines.join("\n"))
       }),
     )
 
@@ -321,7 +418,18 @@ export default {
         if (e.action !== "shell" || e.effect !== "allow" || !e.resources?.length) return
         const judged = e.resources.filter((r: string) => !inProjectRm(r))
         if (!judged.length) return
-        const a = await ask(riskState(judged), RISK_QUESTIONS)
+        const r = await query(riskState(judged), RISK_QUESTIONS)
+        if (tracing())
+          park({
+            label: "F3 shell risk",
+            trace: r.trace,
+            // the permission event has no tool call id; match the shell call by its command text
+            match: (ev) =>
+              ev?.tool === "shell" &&
+              typeof ev.input?.command === "string" &&
+              judged.every((c: string) => ev.input.command.includes(c)),
+          })
+        const a = r.answers
         if (!a) return
         const hits = flagged(a.shell_risk, ESCALATE_MIN, "routine")
         if (!hits.length) return
@@ -337,6 +445,13 @@ export default {
 // For the calibration script only; the plugin loader reads `default` alone
 export const __test = {
   ask,
+  query,
+  tracing,
+  traceBlock,
+  park,
+  collect,
+  withText,
+  TRACE_FILE,
   cap,
   reviewState,
   preScreen,

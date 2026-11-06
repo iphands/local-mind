@@ -125,6 +125,73 @@ F3 can only move `allow` to `ask`. It never touches commands that are already `a
 (the `git reset --hard`, `git clean`, `git push --force` and `git branch -D` rules in
 `opencode.jsonc` stay as they are), and it never turns anything into `deny`.
 
+## Trace view (request/response debugging)
+
+Off by default. When it is on, every request jev sends and the raw response it gets back are shown
+in the TUI as formatted JSON, attached to the tool result they belong to.
+
+Turn it on or off while OpenCode is running. The file is checked on every call, so no restart is
+needed:
+
+```sh
+# inside the ocli container
+touch ~/.config/opencode/jev-trace     # on
+rm ~/.config/opencode/jev-trace        # off
+
+# from the host (container_data/config is mounted as ~/.config)
+touch opencode/container_data/config/opencode/jev-trace
+```
+
+`JEV_TRACE=1` in the `opencode serve` environment also turns it on, but needs a restart.
+
+Each trace looks like this:
+
+````
+[jev trace] F2 shell verdict
+```json
+{
+  "request": {
+    "state": "A coding agent ran a shell command. ...\n$ make test\nexit code: 0\n\n...",
+    "questions": { "verdict": { "type": "choice", "criteria": { "pass": "...", "fail": "..." } } }
+  },
+  "response": {
+    "model": "h2oai/h2o-lightning-4b",
+    "answers": { "verdict": { "type": "choice", "choice": "fail",
+                              "probabilities": { "pass": 0.079, "fail": 0.921 }, "confidence": 0.842 } },
+    "usage": { "input_tokens": 119, "output_tokens": 0 }
+  },
+  "ms": 41
+}
+```
+````
+
+- `request.state` is cut to 800 characters (head and tail). The full state can be 24k
+  characters. `questions` is shown in full, criteria included.
+- `response` is the server's body exactly as it came back.
+- On failure there is no `response`. Instead `error` gives the reason: the fetch error,
+  `HTTP 404: …`, `malformed answer for verdict`, or `skipped: cooling down after a failure (42s left)`.
+  This is the quickest way to see why a verdict line is missing.
+
+Where each trace appears:
+
+| Feature | Shown on |
+|---|---|
+| F1 reviewer pre-screen | the reviewer's **result** (after `execute.after` on that tool call id). It is never added to the reviewer's prompt, so the reviewer's input stays the same as with tracing off |
+| F2 shell verdict | the shell call's result, after the `[jev] verdict:` line |
+| F3 shell risk | the same shell call's result. The permission event has no tool call id, so the trace waits until a shell call whose command contains the judged text arrives |
+
+A trace waiting for its tool result is dropped after 10 minutes, or once 16 others are queued.
+This happens for example to an F3 trace whose command you rejected at the `ask` prompt.
+
+Caveats:
+
+- A trace is part of the tool result, so **the main agent reads it too**. That costs tokens: an
+  F1 trace with all three questions is about 3k characters. Leave tracing off for normal work.
+- F2 traces show up only for calls that get a verdict request at all (exit 0, at least 200
+  characters, not read-only). F3 traces show up only for commands the config would `allow`.
+- Tracing never changes what jev decides. It only adds text, and it goes through the same
+  `guard()` as everything else.
+
 ## Safety when the server is down
 
 The plugin is designed to **fail open**. If the decision server is unavailable, OpenCode behaves
@@ -191,6 +258,8 @@ That just means one missed hint and a 60 s pause, nothing more.
 |---|---|
 | `JEV_URL` | Decision server base URL (default `http://cosmo.lan:8701`; trailing `/` is stripped) |
 | `JEV_DISABLE=1` | Registers no hooks at all; logs `JEV_DISABLE=1, not registering hooks` |
+| `JEV_TRACE=1` | Trace view always on (same as the `jev-trace` file existing) |
+| `$XDG_CONFIG_HOME/opencode/jev-trace` | Trace view on while this file exists (default `~/.config/opencode/jev-trace`) |
 
 Tunables live at the top of `jev.ts` and were set from a calibration run:
 
@@ -208,6 +277,9 @@ Tunables live at the top of `jev.ts` and were set from a calibration run:
 | `VERDICT_MIN` | 0.50 | below this the verdict says `unsure` |
 | `RUNNER_UP_MIN` | 0.20 | show the second verdict label at or above this |
 | `ESCALATE_MIN` | 0.70 | shell `allow` -> `ask` threshold |
+| `TRACE_STATE_CHARS` | 800 | state shown in a trace (head + tail) |
+| `TRACE_KEEP` | 16 | F1/F3 traces waiting for their tool result |
+| `TRACE_MAX_AGE_MS` | 600000 | a waiting trace older than this is dropped |
 
 `jev.ts` also exports `__test` (the client, state builders and question sets) for calibration
 scripts. The plugin loader reads only `default`.
@@ -227,4 +299,5 @@ scripts. The plugin loader reads only `default`.
 
 - To confirm the plugin fails open, stop the 4060 container and run a shell command that prints
   more than 200 characters. It should come back with no `[jev]` line, and the log should show one
-  `unavailable … skipping for 60s` line.
+  `unavailable … skipping for 60s` line. With the trace view on, the same call shows a trace with
+  the `error` instead.
