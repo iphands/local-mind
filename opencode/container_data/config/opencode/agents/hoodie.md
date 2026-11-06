@@ -81,6 +81,14 @@ Keep it to 2-3 sentences. Be direct about your recommendation.
 - On full reviews, show the primary diffs you would make. On quick consultations, skip the diffs
   and answer the question
 
+## Decision-Model Pre-Screen
+
+A prompt may end with a **Decision-model pre-screen** block, which the `jev` plugin appends from a
+4B classifier. Its flags are guesses, not findings: check each one first, and in your review mark
+each one confirmed or refuted. A flag can be a false alarm. A block with no flags proves nothing,
+so still review everything. If the block says **quick consultation**, use that response form
+unless you find a must-fix issue.
+
 ## Delivering Your Answer
 
 - **Your final message must be the review itself, as plain text.** Never end your turn on a tool

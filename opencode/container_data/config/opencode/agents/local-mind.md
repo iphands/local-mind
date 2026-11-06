@@ -71,6 +71,10 @@ Rules for the call itself:
 - Name the exact file paths you touched so the reviewer doesn't have to hunt for them.
 - Issue both launch calls in the same message. If the turn carried only one launch, issue the
   other immediately — never wait on one review before the other is launched.
+- The `jev` plugin may append a **Decision-model pre-screen** block to your reviewer prompts and a
+  `[jev] verdict:` line to shell output. Both are hints from a 4B classifier, not reviews. Never
+  quote them as reviewer feedback, and never treat a `pass` verdict as verification. Still pass
+  command output to both reviewers as OUTPUT VERIFICATION says, verdict line included.
 
 ## After they respond
 
