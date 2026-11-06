@@ -101,6 +101,7 @@
   .t-f2 { background: var(--ok-soft); color: var(--ok); }
   .t-f3 { background: var(--accent-soft); color: var(--accent); }
   .t-tr { background: var(--warn-soft); color: var(--warn); }
+  .t-f4 { background: var(--surface-2); color: var(--text); border: 1px solid var(--line); }
   .t-none { background: var(--surface-2); color: var(--muted); }
 
   /* feature cards */
@@ -159,6 +160,7 @@
   <a href="#f1">F1</a>
   <a href="#f2">F2</a>
   <a href="#f3">F3</a>
+  <a href="#f4">F4 ask_jev</a>
   <a href="#trace">Trace view</a>
   <a href="#safety">Fail-open</a>
   <a href="#server">Server</a>
@@ -175,12 +177,14 @@
     It never asks the model to write text. It sends a block of text (the <em>state</em>) and multiple-choice questions,
     and the model returns a probability for each option. One answer costs one prefill and no decoding:
     about <strong>125 ms</strong> for a shell command.
+    Three hooks add hints and tighten permissions. One tool, <code>ask_jev</code>, lets an agent ask a question about files
+    <strong>without reading them</strong>.
   </p>
   <div class="principles">
     <div class="pr"><b>Only adds</b><span>Hint text on prompts and tool results. Command output is never edited.</span></div>
     <div class="pr"><b>Only tightens</b><span>A permission can go from <code>allow</code> to <code>ask</code>, never the other way, and never to <code>deny</code>.</span></div>
     <div class="pr"><b>Never blocks</b><span>No hook throws. Both reviewers always run.</span></div>
-    <div class="pr"><b>Fails open</b><span>If the server is down, slow or wrong, OpenCode behaves as if jev weren't installed.</span></div>
+    <div class="pr"><b>Fails open</b><span>If the server is down, slow or wrong, the hooks behave as if jev weren't installed, and <code>ask_jev</code> says to read the files instead.</span></div>
   </div>
 </header>
 
@@ -200,9 +204,19 @@ touch opencode/container_data/config/opencode/jev-trace</code></pre>
   <div class="panel">
     <h3>Environment (read at startup)</h3>
 <pre><code>JEV_URL=http://cosmo.lan:8701   # decision server
-JEV_DISABLE=1                   # register no hooks at all
+JEV_DISABLE=1                   # register no hooks and no tool
 JEV_TRACE=1                     # trace view always on</code></pre>
     <p>Set these in the <code>opencode serve</code> environment. Changes need a serve restart.</p>
+  </div>
+  <div class="panel">
+    <h3>Ask about files (<code>ask_jev</code>)</h3>
+    <p>Agents call it themselves; you can also ask for it: "without reading them, use ask_jev to find which files under src/ talk to the database".</p>
+<pre><code>{ "paths": ["src/**/*.rs"],
+  "question": "Does this file use a mutex or read-write lock?" }</code></pre>
+  </div>
+  <div class="panel">
+    <h3>Long command output</h3>
+    <p>When OpenCode cuts a result short with <code>full output saved to &lt;path&gt;</code>, pass that path to <code>ask_jev</code>: "did any test fail?" over a 20k-line log, without reading it.</p>
   </div>
   <div class="panel">
     <h3>What you'll see</h3>
@@ -236,8 +250,8 @@ jev flagged this command as irreversible (p=0.96); confirm to run it
   <div class="step">
     <div class="k">3 · run</div>
     <div class="h">the tool runs</div>
-    <div class="f"><span class="tag t-none">untouched</span></div>
-    <p>jev never changes how the tool runs or what it outputs.</p>
+    <div class="f"><span class="tag t-none">untouched</span><span class="tag t-f4">F4 ask_jev</span></div>
+    <p>jev never changes how other tools run or what they output. <code>ask_jev</code> is jev's own tool.</p>
   </div>
   <div class="step">
     <div class="k">4 · after</div>
@@ -332,6 +346,57 @@ jev flagged this command as irreversible (p=0.96); confirm to run it</code></pre
   </div>
 </section>
 
+<!-- F4 -->
+<section class="feature" id="f4">
+  <div class="hd"><span class="tag t-f4">F4</span><h3><code>ask_jev</code>: questions about files, without reading them</h3><span class="hook"><code>ctx.tool.transform</code> · runs under the <code>read</code> permission</span></div>
+  <div class="bd">
+    <p>An agent asks one question about many files. Each file is judged separately, and the agent gets one line per file:
+       the answer, its probability, and the line range that decided it. None of the file text enters the agent's context.
+       It is a scouting tool: find what's worth reading, then read only that.</p>
+<pre><code>ask_jev: "Does this file use a mutex or read-write lock?" (yes/no) · 17 files · 398k chars · 113,819 tokens judged in 28.8 s
+yes 0.95  llama-proxy/src/augment.rs  (lines 1079-1249)
+yes 0.91  llama-proxy/src/backends/mod.rs  (lines 1-197)
+…
+unsure (leans no) 0.69  llama-proxy/src/backends/balancer.rs
+not checked (budget; ask again with these paths): llama-proxy/src/exporters/influxdb.rs, … (+13)
+jev answers are a 4B classifier's guesses: read a file before editing it, quoting it, or relying on the answer.</code></pre>
+    <dl class="kv">
+      <dt>Arguments</dt><dd><ul>
+        <li><code>paths</code>: 1–20 files, directories or globs (<code>src/**/*.ts</code>), relative to the project, or a saved tool-output path</li>
+        <li><code>question</code>: one question, answered per file</li>
+        <li><code>options</code> (optional): <code>{label: description}</code>, 2–8 labels, with the question phrased as a choice ("Which of these…?"). Without it, the question is yes/no</li>
+      </ul></dd>
+      <dt>Who sees it</dt><dd>every agent allowed to read: local-mind, chat, neckbeard, hoodie</dd>
+      <dt>Permissions</dt><dd>each file gets the same <code>read</code> check as the read tool, so the reviewers' <code>*.env</code> denies apply. A denied file is listed and the call goes on</dd>
+      <dt>Paths</dt><dd>inside the directory or project, plus <code>~/.local/share/opencode/tool-output/</code>. Globs and directories expand with <code>rg --files</code> (<code>.gitignore</code> respected, hidden files skipped). At most 50 files. Binary files are skipped</dd>
+      <dt>Judging</dt><dd>files are split into ~8000-character chunks with 20 lines of overlap, one request each. Yes/no: a yes in any chunk counts, and its line range is shown. Options: length-weighted average, and a part that leans elsewhere is noted. Below 0.70 a line reads <code>unsure (leans …)</code></dd>
+      <dt>Queue</dt><dd>requests go one at a time across <b>all</b> <code>ask_jev</code> calls, so parallel calls wait for each other: more in flight adds no throughput (flat from 1 to 8 clients) and would take slots from the hooks, which never wait here. An interrupted call that is still queued ends at once</dd>
+      <dt>Budget</dt><dd>at most 400k characters per call (~29 s). Files past that are listed as not checked. A file over 200k characters is checked from the top and marked partial. One glob can cover the whole call, so there's no reason to batch</dd>
+      <dt>Failure</dt><dd>15 s per request. The first failure stops the call with what it has. With nothing answered, the tool errors: <code>jev is unavailable (…); read the files instead</code></dd>
+    </dl>
+
+    <h3 style="margin-top:20px">Calibration (2026-11-06, the live 4060)</h3>
+    <p style="margin:0 0 4px;font-size:.92rem">32 Rust files from <code>llama-proxy/src</code> (773k characters), four yes/no questions with hand-checked ground truth:
+       lock use (14 files), disk I/O (4), HTTP routes (1), spawning a process (1).</p>
+    <div class="tablewrap">
+      <table>
+        <thead><tr><th>Chunk size</th><th>Wording</th><th>Found (of 20) at 0.5</th><th>at 0.7</th><th>s / 100k chars</th></tr></thead>
+        <tbody>
+          <tr><td class="num"><b>8k</b></td><td><b>A (shipped)</b></td><td class="num pass">19, 12 false alarms</td><td class="num pass">19, 6 false alarms</td><td class="num">7.4</td></tr>
+          <tr><td class="num">8k</td><td>B: "a mention in a comment or name doesn't count"</td><td class="num">15, 6 false alarms</td><td class="num">13, 4 false alarms</td><td class="num">7.4</td></tr>
+          <tr><td class="num">12k</td><td>A</td><td class="num">17, 9 false alarms</td><td class="num">15, 5 false alarms</td><td class="num">6.7</td></tr>
+          <tr><td class="num">24k</td><td>A</td><td class="num">17, 8 false alarms</td><td class="num">17, 6 false alarms</td><td class="num">7.1</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="callout">Most false alarms are lookalikes: <code>tokio::spawn</code> (an async task) taken as "spawns a process", or <code>Path</code> in comments taken as disk I/O.
+      A yes means "worth reading", not a fact.</div>
+    <div class="callout ok">During a 400k-character scan, 10 F3 shell checks answered in 167–630 ms, all of them, and no cooldown was triggered.</div>
+    <div class="callout"><code>local-mind.md</code> tells the agent to use it first for scouting, read only what it points to, and never count an answer as verification.
+      <code>neckbeard.md</code> and <code>hoodie.md</code> say a finding must come from code they read.</div>
+  </div>
+</section>
+
 <h2 id="trace">Trace view</h2>
 <p class="sub">For debugging. While it's on, each request jev sends (a preview of the state plus the questions in full) and the raw response go into the TUI as formatted JSON.</p>
 <div class="grid2">
@@ -341,6 +406,7 @@ jev flagged this command as irreversible (p=0.96); confirm to run it</code></pre
       <li><span class="tag t-f1">F1</span> on the reviewer's <b>result</b>, matched by tool call id. Never on its prompt, so reviewers get the same input either way</li>
       <li><span class="tag t-f2">F2</span> on the shell result, after the verdict line</li>
       <li><span class="tag t-f3">F3</span> on the same shell call's result, matched by command text (the permission event has no call id)</li>
+      <li><span class="tag t-f4">F4</span> on the <code>ask_jev</code> result: one summary block with the first request, request count, tokens and per-request time</li>
     </ul>
     <p>A trace waiting for its result is dropped after 10 minutes, or once 16 others are queued (for example when you reject a command at the <code>ask</code> prompt).</p>
   </div>
@@ -376,10 +442,11 @@ jev flagged this command as irreversible (p=0.96); confirm to run it</code></pre
 <p class="sub">If the decision server is down, slow or returns nonsense, OpenCode behaves as if the plugin weren't there. Seven mechanisms guarantee that.</p>
 <div class="safety">
   <div class="panel"><h3>Every failure is "no answer"</h3><p><code>query()</code> never throws. Connection refused, DNS failure, timeout, a non-2xx status (including a stock GGUF with no <code>/v1/systemone</code>), bad JSON or a missing answer all come back as <code>answers: null</code>, and the hook leaves the call alone.</p></div>
-  <div class="panel"><h3>One failure pauses every feature for 60 s</h3><p>A dead server costs at most one timeout a minute. With connection refused, the pause costs nothing noticeable. Calls during the pause skip the network entirely.</p></div>
+  <div class="panel"><h3>One failure pauses every feature for 60 s</h3><p>A dead server costs at most one timeout a minute. With connection refused, the pause costs nothing noticeable. Calls during the pause skip the network entirely.
+    <code>ask_jev</code> respects the pause but only starts one when the server can't be reached at all: its timeouts never switch off F3.</p></div>
   <div class="panel"><h3>Hooks never throw</h3><p>Every hook body runs inside <code>guard()</code>, which logs <code>[jev] &lt;hook&gt; hook error, passing through</code> and returns. This matters most for F1: a throw from <code>execute.before</code> would block the reviewer launch.</p></div>
   <div class="panel"><h3>Changes happen last, all at once</h3><p>Each hook builds its change and assigns it in one step at the end (<code>e.input</code>, <code>e.result</code>, <code>e.effect</code>). A failure before that leaves the event untouched.</p></div>
-  <div class="panel"><h3>No answer means no change</h3><p>F1: the prompt is sent unchanged and both reviewers run. F2: no <code>[jev]</code> line. F3: <code>allow</code> stays <code>allow</code>.</p></div>
+  <div class="panel"><h3>No answer means no change</h3><p>F1: the prompt is sent unchanged and both reviewers run. F2: no <code>[jev]</code> line. F3: <code>allow</code> stays <code>allow</code>. F4: the tool errors with "read the files instead", or returns what it has plus <code>stopped early</code>.</p></div>
   <div class="panel"><h3>Failures are not cached</h3><p>The F1 cache drops failed results, so the next launch after the pause tries again.</p></div>
   <div class="panel"><h3>Startup doesn't depend on the server</h3><p><code>setup()</code> only registers hooks and logs the URL. It never contacts the server.</p></div>
 </div>
@@ -393,8 +460,8 @@ jev flagged this command as irreversible (p=0.96); confirm to run it</code></pre
       <tr><th>Model</th><td>H2O Lightning 4B (Qwen3.5-4B decision model), <code>h2o-lightning-4b-Q8_0.gguf</code>, f16 KV</td></tr>
       <tr><th>Launcher</th><td><code>server/llamacpp/run-jev-4060</code>, on the RTX 4060 (<code>device=1</code>)</td></tr>
       <tr><th>Endpoint</th><td><code>POST http://cosmo.lan:8701/v1/systemone</code> (llama.cpp build ≥ 11773; probed against b12169)</td></tr>
-      <tr><th>Context</th><td>40960 tokens, one slot</td></tr>
-      <tr><th>Speed</th><td>3337 tok/s prefill on a 35k-token prompt · peak 6.70 GiB</td></tr>
+      <tr><th>Slots</th><td>8, sharing one 40960-token KV pool (<code>--parallel 8 --kv-unified</code>), chosen by <code>server/llamacpp/run-jev-4060-benchmark</code> · peak 7.06 GiB</td></tr>
+      <tr><th>Speed</th><td>~4k tok/s prefill, the same whether 1 or 8 requests run. Questions of one request run in separate slots: a 3-question review takes 1.9 s instead of 5.1 s, and a shell check under mixed load 1.7 s instead of 6.8 s (p50)</td></tr>
     </tbody>
   </table>
 </div>
@@ -431,6 +498,16 @@ jev flagged this command as irreversible (p=0.96); confirm to run it</code></pre
       <tr><td><code>TRACE_STATE_CHARS</code></td><td class="num">800</td><td>state shown in a trace</td></tr>
       <tr><td><code>TRACE_KEEP</code></td><td class="num">16</td><td>traces waiting for their tool result</td></tr>
       <tr><td><code>TRACE_MAX_AGE_MS</code></td><td class="num">600000</td><td>a waiting trace older than this is dropped</td></tr>
+      <tr><td><code>ASK_CHUNK_CHARS</code></td><td class="num">8000</td><td><code>ask_jev</code>: characters per request (~2k tokens, ~0.6 s)</td></tr>
+      <tr><td><code>ASK_OVERLAP_LINES</code></td><td class="num">20</td><td>lines shared by neighbouring chunks</td></tr>
+      <tr><td><code>ASK_MAX_FILES</code></td><td class="num">50</td><td>files per call</td></tr>
+      <tr><td><code>ASK_FILE_MAX_CHARS</code></td><td class="num">200000</td><td>a bigger file is checked from the top and marked partial</td></tr>
+      <tr><td><code>ASK_BUDGET_CHARS</code></td><td class="num">400000</td><td>characters sent per call (~29 s)</td></tr>
+      <tr><td><code>ASK_TIMEOUT_MS</code></td><td class="num">15000</td><td>per request</td></tr>
+      <tr><td><code>ASK_UNSURE_BELOW</code></td><td class="num">0.70</td><td>a winning answer below this is shown as <code>unsure</code></td></tr>
+      <tr><td><code>ASK_NO_COLLAPSE</code></td><td class="num">0.90</td><td>confident <code>no</code> answers fold into one line</td></tr>
+      <tr><td><code>ASK_LEAN_MIN</code></td><td class="num">0.60</td><td>options: note a part that leans to another label</td></tr>
+      <tr><td><code>ASK_MAX_LINES</code></td><td class="num">60</td><td>lines in the tool result</td></tr>
     </tbody>
   </table>
 </div>

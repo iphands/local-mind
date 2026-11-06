@@ -7,3 +7,5 @@
 /container_data/.opencode-password
 # local reference material (transcripts etc.), never committed
 /vendor
+# jev trace-view toggle (touch / rm at runtime)
+/container_data/config/opencode/jev-trace
