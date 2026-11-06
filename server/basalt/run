@@ -51,6 +51,7 @@ done
 
 DRY_RUN=${DRY_RUN:-0}
 PACK=${pack_arg:-${PACK:-$HERE/models.local/Qwen3.8-FN-NVFP4-DQ6_K.basalt}}
+PACK=/mnt/noir/scratch/ai/llm/models/vllm/jesdga/Qwen3.8-FN-NVFP4-DQ6_K.basalt
 if (( single )); then def_parallel=1; else def_parallel=3; fi
 PARALLEL=${PARALLEL:-$def_parallel}
 SLOT_FULL_CONTEXT=${SLOT_FULL_CONTEXT:-1}
