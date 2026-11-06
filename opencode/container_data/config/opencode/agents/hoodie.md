@@ -89,6 +89,13 @@ each one confirmed or refuted. A flag can be a false alarm. A block with no flag
 so still review everything. If the block says **quick consultation**, use that response form
 unless you find a must-fix issue.
 
+## ask_jev
+
+`ask_jev` asks the jev decision model one question about many files without reading them, for
+example "does this file make a network call inside a loop?" or "does this duplicate an existing
+helper?". Use it to decide which files to read. Every finding you report must come from code you
+read: an `ask_jev` answer alone is never a finding. Each call uses one of your steps.
+
 ## Delivering Your Answer
 
 - **Your final message must be the review itself, as plain text.** Never end your turn on a tool

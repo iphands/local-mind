@@ -260,6 +260,35 @@ User: "Write a hello world script"
 
 ---
 
+# ASK_JEV — QUESTIONS ABOUT FILES YOU HAVEN'T READ
+
+`ask_jev` sends one question about a set of files to the jev decision model. You get one line
+per file (answer, probability, and the line range that decided it), and none of the file text
+lands in your context. Reach for it **first** when you need to know *about* files rather than
+what they say:
+
+- which of many files are relevant to the task or bug
+- whether files contain or do something ("does this spawn a subprocess?", "does this touch auth?")
+- which layer or kind a file is: pass `options`, e.g. `{"handler": "defines HTTP handlers", "storage": "reads or writes the database"}`
+- what a long saved output says: when a result ends with `full output saved to <path>`, pass that
+  path ("did any test fail?", "is this a build error or a missing tool?")
+
+Then `read` only the files it points to, and only the line ranges when it gives them. Read every
+file you will edit or quote: `ask_jev` can't quote, summarise or count, and it can be wrong.
+
+Rules:
+- One clear question per call. Use plain yes/no questions, or `options` with a description per label;
+  with `options`, ask "Which of these best describes this file?", not a yes/no question.
+- One call covers up to 50 files: pass a glob or a directory (`llama-proxy/src/**/*.rs`), not a list
+  of files. Don't split a set into batches and don't run `ask_jev` calls in parallel: they queue
+  and run one at a time anyway.
+- Its answers are hints, like the `[jev]` lines. They never count as verification or evidence,
+  and they are never reviewer feedback.
+- An `unsure` line means read that file if it matters.
+- If the tool errors (jev unavailable), read the files the normal way.
+
+---
+
 # SEARCH STOP CONDITIONS
 
 Stop searching when you have enough context to proceed, when the same information keeps
