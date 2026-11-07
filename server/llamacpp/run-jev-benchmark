@@ -136,7 +136,7 @@ for cfg in $MATRIX; do
       echo "$peak $low" >"$OUT/vram-$idx.txt"
       if (( RESERVE_MIB > 0 && f < RESERVE_MIB )); then
         echo "GPU $GPU free fell to $f MiB (< $RESERVE_MIB reserve)" >"$OUT/guard-$idx.txt"
-        docker stop "$NAME" >/dev/null 2>&1
+        docker kill "$NAME" >/dev/null 2>&1   # at once: docker stop would hold the memory ~10 s more
         exit 0
       fi
       sleep 0.5

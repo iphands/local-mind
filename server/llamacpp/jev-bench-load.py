@@ -166,11 +166,19 @@ class Payloads:
 
 # ---------------------------------------------------------------- client
 
+# Connection-level failures that mean "nobody is listening" (a timeout only means "busy")
+GONE_ERRORS = (ConnectionRefusedError, ConnectionResetError, BrokenPipeError, http.client.RemoteDisconnected)
+GONE_AFTER = 10  # consecutive ones before the server counts as gone and every phase stops
+
+
 class Client:
     def __init__(self, url, timeout):
         u = urllib.parse.urlparse(url)
         self.host, self.port, self.timeout = u.hostname, u.port or 80, timeout
         self.local = threading.local()
+        self.dead = None  # set to the reason once the server is gone; loops and phases check it
+        self.gone_streak = 0
+        self.lock = threading.Lock()
 
     def _conn(self):
         c = getattr(self.local, "conn", None)
@@ -194,11 +202,15 @@ class Client:
 
     def ask(self, scenario, payload):
         """One /v1/systemone request -> record dict. Never raises."""
+        if self.dead:
+            return {"scenario": scenario, "t": time.time(), "ok": False, "ms": 0.0, "error": f"server gone: {self.dead}"}
         body = json.dumps(payload).encode()
         t0 = time.monotonic()
         rec = {"scenario": scenario, "t": time.time(), "ok": False}
         try:
             r, data = self._post(body)
+            with self.lock:
+                self.gone_streak = 0
             rec["status"] = r.status
             if r.status != 200:
                 rec["error"] = f"HTTP {r.status}: {data[:160].decode(errors='replace')}"
@@ -215,6 +227,12 @@ class Client:
         except Exception as e:  # noqa: BLE001 - record every failure
             rec["error"] = f"{type(e).__name__}: {e}"
             self.local.conn = None
+            if isinstance(e, GONE_ERRORS):
+                with self.lock:
+                    self.gone_streak += 1
+                    if self.gone_streak >= GONE_AFTER and not self.dead:
+                        self.dead = rec["error"]
+                        print(f"  [ABORT] server stopped answering ({GONE_AFTER} connection failures in a row: {self.dead})", flush=True)
         rec["ms"] = round((time.monotonic() - t0) * 1000, 1)
         return rec
 
@@ -241,7 +259,7 @@ def stats(recs, wall_s=None):
 
 
 def looper(client, payloads, scenario, until, sink):
-    while time.monotonic() < until:
+    while time.monotonic() < until and not client.dead:
         sink.append(client.ask(scenario, payloads.build(scenario)))
 
 
@@ -302,7 +320,7 @@ def phase_mixed(client, payloads, seconds, interval=0.5):
         t.start()
     time.sleep(1.0)  # let the background reach the server first
     gate, nxt = [], time.monotonic()
-    while time.monotonic() < until:
+    while time.monotonic() < until and not client.dead:
         gate.append(client.ask("gate", payloads.build("gate")))
         nxt += interval
         time.sleep(max(0.0, nxt - time.monotonic()))
@@ -324,7 +342,7 @@ SWEEP_MIX = ["gate", "chunk", "gate", "verdict", "gate", "chunk", "gate", "revie
 
 def sweep_client(client, payloads, until, sink, offset):
     i = offset
-    while time.monotonic() < until:
+    while time.monotonic() < until and not client.dead:
         sc = SWEEP_MIX[i % len(SWEEP_MIX)]
         sink.append(client.ask(sc, payloads.build(sc)))
         i += 1
@@ -371,18 +389,21 @@ def cmd_run(a):
     secs = lambda base: max(5.0, base * a.scale)  # noqa: E731
     result = {"url": a.url, "target": a.target, "config": a.config, "slot_ctx": a.slot_ctx, "scale": a.scale,
               "started": time.strftime("%Y-%m-%d %H:%M:%S")}
-    if "alone" in phases:
-        result["alone"] = phase_alone(client, payloads, reps, a.slot_ctx, long_reps=max(1, round(2 * a.scale)))
-    if "throughput" in phases:
-        clients = [1, 2, 4, 8] if a.scale >= 0.5 else [1, 4]
-        result["throughput"] = phase_throughput(client, payloads, clients, secs(20))
-    if "mixed" in phases:
-        result["mixed"] = phase_mixed(client, payloads, secs(30))
-    if "consistency" in phases:
-        result["consistency"] = phase_consistency(client, payloads)
-    if "sweep" in phases:
-        clients = [int(x) for x in a.sweep_clients.split(",")]
-        result["sweep"] = phase_sweep(client, payloads, clients, secs(20))
+    runners = {
+        "alone": lambda: phase_alone(client, payloads, reps, a.slot_ctx, long_reps=max(1, round(2 * a.scale))),
+        "throughput": lambda: phase_throughput(client, payloads, [1, 2, 4, 8] if a.scale >= 0.5 else [1, 4], secs(20)),
+        "mixed": lambda: phase_mixed(client, payloads, secs(30)),
+        "consistency": lambda: phase_consistency(client, payloads),
+        "sweep": lambda: phase_sweep(client, payloads, [int(x) for x in a.sweep_clients.split(",")], secs(20)),
+    }
+    for name in ("alone", "throughput", "mixed", "consistency", "sweep"):
+        if name not in phases:
+            continue
+        result[name] = runners[name]()
+        if client.dead:
+            result["failed"] = f"server stopped answering during {name}: {client.dead}"
+            print(f"  [ABORT] skipping the remaining phases", flush=True)
+            break
     if a.out:
         with open(a.out, "w") as f:
             json.dump(result, f, indent=1)
