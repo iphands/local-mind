@@ -25,9 +25,9 @@
         "apiKey": "deadbeef1234"
       },
       "models": {
-        "cosmo-proxy": { "name": "cosmo-proxy", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 222822, "output": 262144 } },
-        "cosmo-heavy": { "name": "cosmo-heavy", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 222822, "output": 262144 } },
-        "cosmo-light": { "name": "cosmo-light", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 222822, "output": 262144 } }
+        "cosmo-proxy": { "name": "cosmo-proxy", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 241172, "output": 262144 } },
+        "cosmo-heavy": { "name": "cosmo-heavy", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 241172, "output": 262144 } },
+        "cosmo-light": { "name": "cosmo-light", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 241172, "output": 262144 } }
       }
     },
     "cosmo-00": {
@@ -38,7 +38,7 @@
         "apiKey": "deadbeef1234"
       },
       "models": {
-        "cosmo-6000": { "name": "cosmo-6000", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 222822, "output": 262144 } }
+        "cosmo-6000": { "name": "cosmo-6000", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 241172, "output": 262144 } }
       }
     },
     "cosmo-01": {
@@ -49,7 +49,7 @@
         "apiKey": "deadbeef1234"
       },
       "models": {
-        "cosmo-4060": { "name": "cosmo-4060", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 222822, "output": 262144 } }
+        "cosmo-4060": { "name": "cosmo-4060", "capabilities": { "tools": true, "input": ["text", "image"], "output": ["text"] }, "limit": { "context": 262144, "input": 241172, "output": 262144 } }
       }
     }
   }
