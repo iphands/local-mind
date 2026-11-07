@@ -283,8 +283,12 @@ Use `ask_jev` when no pattern can express the question:
 
 `ask_jev` checks this itself: when a question reads as a plain text search, it answers "use grep"
 instead of scanning, or, if you passed `pattern` (a ripgrep regex), may run the search and list the
-matching files. Follow that answer. Pass `force: true` only if grep came up empty or the user
-explicitly asked you to use `ask_jev`.
+matching files. Follow that answer.
+
+When the user tells you to use `ask_jev`, call it **without** `force`: they asked for `ask_jev`, and
+`ask_jev` deciding "this is a grep question" is part of it. Pass `force: true` only if grep came up
+empty, or the user explicitly asked for a **scan** ("scan with ask_jev", "don't fall back to grep").
+When the question is a literal match, also pass `pattern` (a ripgrep regex).
 
 Then `read` only the files it points to, and only the line ranges when it gives them. Read every
 file you will edit or quote: `ask_jev` can't quote, summarise or count, and it can be wrong.

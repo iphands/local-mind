@@ -511,18 +511,22 @@ type RouterMode = "off" | "advise" | "rg"
 
 // off: always scan. advise (default): on a grep verdict, skip the scan and tell the agent to grep.
 // rg: on a grep verdict, run ripgrep for the agent's `pattern` (advise when there is none).
-// Read on every call from the jev-router file (its content is the mode), then JEV_ROUTER, so
-// `echo rg > ~/.config/opencode/jev-router` switches modes without a restart.
-function routerMode(): RouterMode {
+// Add "strict" ("rg strict", "advise strict") to ignore the agent's `force`, so every ask_jev call
+// goes through the router: for A/B runs, where prompt wording must not decide the arm.
+// Read on every call from the jev-router file (its content is the setting), then JEV_ROUTER, so
+// `echo "rg strict" > ~/.config/opencode/jev-router` switches without a restart.
+function routerSetting(): { mode: RouterMode; strict: boolean } {
   let raw = ""
   try {
     if (existsSync(ROUTER_FILE)) raw = readFileSync(ROUTER_FILE, "utf8")
   } catch {
     raw = ""
   }
-  const m = (raw.trim() || process.env.JEV_ROUTER || "advise").toLowerCase()
-  return m === "off" || m === "rg" ? m : "advise"
+  const words = (raw.trim() || process.env.JEV_ROUTER || "advise").toLowerCase().split(/\s+/)
+  const mode = words.includes("off") ? "off" : words.includes("rg") ? "rg" : "advise"
+  return { mode, strict: words.includes("strict") }
 }
+const routerMode = (): RouterMode => routerSetting().mode
 
 const ROUTER_CRITERIA: Criteria = {
   grep:
@@ -541,7 +545,15 @@ function routerState(question: string, options?: Record<string, string>): string
   return s
 }
 
-type RouterInfo = { mode: RouterMode; p_grep: number | null; action: "scan" | "advise" | "rg"; ms: number; error?: string }
+type RouterInfo = {
+  mode: RouterMode
+  strict?: boolean
+  p_grep: number | null
+  action: "scan" | "advise" | "rg"
+  ms: number
+  error?: string
+  force_ignored?: boolean
+}
 
 const ASK_DESCRIPTION =
   "Ask the jev decision model one question about files WITHOUT reading them into your context. " +
@@ -555,7 +567,7 @@ const ASK_DESCRIPTION =
   "Read a file before editing it, quoting it, or relying on an answer as proof. " +
   "Before scanning, jev checks whether the question is just a text search (a name, call, import or string): if so " +
   "it answers \"use grep\" instead, or, when you pass `pattern`, runs ripgrep for you. Follow that. Pass " +
-  "`force: true` only if grep came up empty or the user explicitly asked for ask_jev. " +
+  "`force: true` only if grep came up empty or the user explicitly asked for a scan; \"use ask_jev\" alone is not that. " +
   "If jev is unavailable the tool fails; then read the files instead."
 
 const ASK_INPUT_SCHEMA = {
@@ -598,7 +610,9 @@ const ASK_INPUT_SCHEMA = {
     },
     force: {
       type: "boolean",
-      description: "Skip the text-search check and scan anyway. Only if grep came up empty or the user explicitly asked for ask_jev.",
+      description:
+        "Skip the text-search check and scan anyway. Only if grep came up empty or the user explicitly asked for a scan " +
+        '("use ask_jev" alone is not that: let ask_jev decide).',
     },
   },
 }
@@ -832,16 +846,18 @@ async function mayRead(f: Target, call: AskCall, permission: Permission): Promis
 
 // One request on the tool lane. Fails open: any problem means "scan".
 async function routeQuestion(question: string, options: Record<string, string> | undefined, force: boolean, signal?: AbortSignal): Promise<RouterInfo> {
-  const mode = routerMode()
-  if (mode === "off" || force) return { mode, p_grep: null, action: "scan", ms: 0, ...(force ? { error: "force" } : {}) }
+  const { mode, strict } = routerSetting()
+  const tag = { mode, ...(strict ? { strict } : {}), ...(force && strict ? { force_ignored: true } : {}) }
+  if (mode === "off") return { ...tag, p_grep: null, action: "scan", ms: 0 }
+  if (force && !strict) return { ...tag, p_grep: null, action: "scan", ms: 0, error: "force" }
   const r = await query(routerState(question, options), { route: { type: "choice", criteria: ROUTER_CRITERIA } }, ASK_ROUTER_TIMEOUT_MS, {
     signal,
     lane: "tool",
   })
-  if (!r.answers) return { mode, p_grep: null, action: "scan", ms: r.trace.ms, error: r.trace.error }
+  if (!r.answers) return { ...tag, p_grep: null, action: "scan", ms: r.trace.ms, error: r.trace.error }
   const p = r.answers.route.probabilities.grep ?? 0
-  if (p < ASK_ROUTER_GREP_MIN) return { mode, p_grep: p, action: "scan", ms: r.trace.ms }
-  return { mode, p_grep: p, action: mode === "rg" ? "rg" : "advise", ms: r.trace.ms }
+  if (p < ASK_ROUTER_GREP_MIN) return { ...tag, p_grep: p, action: "scan", ms: r.trace.ms }
+  return { ...tag, p_grep: p, action: mode === "rg" ? "rg" : "advise", ms: r.trace.ms }
 }
 
 function adviseGrep(question: string, router: RouterInfo, pattern?: string) {
@@ -849,7 +865,7 @@ function adviseGrep(question: string, router: RouterInfo, pattern?: string) {
   const content =
     `ask_jev: "${question}" reads as a text-search question (p=${pct(router.p_grep ?? 0)}), so a scan would be ` +
     `slower than grep and no more accurate. Use grep for the exact name / call / import / string instead${why}. ` +
-    "Pass force: true only if grep comes up empty or the user explicitly asked for ask_jev."
+    "Pass force: true only if grep comes up empty or the user explicitly asked for a scan."
   return { content, metadata: { files: 0, chars: 0, tokens: 0, ms: router.ms, question, router } }
 }
 
@@ -1200,6 +1216,7 @@ export const __test = {
   routes,
   ROUTES,
   routerMode,
+  routerSetting,
   routerState,
   routeQuestion,
   ROUTER_FILE,

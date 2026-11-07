@@ -207,7 +207,7 @@ jev answers are a 4B classifier's guesses: read a file before editing it, quotin
 | `question` | one question, 3–300 characters, answered per file |
 | `options` | optional `{label: description}` with 2–8 labels, e.g. `{"handler": "defines HTTP handlers", "storage": "reads or writes the database"}`, with a question phrased as a choice ("Which of these best describes this file?"). Without it the question is yes/no |
 | `pattern` | optional ripgrep regex, used by the router's `rg` mode when the question is a text search |
-| `force` | optional `true`: skip the router and scan. Only if grep came up empty or the user explicitly asked for `ask_jev` |
+| `force` | optional `true`: skip the router and scan. Only if grep came up empty or the user explicitly asked for a *scan*; "use ask_jev" alone means let the router decide. Ignored in `strict` mode |
 
 There is one question per call because each question re-prefills the whole state anyway, so two
 questions in one call would cost the same as two calls.
@@ -223,9 +223,13 @@ whether a plain text search would answer the question:
 
 Below 0.80, with `force: true`, or when the router request fails, the tool scans as usual, so the router
 fails open. Switch modes while OpenCode runs with `echo rg > ~/.config/opencode/jev-router`
-(`off`, `advise` or `rg`; delete the file to go back to `JEV_ROUTER`, then `advise`). Every result
-records `metadata.router` (`mode`, `p_grep`, `action`, `ms`), which `opencode/scripts/session-report.py`
-lists.
+(`off`, `advise` or `rg`; delete the file to go back to `JEV_ROUTER`, then `advise`).
+
+**`strict`** (`echo "rg strict" > …/jev-router`, or `advise strict`) ignores the agent's `force`, so every
+`ask_jev` call goes through the router whatever the prompt says. Use it for A/B runs, where wording such
+as "use ask_jev" must not decide the arm. Every result records `metadata.router` (`mode`, `strict`,
+`p_grep`, `action`, `ms`, and `force_ignored` when `strict` overrode a `force`), which
+`opencode/scripts/session-report.py` lists.
 
 Calibrated 2026-11-06 on 40 questions against the live 6000:
 
@@ -310,8 +314,9 @@ process", and `Path` in comments answered as "disk I/O". Treat a yes as "worth r
 
 `local-mind.md` tells the main agent to **grep first** whenever the question can be written as a
 pattern (including behaviour with an obvious code signature), to use `ask_jev` for questions no
-pattern can express and for long saved outputs, to follow the router's "use grep", to pass `force`
-only when grep came up empty or the user asked for `ask_jev`, and never to count an answer as
+pattern can express and for long saved outputs, to follow the router's "use grep", to call `ask_jev`
+without `force` even when the user asks for it (`force` only when grep came up empty or the user
+explicitly asked for a scan), and never to count an answer as
 verification. `neckbeard.md` and `hoodie.md` say a finding must come from code they read, and to
 grep plain text matches.
 
@@ -465,7 +470,7 @@ That just means one missed hint and a 60 s pause, nothing more.
 | `JEV_DISABLE=1` | Registers no hooks and no `ask_jev` tool; logs `JEV_DISABLE=1, not registering hooks` |
 | `JEV_TRACE=1` | Trace view always on (same as the `jev-trace` file existing) |
 | `JEV_ROUTER` | `ask_jev` router mode when the toggle file is absent: `advise` (default), `rg` or `off` |
-| `$XDG_CONFIG_HOME/opencode/jev-router` | Router mode while this file exists; its content is the mode (read on every call) |
+| `$XDG_CONFIG_HOME/opencode/jev-router` | Router setting while this file exists: `off`, `advise` or `rg`, optionally followed by `strict` (ignore the agent's `force`). Read on every call |
 | `$XDG_CONFIG_HOME/opencode/jev-trace` | Trace view on while this file exists (default `~/.config/opencode/jev-trace`) |
 
 Tunables live at the top of `jev.ts` and were set from a calibration run:

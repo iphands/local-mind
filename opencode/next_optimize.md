@@ -153,8 +153,10 @@ below are what can still show whether `ask_jev` earns its place.
 
    **Comparison protocol.** Each in a fresh local-mind session; numbers via
    `python3 -I scripts/session-report.py --match "<prompt start>" --latest N`:
-   - Grep-shaped, once per mode (`echo off|advise|rg > container_data/config/opencode/jev-router`
-     before each):
+   - Grep-shaped, once per mode (`echo "off|advise|rg strict" > container_data/config/opencode/jev-router`
+     before each; `strict` makes the plugin ignore the agent's `force`, so the prompt's "use ask_jev"
+     can't skip the router. A first run at 17:37 had the agent force every call because the old
+     rule treated "use ask_jev" as a request to scan; the rule now says to call it without `force`):
      "Without reading them, use ask_jev to find which files under llama-proxy/src call reqwest's
      send(), then read only the hits."
    - The same question with "Do not use the ask_jev tool; use your normal tools" as the control.
