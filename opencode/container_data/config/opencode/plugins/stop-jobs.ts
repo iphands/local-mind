@@ -17,8 +17,10 @@
 //   owned by this process"): subagents first, then parents. An interrupted subagent's job
 //   completes and notifies its parent, which can wake it, so this repeats until a pass finds
 //   nothing new (at most PASSES times).
-// - The result goes into the invoking session as a synthetic message with resume: false, so it
-//   shows in the TUI without starting a model turn.
+// - The result goes into the invoking session as a synthetic message with resume: false, so no
+//   model turn starts. The TUI draws a synthetic message only when it has a `description` (as a
+//   "◈ <description>" notice row), so the report goes in `description`. `text` is what the model
+//   reads at the session's next turn, labelled as a report that needs no action.
 // - Anything still marked but not running in this process (a stale flag left by a crash) is
 //   reported, not touched: clearing it needs OpenCode stopped (see plugins/README.md).
 //
@@ -194,7 +196,12 @@ export default {
           log(text.split("\n")[0])
           if (sessionID) {
             try {
-              await ctx.session.synthetic({ sessionID, text, resume: false })
+              await ctx.session.synthetic({
+                sessionID,
+                description: text,
+                text: `[report from the user's /stop-all-jobs command; for information only, no action needed]\n${text}`,
+                resume: false,
+              })
             } catch (err) {
               log(`could not report in the session: ${err instanceof Error ? err.message : String(err)}`)
             }

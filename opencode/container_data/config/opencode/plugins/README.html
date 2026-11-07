@@ -553,8 +553,8 @@ jev answers are a 4B classifier's guesses: read a file before editing it, quotin
     <h3>Usage</h3>
 <pre><code>/stop-all-jobs         stop everything (except this session)
 /stop-all-jobs list    dry run: show what would be stopped</code></pre>
-    <p>The result shows up in the session you typed it in, as a message that doesn't start a model turn:</p>
-<pre><code>/stop-all-jobs: stopped 4 sessions (3 subagents) in 2 passes:
+    <p>The result shows up in the session you typed it in, as a <code>◈</code> notice row that doesn't start a model turn:</p>
+<pre><code>◈ /stop-all-jobs: stopped 4 sessions (3 subagents) in 2 passes:
 "Scan part 1", "Scan part 2", "Scan part 3", "Rust crates bug scan"</code></pre>
   </div>
   <div class="panel">
@@ -573,6 +573,11 @@ jev answers are a 4B classifier's guesses: read a file before editing it, quotin
     <p><code>interrupt</code> only reaches work owned by the running <code>opencode serve</code>. A session still marked but not running there (for example a stale flag left by a crash) is listed as <b>"Still marked but not running in this OpenCode process"</b>. It would resume at the next start, so clear it by hand.
        Stopping ends the current turn. It doesn't undo what the session already did.
        <code>STOP_JOBS_DB</code> overrides the database path.</p>
+  </div>
+  <div class="panel">
+    <h3>Why it's a notice row</h3>
+    <p>The report is a synthetic message with <code>resume: false</code>. The TUI draws a synthetic message only when it has a <code>description</code>, so the report goes there.
+       The model reads the same report, labelled "for information only", at that session's next turn.</p>
   </div>
 </div>
 <div class="panel" style="margin-top:14px">

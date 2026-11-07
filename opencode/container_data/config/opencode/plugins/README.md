@@ -555,11 +555,16 @@ session keeps `session_v2.time_suspended` set, a background subagent keeps a `jo
 3. An interrupted subagent's job completes and notifies its parent, which can wake the parent, so
    it re-reads the database 1.5 s later and repeats. It stops when a pass stops nothing, or after
    5 passes.
-4. It reports in the session you typed it in, as a message that does not start a model turn:
+4. It reports in the session you typed it in, as a `◈` notice row that does not start a model
+   turn:
 
    ```text
-   /stop-all-jobs: stopped 4 sessions (3 subagents) in 2 passes: "Scan part 1", "Scan part 2", "Scan part 3", "Rust crates bug scan"
+   ◈ /stop-all-jobs: stopped 4 sessions (3 subagents) in 2 passes: "Scan part 1", "Scan part 2", "Scan part 3", "Rust crates bug scan"
    ```
+
+   This is a synthetic message with `resume: false`. The TUI draws a synthetic message only when
+   it has a `description`, so the report goes there. The model reads the same report, labelled
+   "for information only", at that session's next turn.
 
 **Limits.**
 
