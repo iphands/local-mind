@@ -69,6 +69,34 @@ One run per arm, so the numbers are noisy, but the 68 s vs 123 s gap is large. T
 change 1 below (grep first). `ask_jev` on the 6000 is now fast enough that change 2 (the semantic
 pair) is the real test of whether it earns its place.
 
+## Do scans and shell checks overlap in real use? No
+
+Checked 2026-11-06, ~17:00, against everything since jev moved to the 6000 and the last ~6 hours of
+sessions:
+
+| Source | Result |
+|---|---|
+| `llama-jev-6000` server log (234 requests since start) | **0 of 27** short requests (shell checks, small verdicts) ran while an `ask_jev` chunk was in flight. Most requests in flight at once: 6 (multi-question hooks) |
+| `opencode.db` tool-call timings (`time.created` → `time.completed`), all sessions | **0 of 143** shell calls ran while one of 19 `ask_jev` calls was running |
+| Same, `ask_jev` against `ask_jev` | **3** overlapping pairs (the agent's "parallel batches"; the global queue now serializes them) |
+
+Why: the agent works step by step (`ask_jev`, wait, then the next command), and the reviewers can't run
+shell commands (their permissions deny it), so they never trigger F2/F3. The overlap the benchmark's
+mixed and sweep phases model only happens with several sessions or agents at once (a swarm, or two
+OpenCode sessions), or if the agent sends `ask_jev` and a shell command in one message (not seen yet).
+So those phases are a worst-case stress test, not what one session produces: in single-session use a
+shell check on the 6000 is answered alone, ~33 ms.
+
+What it means for using both GPUs at once (the plugin talks to one `JEV_URL` today):
+- **Split by job** (hooks on one server, `ask_jev` on the other) fixes a problem a single session
+  doesn't have. It only pays off for multi-session / swarm use (change 6).
+- **Share `ask_jev` chunks across both servers** (each takes the next chunk from one queue, so the
+  faster card does more) helps today: scans ~20% faster (6000 ~20k tok/s + 4060 ~4k), since the 4060
+  sits idle during a scan.
+- **Failover** helps regardless: it would have saved the two runs that failed during the 16:49-16:51
+  server swap.
+Note: run the 6000 on its default :8703 when both servers are up; :8702 is the benchmark's port.
+
 ## Proposed changes
 
 1. **`agents/local-mind.md`: grep first.** If the question can be written as a pattern (a call,
@@ -97,7 +125,14 @@ pair) is the real test of whether it earns its place.
    slot count, and llama.cpp has no request priority, so a 250-token shell check waits behind
    6k-token reviews (gate p95 13-35 s at 64-128 clients). Options: hooks on one jev server and
    `ask_jev` / reviews on the other (4060 + 6000 side by side, two `JEV_URL`s), or try a smaller
-   `--batch-size`.
+   `--batch-size`. Only matters for multi-session / swarm use: one session never overlaps them
+   (see the section above).
+7. **Use both jev servers from the plugin.** Configure `JEV_HOOK_URL` / `JEV_TOOL_URL` (both
+   defaulting to `JEV_URL`), with:
+   - per-server cooldowns and failover in both directions
+   - optionally, `ask_jev` chunks taken from one shared queue by both servers (~+20% scan speed)
+
+   The mocked harness and the READMEs need extending, then a live check with both servers up.
 
 ## Already done (for reference)
 
