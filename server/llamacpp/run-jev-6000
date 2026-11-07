@@ -8,7 +8,8 @@
 # heavy jev load slows basalt and basalt load slows jev (the size of that effect is NOT measured
 # yet). Leave ~2 GB free for basalt's growth.
 #
-# The jev plugin defaults to JEV_URLS=http://cosmo.lan:8710,http://cosmo.lan:8711 (this server first).
+# The jev plugin defaults to JEV_URLS=http://cosmo.lan:8711,http://cosmo.lan:8710: the 4060 first, so hooks
+# stay off this GPU (basalt runs faster that way); in share mode this server still takes most scan chunks.
 #
 # ./run-jev-benchmark 6000, 2026-11-06, build 12169, basalt resident (bench-results/jev-6000-20261106-155122).
 # Same jev-shaped load as the 4060 table in ./run-jev-4060. VRAM is this server's own process.
