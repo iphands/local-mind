@@ -95,7 +95,43 @@ What it means for using both GPUs at once (the plugin talks to one `JEV_URL` tod
   sits idle during a scan.
 - **Failover** helps regardless: it would have saved the two runs that failed during the 16:49-16:51
   server swap.
-Note: run the 6000 on its default :8703 when both servers are up; :8702 is the benchmark's port.
+Note (superseded the same day): the servers now run on fixed ports, the 6000 on :8710 and the 4060
+on :8711; :8702 stays the benchmark's port.
+
+## Re-run with both servers (share mode)
+
+Same "with" prompt, fresh session (`ses_e4c6bda2affeKZ2sRkEqAqVr3Y`, 17:16), the plugin using both
+servers in share mode (6000 :8710 + 4060 :8711), compared with every earlier run:
+
+| | Both servers (17:16) | 6000 only (16:53) | 4060 only (15:25) | No `ask_jev` (15:33) |
+|---|---|---|---|---|
+| Wall time | 77 s | 123 s | 197 s | 68 s |
+| Time in `ask_jev` | 17.8 s for 440k tokens | 20.1 s for 409k tokens | 90.9 s for 378k tokens | — |
+| `ask_jev` throughput | ~24.7k tok/s | ~20.3k tok/s | ~4.2k tok/s | — |
+| Main-agent steps | 16 | 17 | 17 | 12 |
+| Files read / greps | 13 (49k chars) / 5 | 17 (61k) / 9 | 12 (46k) / 3 | 6 (28k) / 10 |
+| Main prompt tokens (peak context) | 538k (56k) | 740k (67k) | 541k (54k) | 384k (47k) |
+| Total incl. reviewers | 708k / 19k generated | 1.11M / 33k | 809k / 21k | 588k / 21k |
+| Reviewers | 25 s + 31 s | 49 s + 69 s | 25 s + 47 s | 43 s + 39 s |
+| Key sites in the answer | 7/8 (missed `handler.rs:1793`) | 6/8 | 7/8 | 8/8 |
+
+- **What the second server bought:** `ask_jev` throughput +22% (~24.7k vs ~20.3k tok/s; the 4060
+  took 34 of 210 requests, the 6000 176). In time, only ~2-3 s here (17.8 s vs 20.1 s for fewer
+  tokens). The agent made 4 `ask_jev` calls in a row (~5 s each, 17:16:35 → 17:16:57), re-asking
+  about narrower sets of files after the first call hit its 400k-char budget.
+- **Where the 46 s gain over the 6000-only run came from:** mostly not jev. The slower reviewer took
+  31 s against 69 s (reviewers run in parallel, so the slower one sets the time: ~38 s), and the
+  agent took a shorter path (13 reads vs 17, 202k fewer main-agent prompt tokens). One run per
+  setup, so that is run-to-run variance; the jev part got ~10% faster.
+- **Against no `ask_jev`:** close on speed now (77 s vs 68 s; it was 1.8x on the 6000 alone and 2.9x
+  on the 4060), still more costly (708k vs 588k total tokens, 13 reads vs 6, because the agent still
+  checks `ask_jev`'s answers by reading), about the same quality (7/8 vs 8/8 key sites; the miss,
+  `handler.rs:1793`, is one the earlier `ask_jev` runs also struggled with).
+
+Bottom line: both servers make `ask_jev` as fast as this hardware allows, and it is now a small share
+of the run (~18 of 77 s). On a grep-shaped question what decides the outcome is how much the agent
+reads and how fast the reviewers answer, not jev. Changes 1 (grep first) and 2 (the semantic pair)
+below are what can still show whether `ask_jev` earns its place.
 
 ## Proposed changes
 
