@@ -1,4 +1,7 @@
+mod config;
+
 use anyhow::{Context, Result};
+use config::*;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyModifiers},
@@ -7,149 +10,115 @@ use crossterm::{
     terminal::{self, Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen},
 };
 use std::env;
-use std::fs;
 use std::io::{self, Write};
-
-const OMO_CONFIG_PATH: &str = "container_data/config/opencode/oh-my-openagent.json";
-const OMO_BACKUP_PATH: &str = "container_data/config/opencode/oh-my-openagent.json.original";
-const OPENCODE_CONFIG_PATH: &str = "container_data/config/opencode/opencode.jsonc";
-const OMA_CONFIG_PATH: &str = "container_data/config/opencode/oh-my-openagent.json";
-
-const AGENTS: &[(&str, &str)] = &[
-    (
-        "local-mind",
-        "container_data/config/opencode/agent/local-mind.md",
-    ),
-    ("hoodie", "container_data/config/opencode/agent/hoodie.md"),
-    (
-        "neckbeard",
-        "container_data/config/opencode/agent/neckbeard.md",
-    ),
-];
 
 fn print_usage() {
     eprintln!("Usage: model-switcher <COMMAND>");
     eprintln!();
-    eprintln!("Commands:");
-    eprintln!("  lm, local-mind        Interactive agent model selection (default)");
-    eprintln!(
-        "  omo, oh-my-opencode   Replace all models in oh-my-opencode.json with a chosen model"
-    );
-    eprintln!("  all                    Change all agents (system default + agents) to same model");
-    eprintln!("  restore-omo-defaults  Restore oh-my-opencode.json from backup");
-            eprintln!("  ctx <SIZE> <PRESET>   Set limit.context and limit.input for all models (safe/balanced/aggressive)");
-    eprintln!("  ctx off               Remove limit.input from all models");
-    eprintln!("  image [on]            Add image input modality to all models in opencode.jsonc (default: on)");
-    eprintln!("  image off             Remove image input modality from all models");
-    eprintln!("  vision                Interactive: set vision model for multimodal-looker (enables it)");
-    eprintln!("  vision off            Disable multimodal-looker agent");
-    eprintln!("  help                   Show this help message");
+    eprintln!("Edits opencode 2's config under ./container_data/config/opencode (run from opencode/;");
+    eprintln!("bin/model-switcher does that for you).");
     eprintln!();
-    eprintln!("Without command, runs interactive agent model selection.");
+    eprintln!("Commands:");
+    eprintln!("  lm, local-mind        Interactive: system default model, then each agent's model (default)");
+    eprintln!("  all                   Interactive: set the system default and every agent to one model");
+    eprintln!("  status                Show the default model, agent models, and each model's limits/image input");
+    eprintln!("  ctx <SIZE> <PRESET>   Set limit.context and limit.input on all models (safe/balanced/aggressive)");
+    eprintln!("  ctx off               Remove limit.input from all models (limit.context stays)");
+    eprintln!("  image [on]            Add \"image\" to capabilities.input on all models (default: on)");
+    eprintln!("  image off             Remove \"image\" from capabilities.input on all models");
+    eprintln!("  help                  Show this help message");
+    eprintln!();
+    eprintln!("ctx can be followed by an image command: ctx 262144 balanced image on");
+    eprintln!("Models come from the providers block of opencode.jsonc; agents are agents/*.md with a model: line.");
 }
 
 fn main() -> Result<()> {
     let args: Vec<String> = env::args().collect();
+    let cmd = args.get(1).map(String::as_str).unwrap_or("lm");
 
-    // Handle command line arguments
-    if args.len() > 1 {
-        match args[1].as_str() {
-            "omo" | "oh-my-opencode" => return run_omo_mode(),
-            "all" => return run_all_mode(),
-            "restore-omo-defaults" => return restore_omo_defaults(),
-            "lm" | "local-mind" => return run_agent_mode(),
-            "image" => {
-                let sub = args.get(2).map(|s| s.as_str()).unwrap_or("on");
-                match sub {
-                    "on" => return run_image_on_mode(),
-                    "off" => return run_image_off_mode(),
-                    other => {
-                        eprintln!("Unknown image subcommand: '{}'. Valid: on, off", other);
-                        std::process::exit(1);
-                    }
-                }
-            }
-            "vision" => {
-                let sub = args.get(2).map(|s| s.as_str()).unwrap_or("on");
-                match sub {
-                    "off" => return run_vision_off_mode(),
-                    _ => return run_vision_on_mode(),
-                }
-            }
-            "ctx" => {
-                if args.len() >= 3 && args[2] == "off" {
-                    return run_ctx_off_mode();
-                }
-                if args.len() < 4 {
-                    eprintln!("Usage:");
-                    eprintln!("  model-switcher ctx <SIZE> <PRESET>");
-                    eprintln!("  model-switcher ctx off");
-                    eprintln!();
-                    eprintln!("  SIZE   : context window size (e.g. 65536, 262144, 1048576)");
-                    eprintln!("  PRESET : safe (76%) | balanced (85%) | aggressive (92%)");
-                    std::process::exit(1);
-                }
-                let ctx_size: u64 = args[2].parse().with_context(|| {
-                    format!(
-                        "Invalid context size '{}': must be a positive integer",
-                        args[2]
-                    )
-                })?;
-                if ctx_size == 0 {
-                    anyhow::bail!("Context size must be greater than 0");
-                }
-                let preset = match args[3].as_str() {
-                    "safe" => CtxPreset::Safe,
-                    "balanced" => CtxPreset::Balanced,
-                    "aggressive" => CtxPreset::Aggressive,
-                    other => {
-                        eprintln!(
-                            "Unknown preset: '{}'. Valid: safe, balanced, aggressive",
-                            other
-                        );
-                        std::process::exit(1);
-                    }
-                };
-                run_ctx_mode(ctx_size, preset)?;
-                if let Some(img_cmd) = args.get(4) {
-                    if img_cmd == "image" {
-                        let sub = args.get(5).map(|s| s.as_str()).unwrap_or("on");
-                        match sub {
-                            "on" => run_image_on_mode()?,
-                            "off" => run_image_off_mode()?,
-                            other => {
-                                eprintln!("Unknown image subcommand: '{}'. Valid: on, off", other);
-                                std::process::exit(1);
-                            }
-                        }
-                    }
-                }
-                return Ok(());
-            }
-            "help" | "-h" | "--help" => {
-                print_usage();
-                return Ok(());
-            }
-            other => {
-                eprintln!("Unknown command: {}", other);
-                print_usage();
-                std::process::exit(1);
-            }
-        }
+    if matches!(cmd, "help" | "-h" | "--help") {
+        print_usage();
+        return Ok(());
+    }
+    if matches!(
+        cmd,
+        "omo" | "oh-my-opencode" | "restore-omo-defaults" | "vision"
+    ) {
+        eprintln!(
+            "'{}' managed oh-my-openagent, which opencode 2 doesn't use. Nothing to switch.",
+            cmd
+        );
+        std::process::exit(1);
     }
 
-    // Default: run interactive agent model selection
-    run_agent_mode()
+    check_layout()?;
+
+    match cmd {
+        "lm" | "local-mind" => run_agent_mode(),
+        "all" => run_all_mode(),
+        "status" => run_status(),
+        "image" => run_image(args.get(2).map(String::as_str).unwrap_or("on")),
+        "ctx" => {
+            if args.len() >= 3 && args[2] == "off" {
+                return run_ctx_off_mode();
+            }
+            if args.len() < 4 {
+                eprintln!("Usage:");
+                eprintln!("  model-switcher ctx <SIZE> <PRESET> [image on|off]");
+                eprintln!("  model-switcher ctx off");
+                eprintln!();
+                eprintln!("  SIZE   : context window size (e.g. 65536, 262144, 1048576)");
+                eprintln!("  PRESET : safe (76%) | balanced (85%) | aggressive (92%)");
+                std::process::exit(1);
+            }
+            let ctx_size: u64 = args[2].parse().with_context(|| {
+                format!(
+                    "Invalid context size '{}': must be a positive integer",
+                    args[2]
+                )
+            })?;
+            if ctx_size == 0 {
+                anyhow::bail!("Context size must be greater than 0");
+            }
+            let preset = match args[3].as_str() {
+                "safe" => CtxPreset::Safe,
+                "balanced" => CtxPreset::Balanced,
+                "aggressive" => CtxPreset::Aggressive,
+                other => {
+                    eprintln!(
+                        "Unknown preset: '{}'. Valid: safe, balanced, aggressive",
+                        other
+                    );
+                    std::process::exit(1);
+                }
+            };
+            run_ctx_mode(ctx_size, preset)?;
+            if args.get(4).map(String::as_str) == Some("image") {
+                run_image(args.get(5).map(String::as_str).unwrap_or("on"))?;
+            }
+            Ok(())
+        }
+        other => {
+            eprintln!("Unknown command: {}", other);
+            print_usage();
+            std::process::exit(1);
+        }
+    }
+}
+
+fn load_models() -> Result<Vec<String>> {
+    let models = read_models(OPENCODE_CONFIG_PATH)?;
+    if models.is_empty() {
+        anyhow::bail!("No models declared under providers in {}", OPENCODE_CONFIG_PATH);
+    }
+    Ok(models)
 }
 
 fn run_agent_mode() -> Result<()> {
-    let models = read_models("data/models")?;
-    if models.is_empty() {
-        eprintln!("No models found in data/models");
-        return Ok(());
-    }
+    let models = load_models()?;
+    let agents = discover_agents(AGENTS_DIR)?;
 
-    let total_steps = AGENTS.len() + 1; // +1 for system default
+    let total_steps = agents.len() + 1; // +1 for system default
 
     // Step 1: Select system default model
     let current_default =
@@ -166,20 +135,20 @@ fn run_agent_mode() -> Result<()> {
     // Collect all agent selections
     let mut selections: Vec<(&str, &str, String, String)> = Vec::new(); // (name, path, current, selected)
 
-    for (i, (name, path)) in AGENTS.iter().enumerate() {
-        let current = get_current_model(path).unwrap_or_else(|_| "unknown".to_string());
+    for (i, agent) in agents.iter().enumerate() {
+        let current = get_current_model(&agent.path).unwrap_or_else(|_| "unknown".to_string());
 
         match select_model(
             &models,
             &current,
-            name,
+            &agent.name,
             i + 2,
             total_steps,
             &selections,
             &default_selection,
         )? {
             Some(selected) => {
-                selections.push((name, path, current, selected));
+                selections.push((&agent.name, &agent.path, current, selected));
             }
             None => {
                 println!("Aborted. No changes made.");
@@ -197,7 +166,6 @@ fn run_agent_mode() -> Result<()> {
     // All confirmed - now write to disk
     let mut changes = 0;
 
-    // Write system default model
     if let Some((ref old, ref new)) = default_selection {
         if old != new {
             update_default_model(OPENCODE_CONFIG_PATH, new)?;
@@ -208,7 +176,6 @@ fn run_agent_mode() -> Result<()> {
         }
     }
 
-    // Write agent models
     for (name, path, current, selected) in &selections {
         if selected != current {
             update_agent_model(path, selected)?;
@@ -227,393 +194,180 @@ fn run_agent_mode() -> Result<()> {
 }
 
 fn run_all_mode() -> Result<()> {
-    let models = read_models("data/models")?;
-    if models.is_empty() {
-        eprintln!("No models found in data/models");
-        return Ok(());
-    }
+    let models = load_models()?;
+    let agents = discover_agents(AGENTS_DIR)?;
 
-    // Get current models from all sources for display
     let current_default =
         get_default_model(OPENCODE_CONFIG_PATH).unwrap_or_else(|_| "unknown".to_string());
-    let current_agent = get_current_model(AGENTS[0].1).unwrap_or_else(|_| "unknown".to_string());
+    let current_agent = agents
+        .first()
+        .and_then(|a| get_current_model(&a.path).ok())
+        .unwrap_or_else(|| "unknown".to_string());
+    let agent_names: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
 
-    // Get current OMO model
-    let current_omo = if std::path::Path::new(OMO_CONFIG_PATH).exists() {
-        let omo_value = read_oma_value(OMO_CONFIG_PATH)?;
-        omo_value["agents"]
-            .as_object()
-            .and_then(|m| m.values().next())
-            .and_then(|v| v["model"].as_str())
-            .unwrap_or("unknown")
-            .to_string()
-    } else {
-        "not configured".to_string()
+    let Some(selected) = select_all_model(&models, &current_default, &current_agent, &agent_names)?
+    else {
+        println!("Aborted. No changes made.");
+        return Ok(());
     };
 
-    match select_all_model(&models, &current_default, &current_agent, &current_omo)? {
-        Some(selected) => {
-            let mut changes = 0;
+    let mut changes = 0;
 
-            // Update system default
-            if current_default != selected {
-                update_default_model(OPENCODE_CONFIG_PATH, &selected)?;
-                println!("Updated system default -> {}", selected);
-                changes += 1;
-            } else {
-                println!("system default: no change");
-            }
+    if current_default != selected {
+        update_default_model(OPENCODE_CONFIG_PATH, &selected)?;
+        println!("Updated system default -> {}", selected);
+        changes += 1;
+    } else {
+        println!("system default: no change");
+    }
 
-            // Update all agent models
-            for (name, path) in AGENTS.iter() {
-                let current = get_current_model(path).unwrap_or_else(|_| "unknown".to_string());
-                if current != selected {
-                    update_agent_model(path, &selected)?;
-                    println!("Updated {} -> {}", name, selected);
-                    changes += 1;
-                } else {
-                    println!("{}: no change", name);
-                }
-            }
-
-            // Update OMO config if it exists
-            if std::path::Path::new(OMO_CONFIG_PATH).exists() {
-                let mut omo_value = read_oma_value(OMO_CONFIG_PATH)?;
-                let agent_count = omo_value["agents"].as_object().map(|m| m.len()).unwrap_or(0);
-                let category_count = omo_value["categories"].as_object().map(|m| m.len()).unwrap_or(0);
-
-                if agent_count > 0 || category_count > 0 {
-                    if let Some(agents) = omo_value["agents"].as_object_mut() {
-                        for agent in agents.values_mut() {
-                            if agent["model"].as_str() != Some(&selected) {
-                                agent["model"] = serde_json::Value::String(selected.clone());
-                                changes += 1;
-                            }
-                        }
-                    }
-                    if let Some(categories) = omo_value["categories"].as_object_mut() {
-                        for category in categories.values_mut() {
-                            if category["model"].as_str() != Some(&selected) {
-                                category["model"] = serde_json::Value::String(selected.clone());
-                                changes += 1;
-                            }
-                        }
-                    }
-                    write_oma_value(OMO_CONFIG_PATH, &omo_value)?;
-                    println!(
-                        "Updated oh-my-openagent.json: {} agents, {} categories -> {}",
-                        agent_count, category_count, selected
-                    );
-                } else {
-                    println!("oh-my-openagent.json: no agents or categories to update");
-                }
-            } else {
-                println!("oh-my-openagent.json: not found, skipping");
-            }
-
-            if changes == 0 {
-                println!("No changes made.");
-            } else {
-                println!("Updated ALL configurations to: {}", selected);
-            }
+    for agent in &agents {
+        let current = get_current_model(&agent.path).unwrap_or_else(|_| "unknown".to_string());
+        if current != selected {
+            update_agent_model(&agent.path, &selected)?;
+            println!("Updated {} -> {}", agent.name, selected);
+            changes += 1;
+        } else {
+            println!("{}: no change", agent.name);
         }
-        None => {
-            println!("Aborted. No changes made.");
-        }
+    }
+
+    if changes == 0 {
+        println!("No changes made.");
+    } else {
+        println!("Updated ALL configurations to: {}", selected);
     }
 
     Ok(())
 }
 
-fn run_omo_mode() -> Result<()> {
-    let models = read_models("data/models")?;
-    if models.is_empty() {
-        eprintln!("No models found in data/models");
-        return Ok(());
+fn run_status() -> Result<()> {
+    let default = get_default_model(OPENCODE_CONFIG_PATH)?;
+    println!("Config: {}", OPENCODE_CONFIG_PATH);
+    println!();
+    println!("  system default : {}", default);
+    for agent in discover_agents(AGENTS_DIR)? {
+        let model = get_current_model(&agent.path)?;
+        println!("  {:<14} : {}", agent.name, model);
     }
-
-    let mut value = read_oma_value(OMO_CONFIG_PATH)?;
-
-    let agent_count = value["agents"].as_object().map(|m| m.len()).unwrap_or(0);
-    let category_count = value["categories"].as_object().map(|m| m.len()).unwrap_or(0);
-
-    let current_model = value["agents"]
-        .as_object()
-        .and_then(|m| m.values().next())
-        .and_then(|v| v["model"].as_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    match select_omo_model(&models, &current_model, agent_count, category_count)? {
-        Some(selected) => {
-            if let Some(agents) = value["agents"].as_object_mut() {
-                for agent in agents.values_mut() {
-                    agent["model"] = serde_json::Value::String(selected.clone());
-                }
-            }
-            if let Some(categories) = value["categories"].as_object_mut() {
-                for category in categories.values_mut() {
-                    category["model"] = serde_json::Value::String(selected.clone());
-                }
-            }
-            write_oma_value(OMO_CONFIG_PATH, &value)?;
-            println!(
-                "Updated {} agents and {} categories to: {}",
-                agent_count, category_count, selected
-            );
-        }
-        None => {
-            println!("Aborted. No changes made.");
-        }
+    for name in unpinned_agents(AGENTS_DIR)? {
+        println!("  {:<14} : (inherits default)", name);
     }
+    println!();
 
-    Ok(())
-}
-
-fn restore_omo_defaults() -> Result<()> {
-    // Check if backup exists
-    if !std::path::Path::new(OMO_BACKUP_PATH).exists() {
-        anyhow::bail!(
-            "Backup file not found: {}\nPlease create a backup first.",
-            OMO_BACKUP_PATH
+    let opt = |v: Option<u64>| v.map(format_tokens).unwrap_or_else(|| "-".to_string());
+    let infos = read_model_info(OPENCODE_CONFIG_PATH)?;
+    let width = infos.iter().map(|m| m.id.len()).max().unwrap_or(5).max(5);
+    println!(
+        "  {:<width$}  {:>9}  {:>9}  {:>9}  image",
+        "model", "context", "input", "output"
+    );
+    for m in &infos {
+        let pct = match (m.input, m.context) {
+            (Some(i), Some(c)) if c > 0 => format!(" ({}%)", (i * 100 + c / 2) / c),
+            _ => String::new(),
+        };
+        println!(
+            "  {:<width$}  {:>9}  {:>9}  {:>9}  {}{}",
+            m.id,
+            opt(m.context),
+            opt(m.input),
+            opt(m.output),
+            if m.image { "yes" } else { "no" },
+            pct,
         );
     }
-
-    // Read backup and write to main config
-    let backup_content = fs::read_to_string(OMO_BACKUP_PATH)
-        .with_context(|| format!("Failed to read backup: {}", OMO_BACKUP_PATH))?;
-
-    fs::write(OMO_CONFIG_PATH, &backup_content)
-        .with_context(|| format!("Failed to write config: {}", OMO_CONFIG_PATH))?;
-
-    println!("Restored oh-my-opencode.json from backup.");
     Ok(())
 }
 
-fn select_omo_model(
-    models: &[String],
-    current: &str,
-    agent_count: usize,
-    category_count: usize,
-) -> Result<Option<String>> {
-    let mut stdout = io::stdout();
-
-    terminal::enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, Hide)?;
-
-    let result = run_omo_selector(&mut stdout, models, current, agent_count, category_count);
-
-    execute!(stdout, Show, LeaveAlternateScreen)?;
-    terminal::disable_raw_mode()?;
-
-    result
-}
-
-fn run_omo_selector(
-    stdout: &mut io::Stdout,
-    models: &[String],
-    current: &str,
-    agent_count: usize,
-    category_count: usize,
-) -> Result<Option<String>> {
-    let mut filter = String::new();
-    let mut selected: usize = 0;
-    let mut initialized = false;
-
-    loop {
-        let filtered: Vec<&String> = models
-            .iter()
-            .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter.to_lowercase()))
-            .collect();
-
-        // Clamp selection
-        if selected >= filtered.len() {
-            selected = filtered.len().saturating_sub(1);
+fn run_image(sub: &str) -> Result<()> {
+    let enable = match sub {
+        "on" => true,
+        "off" => false,
+        other => {
+            eprintln!("Unknown image subcommand: '{}'. Valid: on, off", other);
+            std::process::exit(1);
         }
-
-        // Set initial selection to current model only once
-        if !initialized && filter.is_empty() {
-            if let Some(idx) = filtered.iter().position(|m| *m == current) {
-                selected = idx;
-            }
-            initialized = true;
-        }
-
-        draw_omo(
-            stdout,
-            &filtered,
-            selected,
-            &filter,
-            current,
-            agent_count,
-            category_count,
-        )?;
-
-        if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Up => {
-                    selected = selected.saturating_sub(1);
-                }
-                KeyCode::Down => {
-                    if selected + 1 < filtered.len() {
-                        selected += 1;
-                    }
-                }
-                KeyCode::Enter => {
-                    if let Some(m) = filtered.get(selected) {
-                        return Ok(Some((*m).clone()));
-                    }
-                }
-                KeyCode::Esc => {
-                    return Ok(None);
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(None);
-                }
-                KeyCode::Char(c) => {
-                    filter.push(c);
-                    selected = 0;
-                    initialized = true;
-                }
-                KeyCode::Backspace => {
-                    filter.pop();
-                    selected = 0;
-                }
-                _ => {}
-            }
-        }
+    };
+    let changes = update_image(OPENCODE_CONFIG_PATH, enable)?;
+    let verb = if enable { "Added image input to" } else { "Removed image input from" };
+    println!("  {} {} model(s) in {}", verb, changes, OPENCODE_CONFIG_PATH);
+    let wrong: Vec<String> = read_model_info(OPENCODE_CONFIG_PATH)?
+        .into_iter()
+        .filter(|m| m.image != enable)
+        .map(|m| m.id)
+        .collect();
+    if !wrong.is_empty() {
+        eprintln!("  WARNING: not updated (not a one-line model entry?): {}", wrong.join(", "));
     }
-}
-
-fn draw_omo(
-    stdout: &mut io::Stdout,
-    items: &[&String],
-    selected: usize,
-    filter: &str,
-    current: &str,
-    agent_count: usize,
-    category_count: usize,
-) -> Result<()> {
-    let (_, term_height) = terminal::size()?;
-    let max_visible = (term_height as usize).saturating_sub(14);
-
-    execute!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
-
-    // Big banner
-    let banner = ">>> OH-MY-OPENCODE MODEL OVERRIDE <<<";
-    let padding = "=".repeat(banner.len());
-
-    execute!(
-        stdout,
-        SetForegroundColor(Color::DarkGrey),
-        SetAttribute(Attribute::Bold),
-        Print(format!("  {}\r\n", padding)),
-        SetForegroundColor(Color::Magenta),
-        Print(format!("  {}\r\n", banner)),
-        SetForegroundColor(Color::DarkGrey),
-        Print(format!("  {}\r\n", padding)),
-        ResetColor,
-        SetAttribute(Attribute::Reset),
-    )?;
-
-    // Info about what will change
-    execute!(
-        stdout,
-        Print("\r\n  This will replace ALL models in oh-my-opencode.json\r\n"),
-        Print(format!(
-            "  Affecting: {} agents, {} categories\r\n",
-            agent_count, category_count
-        )),
-        Print(format!("\r\n  Sample current model: ")),
-        SetForegroundColor(Color::Cyan),
-        Print(format!("{}\r\n", current)),
-        ResetColor,
-    )?;
-
-    // Instructions
-    if filter.is_empty() {
-        execute!(
-            stdout,
-            Print("  Type to filter | ↑↓ navigate | Enter select | Esc cancel\r\n\r\n")
-        )?;
-    } else {
-        execute!(
-            stdout,
-            Print(format!(
-                "  Filter: {} | Backspace to clear | Esc cancel\r\n\r\n",
-                filter
-            ))
-        )?;
-    }
-
-    if items.is_empty() {
-        execute!(
-            stdout,
-            SetForegroundColor(Color::Red),
-            Print("    No matches\r\n"),
-            ResetColor,
-        )?;
-    } else {
-        // Calculate scroll window
-        let start = if selected >= max_visible {
-            selected - max_visible + 1
-        } else {
-            0
-        };
-        let end = (start + max_visible).min(items.len());
-
-        for (i, item) in items.iter().enumerate().skip(start).take(end - start) {
-            let is_selected = i == selected;
-            let is_current = *item == current;
-
-            let prefix = match (is_selected, is_current) {
-                (true, true) => "  > * ",
-                (true, false) => "  >   ",
-                (false, true) => "    * ",
-                (false, false) => "      ",
-            };
-
-            if is_selected {
-                execute!(
-                    stdout,
-                    SetForegroundColor(Color::Green),
-                    SetAttribute(Attribute::Bold),
-                    Print(format!("{}{}\r\n", prefix, item)),
-                    SetAttribute(Attribute::Reset),
-                    ResetColor,
-                )?;
-            } else if is_current {
-                execute!(
-                    stdout,
-                    SetForegroundColor(Color::Yellow),
-                    Print(format!("{}{}\r\n", prefix, item)),
-                    ResetColor,
-                )?;
-            } else {
-                execute!(stdout, Print(format!("{}{}\r\n", prefix, item)))?;
-            }
-        }
-
-        // Show scroll indicator if needed
-        if items.len() > max_visible {
-            execute!(
-                stdout,
-                SetForegroundColor(Color::DarkGrey),
-                Print(format!("\r\n    [{}/{}]\r\n", selected + 1, items.len())),
-                ResetColor,
-            )?;
-        }
-    }
-
-    stdout.flush()?;
     Ok(())
+}
+
+fn run_ctx_mode(ctx_size: u64, preset: CtxPreset) -> Result<()> {
+    let input_limit = (ctx_size as f64 * preset.fraction()) as u64;
+
+    println!("  Context size : {}", format_tokens(ctx_size));
+    println!(
+        "  Preset       : {} ({}%)",
+        preset.name(),
+        (preset.fraction() * 100.0) as u64
+    );
+    println!("  limit.context: {}", format_tokens(ctx_size));
+    println!(
+        "  limit.input  : {}  ({}% of context)",
+        format_tokens(input_limit),
+        (preset.fraction() * 100.0) as u64
+    );
+    println!();
+
+    let changes = update_limits(OPENCODE_CONFIG_PATH, Some(ctx_size), Some(input_limit))?;
+    println!("  Updated {} model(s) in {}", changes, OPENCODE_CONFIG_PATH);
+    warn_unapplied_limits(Some(ctx_size), Some(input_limit))
+}
+
+fn run_ctx_off_mode() -> Result<()> {
+    let changes = update_limits(OPENCODE_CONFIG_PATH, None, None)?;
+    println!(
+        "  Removed limit.input from {} model(s) in {}",
+        changes, OPENCODE_CONFIG_PATH
+    );
+    warn_unapplied_limits(None, None)
+}
+
+/// Re-read the config and name any model whose limits didn't end up as intended
+/// (e.g. a multi-line model entry the line editor can't see).
+fn warn_unapplied_limits(context: Option<u64>, input: Option<u64>) -> Result<()> {
+    let wrong: Vec<String> = read_model_info(OPENCODE_CONFIG_PATH)?
+        .into_iter()
+        .filter(|m| (context.is_some() && m.context != context) || m.input != input)
+        .map(|m| m.id)
+        .collect();
+    if !wrong.is_empty() {
+        eprintln!(
+            "  WARNING: not updated (not a one-line model entry?): {}",
+            wrong.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn format_tokens(n: u64) -> String {
+    let s = n.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().rev().enumerate() {
+        if i > 0 && i % 3 == 0 {
+            result.push(',');
+        }
+        result.push(c);
+    }
+    result.chars().rev().collect()
 }
 
 fn select_all_model(
     models: &[String],
     current_default: &str,
     current_agent: &str,
-    current_omo: &str,
+    agent_names: &[&str],
 ) -> Result<Option<String>> {
     let mut stdout = io::stdout();
 
@@ -625,7 +379,7 @@ fn select_all_model(
         models,
         current_default,
         current_agent,
-        current_omo,
+        agent_names,
     );
 
     execute!(stdout, Show, LeaveAlternateScreen)?;
@@ -639,7 +393,7 @@ fn run_all_selector(
     models: &[String],
     current_default: &str,
     current_agent: &str,
-    current_omo: &str,
+    agent_names: &[&str],
 ) -> Result<Option<String>> {
     let mut filter = String::new();
     let mut selected: usize = 0;
@@ -671,7 +425,7 @@ fn run_all_selector(
             &filter,
             current_default,
             current_agent,
-            current_omo,
+            agent_names,
         )?;
 
         if let Event::Key(key) = event::read()? {
@@ -717,7 +471,7 @@ fn draw_all(
     filter: &str,
     current_default: &str,
     current_agent: &str,
-    current_omo: &str,
+    agent_names: &[&str],
 ) -> Result<()> {
     let (_, term_height) = terminal::size()?;
     let max_visible = (term_height as usize).saturating_sub(16);
@@ -746,7 +500,11 @@ fn draw_all(
         stdout,
         Print("\r\n  This will change ALL models to the same selection:\r\n"),
         Print("  - System default (opencode.jsonc)\r\n"),
-        Print("  - All 3 agents (local-mind, hoodie, neckbeard)\r\n"),
+        Print(format!(
+            "  - All {} agents ({})\r\n",
+            agent_names.len(),
+            agent_names.join(", ")
+        )),
         Print(format!("\r\n  Current system default: ")),
         SetForegroundColor(Color::Cyan),
         Print(format!("{}\r\n", current_default)),
@@ -792,7 +550,7 @@ fn draw_all(
         for (i, item) in items.iter().enumerate().skip(start).take(end - start) {
             let is_selected = i == selected;
             let is_current =
-                *item == current_default || *item == current_agent || *item == current_omo;
+                *item == current_default || *item == current_agent;
 
             let prefix = match (is_selected, is_current) {
                 (true, true) => "  > * ",
@@ -859,856 +617,6 @@ impl CtxPreset {
             CtxPreset::Aggressive => "aggressive",
         }
     }
-}
-
-fn read_oma_value(path: &str) -> Result<serde_json::Value> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path))?;
-    serde_json::from_str(&content).with_context(|| format!("Failed to parse JSON: {}", path))
-}
-
-fn write_oma_value(path: &str, value: &serde_json::Value) -> Result<()> {
-    let content = serde_json::to_string_pretty(value)
-        .with_context(|| "Failed to serialize config to JSON")?;
-    fs::write(path, content + "\n").with_context(|| format!("Failed to write {}", path))?;
-    Ok(())
-}
-
-pub fn set_vision_model(path: &str, model: &str) -> Result<()> {
-    let mut value = read_oma_value(path)?;
-
-    // Set the model for multimodal-looker
-    value["agents"]["multimodal-looker"]["model"] = serde_json::Value::String(model.to_string());
-
-    // Remove "multimodal-looker" from disabled_agents if present
-    if let Some(arr) = value.get_mut("disabled_agents").and_then(|v| v.as_array_mut()) {
-        arr.retain(|v| v.as_str() != Some("multimodal-looker"));
-    }
-
-    write_oma_value(path, &value)
-}
-
-pub fn disable_vision(path: &str) -> Result<()> {
-    let mut value = read_oma_value(path)?;
-
-    let already_disabled = value
-        .get("disabled_agents")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().any(|v| v.as_str() == Some("multimodal-looker")))
-        .unwrap_or(false);
-
-    if already_disabled {
-        return Ok(());
-    }
-
-    match value.get_mut("disabled_agents").and_then(|v| v.as_array_mut()) {
-        Some(arr) => {
-            arr.push(serde_json::Value::String("multimodal-looker".to_string()));
-        }
-        None => {
-            value["disabled_agents"] =
-                serde_json::json!(["multimodal-looker"]);
-        }
-    }
-
-    write_oma_value(path, &value)
-}
-
-fn run_vision_on_mode() -> Result<()> {
-    let models = read_models("data/models")?;
-    if models.is_empty() {
-        eprintln!("No models found in data/models");
-        return Ok(());
-    }
-
-    let value = read_oma_value(OMA_CONFIG_PATH)?;
-    let current_model = value
-        .get("agents")
-        .and_then(|a| a.get("multimodal-looker"))
-        .and_then(|m| m.get("model"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-
-    let is_disabled = value
-        .get("disabled_agents")
-        .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().any(|v| v.as_str() == Some("multimodal-looker")))
-        .unwrap_or(false);
-
-    match select_vision_model(&models, &current_model, is_disabled)? {
-        Some(selected) => {
-            set_vision_model(OMA_CONFIG_PATH, &selected)?;
-            println!("Vision model set to: {} (multimodal-looker enabled)", selected);
-        }
-        None => {
-            println!("Aborted. No changes made.");
-        }
-    }
-
-    Ok(())
-}
-
-fn run_vision_off_mode() -> Result<()> {
-    disable_vision(OMA_CONFIG_PATH)?;
-    println!("multimodal-looker disabled.");
-    Ok(())
-}
-
-fn select_vision_model(
-    models: &[String],
-    current: &str,
-    is_disabled: bool,
-) -> Result<Option<String>> {
-    let mut stdout = io::stdout();
-
-    terminal::enable_raw_mode()?;
-    execute!(stdout, EnterAlternateScreen, Hide)?;
-
-    let result = run_vision_selector(&mut stdout, models, current, is_disabled);
-
-    execute!(stdout, Show, LeaveAlternateScreen)?;
-    terminal::disable_raw_mode()?;
-
-    result
-}
-
-fn run_vision_selector(
-    stdout: &mut io::Stdout,
-    models: &[String],
-    current: &str,
-    is_disabled: bool,
-) -> Result<Option<String>> {
-    let mut filter = String::new();
-    let mut selected: usize = 0;
-    let mut initialized = false;
-
-    loop {
-        let filtered: Vec<&String> = models
-            .iter()
-            .filter(|m| filter.is_empty() || m.to_lowercase().contains(&filter.to_lowercase()))
-            .collect();
-
-        if selected >= filtered.len() {
-            selected = filtered.len().saturating_sub(1);
-        }
-
-        if !initialized && filter.is_empty() {
-            if let Some(idx) = filtered.iter().position(|m| *m == current) {
-                selected = idx;
-            }
-            initialized = true;
-        }
-
-        draw_vision(stdout, &filtered, selected, &filter, current, is_disabled)?;
-
-        if let Event::Key(key) = event::read()? {
-            match key.code {
-                KeyCode::Up => {
-                    selected = selected.saturating_sub(1);
-                }
-                KeyCode::Down => {
-                    if selected + 1 < filtered.len() {
-                        selected += 1;
-                    }
-                }
-                KeyCode::Enter => {
-                    if let Some(m) = filtered.get(selected) {
-                        return Ok(Some((*m).clone()));
-                    }
-                }
-                KeyCode::Esc => {
-                    return Ok(None);
-                }
-                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    return Ok(None);
-                }
-                KeyCode::Char(c) => {
-                    filter.push(c);
-                    selected = 0;
-                    initialized = true;
-                }
-                KeyCode::Backspace => {
-                    filter.pop();
-                    selected = 0;
-                }
-                _ => {}
-            }
-        }
-    }
-}
-
-fn draw_vision(
-    stdout: &mut io::Stdout,
-    items: &[&String],
-    selected: usize,
-    filter: &str,
-    current: &str,
-    is_disabled: bool,
-) -> Result<()> {
-    let (_, term_height) = terminal::size()?;
-    let max_visible = (term_height as usize).saturating_sub(14);
-
-    execute!(stdout, MoveTo(0, 0), Clear(ClearType::All))?;
-
-    let banner = ">>> VISION MODEL (multimodal-looker) <<<";
-    let padding = "=".repeat(banner.len());
-
-    execute!(
-        stdout,
-        SetForegroundColor(Color::DarkGrey),
-        SetAttribute(Attribute::Bold),
-        Print(format!("  {}\r\n", padding)),
-        SetForegroundColor(Color::Cyan),
-        Print(format!("  {}\r\n", banner)),
-        SetForegroundColor(Color::DarkGrey),
-        Print(format!("  {}\r\n", padding)),
-        ResetColor,
-        SetAttribute(Attribute::Reset),
-    )?;
-
-    let status = if is_disabled { "DISABLED" } else { "enabled" };
-    let status_color = if is_disabled { Color::Red } else { Color::Green };
-
-    execute!(
-        stdout,
-        Print("\r\n  Sets the model used by multimodal-looker for image/vision analysis.\r\n"),
-        Print("  Selecting a model will also ENABLE multimodal-looker if disabled.\r\n"),
-        Print(format!("\r\n  Current model : ")),
-        SetForegroundColor(Color::Cyan),
-        Print(format!("{}", current)),
-        ResetColor,
-        Print("  ("),
-        SetForegroundColor(status_color),
-        Print(status),
-        ResetColor,
-        Print(")\r\n"),
-    )?;
-
-    if filter.is_empty() {
-        execute!(
-            stdout,
-            Print("  Type to filter | ↑↓ navigate | Enter select | Esc cancel\r\n\r\n")
-        )?;
-    } else {
-        execute!(
-            stdout,
-            Print(format!(
-                "  Filter: {} | Backspace to clear | Esc cancel\r\n\r\n",
-                filter
-            ))
-        )?;
-    }
-
-    if items.is_empty() {
-        execute!(
-            stdout,
-            SetForegroundColor(Color::Red),
-            Print("    No matches\r\n"),
-            ResetColor,
-        )?;
-    } else {
-        let start = if selected >= max_visible {
-            selected - max_visible + 1
-        } else {
-            0
-        };
-        let end = (start + max_visible).min(items.len());
-
-        for (i, item) in items.iter().enumerate().skip(start).take(end - start) {
-            let is_selected = i == selected;
-            let is_current = *item == current;
-
-            let prefix = match (is_selected, is_current) {
-                (true, true) => "  > * ",
-                (true, false) => "  >   ",
-                (false, true) => "    * ",
-                (false, false) => "      ",
-            };
-
-            if is_selected {
-                execute!(
-                    stdout,
-                    SetForegroundColor(Color::Green),
-                    SetAttribute(Attribute::Bold),
-                    Print(format!("{}{}\r\n", prefix, item)),
-                    SetAttribute(Attribute::Reset),
-                    ResetColor,
-                )?;
-            } else if is_current {
-                execute!(
-                    stdout,
-                    SetForegroundColor(Color::Yellow),
-                    Print(format!("{}{}\r\n", prefix, item)),
-                    ResetColor,
-                )?;
-            } else {
-                execute!(stdout, Print(format!("{}{}\r\n", prefix, item)))?;
-            }
-        }
-
-        if items.len() > max_visible {
-            execute!(
-                stdout,
-                SetForegroundColor(Color::DarkGrey),
-                Print(format!("\r\n    [{}/{}]\r\n", selected + 1, items.len())),
-                ResetColor,
-            )?;
-        }
-    }
-
-    stdout.flush()?;
-    Ok(())
-}
-
-fn run_image_on_mode() -> Result<()> {
-    let changes = update_image_modality(OPENCODE_CONFIG_PATH, true)?;
-    println!("  Added image modality to {} model(s) in {}", changes, OPENCODE_CONFIG_PATH);
-    Ok(())
-}
-
-fn run_image_off_mode() -> Result<()> {
-    let changes = update_image_modality(OPENCODE_CONFIG_PATH, false)?;
-    println!("  Removed image modality from {} model(s) in {}", changes, OPENCODE_CONFIG_PATH);
-    Ok(())
-}
-
-/// Find the byte position just after the closing `}` of the `"limit": { ... }` object on a line.
-fn find_limit_object_end(line: &str) -> Option<usize> {
-    let limit_key = "\"limit\":";
-    let key_pos = line.find(limit_key)?;
-    let after_key = key_pos + limit_key.len();
-    let brace_offset = line[after_key..].find('{')?;
-    let start = after_key + brace_offset;
-
-    let mut depth = 0usize;
-    for (i, c) in line[start..].char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(start + i + 1);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-pub fn add_image_modality_to_line(line: &str) -> String {
-    if !line.contains("\"limit\":") || !line.contains("\"name\":") {
-        return line.to_string();
-    }
-    if line.contains("\"modalities\":") {
-        return line.to_string();
-    }
-    let Some(end) = find_limit_object_end(line) else {
-        return line.to_string();
-    };
-    const MODALITIES: &str = r#", "modalities": { "input": ["text", "image"], "output": ["text"] }"#;
-    format!("{}{}{}", &line[..end], MODALITIES, &line[end..])
-}
-
-pub fn remove_image_modality_from_line(line: &str) -> String {
-    if !line.contains("\"modalities\":") {
-        return line.to_string();
-    }
-
-    let key = "\"modalities\":";
-    let Some(key_pos) = line.find(key) else {
-        return line.to_string();
-    };
-    let after_key = key_pos + key.len();
-    let Some(brace_offset) = line[after_key..].find('{') else {
-        return line.to_string();
-    };
-    let brace_start = after_key + brace_offset;
-
-    // Find closing brace of the modalities object
-    let mut depth = 0usize;
-    let mut obj_end = brace_start;
-    for (i, c) in line[brace_start..].char_indices() {
-        match c {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    obj_end = brace_start + i + 1;
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Prefer removing the preceding ", " before "modalities"
-    let before = &line[..key_pos];
-    if let Some(comma_pos) = before.rfind(',') {
-        if before[comma_pos + 1..].chars().all(|c| c == ' ') {
-            return format!("{}{}", &line[..comma_pos], &line[obj_end..]);
-        }
-    }
-
-    // Fall back: remove trailing comma after the object
-    let after = &line[obj_end..];
-    let ws = after.bytes().take_while(|&b| b == b' ').count();
-    if after[ws..].starts_with(',') {
-        return format!("{}{}", &line[..key_pos], &line[obj_end + ws + 1..]);
-    }
-
-    format!("{}{}", &line[..key_pos], &line[obj_end..])
-}
-
-pub fn update_image_modality(path: &str, enable: bool) -> Result<usize> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path))?;
-    let mut changes = 0usize;
-
-    let new_content: String = content
-        .lines()
-        .map(|line| {
-            let new_line = if enable {
-                add_image_modality_to_line(line)
-            } else {
-                remove_image_modality_from_line(line)
-            };
-            if new_line != line {
-                changes += 1;
-            }
-            new_line
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let new_content = if content.ends_with('\n') {
-        new_content + "\n"
-    } else {
-        new_content
-    };
-
-    fs::write(path, &new_content)
-        .with_context(|| format!("Failed to write {}", path))?;
-    Ok(changes)
-}
-
-fn run_ctx_mode(ctx_size: u64, preset: CtxPreset) -> Result<()> {
-    let input_limit = (ctx_size as f64 * preset.fraction()) as u64;
-
-    println!("  Context size : {}", format_tokens(ctx_size));
-    println!(
-        "  Preset       : {} ({}%)",
-        preset.name(),
-        (preset.fraction() * 100.0) as u64
-    );
-    println!("  limit.context: {}", format_tokens(ctx_size));
-    println!(
-        "  limit.input  : {}  ({}% of context)",
-        format_tokens(input_limit),
-        (preset.fraction() * 100.0) as u64
-    );
-    println!();
-
-    let context_changes = update_context_limits(OPENCODE_CONFIG_PATH, Some(ctx_size))?;
-    let input_changes = update_input_limits(OPENCODE_CONFIG_PATH, Some(input_limit))?;
-    println!(
-        "  Updated {} model(s) in {}",
-        context_changes.max(input_changes),
-        OPENCODE_CONFIG_PATH
-    );
-
-    Ok(())
-}
-
-fn run_ctx_off_mode() -> Result<()> {
-    let context_changes = update_context_limits(OPENCODE_CONFIG_PATH, None)?;
-    let input_changes = update_input_limits(OPENCODE_CONFIG_PATH, None)?;
-    println!(
-        "  Removed limit.context and limit.input from {} model(s) in {}",
-        context_changes.max(input_changes),
-        OPENCODE_CONFIG_PATH
-    );
-    Ok(())
-}
-
-fn format_tokens(n: u64) -> String {
-    let s = n.to_string();
-    let mut result = String::new();
-    for (i, c) in s.chars().rev().enumerate() {
-        if i > 0 && i % 3 == 0 {
-            result.push(',');
-        }
-        result.push(c);
-    }
-    result.chars().rev().collect()
-}
-
-pub fn update_input_limits(path: &str, input_limit: Option<u64>) -> Result<usize> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path))?;
-    let mut changes = 0usize;
-
-    let new_content: String = content
-        .lines()
-        .map(|line| {
-            if !line.contains("\"limit\":") {
-                return line.to_string();
-            }
-            let new_line = update_line_input_limit(line, input_limit);
-            if new_line != line {
-                changes += 1;
-            }
-            new_line
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let new_content = if content.ends_with('\n') {
-        new_content + "\n"
-    } else {
-        new_content
-    };
-
-    fs::write(path, &new_content)
-        .with_context(|| format!("Failed to write {}", path))?;
-    Ok(changes)
-}
-
-pub fn update_line_input_limit(line: &str, input_limit: Option<u64>) -> String {
-    if !line.contains("\"limit\":") {
-        return line.to_string();
-    }
-
-    let has_input = line.contains("\"input\":");
-
-    match input_limit {
-        Some(val) => {
-            if has_input {
-                replace_input_value(line, val)
-            } else {
-                add_input_to_limit(line, val)
-            }
-        }
-        None => {
-            if has_input {
-                remove_input_from_limit(line)
-            } else {
-                line.to_string()
-            }
-        }
-    }
-}
-
-fn replace_input_value(line: &str, val: u64) -> String {
-    let key = "\"input\":";
-    let Some(key_pos) = line.find(key) else {
-        return line.to_string();
-    };
-    let after_key = key_pos + key.len();
-    let ws_count = line[after_key..].bytes().take_while(|&b| b == b' ').count();
-    let digit_start = after_key + ws_count;
-    let digit_len = line[digit_start..]
-        .bytes()
-        .take_while(|b| b.is_ascii_digit())
-        .count();
-    format!("{}{}{}", &line[..digit_start], val, &line[digit_start + digit_len..])
-}
-
-fn add_input_to_limit(line: &str, val: u64) -> String {
-    let limit_key = "\"limit\":";
-    let Some(limit_pos) = line.find(limit_key) else {
-        return line.to_string();
-    };
-    let after_limit = limit_pos + limit_key.len();
-    let Some(brace_offset) = line[after_limit..].find('{') else {
-        return line.to_string();
-    };
-    let content_start = after_limit + brace_offset + 1;
-    let Some(close_offset) = line[content_start..].find('}') else {
-        return line.to_string();
-    };
-    let close_pos = content_start + close_offset;
-    format!(
-        "{}, \"input\": {}{}",
-        &line[..close_pos],
-        val,
-        &line[close_pos..]
-    )
-}
-
-fn remove_input_from_limit(line: &str) -> String {
-    let key = "\"input\":";
-    let Some(key_pos) = line.find(key) else {
-        return line.to_string();
-    };
-    let after_key = key_pos + key.len();
-    let ws_count = line[after_key..].bytes().take_while(|&b| b == b' ').count();
-    let digit_start = after_key + ws_count;
-    let digit_len = line[digit_start..]
-        .bytes()
-        .take_while(|b| b.is_ascii_digit())
-        .count();
-    let after_num = digit_start + digit_len;
-
-    // Prefer removing the preceding comma: ..., "input": NNN
-    if let Some(comma_pos) = line[..key_pos].rfind(',') {
-        let between = &line[comma_pos + 1..key_pos];
-        if between.chars().all(|c| c == ' ') {
-            return format!("{}{}", &line[..comma_pos], &line[after_num..]);
-        }
-    }
-
-    // Fall back to removing the following comma: "input": NNN, ...
-    let after = &line[after_num..];
-    let ws_after = after.bytes().take_while(|&b| b == b' ').count();
-    if after[ws_after..].starts_with(',') {
-        let comma_end = after_num + ws_after + 1;
-        return format!("{}{}", &line[..key_pos], &line[comma_end..]);
-    }
-
-    format!("{}{}", &line[..key_pos], &line[after_num..])
-}
-
-pub fn update_context_limits(path: &str, context_limit: Option<u64>) -> Result<usize> {
-    let content =
-        fs::read_to_string(path).with_context(|| format!("Failed to read {}", path))?;
-    let mut changes = 0usize;
-
-    let new_content: String = content
-        .lines()
-        .map(|line| {
-            if !line.contains("\"limit\":") {
-                return line.to_string();
-            }
-            let new_line = update_line_context_limit(line, context_limit);
-            if new_line != line {
-                changes += 1;
-            }
-            new_line
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let new_content = if content.ends_with('\n') {
-        new_content + "\n"
-    } else {
-        new_content
-    };
-
-    fs::write(path, &new_content)
-        .with_context(|| format!("Failed to write {}", path))?;
-    Ok(changes)
-}
-
-pub fn update_line_context_limit(line: &str, context_limit: Option<u64>) -> String {
-    if !line.contains("\"limit\":") {
-        return line.to_string();
-    }
-
-    let has_context = line.contains("\"context\":");
-
-    match context_limit {
-        Some(val) => {
-            if has_context {
-                replace_context_value(line, val)
-            } else {
-                add_context_to_limit(line, val)
-            }
-        }
-        None => {
-            if has_context {
-                remove_context_from_limit(line)
-            } else {
-                line.to_string()
-            }
-        }
-    }
-}
-
-fn replace_context_value(line: &str, val: u64) -> String {
-    let key = "\"context\":";
-    let Some(key_pos) = line.find(key) else {
-        return line.to_string();
-    };
-    let after_key = key_pos + key.len();
-    let ws_count = line[after_key..].bytes().take_while(|&b| b == b' ').count();
-    let digit_start = after_key + ws_count;
-    let digit_len = line[digit_start..]
-        .bytes()
-        .take_while(|b| b.is_ascii_digit())
-        .count();
-    format!("{}{}{}", &line[..digit_start], val, &line[digit_start + digit_len..])
-}
-
-fn add_context_to_limit(line: &str, val: u64) -> String {
-    let limit_key = "\"limit\":";
-    let Some(limit_pos) = line.find(limit_key) else {
-        return line.to_string();
-    };
-    let after_limit = limit_pos + limit_key.len();
-    let Some(brace_offset) = line[after_limit..].find('{') else {
-        return line.to_string();
-    };
-    let content_start = after_limit + brace_offset + 1;
-    let Some(close_offset) = line[content_start..].find('}') else {
-        return line.to_string();
-    };
-    let close_pos = content_start + close_offset;
-    format!(
-        "{}, \"context\": {}{}",
-        &line[..close_pos],
-        val,
-        &line[close_pos..]
-    )
-}
-
-fn remove_context_from_limit(line: &str) -> String {
-    let key = "\"context\":";
-    let Some(key_pos) = line.find(key) else {
-        return line.to_string();
-    };
-    let after_key = key_pos + key.len();
-    let ws_count = line[after_key..].bytes().take_while(|&b| b == b' ').count();
-    let digit_start = after_key + ws_count;
-    let digit_len = line[digit_start..]
-        .bytes()
-        .take_while(|b| b.is_ascii_digit())
-        .count();
-    let after_num = digit_start + digit_len;
-
-    // Prefer removing the preceding comma: ..., "context": NNN
-    if let Some(comma_pos) = line[..key_pos].rfind(',') {
-        let between = &line[comma_pos + 1..key_pos];
-        if between.chars().all(|c| c == ' ') {
-            return format!("{}{}", &line[..comma_pos], &line[after_num..]);
-        }
-    }
-
-    // Fall back to removing the following comma: "context": NNN, ...
-    let after = &line[after_num..];
-    let ws_after = after.bytes().take_while(|&b| b == b' ').count();
-    if after[ws_after..].starts_with(',') {
-        let comma_end = after_num + ws_after + 1;
-        return format!("{}{}", &line[..key_pos], &line[comma_end..]);
-    }
-
-    format!("{}{}", &line[..key_pos], &line[after_num..])
-}
-
-pub fn read_models(path: &str) -> Result<Vec<String>> {
-    let content = fs::read_to_string(path).with_context(|| format!("Failed to read {}", path))?;
-    Ok(content
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .map(|l| l.trim().to_string())
-        .collect())
-}
-
-pub fn get_current_model(path: &str) -> Result<String> {
-    let content = fs::read_to_string(path)?;
-    for line in content.lines() {
-        if line.trim().starts_with("model:") {
-            if let Some(m) = line.split(':').nth(1) {
-                return Ok(m.trim().to_string());
-            }
-        }
-    }
-    anyhow::bail!("No model line found")
-}
-
-/// Get the default model from opencode.jsonc using line-based parsing to preserve JSONC comments
-pub fn get_default_model(path: &str) -> Result<String> {
-    let content = fs::read_to_string(path)?;
-    for line in content.lines() {
-        let trimmed = line.trim();
-        // Match "model": "value" pattern
-        if trimmed.starts_with("\"model\"") {
-            // Extract the value after the colon
-            if let Some(colon_idx) = trimmed.find(':') {
-                let value_part = trimmed[colon_idx + 1..].trim();
-                // Remove quotes and trailing comma
-                let value = value_part
-                    .trim_start_matches('"')
-                    .trim_end_matches(',')
-                    .trim_end_matches('"');
-                return Ok(value.to_string());
-            }
-        }
-    }
-    anyhow::bail!("No model key found in {}", path)
-}
-
-/// Update the default model in opencode.jsonc using line-based replacement to preserve JSONC comments
-pub fn update_default_model(path: &str, model: &str) -> Result<()> {
-    let content = fs::read_to_string(path)?;
-    let mut found = false;
-
-    let new_content: String = content
-        .lines()
-        .map(|line| {
-            let trimmed = line.trim();
-            if trimmed.starts_with("\"model\"") {
-                found = true;
-                // Preserve leading whitespace
-                let leading_ws: String = line.chars().take_while(|c| c.is_whitespace()).collect();
-                format!("{}\"model\": \"{}\",", leading_ws, model)
-            } else {
-                line.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    if !found {
-        anyhow::bail!("No model key found in {}", path);
-    }
-
-    let new_content = if content.ends_with('\n') {
-        new_content + "\n"
-    } else {
-        new_content
-    };
-
-    fs::write(path, new_content)?;
-    Ok(())
-}
-
-pub fn update_agent_model(path: &str, model: &str) -> Result<()> {
-    let content = fs::read_to_string(path)?;
-    let mut found = false;
-
-    for line in content.lines() {
-        if line.trim().starts_with("model:") {
-            found = true;
-            break;
-        }
-    }
-
-    if !found {
-        anyhow::bail!("No model line found in {}", path);
-    }
-
-    let new_content: String = content
-        .lines()
-        .map(|l| {
-            if l.trim().starts_with("model:") {
-                format!("model: {}", model)
-            } else {
-                l.to_string()
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let new_content = if content.ends_with('\n') {
-        new_content + "\n"
-    } else {
-        new_content
-    };
-
-    fs::write(path, new_content)?;
-    Ok(())
 }
 
 fn select_default_model(
@@ -2337,6 +1245,3 @@ fn run_confirm(
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

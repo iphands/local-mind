@@ -1,9 +1,8 @@
 #!/bin/bash
+# Builds opencode/helpers/model-switcher and runs it against opencode 2's config
+# (opencode/container_data/config/opencode). Works from any cwd.
 set -e
-pushd ./opencode-legacy/helpers/model-switcher >/dev/null
-cargo build --release
-popd >/dev/null
-
-pushd ./opencode-legacy >/dev/null
-./helpers/model-switcher/target/release/model-switcher $*
-popd >/dev/null
+ROOT="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+cargo build --release --quiet --manifest-path "$ROOT/opencode/helpers/model-switcher/Cargo.toml"
+cd "$ROOT/opencode"
+exec ./helpers/model-switcher/target/release/model-switcher "$@"

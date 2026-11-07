@@ -61,7 +61,7 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 │   ├── build-container-opencode
 │   ├── build-container-opencode-legacy
 │   ├── model-holder            # Lock model files in memory
-│   ├── model-switcher          # Switch agent models
+│   ├── model-switcher          # Switch default/agent models, context size, image input (opencode 2)
 │   ├── ocm                     # OpenCode model management
 │   └── count-subagent-calls    # Count subagent usage
 │
@@ -75,6 +75,8 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 │   ├── .dnf-deps               # Fedora packages for the base
 │   ├── Dockerfile              # OpenCode 2 on ocli-base (ocli)
 │   ├── bin/                    # In-container ~/bin: opencode joins the serve, opencode-serve runs it
+│   ├── helpers/
+│   │   └── model-switcher/     # Rust: model/context/image switcher for opencode.jsonc + agents/*.md
 │   └── container_data/
 │       └── config/opencode/
 │           ├── opencode.jsonc  # Provider & permission config
@@ -90,8 +92,6 @@ Reviewers have read-only access (grep, glob, read) and cannot modify files. The 
 │   │           ├── local-mind.md
 │   │           ├── neckbeard.md
 │   │           └── hoodie.md
-│   ├── helpers/
-│   │   └── model-switcher/     # Rust: TUI for switching models per agent
 │   ├── vendor/                 # Read-only reference: OpenCode & oh-my-opencode source
 │   └── plans/                  # Planning documents
 │
@@ -192,14 +192,21 @@ See `llama-proxy/README.md` for full documentation.
 
 ### model-switcher
 
-Interactive TUI for switching which LLM model each agent uses:
+Switches models and model size info in the OpenCode 2 config
+(`opencode/container_data/config/opencode/`). `bin/model-switcher` builds it and runs it from
+`opencode/`, so it works from any directory:
 
 ```bash
-cd opencode-legacy/helpers/model-switcher
-cargo run --release lm        # Switch local-mind's model
-cargo run --release omo       # Switch oh-my-opencode models
-cargo run --release all       # Switch all agents at once
+bin/model-switcher                      # TUI: system default, then each agent's model
+bin/model-switcher all                  # TUI: default + every agent to one model
+bin/model-switcher status               # Default/agent models + each model's limits and image input
+bin/model-switcher ctx 262144 balanced  # limit.context + limit.input (safe 76% / balanced 85% / aggressive 92%)
+bin/model-switcher ctx off              # Drop limit.input
+bin/model-switcher image on|off         # "image" in each model's capabilities.input
 ```
+
+Restart the opencode container (or serve) to pick up changes. The oh-my-openagent commands
+(`omo`, `vision`, `restore-omo-defaults`) are gone with the legacy setup.
 
 ### model-holder
 
