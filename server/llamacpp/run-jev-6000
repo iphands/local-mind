@@ -13,7 +13,7 @@
 # ./run-jev-benchmark 6000, 2026-11-06, build 12169, basalt resident (bench-results/jev-6000-20261106-155122).
 # Same jev-shaped load as the 4060 table in ./run-jev-4060. VRAM is this server's own process.
 #   NP:KVU:UB:CTX[:BATCH]   VRAM   gate   review  long 27k  chunk tok/s C=1/8  mixed gate p50/p95/max  mixed tok/s
-#   8:1:512:40960           7484   33 ms  404     1612      18679 / 18284      0.35 / 0.69 / 0.79 s    30978  <- default
+#   8:1:512:40960           7484   33 ms  404     1612      18679 / 18284      0.35 / 0.69 / 0.79 s    30978
 #   8:1:2048:40960          7814   33     365     1461      20143 / 20251      0.36 / 0.70 / 1.09      32843
 #   16:1:2048:40960         8220   33     371     1482      19799 / 20291      0.52 / 1.17 / 1.93      33471
 #   8:1:2048:131072         10986  34     374     1482      19831 / 20041      0.34 / 0.86 / 1.25      32720
@@ -21,16 +21,32 @@
 #   8:1:4096:131072:4096    11814  34     397     1522      20086 / 20490      0.56 / 0.87 / 1.21      34094
 # Against the 4060 at the same 8:1:512:40960: gate 4.0x, review 4.7x, chunk prefill 4.8x faster;
 # mixed-load gate p50/p95/max 4.8x / 5.8x / 7x lower; answers within 0.004 of the 4060's single slot.
-# UB 2048 adds ~8% prefill but a worse gate tail; 16 slots doubles the gate p95; CTX 131072 adds
-# nothing (the ~32k state cap, see ./run-jev-common) and costs ~3.5 GiB.
+# CTX 131072 adds nothing (the ~32k state cap, see ./run-jev-common) and costs ~3.5 GiB.
+#
+# High concurrency (bench-results/jev-6000-20261106-161444): C clients each loop the jev mix
+# (50% gate, 30% chunk, 10% verdict, 10% review). Cell: requests/s / gate p95. Zero errors throughout.
+#   NP:KVU:UB:CTX       VRAM    C=8          C=16         C=32         C=64          C=128
+#   8:1:512:40960       7484    8.2 / 1.8 s  8.2 / 4.0 s  8.3 / 8.0 s  8.2 / 18.6 s  8.5 / 25.3 s
+#   8:1:2048:40960      7814    9.4 / 1.3    9.3 / 4.4    8.9 / 9.0    9.1 / 18.7    9.5 / 24.2
+#   16:1:2048:40960     8220    9.2 / 1.2    9.1 / 3.9    8.9 / 7.1    9.2 / 13.4    9.6 / 27.2   <- default
+#   32:1:2048:65536     9968    9.1 / 1.9    9.2 / 2.8    9.1 / 21.6   9.0 / 28.3    9.3 / 30.3
+#   64:1:2048:131072    14036   9.0 / 1.9    9.0 / 3.2    8.8 / 21.3   9.0 / 25.9    9.0 / 35.0
+#   128:1:2048:262144   ~21400  stopped by the 2 GiB reserve guard: does not fit beside basalt
+# This mix averages ~3.5k prompt tokens per request, so ~9.5 req/s (~32k tok/s) is the GPU's prefill
+# ceiling whatever the slot count; past ~8 clients more clients only queue. UB 2048 is the one knob
+# that helps (+~10% over 512). 16 slots gives the best gate tail up to C=64 and the most req/s at
+# C=128; from 32 slots up, short gates share each step with dozens of long prompts and the gate p95
+# jumps to 21-35 s. Light-load latency is slightly better at 8 slots (mixed gate p95 0.77 vs 0.87 s).
+# Real high concurrency needs fewer tokens per request or gates kept apart from heavy requests (e.g.
+# hooks on one jev server, ask_jev and reviews on another): llama.cpp has no request priority.
 set -ue
 cd "$(dirname "$(realpath "$0")")"
 
 JEV_GPU=0
 JEV_DEFAULT_NAME=llama-jev-6000
 JEV_DEFAULT_PORT=8703
-JEV_DEFAULT_PARALLEL=8
+JEV_DEFAULT_PARALLEL=16     # high concurrency: see the second table above
 JEV_DEFAULT_KV_UNIFIED=1
 JEV_DEFAULT_CTX=40960
-JEV_DEFAULT_UB=512
+JEV_DEFAULT_UB=2048
 source ./run-jev-common
