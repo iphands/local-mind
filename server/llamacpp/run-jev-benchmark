@@ -34,17 +34,22 @@ case "$TARGET" in
     GPU=0; LAUNCHER=./run-jev-6000; PROD_NAME=   # shares the card with basalt; nothing to stop
     MIN_FREE_MIB=${MIN_FREE_MIB:-12000}  # the largest config plus RESERVE_MIB
     RESERVE_MIB=${RESERVE_MIB:-2048}     # never let basalt's GPU fall below this much free
-    DEFAULT_MATRIX="8:1:512:40960 8:1:2048:40960 16:1:2048:40960 8:1:2048:131072 16:1:2048:131072 8:1:4096:131072:4096"
-    QUICK_MATRIX="8:1:512:40960 8:1:2048:131072"
+    # High concurrency: the unified KV pool grows ~2k tokens per slot so many in-flight chunks fit.
+    # The first run (2026-11-06, bench-results/jev-6000-20261106-155122) settled UB and long CTX:
+    # 8:1:512:40960 won, CTX 131072 bought nothing (the ~32k state cap).
+    DEFAULT_MATRIX="8:1:512:40960 8:1:2048:40960 16:1:2048:40960 32:1:2048:65536 64:1:2048:131072 128:1:2048:262144"
+    QUICK_MATRIX="8:1:512:40960 64:1:2048:131072"
     ;;
   *)
     echo "usage: $0 4060|6000 [--quick]   (MATRIX=\"NP:KVU:UB:CTX[:BATCH] ...\" overrides the configs)"; exit 2 ;;
 esac
 shift
 SCALE=1.0
+SWEEP_CLIENTS=${SWEEP_CLIENTS:-8,16,32,64,128}
 if [[ "${1:-}" == "--quick" ]]; then
   DEFAULT_MATRIX=$QUICK_MATRIX
   SCALE=0.33
+  SWEEP_CLIENTS=${SWEEP_CLIENTS_QUICK:-8,32,128}
 elif [[ -n "${1:-}" ]]; then
   echo "usage: $0 4060|6000 [--quick]"; exit 2
 fi
@@ -77,6 +82,7 @@ free=$(gpu_free)
 
 OUT=bench-results/jev-$TARGET-$(date +%Y%m%d-%H%M%S)
 mkdir -p "$OUT"
+exec > >(tee -a "$OUT/run.log") 2>&1   # progress is readable while it runs: tail -f $OUT/run.log
 SAMPLER=
 
 cleanup() {
@@ -100,7 +106,8 @@ record_failure() {  # $1 idx, $2 config, $3 reason
 
 echo "## jev benchmark on the $TARGET (GPU $GPU) -> $OUT"
 echo "## configs (NP:KVU:UB:CTX[:BATCH]): $MATRIX"
-echo "## scale: $SCALE   free now: $free MiB   reserve kept free: $RESERVE_MIB MiB"
+echo "## scale: $SCALE   sweep clients: $SWEEP_CLIENTS   free now: $free MiB   reserve kept free: $RESERVE_MIB MiB"
+echo "## started $(date '+%Y-%m-%d %H:%M:%S')"
 i=0
 for cfg in $MATRIX; do
   i=$((i + 1)); idx=$(printf '%02d' "$i")
@@ -108,7 +115,7 @@ for cfg in $MATRIX; do
   batch=${batch:-$(( ub > 2048 ? ub : 2048 ))}
   slot_ctx=$(( kvu == 1 ? ctx : ctx / np ))
   echo
-  echo "=== [$idx] NP=$np KV_UNIFIED=$kvu UB=$ub CTX=$ctx BATCH=$batch (per-request room: $slot_ctx tokens)"
+  echo "=== [$idx/$(wc -w <<<"$MATRIX")] $(date +%H:%M:%S) NP=$np KV_UNIFIED=$kvu UB=$ub CTX=$ctx BATCH=$batch (per-request room: $slot_ctx tokens)"
 
   if ! DETACH=1 METRICS=1 NAME="$NAME" PORT="$PORT" PARALLEL="$np" KV_UNIFIED="$kvu" UB="$ub" CTX="$ctx" BATCH="$batch" \
       "$LAUNCHER" >"$OUT/launch-$idx.txt" 2>&1; then
@@ -155,7 +162,7 @@ for cfg in $MATRIX; do
   echo "  ready (PID $pid, $(pid_mib "$pid") MiB); running load"
 
   python3 -I jev-bench-load.py run --url "http://127.0.0.1:$PORT" --config "$cfg" --target "$TARGET" \
-    --slot-ctx "$slot_ctx" --scale "$SCALE" --out "$OUT/cfg-$idx.json" || echo "  [WARN] load generator exited non-zero"
+    --slot-ctx "$slot_ctx" --scale "$SCALE" --sweep-clients "$SWEEP_CLIENTS" --out "$OUT/cfg-$idx.json" || echo "  [WARN] load generator exited non-zero"
 
   curl -s -m 5 "http://127.0.0.1:$PORT/metrics" >"$OUT/metrics-$idx.txt" || true
   docker logs "$NAME" >"$OUT/server-$idx.log" 2>&1 || true
@@ -176,5 +183,6 @@ json.dump(d, open(p, "w"), indent=1)' "$OUT/cfg-$idx.json" "$peak" "$low" "$guar
 done
 
 echo
+echo "## finished $(date '+%Y-%m-%d %H:%M:%S')"
 python3 -I jev-bench-load.py summarize "$OUT"
 if [[ -n "$PROD_NAME" ]]; then echo "Results in $OUT. Start production again with $LAUNCHER"; else echo "Results in $OUT."; fi

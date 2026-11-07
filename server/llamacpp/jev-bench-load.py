@@ -26,6 +26,8 @@ Phases (per server config):
   mixed        2 chunk loopers + 1 review looper in the background, a gate request every 0.5 s in the
                foreground -> gate p50/p95/max: is the shell gate still fast while scans and reviews run?
   consistency  one fixed payload per scenario -> probabilities, compared across configs (drift)
+  sweep        C = 8, 16, 32, 64, 128 clients (--sweep-clients) each looping the jev mix (50% gate,
+               30% chunk, 10% verdict, 10% review) -> req/s, tok/s, per-type p50/p95, errors
 """
 
 import argparse
@@ -315,6 +317,44 @@ def phase_mixed(client, payloads, seconds, interval=0.5):
     return out
 
 
+# Concurrency sweep: each client loops through this 10-request cycle (50% gate, 30% chunk,
+# 10% verdict, 10% review), starting at a different offset so the mix is even at every instant.
+SWEEP_MIX = ["gate", "chunk", "gate", "verdict", "gate", "chunk", "gate", "review", "gate", "chunk"]
+
+
+def sweep_client(client, payloads, until, sink, offset):
+    i = offset
+    while time.monotonic() < until:
+        sc = SWEEP_MIX[i % len(SWEEP_MIX)]
+        sink.append(client.ask(sc, payloads.build(sc)))
+        i += 1
+
+
+def phase_sweep(client, payloads, clients, seconds):
+    """High concurrency: C clients each looping the jev request mix. Where does throughput stop
+    rising, and when does a gate request stop being instant?"""
+    out = {}
+    for c in clients:
+        sink, until = [], time.monotonic() + seconds
+        t0 = time.monotonic()
+        threads = [threading.Thread(target=sweep_client, args=(client, payloads, until, sink, k), daemon=True)
+                   for k in range(c)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+        wall = time.monotonic() - t0
+        s = stats(sink, wall)
+        s["by_scenario"] = {sc: stats([r for r in sink if r["scenario"] == sc])
+                            for sc in ("gate", "chunk", "verdict", "review")}
+        out[str(c)] = s
+        g = s["by_scenario"]["gate"]
+        print(f"  sweep C={c:<3}: {s['req_s']} req/s, {s['tok_s']} tok/s, gate p50 {g['p50_ms']} p95 {g['p95_ms']} ms, "
+              f"review p95 {s['by_scenario']['review']['p95_ms']} ms ({s['errors']} errors"
+              f"{', first: ' + str(s.get('first_error'))[:80] if s['errors'] else ''})", flush=True)
+    return out
+
+
 def phase_consistency(client, payloads):
     out = {}
     for sc in ("gate", "chunk", "verdict", "review"):
@@ -340,6 +380,9 @@ def cmd_run(a):
         result["mixed"] = phase_mixed(client, payloads, secs(30))
     if "consistency" in phases:
         result["consistency"] = phase_consistency(client, payloads)
+    if "sweep" in phases:
+        clients = [int(x) for x in a.sweep_clients.split(",")]
+        result["sweep"] = phase_sweep(client, payloads, clients, secs(20))
     if a.out:
         with open(a.out, "w") as f:
             json.dump(result, f, indent=1)
@@ -367,6 +410,36 @@ VRAM_LIMIT_MIB = {"4060": 7782}  # the 4060 must fit whole; the 6000's limit is 
 def target_of(r, path):
     """Older results (before the 6000 existed) carry no target and were all 4060 runs."""
     return r.get("target") or ("6000" if "jev-6000-" in path else "4060")
+
+
+def sweep_table(rows):
+    """Second table: the concurrency sweep, one row per config, req/s and gate p95 per client count."""
+    swept = [r for r in rows if r.get("sweep")]
+    if not swept:
+        return []
+    counts = sorted({int(c) for r in swept for c in r["sweep"]})
+    head = " | ".join(f"C={c}" for c in counts)
+    lines = ["", "## Concurrency sweep", "",
+             "Each of C clients loops the jev mix (50% gate, 30% chunk, 10% verdict, 10% review). "
+             "Cell: requests/s · prefill tok/s · gate p95 ms · errors.", "",
+             f"| gpu | config | {head} |", "|---|---|" + "---|" * len(counts)]
+    best = {}
+    for r in swept:
+        cells = []
+        for c in counts:
+            s = r["sweep"].get(str(c))
+            if not s:
+                cells.append("—")
+                continue
+            g = s["by_scenario"]["gate"]
+            cells.append(f"{s['req_s']} · {round(s['tok_s'] / 1000, 1)}k · {g['p95_ms']} · {s['errors']}")
+            if s["errors"] == 0 and (c not in best or s["req_s"] > best[c][1]):
+                best[c] = (r.get("config"), s["req_s"])
+        lines.append(f"| {r['_target']} | `{r.get('config')}` | " + " | ".join(cells) + " |")
+    if best:
+        top = max(best)
+        lines += ["", f"**Most requests/s at C={top} with no errors: `{best[top][0]}`** ({best[top][1]} req/s)."]
+    return lines
 
 
 def cmd_summarize(a):
@@ -432,6 +505,7 @@ def cmd_summarize(a):
             lines.append(f"**Suggestion for the {tgt}: `{pick['cfg']}`**: lowest mixed-gate p95 ({pick['gate_p95']} ms) among configs with {rule}.")
         else:
             lines.append(f"**No {tgt} config met every rule** ({rule}). Read the table.")
+    lines += sweep_table(rows)
     text = "\n".join(lines) + "\n"
     if len(a.dirs) == 1:
         with open(os.path.join(a.dirs[0], "summary.md"), "w") as f:
@@ -450,7 +524,8 @@ def main():
     r.add_argument("--slot-ctx", type=int, default=0,
                    help="tokens one request may use (CTX when unified, CTX/NP otherwise); long states that don't fit are skipped")
     r.add_argument("--scale", type=float, default=1.0, help="phase length multiplier (--quick uses 0.33)")
-    r.add_argument("--phases", default="alone,throughput,mixed,consistency")
+    r.add_argument("--phases", default="alone,throughput,mixed,consistency,sweep")
+    r.add_argument("--sweep-clients", default="8,16,32,64,128", help="client counts for the concurrency sweep")
     r.add_argument("--corpus", default=DEFAULT_CORPUS)
     r.add_argument("--timeout", type=float, default=180.0, help="per request; the 114k-token state needs room")
     s = sub.add_parser("summarize", help="one or more result dirs; several dirs give one combined table")
