@@ -530,3 +530,64 @@ pieces, including `askFiles`) for calibration scripts. The plugin loader reads o
 - To confirm the plugin fails open, stop both and run a shell command that prints more than 200
   characters. It should come back with no `[jev]` line. With the trace view on, the same call
   shows a trace with the `error` instead.
+
+## Other plugins: `/stop-all-jobs` (`stop-jobs.ts`)
+
+A separate plugin, not part of jev, that adds one command to the TUI:
+
+```text
+/stop-all-jobs         stop every running session and background subagent
+/stop-all-jobs list    dry run: show what would be stopped, stop nothing
+```
+
+**Why.** A prompt that fans out to many background subagents (9 at once on 2026-11-06, each with
+a 70-150k-token context) can swamp basalt's 3 slots. Restarting OpenCode does not help: a running
+session keeps `session_v2.time_suspended` set, a background subagent keeps a `job` row with
+`status = 'running'`, and `opencode serve` resumes both at startup.
+
+**What it does.**
+
+1. It reads the candidates **read-only** from `opencode.db`: every session with `time_suspended`
+   set, plus the parent and child session of every running job. The session you type the
+   command in is left out. The command never writes to the database.
+2. It stops each one with `ctx.session.interrupt` (OpenCode's own "interrupt active execution
+   owned by this process"), subagents first, then parents.
+3. An interrupted subagent's job completes and notifies its parent, which can wake the parent, so
+   it re-reads the database 1.5 s later and repeats. It stops when a pass stops nothing, or after
+   5 passes.
+4. It reports in the session you typed it in, as a message that does not start a model turn:
+
+   ```text
+   /stop-all-jobs: stopped 4 sessions (3 subagents) in 2 passes: "Scan part 1", "Scan part 2", "Scan part 3", "Rust crates bug scan"
+   ```
+
+**Limits.**
+
+- `interrupt` only reaches work owned by the running `opencode serve`. A session that is still
+  marked but isn't running there, such as a stale flag left by a crash, comes back as
+  `interrupted: false`. It is listed as "Still marked but not running in this OpenCode process"
+  and would resume at the next start. Clear it by hand (below).
+- Stopping a session does not undo what it did. It only ends the current turn.
+- `STOP_JOBS_DB` overrides the database path (default `$XDG_DATA_HOME/opencode/opencode.db`,
+  i.e. `~/.local/share/opencode/opencode.db` in the container,
+  `container_data/local/share/opencode/opencode.db` on the host).
+
+**Manual cleanup (the fallback).** Do this on the host, **with the opencode container stopped**.
+It backs the database up first, then clears the resume flags and the running jobs. Sessions and
+their history are kept.
+
+```sh
+cd opencode/container_data/local/share/opencode
+docker ps --format '{{.Names}}' | grep -qx opencode && echo "stop the opencode container first" || {
+  B=~/opencode-db-backup-$(date +%Y%m%d-%H%M%S); mkdir -p "$B" && cp -p opencode.db* "$B"/ && echo "backup: $B"
+  python3 -I -c '
+import sqlite3
+c = sqlite3.connect("opencode.db")
+s = c.execute("update session_v2 set time_suspended = null where time_suspended is not null").rowcount
+j = c.execute("delete from job where status = '"'"'running'"'"'").rowcount
+c.commit(); c.execute("pragma wal_checkpoint(TRUNCATE)")
+print(f"cleared {s} suspended sessions, removed {j} running jobs; integrity:", c.execute("pragma integrity_check").fetchone()[0])'
+}
+```
+
+`stop-jobs.ts` exports `__test` (`readCandidates`, `stopAll`, `dbPath`) for test scripts.

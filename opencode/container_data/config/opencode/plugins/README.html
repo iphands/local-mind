@@ -165,6 +165,7 @@
   <a href="#safety">Fail-open</a>
   <a href="#server">Server</a>
   <a href="#config">Config</a>
+  <a href="#stop-all-jobs">/stop-all-jobs</a>
 </div></nav>
 
 <div class="wrap">
@@ -545,8 +546,53 @@ jev answers are a 4B classifier's guesses: read a file before editing it, quotin
   </div>
 </div>
 
+<h2 id="stop-all-jobs">Other plugins: <code>/stop-all-jobs</code></h2>
+<p class="sub">A separate plugin (<code>stop-jobs.ts</code>), not part of jev. One TUI command that stops every running session and background subagent, so nothing is left to resume.</p>
+<div class="grid2">
+  <div class="panel">
+    <h3>Usage</h3>
+<pre><code>/stop-all-jobs         stop everything (except this session)
+/stop-all-jobs list    dry run: show what would be stopped</code></pre>
+    <p>The result shows up in the session you typed it in, as a message that doesn't start a model turn:</p>
+<pre><code>/stop-all-jobs: stopped 4 sessions (3 subagents) in 2 passes:
+"Scan part 1", "Scan part 2", "Scan part 3", "Rust crates bug scan"</code></pre>
+  </div>
+  <div class="panel">
+    <h3>Why restarting doesn't help</h3>
+    <p>A running session keeps <code>session_v2.time_suspended</code> set. A background subagent keeps a <code>job</code> row with <code>status = 'running'</code>. <code>opencode serve</code> resumes both at startup.
+       On 2026-11-06 one prompt fanned out to 9 background subagents with 70–150k-token contexts, swamping basalt's 3 slots, and they came back after every restart.</p>
+  </div>
+  <div class="panel">
+    <h3>How it works</h3>
+    <p>It reads the candidates <b>read-only</b> from <code>opencode.db</code>: sessions with <code>time_suspended</code> set, plus the parent and child of every running job, but not the session you typed it in.
+       It stops each with <code>ctx.session.interrupt</code>, subagents first, then parents.
+       A stopped subagent's completion notice can wake its parent, so it re-reads the database 1.5 s later and repeats, until a pass stops nothing (at most 5 passes). It never writes to the database.</p>
+  </div>
+  <div class="panel">
+    <h3>Limits</h3>
+    <p><code>interrupt</code> only reaches work owned by the running <code>opencode serve</code>. A session still marked but not running there (for example a stale flag left by a crash) is listed as <b>"Still marked but not running in this OpenCode process"</b>. It would resume at the next start, so clear it by hand.
+       Stopping ends the current turn. It doesn't undo what the session already did.
+       <code>STOP_JOBS_DB</code> overrides the database path.</p>
+  </div>
+</div>
+<div class="panel" style="margin-top:14px">
+  <h3>Manual cleanup (the fallback), on the host, with the opencode container stopped</h3>
+<pre><code>cd opencode/container_data/local/share/opencode
+docker ps --format '{{.Names}}' | grep -qx opencode &amp;&amp; echo "stop the opencode container first" || {
+  B=~/opencode-db-backup-$(date +%Y%m%d-%H%M%S); mkdir -p "$B" &amp;&amp; cp -p opencode.db* "$B"/ &amp;&amp; echo "backup: $B"
+  python3 -I -c '
+import sqlite3
+c = sqlite3.connect("opencode.db")
+s = c.execute("update session_v2 set time_suspended = null where time_suspended is not null").rowcount
+j = c.execute("delete from job where status = '"'"'running'"'"'").rowcount
+c.commit(); c.execute("pragma wal_checkpoint(TRUNCATE)")
+print(f"cleared {s} suspended sessions, removed {j} running jobs; integrity:", c.execute("pragma integrity_check").fetchone()[0])'
+}</code></pre>
+  <div class="callout">It backs the database up first, then clears the resume flags and deletes the running jobs. Sessions and their history are kept.</div>
+</div>
+
 <footer>
-  <code>container_data/config/opencode/plugins/jev.ts</code> · agent instructions in <code>agents/local-mind.md</code>, <code>agents/neckbeard.md</code>, <code>agents/hoodie.md</code> · plain-text version in <code>README.md</code>.
+  <code>container_data/config/opencode/plugins/jev.ts</code> and <code>stop-jobs.ts</code> · agent instructions in <code>agents/local-mind.md</code>, <code>agents/neckbeard.md</code>, <code>agents/hoodie.md</code> · plain-text version in <code>README.md</code>.
 </footer>
 
 </div>
