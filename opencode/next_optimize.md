@@ -1,6 +1,6 @@
 # jev / ask_jev: next optimizations (on hold)
 
-Notes from 2026-11-06. Nothing here is applied yet.
+Notes from 2026-11-06. Nothing under "Proposed changes" is applied yet.
 
 ## A/B result: `ask_jev` vs plain tools, on a grep-shaped question
 
@@ -37,6 +37,38 @@ Why it lost:
 - Options classification over whole files had the predictable false positives: `lib.rs` and
   `proxy/mod.rs` only declare modules, but their module names sound like HTTP code.
 
+## Re-run on the RTX 6000 (same prompt, jev server moved)
+
+jev now runs on the 6000 (`server/llamacpp/run-jev-6000`, `16:1:2048:40960`, started with `PORT=8701`
+so the plugin's default URL reaches it). Same "with" prompt, fresh session
+(`ses_e4c80e724ffePAdvvxMZpGMyKr`, 16:53), compared with the two runs above:
+
+| | 6000 `ask_jev` | 4060 `ask_jev` | No `ask_jev` |
+|---|---|---|---|
+| Wall time | 123 s | 197 s | 68 s |
+| Time in `ask_jev` | 20.1 s for 408k tokens | 90.9 s for 378k tokens | — |
+| Main-agent steps | 17 | 17 | 12 |
+| Files read | 17 (61k chars) | 12 (47k) | 6 (28k) |
+| Main-agent prompt tokens | 741k (peak context 68k) | 542k (peak 55k) | 385k (peak 48k) |
+| Total incl. reviewers | 1.11M prompt / 34k generated | 810k / 22k | 588k / 21k |
+| Reviewers | 49 s + 69 s | 25 s + 47 s | 43 s + 39 s |
+| Answer | same file map | same map | same map |
+
+- **Faster than without `ask_jev`? No**: 1.8x slower (it was 2.9x on the 4060).
+- **Better? No**: the same map once reviewers weigh in, at ~1.9x the total tokens and almost 3x the
+  file reads. The agent still verifies `ask_jev`'s answers by grepping and reading, so it remains an
+  extra step rather than a replacement.
+- **Faster than the 4060 run? Yes**: 74 s faster overall; `ask_jev` itself 4.5x faster (91 s → 20 s),
+  matching the benchmark. The remaining ~100 s is the main model plus reviewers, which took longer
+  than on the 4060 run (49 + 69 s vs 25 + 47 s). That may be basalt sharing the 6000 with jev's scans,
+  or just a different path through the task; one run can't tell.
+- Two attempts during the server swap (16:49, 16:51) hit `cooling down` / `ECONNREFUSED` and fell
+  back to reading (167 s, ~1M tokens) or stopped early: the fail-open path works.
+
+One run per arm, so the numbers are noisy, but the 68 s vs 123 s gap is large. This strengthens
+change 1 below (grep first). `ask_jev` on the 6000 is now fast enough that change 2 (the semantic
+pair) is the real test of whether it earns its place.
+
 ## Proposed changes
 
 1. **`agents/local-mind.md`: grep first.** If the question can be written as a pattern (a call,
@@ -57,10 +89,22 @@ Why it lost:
 4. **Big files.** `handler.rs` (260k chars) is always partial at `ASK_FILE_MAX_CHARS` = 200k and
    eats most of a call's 400k budget. Consider a smaller per-file cap plus a "partial" nudge to grep,
    or skip files over the cap with a hint to use grep there.
+5. **Measure what jev costs basalt on the 6000.** Both share its compute, and an `ask_jev` scan keeps
+   prefill busy (~762k tokens in 2 minutes were seen live). Time a normal basalt prompt with and
+   without a concurrent scan (`jev-bench-load.py` against the 6000).
+6. **Keep gates apart from heavy requests under high concurrency.** The 6000 sweep
+   (`bench-results/jev-6000-20261106-161444`) tops out at ~9.5 req/s for the jev mix whatever the
+   slot count, and llama.cpp has no request priority, so a 250-token shell check waits behind
+   6k-token reviews (gate p95 13-35 s at 64-128 clients). Options: hooks on one jev server and
+   `ask_jev` / reviews on the other (4060 + 6000 side by side, two `JEV_URL`s), or try a smaller
+   `--batch-size`.
 
 ## Already done (for reference)
 
-- Server: 8 slots with unified KV (`server/llamacpp/run-jev-4060`, benchmarked with
-  `run-jev-4060-benchmark`, results in `bench-results/jev-20261106-134340`).
+- Server: 8 slots with unified KV on the 4060 (`server/llamacpp/run-jev-4060`, benchmarked with
+  `run-jev-benchmark 4060`, results in `bench-results/jev-20261106-134340`).
+- Server on the 6000: `run-jev-6000`, 16 slots, UB 2048, CTX 40960 (`run-jev-benchmark 6000`,
+  results in `bench-results/jev-6000-20261106-155122` and `jev-6000-20261106-161444`): 4-7x
+  faster than the 4060, same answers; `/v1/systemone` clips states at ~32k tokens.
 - `ask_jev`: global queue (one request in flight across calls). Live test: 3 parallel calls, the
   server never had more than 3 slots busy, shell checks p50 583 ms / max 985 ms, no cooldown.
