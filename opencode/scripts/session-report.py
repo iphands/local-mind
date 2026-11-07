@@ -115,9 +115,17 @@ def report(c, sids, keys):
     row("ask_jev calls", lambda a: str(a["tools"].get("ask_jev", 0)) + (f" (+{a['kid_jev']} by reviewers)" if a["kid_jev"] else ""))
     row("ask_jev judged", lambda a: f"{a['jev_tok']:,} tok in {a['jev_s']:.1f} s" if a["jev_tok"] else "—")
     row("Requests per jev server", lambda a: ", ".join(f"{u.rsplit(':', 1)[-1]}: {n}" for u, n in a["servers"].items()) or "—")
-    row("Router (action p(grep))", lambda a: ", ".join(
-        f"{r.get('action')} {r['p_grep']:.2f}" if r.get("p_grep") is not None else f"{r.get('action')} ({r.get('mode')})"
-        for r in a["router"]) or "—")
+    def router_cell(r):
+        label = f"{r.get('action')} {r['p_grep']:.2f}" if r.get("p_grep") is not None else str(r.get("action"))
+        notes = [r.get("mode", "?") + (" strict" if r.get("strict") else "")]
+        if r.get("error") == "force":
+            notes.append("forced")
+        elif r.get("force_ignored"):
+            notes.append("force ignored")
+        elif r.get("error"):
+            notes.append("router failed")
+        return f"{label} ({', '.join(notes)})"
+    row("Router (action p(grep))", lambda a: ", ".join(router_cell(r) for r in a["router"]) or "—")
     row("Main prompt tokens (peak ctx)", lambda a: f"{a['prompt'] // 1000}k ({a['ctx_peak'] // 1000}k)")
     row("Total incl. reviewers", lambda a: f"{a['tot_prompt'] // 1000}k / {a['tot_gen'] // 1000}k gen")
     row("Reviewers", lambda a: " + ".join(f"{x} s" for x in a["reviewers"]) or "—")
