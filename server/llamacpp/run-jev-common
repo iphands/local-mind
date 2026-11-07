@@ -1,0 +1,127 @@
+#!/bin/bash
+# Shared body of the jev decision-server launchers: H2O Lightning 4B (Qwen3.5-4B decision model,
+# JevBench) behind llama.cpp's /v1/systemone. Not run directly; ./run-jev-4060 and ./run-jev-6000
+# set the per-GPU defaults below and source this file.
+#
+# Set by the wrapper (required):
+#   JEV_GPU             docker device index (nvidia-smi index): 1 = RTX 4060, 0 = RTX PRO 6000
+#   JEV_DEFAULT_NAME    container name
+#   JEV_DEFAULT_PORT    host port
+# Optional per-GPU defaults from the wrapper: JEV_DEFAULT_PARALLEL JEV_DEFAULT_KV_UNIFIED
+#   JEV_DEFAULT_CTX JEV_DEFAULT_UB JEV_DEFAULT_BATCH
+#
+# Env overrides: MODEL MMPROJ PORT NAME ALIAS CTX KV UB IMAGE
+#                PARALLEL KV_UNIFIED BATCH METRICS DETACH DRYRUN
+#   PARALLEL=1 KV_UNIFIED=0 gives the card's original single-slot setup
+#   DETACH=1  run in the background (docker run -d), no docker pull; prints the container id
+#   DRYRUN=1  print the docker command and exit (no pull, no run)
+# ./run-jev-benchmark starts every configuration it tests through the wrappers.
+#
+# Model card: https://huggingface.co/h2oai/h2o-lightning-4b-gguf
+#   h2o-lightning-4b-Q8_0.gguf        decision metadata -> POST /v1/systemone (needs build >= 11773)
+#   h2o-lightning-4b-stock-Q8_0.gguf  same weights, plain chat only (/v1/chat/completions)
+# The non-stock file is preferred when present.
+#
+# Sizing (qwen35 hybrid: only 8 of 32 layers are full attention, 4 KV heads x 256):
+#   KV is 32 KiB/token at f16, so the card's 40960 ctx costs ~1.25 GiB.
+# State cap: /v1/systemone clips a request's state to ~32k tokens (the card's 32,000-token state),
+#   silently: on b12169 a ~60k- and a ~114k-token state both arrived as 32,104 tokens and the log
+#   still said `truncated = 0`. CTX beyond 40960 therefore buys no longer states, only a bigger
+#   pool for many concurrent requests (measured: no gain, +3.5 GiB). jev sends <= ~6k tokens anyway.
+set -ue
+
+: "${JEV_GPU:?set by run-jev-4060 / run-jev-6000}" "${JEV_DEFAULT_NAME:?}" "${JEV_DEFAULT_PORT:?}"
+
+pick_model() {
+  for f in models/gguf/h2o-lightning-4b-Q8_0.gguf models/gguf/h2o-lightning-4b-stock-Q8_0.gguf; do
+    [[ -f "$f" ]] && { echo "$f"; return; }
+  done
+  echo models/gguf/h2o-lightning-4b-Q8_0.gguf
+}
+
+MODEL=${1:-${MODEL:-$(pick_model)}}
+MMPROJ=${MMPROJ:-models/gguf/mmproj-lightning-f16.gguf}
+PORT=${PORT:-$JEV_DEFAULT_PORT}
+NAME=${NAME:-$JEV_DEFAULT_NAME}
+ALIAS=${ALIAS:-h2oai/h2o-lightning-4b}
+CTX=${CTX:-${JEV_DEFAULT_CTX:-40960}}   # card's validated setting: a 32,000-token state plus the question
+KV=${KV:-f16}       # f16 keeps probabilities close to the card's numbers; q8_0 halves the KV cost
+UB=${UB:-${JEV_DEFAULT_UB:-512}}
+IMAGE=${IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}  # CUDA 12.8, the image the card tested
+PARALLEL=${PARALLEL:-${JEV_DEFAULT_PARALLEL:-8}}
+KV_UNIFIED=${KV_UNIFIED:-${JEV_DEFAULT_KV_UNIFIED:-1}}  # 1: one CTX-token pool shared by all slots; 0: CTX/PARALLEL each
+BATCH=${BATCH:-${JEV_DEFAULT_BATCH:-2048}}
+METRICS=${METRICS:-0}        # 1: expose Prometheus /metrics
+DETACH=${DETACH:-0}
+DRYRUN=${DRYRUN:-0}
+
+[[ -f "$MODEL" ]] || { echo "[FATAL] model not found: $MODEL"; exit 1; }
+
+MODEL_PATH=$(realpath "$MODEL")
+MODEL_FOLDER=${MODEL_PATH%/*}
+MODEL_FILE=${MODEL_PATH##*/}
+
+if [[ "$DETACH" == 1 ]]; then RUN_MODE=(-d --rm); else RUN_MODE=(-it --rm); fi
+if [[ "$KV_UNIFIED" == 1 ]]; then KV_MODE=--kv-unified; else KV_MODE=--no-kv-unified; fi
+
+CONTAINER_ARGS=(
+  run "${RUN_MODE[@]}"
+  --name "$NAME"
+  --gpus "\"device=$JEV_GPU\""
+  -p "0.0.0.0:${PORT}:8799"
+  -v "$MODEL_FOLDER":/models:ro
+)
+
+LLAMA_ARGS=(
+  --model "/models/$MODEL_FILE"
+  --alias "$ALIAS"
+  --host 0.0.0.0
+  --port 8799
+  --n-gpu-layers 99
+  --ctx-size "$CTX"
+  --parallel "$PARALLEL"
+  "$KV_MODE"                # --no-kv-unified with PARALLEL=1: one slot owns the whole context (card's setting)
+  --flash-attn on
+  --cache-type-k "$KV"
+  --cache-type-v "$KV"
+  --batch-size "$BATCH"
+  --ubatch-size "$UB"
+  --no-context-shift        # recurrent layers cannot shift anyway; fail loudly instead
+  --jinja
+)
+
+case "$MODEL_FILE" in
+  *stock*) echo "[WARN] $MODEL_FILE is a stock file: plain chat only, no /v1/systemone decision API" ;;
+esac
+
+if [[ -n "$MMPROJ" && -f "$MMPROJ" ]]; then
+  [[ "$(realpath "$MMPROJ")" == "$MODEL_FOLDER/"* ]] || { echo "[FATAL] MMPROJ must sit next to the model"; exit 1; }
+  LLAMA_ARGS+=(--mmproj "/models/${MMPROJ##*/}" --image-max-tokens 1024)  # card's validated image budget
+else
+  echo "[WARN] no mmproj ($MMPROJ): text only"
+  LLAMA_ARGS+=(--no-mmproj)
+fi
+
+if [[ "$METRICS" == 1 ]]; then LLAMA_ARGS+=(--metrics); fi
+
+echo "## Detected settings:
+PORT:   $PORT
+MODEL:  $MODEL_FILE
+MMPROJ: $MMPROJ
+NAME:   $NAME
+ALIAS:  $ALIAS
+CTX:    $CTX
+KV:     $KV
+UB:     $UB
+BATCH:  $BATCH
+SLOTS:  $PARALLEL ($KV_MODE)
+IMAGE:  $IMAGE
+"
+
+if [[ "$DRYRUN" == 1 ]]; then
+  echo docker "${CONTAINER_ARGS[@]}" "$IMAGE" "${LLAMA_ARGS[@]}"
+  exit 0
+fi
+[[ "$DETACH" == 1 ]] || docker pull "$IMAGE"   # a detached (benchmark) run uses the local image
+echo docker "${CONTAINER_ARGS[@]}" "$IMAGE" "${LLAMA_ARGS[@]}"
+exec docker "${CONTAINER_ARGS[@]}" "$IMAGE" "${LLAMA_ARGS[@]}"

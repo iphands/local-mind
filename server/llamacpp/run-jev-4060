@@ -1,20 +1,8 @@
 #!/bin/bash
-# H2O Lightning 4B (Qwen3.5-4B decision model, JevBench) on the RTX 4060 (8 GB).
+# H2O Lightning 4B decision server for jev on the RTX 4060 (8 GB), container llama-server-4060 on :8701.
 #   ./run-jev-4060 [model.gguf]
-# Env overrides: MODEL MMPROJ PORT NAME ALIAS CTX KV UB IMAGE
-#                PARALLEL KV_UNIFIED BATCH METRICS DETACH DRYRUN
-#   PARALLEL=1 KV_UNIFIED=0 gives the card's original single-slot setup
-#   DETACH=1  run in the background (docker run -d), no docker pull; prints the container id
-#   DRYRUN=1  print the docker command and exit (no pull, no run)
-# ./run-jev-4060-benchmark starts every configuration it tests through this script.
+# Everything but the per-GPU defaults lives in ./run-jev-common (env overrides, DETACH, DRYRUN).
 #
-# Model card: https://huggingface.co/h2oai/h2o-lightning-4b-gguf
-#   h2o-lightning-4b-Q8_0.gguf        decision metadata -> POST /v1/systemone (needs build >= 11773)
-#   h2o-lightning-4b-stock-Q8_0.gguf  same weights, plain chat only (/v1/chat/completions)
-# The non-stock file is preferred when present.
-#
-# Sizing (qwen35 hybrid: only 8 of 32 layers are full attention, 4 KV heads x 256):
-#   KV is 32 KiB/token at f16, so the card's 40960 ctx costs ~1.25 GiB.
 # Measured on the 4060, build 12169, Q8_0 + mmproj, f16 KV, 35k-token prompt:
 #   CTX=40960 UB=512   3337 t/s pp, peak 6.70 GiB   <- default
 #   CTX=40960 UB=1024  3274 t/s pp, peak 6.80 GiB
@@ -22,7 +10,7 @@
 #   CTX=65536 UB=1024  3261 t/s pp, peak 7.62 GiB   (fits, if you want more room for chat)
 #   decode ~50 t/s; a 1024px image is ~1040 tokens
 #
-# Slots: ./run-jev-4060-benchmark, 2026-11-06, build 12169, jev-shaped load (bench-results/jev-20261106-134340).
+# Slots: ./run-jev-benchmark 4060, 2026-11-06, build 12169, jev-shaped load (bench-results/jev-20261106-134340).
 # "mixed" = an F3-sized gate request every 0.5 s while 2 ask_jev-chunk loopers and 1 F1-review looper run.
 #   NP:KVU:UB:CTX    VRAM   review alone  chunk tok/s C=1/8  mixed gate p50/p95/max  mixed tok/s
 #   1:0:512:40960    6698   5126 ms       4121 / 4061        6.8 / 7.2 / 7.2 s       3900   (card's setting)
@@ -37,99 +25,13 @@
 # Answers drifted <= 0.004 from the single-slot config. Keep jev's ask_jev to one request in flight:
 # chunk throughput is flat from 1 to 8 clients, so more only crowds out the gate.
 set -ue
-
 cd "$(dirname "$(realpath "$0")")"
 
-pick_model() {
-  for f in models/gguf/h2o-lightning-4b-Q8_0.gguf models/gguf/h2o-lightning-4b-stock-Q8_0.gguf; do
-    [[ -f "$f" ]] && { echo "$f"; return; }
-  done
-  echo models/gguf/h2o-lightning-4b-Q8_0.gguf
-}
-
-MODEL=${1:-${MODEL:-$(pick_model)}}
-MMPROJ=${MMPROJ:-models/gguf/mmproj-lightning-f16.gguf}
-PORT=${PORT:-8701}
-NAME=${NAME:-llama-server-4060}
-ALIAS=${ALIAS:-h2oai/h2o-lightning-4b}
-CTX=${CTX:-40960}   # card's validated setting: a 32,000-token state plus the question
-KV=${KV:-f16}       # f16 keeps probabilities close to the card's numbers; q8_0 halves the KV cost
-UB=${UB:-512}
-IMAGE=${IMAGE:-ghcr.io/ggml-org/llama.cpp:server-cuda}  # CUDA 12.8, the image the card tested
-PARALLEL=${PARALLEL:-8}      # benchmarked best for jev's mixed load (see Slots above); the card used 1
-KV_UNIFIED=${KV_UNIFIED:-1}  # 1: one CTX-token pool shared by all slots; 0: each slot owns CTX/PARALLEL
-BATCH=${BATCH:-2048}
-METRICS=${METRICS:-0}        # 1: expose Prometheus /metrics
-DETACH=${DETACH:-0}
-DRYRUN=${DRYRUN:-0}
-
-[[ -f "$MODEL" ]] || { echo "[FATAL] model not found: $MODEL"; exit 1; }
-
-MODEL_PATH=$(realpath "$MODEL")
-MODEL_FOLDER=${MODEL_PATH%/*}
-MODEL_FILE=${MODEL_PATH##*/}
-
-if [[ "$DETACH" == 1 ]]; then RUN_MODE=(-d --rm); else RUN_MODE=(-it --rm); fi
-if [[ "$KV_UNIFIED" == 1 ]]; then KV_MODE=--kv-unified; else KV_MODE=--no-kv-unified; fi
-
-CONTAINER_ARGS=(
-  run "${RUN_MODE[@]}"
-  --name "$NAME"
-  --gpus '"device=1"'
-  -p 0.0.0.0:${PORT}:8799
-  -v "$MODEL_FOLDER":/models:ro
-)
-
-LLAMA_ARGS=(
-  --model "/models/$MODEL_FILE"
-  --alias "$ALIAS"
-  --host 0.0.0.0
-  --port 8799
-  --n-gpu-layers 99
-  --ctx-size "$CTX"
-  --parallel "$PARALLEL"
-  "$KV_MODE"                # default --no-kv-unified: one slot owns the whole context (card's setting)
-  --flash-attn on
-  --cache-type-k "$KV"
-  --cache-type-v "$KV"
-  --batch-size "$BATCH"
-  --ubatch-size "$UB"
-  --no-context-shift        # recurrent layers cannot shift anyway; fail loudly instead
-  --jinja
-)
-
-case "$MODEL_FILE" in
-  *stock*) echo "[WARN] $MODEL_FILE is a stock file: plain chat only, no /v1/systemone decision API" ;;
-esac
-
-if [[ -n "$MMPROJ" && -f "$MMPROJ" ]]; then
-  [[ "$(realpath "$MMPROJ")" == "$MODEL_FOLDER/"* ]] || { echo "[FATAL] MMPROJ must sit next to the model"; exit 1; }
-  LLAMA_ARGS+=(--mmproj "/models/${MMPROJ##*/}" --image-max-tokens 1024)  # card's validated image budget
-else
-  echo "[WARN] no mmproj ($MMPROJ): text only"
-  LLAMA_ARGS+=(--no-mmproj)
-fi
-
-if [[ "$METRICS" == 1 ]]; then LLAMA_ARGS+=(--metrics); fi
-
-echo "## Detected settings:
-PORT:   $PORT
-MODEL:  $MODEL_FILE
-MMPROJ: $MMPROJ
-NAME:   $NAME
-ALIAS:  $ALIAS
-CTX:    $CTX
-KV:     $KV
-UB:     $UB
-BATCH:  $BATCH
-SLOTS:  $PARALLEL ($KV_MODE)
-IMAGE:  $IMAGE
-"
-
-if [[ "$DRYRUN" == 1 ]]; then
-  echo docker "${CONTAINER_ARGS[@]}" "$IMAGE" "${LLAMA_ARGS[@]}"
-  exit 0
-fi
-[[ "$DETACH" == 1 ]] || docker pull "$IMAGE"   # a detached (benchmark) run uses the local image
-echo docker "${CONTAINER_ARGS[@]}" "$IMAGE" "${LLAMA_ARGS[@]}"
-exec docker "${CONTAINER_ARGS[@]}" "$IMAGE" "${LLAMA_ARGS[@]}"
+JEV_GPU=1
+JEV_DEFAULT_NAME=llama-server-4060
+JEV_DEFAULT_PORT=8701
+JEV_DEFAULT_PARALLEL=8
+JEV_DEFAULT_KV_UNIFIED=1
+JEV_DEFAULT_CTX=40960
+JEV_DEFAULT_UB=512
+source ./run-jev-common
