@@ -1,6 +1,6 @@
 #!/bin/bash
 # H2O Lightning 4B decision server for jev on the RTX PRO 6000 (96 GB, shared with basalt),
-# container llama-jev-6000 on :8703, so it can run beside the 4060 server (:8701).
+# container llama-jev-6000 on :8710, beside the 4060 server (:8711). The jev plugin uses both by default.
 #   ./run-jev-6000 [model.gguf]
 # Everything but the per-GPU defaults lives in ./run-jev-common (env overrides, DETACH, DRYRUN).
 #
@@ -8,7 +8,7 @@
 # heavy jev load slows basalt and basalt load slows jev (the size of that effect is NOT measured
 # yet). Leave ~2 GB free for basalt's growth.
 #
-# To point the jev plugin here: JEV_URL=http://cosmo.lan:8703 in the opencode serve environment.
+# The jev plugin defaults to JEV_URLS=http://cosmo.lan:8710,http://cosmo.lan:8711 (this server first).
 #
 # ./run-jev-benchmark 6000, 2026-11-06, build 12169, basalt resident (bench-results/jev-6000-20261106-155122).
 # Same jev-shaped load as the 4060 table in ./run-jev-4060. VRAM is this server's own process.
@@ -44,7 +44,7 @@ cd "$(dirname "$(realpath "$0")")"
 
 JEV_GPU=0
 JEV_DEFAULT_NAME=llama-jev-6000
-JEV_DEFAULT_PORT=8703
+JEV_DEFAULT_PORT=8710
 JEV_DEFAULT_PARALLEL=16     # high concurrency: see the second table above
 JEV_DEFAULT_KV_UNIFIED=1
 JEV_DEFAULT_CTX=40960

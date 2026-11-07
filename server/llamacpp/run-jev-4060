@@ -1,5 +1,6 @@
 #!/bin/bash
-# H2O Lightning 4B decision server for jev on the RTX 4060 (8 GB), container llama-server-4060 on :8701.
+# H2O Lightning 4B decision server for jev on the RTX 4060 (8 GB), container llama-server-4060 on :8711,
+# beside the 6000 server (:8710). The jev plugin uses both by default.
 #   ./run-jev-4060 [model.gguf]
 # Everything but the per-GPU defaults lives in ./run-jev-common (env overrides, DETACH, DRYRUN).
 #
@@ -29,7 +30,7 @@ cd "$(dirname "$(realpath "$0")")"
 
 JEV_GPU=1
 JEV_DEFAULT_NAME=llama-server-4060
-JEV_DEFAULT_PORT=8701
+JEV_DEFAULT_PORT=8711
 JEV_DEFAULT_PARALLEL=8
 JEV_DEFAULT_KV_UNIFIED=1
 JEV_DEFAULT_CTX=40960
