@@ -11,3 +11,5 @@
 /container_data/config/opencode/jev-trace
 # jev ask_jev router mode toggle (echo off|advise|rg > it at runtime)
 /container_data/config/opencode/jev-router
+# model-switcher build output
+/helpers/model-switcher/target
