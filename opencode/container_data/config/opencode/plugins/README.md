@@ -1,7 +1,8 @@
 # jev: decision-model hints for OpenCode
 
 `jev.ts` is an OpenCode plugin that hands small classification jobs to a local 4B decision
-model: H2O Lightning 4B on the RTX 4060, started by `server/llamacpp/run-jev-4060`. The plugin
+model: H2O Lightning 4B, served on both GPUs (the RTX PRO 6000 by `server/llamacpp/run-jev-6000`
+and the RTX 4060 by `server/llamacpp/run-jev-4060`), which the plugin uses together. The plugin
 never asks the model to write text. It sends a block of text (the *state*) and a multiple-choice
 question, and the model returns a probability for each option. One answer costs one prefill and
 no decoding, so it is fast and cheap.
@@ -15,15 +16,35 @@ It also adds one tool, `ask_jev` (F4), which lets an agent ask a question about 
 reading them. A tool is allowed to fail: when jev can't answer, `ask_jev` errors with a readable
 reason, and the agent reads the files the normal way.
 
-## The decision server
+## The decision servers
 
-| | |
-|---|---|
-| Launcher | `server/llamacpp/run-jev-4060` (RTX 4060, `device=1`) |
-| Endpoint | `POST $JEV_URL/v1/systemone` (default `http://cosmo.lan:8701`) |
-| Model file | `h2o-lightning-4b-Q8_0.gguf`; the stock GGUF has no decision API, so every call fails and the plugin stays out of the way |
-| llama.cpp | build >= 11773 for `/v1/systemone`; probed against b12169 |
-| Slots | 8, sharing one 40960-token KV pool (`--parallel 8 --kv-unified`), chosen by `server/llamacpp/run-jev-4060-benchmark`. `/v1/systemone` runs a request's questions in separate slots, so a 3-question F1 review takes 1.9 s instead of 5.1 s, and a shell check under mixed load 1.7 s instead of 6.8 s (p50). Raw prefill stays at ~4k tok/s however many requests run |
+| | RTX PRO 6000 | RTX 4060 |
+|---|---|---|
+| Launcher | `server/llamacpp/run-jev-6000` (`device=0`, beside basalt) | `server/llamacpp/run-jev-4060` (`device=1`) |
+| Endpoint | `http://cosmo.lan:8710/v1/systemone` | `http://cosmo.lan:8711/v1/systemone` |
+| Slots | 16 sharing a 40960-token KV pool, UB 2048 | 8 sharing a 40960-token KV pool, UB 512 |
+| Speed | ~20k tok/s prefill; shell check ~33 ms, review ~0.4 s | ~4k tok/s; shell check ~130 ms, review ~1.9 s |
+
+Both run `h2o-lightning-4b-Q8_0.gguf` (the stock GGUF has no decision API, so every call fails and
+the plugin stays out of the way) on llama.cpp build >= 11773, probed against b12169. Settings come
+from `server/llamacpp/run-jev-benchmark`. `/v1/systemone` runs a request's questions in separate
+slots, and clips any state to ~32k tokens silently.
+
+**How the plugin uses both.** `JEV_URLS` lists the servers, fastest first (default
+`http://cosmo.lan:8710,http://cosmo.lan:8711`). `JEV_MODE` picks how they're used:
+
+| Mode | Hooks (F1/F2/F3) | `ask_jev` scans |
+|---|---|---|
+| `share` (default) | the first server that is up (the 6000), failing over to the next | every server at once: each takes the next chunk when it's free, so the 6000 does ~5x more of them. Measured live: a 398k-char scan took 5.4 s, 48 requests on the 6000 and 11 on the 4060 |
+| `split` | the last server (the 4060), failing over to the other | the first server (the 6000), with the other on standby if it fails |
+
+`split` keeps shell checks off the GPU that runs scans. That only matters when several sessions run
+at once: in one session the agent never runs a shell command while a scan is going (checked
+against the server log and `opencode.db`, see `opencode/next_optimize.md`). `JEV_HOOK_URL` and
+`JEV_TOOL_URL` override split mode's choice. `JEV_URL` alone (with `JEV_URLS` unset) still means a
+single server.
+
+Each server has its own 60 s pause after a failure, and its own one-at-a-time `ask_jev` queue.
 
 Request and response shape:
 
@@ -218,19 +239,23 @@ rules apply per file. A denied file is listed as `denied by permissions`, and th
 - An answer below 0.70 is shown as `unsure (leans …)`. Confident `no` answers (≥ 0.90) fold into one line.
 
 **Budget and load.**
-- Requests go **one at a time across all `ask_jev` calls**: a global queue in the plugin, so
-  calls the agent runs in parallel wait for each other. More in flight would buy nothing (the
-  benchmark shows chunk throughput flat from 1 to 8 clients) and would take slots from the hooks.
-  The hooks never wait in this queue. With the server's 8 slots, a shell check from F3 or a review
-  from F1 gets its own slots next to the one scan request. Measured on the old single-slot server
-  during a 400k-character scan: 10 F3 checks answered in 167–630 ms, all of them, and no cooldown
-  was triggered.
-- An interrupted call that is still waiting in the queue ends at once, and the queue moves on.
+- Requests go **one at a time per server, across all `ask_jev` calls**: each server has its own
+  queue in the plugin, so calls the agent runs in parallel wait for each other on each server. More
+  in flight on one GPU would buy nothing (the benchmark shows chunk throughput flat from 1 to 8
+  clients) and would take slots from the hooks. A second GPU does add speed, so in `share` mode
+  both servers work on a scan at once. The hooks never wait in these queues. Measured on the old
+  single-slot 4060 during a 400k-character scan: 10 F3 checks answered in 167–630 ms, all of them,
+  and no cooldown was triggered.
+- An interrupted call that is still waiting in a queue ends at once, and the queue moves on.
+- The call first checks, reads and cuts every file into chunks, then hands the chunks to one worker
+  per server (`share`) or to one server with the rest on standby (`split`). A chunk that fails is
+  retried once on another server; that server then sits out the rest of the call.
 - Per call, at most 400k characters are sent (about 114k tokens, about 29 s). Files past that are
   listed as `not checked (budget; ask again with these paths)`. A file over 200k characters is
   checked from the top and marked `partial: lines 1-N of M`.
-- Each request has a 15 s timeout. The first failed request stops the call, and the tool returns
-  what it has plus `stopped early: <reason>`.
+- Each request has a 15 s timeout. When no server is left to take the remaining chunks, the tool
+  returns what it has plus `stopped early: <reason>`, and files with only some parts answered are
+  marked `partial: K of N parts checked`.
 - If nothing was answered, the tool errors with `jev is unavailable (<reason>); read the files
   instead`. Its timeouts never pause the hooks (see [Safety](#safety-when-the-server-is-down)).
 - An interrupted call aborts its request at once.
@@ -340,14 +365,18 @@ throws. All of these end with `answers: null`, and for a hook that means "leave 
 | Server error or overload | non-2xx status, fails at once |
 | Garbage or partial JSON | parse error or "malformed answer", fails at once |
 
-**2. One failure pauses the plugin for 60 seconds.** After any hook failure, `downUntil` is set
-to now + 60 s, and every request from any feature returns `null` without touching the network
-until then. A dead server therefore costs, at most, **one** timeout per minute. With connection
-refused or DNS errors it costs nothing noticeable. The log line says so:
+**2. One failure pauses that server for 60 seconds, and the plugin fails over.** After a hook
+failure, that server's `downUntil` is set to now + 60 s, and requests skip it without touching the
+network until then. A dead server therefore costs, at most, **one** timeout per minute. With
+connection refused or DNS errors it costs nothing noticeable. The log line says so:
 
 ```
-[jev] unavailable (<error message>); skipping for 60s
+[jev] http://cosmo.lan:8710 unavailable (<error message>); skipping it for 60s
 ```
+
+A hook moves on to the next server only after a *cheap* failure: the server is paused, or can't be
+reached at all. A hook that times out or gets a bad answer stops there (fail open), so a hook never
+waits for two timeouts.
 
 The `ask_jev` tool (F4) runs in its own lane. It respects a running pause, but it only *starts*
 one when the server can't be reached at all (connection refused, DNS). A tool request that times
@@ -376,13 +405,14 @@ anywhere before that leaves the event untouched. Nothing is half-applied.
 **6. Failures are not cached.** The F1 cache drops a `null` result, so the next reviewer launch
 after the cooldown tries again instead of reusing the failure.
 
-**7. Startup does not depend on the server.** `setup()` only registers hooks and logs
-`[jev] decision model at <url>`. It never contacts the server, so OpenCode starts normally
-whether or not the 4060 is up.
+**7. Startup does not depend on the servers.** `setup()` only registers hooks and logs the
+servers and mode (`[jev] decision servers, share mode: hooks -> … ; ask_jev -> …`). It never
+contacts a server, so OpenCode starts normally whether or not either GPU's server is up.
 
-What you do lose while the server is down: F3's extra prompts. Shell permissions fall back to
+What you lose while **both** servers are down: F3's extra prompts. Shell permissions fall back to
 the plain rules in `opencode.jsonc`, which are the only guard when jev is not running. jev is
-an extra layer on top of those rules, not a replacement for them.
+an extra layer on top of those rules, not a replacement for them. With one server down, the other
+takes everything.
 
 The worst cost of an unreachable host (one that swallows packets instead of refusing them) is
 latency: one shell command, permission check or reviewer launch waits up to 8 s or 15 s, then
@@ -393,7 +423,10 @@ That just means one missed hint and a 60 s pause, nothing more.
 
 | Env var | Effect |
 |---|---|
-| `JEV_URL` | Decision server base URL (default `http://cosmo.lan:8701`; trailing `/` is stripped) |
+| `JEV_URLS` | Decision servers, fastest first, comma-separated (default `http://cosmo.lan:8710,http://cosmo.lan:8711`: the 6000, then the 4060; trailing `/` is stripped) |
+| `JEV_MODE` | `share` (default: hooks on the first server that is up, scans on all) or `split` (hooks on the last server, scans on the first) |
+| `JEV_HOOK_URL` / `JEV_TOOL_URL` | Override which server split mode uses for hooks / for `ask_jev` |
+| `JEV_URL` | A single server, used only when `JEV_URLS` is unset |
 | `JEV_DISABLE=1` | Registers no hooks and no `ask_jev` tool; logs `JEV_DISABLE=1, not registering hooks` |
 | `JEV_TRACE=1` | Trace view always on (same as the `jev-trace` file existing) |
 | `$XDG_CONFIG_HOME/opencode/jev-trace` | Trace view on while this file exists (default `~/.config/opencode/jev-trace`) |
@@ -434,18 +467,21 @@ pieces, including `askFiles`) for calibration scripts. The plugin loader reads o
 
 ## Checking it
 
-- On startup, the OpenCode log should show `[jev] decision model at http://cosmo.lan:8701`.
-- To probe the server by hand from inside the LAN:
+- On startup, the OpenCode log should show
+  `[jev] decision servers, share mode: hooks -> http://cosmo.lan:8710 then http://cosmo.lan:8711; ask_jev -> http://cosmo.lan:8710 + http://cosmo.lan:8711`.
+- To probe a server by hand from inside the LAN (8710 is the 6000, 8711 the 4060):
 
   ```sh
-  curl -s http://cosmo.lan:8701/v1/systemone -H 'content-type: application/json' -d '{
+  curl -s http://cosmo.lan:8710/v1/systemone -H 'content-type: application/json' -d '{
     "state": "A coding agent ran a shell command.\n\n$ make test\nexit code: 0\n\n3 passed, 1 FAILED",
     "questions": {"verdict": {"type": "choice", "criteria": {
       "pass": "the command succeeded and its output shows no errors or failures",
       "fail": "the command failed: errors, failing tests, crashes or panics"}}}}'
   ```
 
-- To confirm the plugin fails open, stop the 4060 container and run a shell command that prints
-  more than 200 characters. It should come back with no `[jev]` line, and the log should show one
-  `unavailable … skipping for 60s` line. With the trace view on, the same call shows a trace with
-  the `error` instead.
+- To confirm failover, stop one server: hooks and scans carry on against the other, and the log
+  shows one `… unavailable … skipping it for 60s` line per minute for the stopped one. The trace
+  view's `server` field shows which server answered.
+- To confirm the plugin fails open, stop both and run a shell command that prints more than 200
+  characters. It should come back with no `[jev]` line. With the trace view on, the same call
+  shows a trace with the `error` instead.

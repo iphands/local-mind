@@ -127,12 +127,6 @@ Note: run the 6000 on its default :8703 when both servers are up; :8702 is the b
    `ask_jev` / reviews on the other (4060 + 6000 side by side, two `JEV_URL`s), or try a smaller
    `--batch-size`. Only matters for multi-session / swarm use: one session never overlaps them
    (see the section above).
-7. **Use both jev servers from the plugin.** Configure `JEV_HOOK_URL` / `JEV_TOOL_URL` (both
-   defaulting to `JEV_URL`), with:
-   - per-server cooldowns and failover in both directions
-   - optionally, `ask_jev` chunks taken from one shared queue by both servers (~+20% scan speed)
-
-   The mocked harness and the READMEs need extending, then a live check with both servers up.
 
 ## Already done (for reference)
 
@@ -143,3 +137,9 @@ Note: run the 6000 on its default :8703 when both servers are up; :8702 is the b
   faster than the 4060, same answers; `/v1/systemone` clips states at ~32k tokens.
 - `ask_jev`: global queue (one request in flight across calls). Live test: 3 parallel calls, the
   server never had more than 3 slots busy, shell checks p50 583 ms / max 985 ms, no cooldown.
+- Both jev servers from the plugin (was change 7): `JEV_URLS` (default `http://cosmo.lan:8710,http://cosmo.lan:8711`,
+  the 6000 then the 4060; launchers now default to those ports), `JEV_MODE=share` (default: hooks on
+  the first server up with failover, `ask_jev` chunks pulled by one worker per server) or
+  `JEV_MODE=split` (hooks on the 4060, scans on the 6000, each failing over to the other), per-server
+  cooldowns and queues, one retry per failed chunk on another server. Live: a 398k-char scan in 5.4 s
+  (48 requests on the 6000, 11 on the 4060), hook answered by the 6000 in 34 ms.

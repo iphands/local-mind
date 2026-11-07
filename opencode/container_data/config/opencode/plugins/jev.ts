@@ -10,11 +10,12 @@
 //       commands. Only ever escalates.
 //   F4  ask_jev tool: the agent asks one question about files (or a saved tool output) and gets
 //       one answer per file without reading them. Runs under the `read` permission, checks each
-//       file like the read tool does. Its requests go one at a time across all ask_jev calls (a
-//       global queue), so the server's other slots stay free for the hooks.
+//       file like the read tool does. Its requests go one at a time per server across all ask_jev
+//       calls, so each server's other slots stay free for the hooks; in share mode every server
+//       works on a scan at once.
 //
 // Fail-open: any error, timeout or bad answer leaves the call exactly as it was. After one
-// failure every hook call is skipped for COOLDOWN_MS. Hooks never throw: a throw from
+// failure every hook call skips that server for COOLDOWN_MS and fails over to the next one. Hooks never throw: a throw from
 // execute.before blocks the tool call, and a rejection from the other hooks is a defect, not a
 // tool error. The ask_jev tool is the one place that may fail: it errors with a readable reason
 // and the agent reads the files instead. Its timeouts never start the cooldown (see `query`).
@@ -25,7 +26,10 @@
 //     one `choice` rather than one question per item
 //   - `choice` criteria descriptions are tokenized and carry the meaning of each option
 //
-// Env: JEV_URL (default http://cosmo.lan:8701), JEV_DISABLE=1 turns every feature off.
+// Env: JEV_URLS (servers, fastest first; default http://cosmo.lan:8710,http://cosmo.lan:8711, the
+//      6000 then the 4060), JEV_MODE (share, the default, or split), JEV_HOOK_URL / JEV_TOOL_URL
+//      (split-mode overrides), JEV_URL (a single server, when JEV_URLS is unset), JEV_DISABLE=1
+//      turns every feature off. See "decision servers" below for what each mode does.
 //
 // Trace view (off by default): while the file $XDG_CONFIG_HOME/opencode/jev-trace exists, or
 // JEV_TRACE=1 is set, each request (state preview + questions) and the raw response go into the
@@ -39,7 +43,14 @@ import { readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path"
 
-const JEV_URL = (process.env.JEV_URL ?? "http://cosmo.lan:8701").replace(/\/+$/, "")
+const norm = (u?: string) => (u ?? "").trim().replace(/\/+$/, "")
+// Fastest first. Default: the RTX PRO 6000 server (run-jev-6000, :8710) and the RTX 4060 server
+// (run-jev-4060, :8711). JEV_URL (one server) still works when JEV_URLS is unset.
+const JEV_URLS = (process.env.JEV_URLS ?? process.env.JEV_URL ?? "http://cosmo.lan:8710,http://cosmo.lan:8711")
+  .split(",")
+  .map(norm)
+  .filter(Boolean)
+const JEV_MODE: "share" | "split" = process.env.JEV_MODE === "split" ? "split" : "share"
 const DISABLED = process.env.JEV_DISABLE === "1"
 const TRACE_FILE = join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode", "jev-trace")
 
@@ -78,35 +89,61 @@ type Answers = Record<string, Choice>
 
 const log = (msg: string) => console.warn(`[jev] ${msg}`)
 
-// ---------------------------------------------------------------- decision-model client
+// ---------------------------------------------------------------- decision servers
 
-let downUntil = 0
+// JEV_URLS lists the servers, fastest first. Two modes:
+//   share (default): hooks go to the first server that is up, failing over down the list; every
+//     ask_jev call hands its chunks to one worker per server, each pulling the next chunk when free,
+//     so the faster card simply does more of them.
+//   split: hooks use JEV_HOOK_URL (default: the last server) and ask_jev uses JEV_TOOL_URL (default:
+//     the first), each failing over to the other servers. Keeps shell checks away from scans.
+// Every server has its own cooldown and its own one-at-a-time ask_jev queue.
+type Server = { url: string; downUntil: number; queue: Promise<void> }
+const servers = new Map<string, Server>()
+function server(url: string): Server {
+  let sv = servers.get(url)
+  if (!sv) servers.set(url, (sv = { url, downUntil: 0, queue: Promise.resolve() }))
+  return sv
+}
+
+// Put `first` (when set) at the front of the list, keeping the rest in order
+const preferring = (first: string, all: string[]) => (first ? [first, ...all.filter((u) => u !== first)] : all)
+
+// Hook and tool server order for a mode, from the server list and the optional overrides
+function routes(urls: string[], mode: "share" | "split", hookUrl = "", toolUrl = "") {
+  if (mode === "share") return { hooks: preferring(hookUrl, urls), tools: preferring(toolUrl, urls), toolWorkers: urls.length }
+  return {
+    hooks: preferring(hookUrl || urls[urls.length - 1], urls),
+    tools: preferring(toolUrl || urls[0], urls),
+    toolWorkers: 1, // the others stand by and take over if it fails
+  }
+}
+const ROUTES = routes(JEV_URLS, JEV_MODE, norm(process.env.JEV_HOOK_URL), norm(process.env.JEV_TOOL_URL))
 
 // What was sent and what came back, for the trace view. `response` is the raw body.
-type Trace = { request: { state: string; questions: Questions }; response?: unknown; error?: string; ms: number }
-type Result = { answers: Answers | null; trace: Trace }
+type Trace = { request: { state: string; questions: Questions }; server?: string; response?: unknown; error?: string; ms: number }
+// failover: the server could not be reached or is cooling down, so trying another one is cheap
+type Result = { answers: Answers | null; trace: Trace; failover?: boolean }
 
 // An answer the server sent but we can't use (bad status, bad shape): the server is up
 class ServerAnswerError extends Error {}
 
-// Lanes: hooks ("hook") start the cooldown on any failure, as they always have. The ask_jev tool
-// ("tool") respects a running cooldown but only starts one when the server can't be reached at
-// all, so a slow scan that times out never switches off F3's gate. An abort through `signal`
-// (the user interrupted the tool) is not a failure of the server: no cooldown, no log line.
-type QueryOpts = { signal?: AbortSignal; lane?: "hook" | "tool" }
+// Lanes: hooks ("hook") start a server's cooldown on any failure, as they always have. The ask_jev
+// tool ("tool") respects a running cooldown but only starts one when the server can't be reached at
+// all, so a slow scan that times out never switches off F3's gate. An abort through `signal` (the
+// user interrupted the tool) is not a failure of the server: no cooldown, no log line.
+type QueryOpts = { signal?: AbortSignal; lane?: "hook" | "tool"; server?: string }
 
-// Tool requests go one at a time across ALL ask_jev calls, even ones the agent runs in parallel.
-// The benchmark (server/llamacpp/run-jev-4060-benchmark) showed chunk throughput is flat from one
-// client to eight, so more in flight only takes slots from the hooks. Hooks never queue here.
-let toolQueue: Promise<void> = Promise.resolve()
-
+// ask_jev requests go one at a time per server, across ALL ask_jev calls. The benchmark
+// (server/llamacpp/run-jev-benchmark) showed chunk throughput on one GPU is flat from one client to
+// eight, so more in flight per server only takes slots from the hooks. Hooks never queue here.
 // Resolves with a release function once it is this request's turn; rejects if `signal` aborts
 // first. An aborted waiter still hands its turn on, so the queue can't stall.
-async function toolTurn(signal?: AbortSignal): Promise<() => void> {
+async function toolTurn(sv: Server, signal?: AbortSignal): Promise<() => void> {
   let release!: () => void
   const mine = new Promise<void>((done) => (release = done))
-  const prev = toolQueue
-  toolQueue = mine
+  const prev = sv.queue
+  sv.queue = mine
   if (!signal) {
     await prev
     return release
@@ -124,32 +161,49 @@ async function toolTurn(signal?: AbortSignal): Promise<() => void> {
   return release
 }
 
-// Never throws: every failure is { answers: null } with the reason in trace.error
+// Never throws: every failure is { answers: null } with the reason in trace.error.
+// Without opts.server it walks the lane's server order, moving on only after a cheap failure
+// (cooldown or unreachable); a timeout or a bad answer ends the walk, so a hook never waits twice.
 async function query(state: string, questions: Questions, timeoutMs = TIMEOUT_MS, opts: QueryOpts = {}): Promise<Result> {
-  if (opts.lane !== "tool") return send(state, questions, timeoutMs, opts)
+  const lane = opts.lane ?? "hook"
+  const order = opts.server ? [opts.server] : lane === "hook" ? ROUTES.hooks : ROUTES.tools
+  let last: Result | undefined
+  for (const url of order) {
+    last = lane === "tool" ? await sendQueued(url, state, questions, timeoutMs, opts) : await send(url, state, questions, timeoutMs, opts)
+    if (last.answers || !last.failover || opts.signal?.aborted) return last
+  }
+  return last ?? { answers: null, trace: { request: { state, questions }, ms: 0, error: "no decision server configured" } }
+}
+
+async function sendQueued(url: string, state: string, questions: Questions, timeoutMs: number, opts: QueryOpts): Promise<Result> {
   let release: () => void
   try {
-    release = await toolTurn(opts.signal)
+    release = await toolTurn(server(url), opts.signal)
   } catch {
-    return { answers: null, trace: { request: { state, questions }, ms: 0, error: "aborted" } }
+    return { answers: null, trace: { request: { state, questions }, server: url, ms: 0, error: "aborted" } }
   }
   try {
-    return await send(state, questions, timeoutMs, opts) // the timeout starts once it is our turn
+    return await send(url, state, questions, timeoutMs, opts) // the timeout starts once it is our turn
   } finally {
     release()
   }
 }
 
-async function send(state: string, questions: Questions, timeoutMs: number, opts: QueryOpts): Promise<Result> {
-  const trace: Trace = { request: { state, questions }, ms: 0 }
+async function send(url: string, state: string, questions: Questions, timeoutMs: number, opts: QueryOpts): Promise<Result> {
+  const trace: Trace = { request: { state, questions }, server: url, ms: 0 }
   if (DISABLED) return { answers: null, trace: { ...trace, error: "JEV_DISABLE=1" } }
-  const wait = downUntil - Date.now()
+  const sv = server(url)
+  const wait = sv.downUntil - Date.now()
   if (wait > 0)
-    return { answers: null, trace: { ...trace, error: `skipped: cooling down after a failure (${Math.ceil(wait / 1000)}s left)` } }
+    return {
+      answers: null,
+      failover: true,
+      trace: { ...trace, error: `skipped: ${url} cooling down after a failure (${Math.ceil(wait / 1000)}s left)` },
+    }
   const t0 = Date.now()
   const timeout = AbortSignal.timeout(timeoutMs)
   try {
-    const res = await fetch(`${JEV_URL}/v1/systemone`, {
+    const res = await fetch(`${url}/v1/systemone`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ state, questions }),
@@ -179,16 +233,18 @@ async function send(state: string, questions: Questions, timeoutMs: number, opts
     trace.error = timedOut ? `timed out after ${timeoutMs / 1000}s` : err instanceof Error ? err.message : String(err)
     const unreachable = !timedOut && !(err instanceof ServerAnswerError)
     if ((opts.lane ?? "hook") === "hook" || unreachable) {
-      downUntil = Date.now() + COOLDOWN_MS
-      log(`unavailable (${trace.error}); skipping for ${COOLDOWN_MS / 1000}s`)
-    } else log(`ask_jev request failed (${trace.error}); hooks unaffected`)
-    return { answers: null, trace }
+      sv.downUntil = Date.now() + COOLDOWN_MS
+      log(`${url} unavailable (${trace.error}); skipping it for ${COOLDOWN_MS / 1000}s`)
+    } else log(`ask_jev request to ${url} failed (${trace.error}); hooks unaffected`)
+    return { answers: null, trace, failover: unreachable }
   }
 }
 
 async function ask(state: string, questions: Questions, timeoutMs = TIMEOUT_MS): Promise<Answers | null> {
   return (await query(state, questions, timeoutMs)).answers
 }
+
+const downUntil = () => Math.max(0, ...[...servers.values()].map((sv) => sv.downUntil))
 
 // Keep the head and tail of long text; the middle of a diff or log matters least
 function cap(text: string, max = STATE_MAX_CHARS): string {
@@ -697,7 +753,13 @@ function formatAnswers(s: AskSummary): string {
   return [head, ...shown, ...tailLines].join("\n")
 }
 
-// The whole tool call. Throws only when nothing could be answered (the agent then reads instead)
+// One chunk of one file, waiting for a server
+type AskTask = { file: number; chunk: Chunk; state: string; tries: number }
+
+// The whole tool call. Throws only when nothing could be answered (the agent then reads instead).
+// First every file is checked, read and cut into chunks (the budget is spent here); then a pool of
+// workers sends the chunks: one worker per server in share mode, one at a time with the others on
+// standby in split mode. A worker that fails puts its chunk back once for another server and stops.
 async function askFiles(input: AskInput, call: AskCall, loc: Loc, permission: Permission) {
   const t0 = Date.now()
   const signal = call.signal
@@ -708,20 +770,13 @@ async function askFiles(input: AskInput, call: AskCall, loc: Loc, permission: Pe
   const questions: Questions = { answer: { type: "choice", criteria } }
 
   const { files, more, skipped } = await expandPaths(loc, input.paths, signal)
-  const verdicts: Verdict[] = []
   const notChecked: string[] = []
-  const msPer: number[] = []
-  let firstState: string | undefined
-  let stopped: string | undefined
-  let chars = 0
-  let tokens = 0
-  let checkedFiles = 0
+  const meta: { shown: string; lines: number; partial?: string; n: number }[] = []
+  const tasks: AskTask[] = []
+  let planned = 0
 
+  // ---- prepare
   for (const f of files) {
-    if (stopped) {
-      notChecked.push(f.shown)
-      continue
-    }
     if (signal?.aborted) throw new Error("aborted")
     try {
       const source = call.messageID && call.id ? { type: "tool", messageID: call.messageID, id: call.id } : undefined
@@ -748,43 +803,83 @@ async function askFiles(input: AskInput, call: AskCall, loc: Loc, permission: Pe
       continue
     }
     let text = buf.toString("utf8")
-    const totalLines = text.split("\n").length
+    const lines = text.split("\n").length
     let partial: string | undefined
-    const room = Math.min(ASK_FILE_MAX_CHARS, ASK_BUDGET_CHARS - chars)
-    if (room <= 0 || (text.length > room && checkedFiles > 0 && room < ASK_CHUNK_CHARS)) {
+    const room = Math.min(ASK_FILE_MAX_CHARS, ASK_BUDGET_CHARS - planned)
+    if (room <= 0 || (text.length > room && meta.length > 0 && room < ASK_CHUNK_CHARS)) {
       notChecked.push(f.shown)
       continue
     }
     if (text.length > room) {
       text = text.slice(0, text.lastIndexOf("\n", room) > 0 ? text.lastIndexOf("\n", room) : room)
-      partial = `partial: lines 1-${text.split("\n").length} of ${totalLines}`
+      partial = `partial: lines 1-${text.split("\n").length} of ${lines}`
     }
     const chunks = chunkFile(text)
-    const parts: Part[] = []
+    const file = meta.length
+    meta.push({ shown: f.shown, lines, partial, n: chunks.length })
     for (const [k, c] of chunks.entries()) {
-      const state = askState(question, f.shown, c, totalLines, k + 1, chunks.length)
-      firstState ??= state
-      const r = await query(state, questions, ASK_TIMEOUT_MS, { signal, lane: "tool" })
-      if (signal?.aborted) throw new Error("aborted")
+      tasks.push({ file, chunk: c, state: askState(question, f.shown, c, lines, k + 1, chunks.length), tries: 0 })
+      planned += c.text.length
+    }
+  }
+
+  // ---- send: a worker pool over the servers
+  const parts: Part[][] = meta.map(() => [])
+  const pending = [...tasks]
+  const perServer: Record<string, number> = {}
+  const msPer: number[] = []
+  let tokens = 0
+  let chars = 0
+  let lastError: string | undefined
+  let unfinished = 0
+
+  async function worker(url: string) {
+    while (pending.length && !signal?.aborted) {
+      const t = pending.shift()!
+      const r = await query(t.state, questions, ASK_TIMEOUT_MS, { signal, lane: "tool", server: url })
+      if (signal?.aborted) return
       if (!r.answers) {
-        stopped = `${r.trace.error ?? "no answer"} (at ${f.shown}, lines ${c.from}-${c.to})`
-        break
+        lastError = `${r.trace.error ?? "no answer"} (${url}, at ${meta[t.file].shown}, lines ${t.chunk.from}-${t.chunk.to})`
+        if (t.tries++ < 1) pending.unshift(t)
+        else unfinished++
+        return // this server sits out the rest of the call
       }
+      perServer[url] = (perServer[url] ?? 0) + 1
       msPer.push(r.trace.ms)
       const usage = (r.trace.response as { usage?: { input_tokens?: number } })?.usage
       tokens += typeof usage?.input_tokens === "number" ? usage.input_tokens : 0
-      chars += c.text.length
-      parts.push({ probabilities: r.answers.answer.probabilities, from: c.from, to: c.to, chars: c.text.length })
+      chars += t.chunk.text.length
+      parts[t.file].push({ probabilities: r.answers.answer.probabilities, from: t.chunk.from, to: t.chunk.to, chars: t.chunk.text.length })
     }
-    if (stopped && parts.length < chunks.length) {
-      if (parts.length) partial = `partial: lines 1-${parts[parts.length - 1].to} of ${totalLines}`
-      else {
-        notChecked.push(f.shown)
-        continue
-      }
+  }
+
+  const order = ROUTES.tools
+  let next = 0
+  const running = new Set<Promise<void>>()
+  const launch = () => {
+    const p: Promise<void> = worker(order[next++]).finally(() => running.delete(p))
+    running.add(p)
+  }
+  while (next < Math.min(ROUTES.toolWorkers, order.length)) launch()
+  while (running.size) {
+    await Promise.race(running)
+    // a standby server takes over when every running worker has stopped and chunks remain
+    if (!running.size && pending.length && next < order.length && !signal?.aborted) launch()
+  }
+  if (signal?.aborted) throw new Error("aborted")
+  unfinished += pending.length
+  const stopped = unfinished ? lastError : undefined
+
+  // ---- combine
+  const verdicts: Verdict[] = []
+  for (const [i, m] of meta.entries()) {
+    const got = parts[i].sort((a, b) => a.from - b.from)
+    if (!got.length) {
+      notChecked.push(m.shown)
+      continue
     }
-    checkedFiles++
-    verdicts.push({ path: f.shown, ...combine(parts, yesNo, labels), partial })
+    const partial = got.length < m.n ? `partial: ${got.length} of ${m.n} parts checked` : m.partial
+    verdicts.push({ path: m.shown, ...combine(got, yesNo, labels), partial })
   }
 
   if (!verdicts.length && stopped) throw new Error(`jev is unavailable (${stopped}); read the files instead`)
@@ -798,21 +893,21 @@ async function askFiles(input: AskInput, call: AskCall, loc: Loc, permission: Pe
     more,
     notChecked,
     stopped,
-    files: checkedFiles,
+    files: verdicts.length,
     chars,
     tokens,
     ms,
   }
   let content = verdicts.length || files.length ? formatAnswers(summary) : `ask_jev: no files to check.\nskipped: ${skipped.join(" · ")}`
-  if (tracing() && firstState) {
+  if (tracing() && tasks.length) {
     const trace: Trace = {
-      request: { state: firstState, questions },
-      response: { requests: msPer.length, tokens, ms_per_request: msPer, stopped },
+      request: { state: tasks[0].state, questions },
+      response: { requests: msPer.length, by_server: perServer, mode: JEV_MODE, tokens, ms_per_request: msPer, stopped },
       ms,
     }
     content += "\n" + traceBlock("F4 ask_jev (first request shown)", trace)
   }
-  return { content, metadata: { files: checkedFiles, chars, tokens, ms, question } }
+  return { content, metadata: { files: verdicts.length, chars, tokens, ms, question, servers: perServer } }
 }
 
 // ---------------------------------------------------------------- hooks
@@ -834,7 +929,8 @@ export default {
       log("JEV_DISABLE=1, not registering hooks")
       return
     }
-    log(`decision model at ${JEV_URL}`)
+    log(`decision servers, ${JEV_MODE} mode: hooks -> ${ROUTES.hooks.join(" then ")}; ask_jev -> ` +
+      (ROUTES.toolWorkers > 1 ? ROUTES.tools.join(" + ") : ROUTES.tools.join(" then ")))
 
     await ctx.tool.hook(
       "execute.before",
@@ -951,7 +1047,9 @@ export const __test = {
   formatAnswers,
   yesNoCriteria,
   toolOutputDir,
-  downUntil: () => downUntil,
+  downUntil,
+  routes,
+  ROUTES,
   tracing,
   traceBlock,
   park,
