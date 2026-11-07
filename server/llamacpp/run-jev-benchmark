@@ -1,0 +1,180 @@
+#!/bin/bash
+# Benchmark the jev decision server (H2O Lightning 4B) on either GPU, across slot / KV / ubatch /
+# context settings, with request shapes that mirror the jev OpenCode plugin (see jev-bench-load.py).
+#
+#   ./run-jev-benchmark 4060 [--quick]    RTX 4060 (8 GB); production llama-server-4060 must be stopped
+#   ./run-jev-benchmark 6000 [--quick]    RTX PRO 6000; runs beside basalt and the 4060 server
+#   MATRIX="8:1:512:40960 8:1:2048:131072" ./run-jev-benchmark 6000
+#   python3 -I jev-bench-load.py summarize bench-results/jev-4060-* bench-results/jev-6000-*   # compare
+#
+# A config is NP:KV_UNIFIED:UB:CTX[:BATCH] (BATCH defaults to max(2048, UB)). Each one is started
+# through ./run-jev-<gpu> (DETACH=1, so no docker pull) as container llama-jev-bench on :8702,
+# measured, and stopped.
+#
+# Memory is judged per process, not per GPU: the bench server's own VRAM comes from nvidia-smi's
+# compute-apps list (matched by the container's PID), because the 6000 also holds basalt (~75 GB).
+# On the 6000 a guard stops a config at once if the GPU's free memory drops below RESERVE_MIB, so
+# basalt always keeps room to grow.
+#
+# Results: bench-results/jev-<gpu>-<date>-<time>/ (cfg-NN.json, server-NN.log, metrics-NN.txt, summary.md)
+set -ue
+
+cd "$(dirname "$(realpath "$0")")"
+
+TARGET=${1:-}
+case "$TARGET" in
+  4060)
+    GPU=1; LAUNCHER=./run-jev-4060; PROD_NAME=llama-server-4060
+    MIN_FREE_MIB=${MIN_FREE_MIB:-7500}   # the whole card, less the driver's share
+    RESERVE_MIB=${RESERVE_MIB:-0}        # nothing else lives there
+    DEFAULT_MATRIX="1:0:512:40960 2:0:512:40960 2:1:512:40960 4:0:512:40960 4:1:512:40960 4:1:1024:40960 6:1:512:40960 8:1:512:40960 4:1:512:65536"
+    QUICK_MATRIX="1:0:512:40960 8:1:512:40960"
+    ;;
+  6000)
+    GPU=0; LAUNCHER=./run-jev-6000; PROD_NAME=   # shares the card with basalt; nothing to stop
+    MIN_FREE_MIB=${MIN_FREE_MIB:-12000}  # the largest config plus RESERVE_MIB
+    RESERVE_MIB=${RESERVE_MIB:-2048}     # never let basalt's GPU fall below this much free
+    DEFAULT_MATRIX="8:1:512:40960 8:1:2048:40960 16:1:2048:40960 8:1:2048:131072 16:1:2048:131072 8:1:4096:131072:4096"
+    QUICK_MATRIX="8:1:512:40960 8:1:2048:131072"
+    ;;
+  *)
+    echo "usage: $0 4060|6000 [--quick]   (MATRIX=\"NP:KVU:UB:CTX[:BATCH] ...\" overrides the configs)"; exit 2 ;;
+esac
+shift
+SCALE=1.0
+if [[ "${1:-}" == "--quick" ]]; then
+  DEFAULT_MATRIX=$QUICK_MATRIX
+  SCALE=0.33
+elif [[ -n "${1:-}" ]]; then
+  echo "usage: $0 4060|6000 [--quick]"; exit 2
+fi
+MATRIX=${MATRIX:-$DEFAULT_MATRIX}
+
+NAME=llama-jev-bench
+PORT=8702
+START_TIMEOUT=240
+
+gpu_free() { nvidia-smi --query-gpu=memory.free --format=csv,noheader,nounits -i "$GPU" | tr -d ' '; }
+# VRAM held by one host PID on our GPU (0 when it holds none)
+pid_mib() {
+  nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader,nounits -i "$GPU" |
+    awk -F', *' -v p="$1" '$1 == p { s += $2 } END { print s + 0 }'
+}
+bench_pid() { docker inspect -f '{{.State.Pid}}' "$NAME" 2>/dev/null || echo 0; }
+
+# ---------------------------------------------------------------- preflight
+if [[ -n "$PROD_NAME" && -n "$(docker ps -q -f "name=^${PROD_NAME}$")" ]]; then
+  echo "[FATAL] $PROD_NAME is running. Stop it first (the benchmark needs the whole 4060),"
+  echo "        then start it again with $LAUNCHER when the benchmark ends."
+  exit 1
+fi
+if [[ -n "$(docker ps -aq -f "name=^${NAME}$")" ]]; then
+  echo "[FATAL] a $NAME container already exists (docker stop $NAME)"; exit 1
+fi
+command -v python3 >/dev/null || { echo "[FATAL] python3 not found"; exit 1; }
+free=$(gpu_free)
+(( free >= MIN_FREE_MIB )) || { echo "[FATAL] GPU $GPU has $free MiB free; the matrix needs $MIN_FREE_MIB"; exit 1; }
+
+OUT=bench-results/jev-$TARGET-$(date +%Y%m%d-%H%M%S)
+mkdir -p "$OUT"
+SAMPLER=
+
+cleanup() {
+  [[ -n "$SAMPLER" ]] && kill "$SAMPLER" 2>/dev/null || true
+  if [[ -n "$(docker ps -aq -f "name=^${NAME}$")" ]]; then docker stop "$NAME" >/dev/null 2>&1 || true; fi
+}
+trap cleanup EXIT
+trap 'echo; echo "[ABORT] stopping $NAME"; exit 130' INT TERM
+
+wait_gone() {  # $1 = the bench server's host PID
+  # docker stop returns before --rm has removed the container; the next launch needs the name
+  for _ in $(seq 1 60); do [[ -z "$(docker ps -aq -f "name=^${NAME}$")" ]] && break; sleep 1; done
+  for _ in $(seq 1 60); do (( $(pid_mib "$1") == 0 )) && return 0; sleep 1; done
+  echo "[WARN] PID $1 still holds $(pid_mib "$1") MiB on GPU $GPU after 60 s"
+}
+
+record_failure() {  # $1 idx, $2 config, $3 reason
+  python3 -I -c 'import json,sys; json.dump({"target": sys.argv[4], "config": sys.argv[2], "failed": sys.argv[3]}, open(sys.argv[1], "w"))' \
+    "$OUT/cfg-$1.json" "$2" "$3" "$TARGET"
+}
+
+echo "## jev benchmark on the $TARGET (GPU $GPU) -> $OUT"
+echo "## configs (NP:KVU:UB:CTX[:BATCH]): $MATRIX"
+echo "## scale: $SCALE   free now: $free MiB   reserve kept free: $RESERVE_MIB MiB"
+i=0
+for cfg in $MATRIX; do
+  i=$((i + 1)); idx=$(printf '%02d' "$i")
+  IFS=: read -r np kvu ub ctx batch <<<"$cfg"
+  batch=${batch:-$(( ub > 2048 ? ub : 2048 ))}
+  slot_ctx=$(( kvu == 1 ? ctx : ctx / np ))
+  echo
+  echo "=== [$idx] NP=$np KV_UNIFIED=$kvu UB=$ub CTX=$ctx BATCH=$batch (per-request room: $slot_ctx tokens)"
+
+  if ! DETACH=1 METRICS=1 NAME="$NAME" PORT="$PORT" PARALLEL="$np" KV_UNIFIED="$kvu" UB="$ub" CTX="$ctx" BATCH="$batch" \
+      "$LAUNCHER" >"$OUT/launch-$idx.txt" 2>&1; then
+    echo "  launch failed: $(tail -1 "$OUT/launch-$idx.txt")"
+    record_failure "$idx" "$cfg" "launch failed"
+    continue
+  fi
+  pid=$(bench_pid)
+
+  # Track the server's own VRAM peak and the GPU's lowest free memory; enforce the reserve
+  rm -f "$OUT/guard-$idx.txt"
+  (
+    peak=0; low=999999
+    while :; do
+      v=$(pid_mib "$pid"); f=$(gpu_free)
+      (( v > peak )) && peak=$v
+      (( f < low )) && low=$f
+      echo "$peak $low" >"$OUT/vram-$idx.txt"
+      if (( RESERVE_MIB > 0 && f < RESERVE_MIB )); then
+        echo "GPU $GPU free fell to $f MiB (< $RESERVE_MIB reserve)" >"$OUT/guard-$idx.txt"
+        docker stop "$NAME" >/dev/null 2>&1
+        exit 0
+      fi
+      sleep 0.5
+    done
+  ) &
+  SAMPLER=$!
+
+  ready=0
+  for _ in $(seq 1 "$START_TIMEOUT"); do
+    if [[ -z "$(docker ps -q -f "name=^${NAME}$")" ]]; then break; fi
+    if [[ "$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://127.0.0.1:$PORT/health")" == 200 ]]; then ready=1; break; fi
+    sleep 1
+  done
+  if (( ! ready )); then
+    docker logs "$NAME" >"$OUT/server-$idx.log" 2>&1 || true
+    reason=$(cat "$OUT/guard-$idx.txt" 2>/dev/null || grep -m1 -i -E 'out of memory|failed|error' "$OUT/server-$idx.log" | cut -c1-160 || true)
+    echo "  failed to start: ${reason:-not healthy after ${START_TIMEOUT}s}"
+    record_failure "$idx" "$cfg" "${reason:-not healthy after ${START_TIMEOUT}s}"
+    kill "$SAMPLER" 2>/dev/null || true; SAMPLER=
+    cleanup; wait_gone "$pid"
+    continue
+  fi
+  echo "  ready (PID $pid, $(pid_mib "$pid") MiB); running load"
+
+  python3 -I jev-bench-load.py run --url "http://127.0.0.1:$PORT" --config "$cfg" --target "$TARGET" \
+    --slot-ctx "$slot_ctx" --scale "$SCALE" --out "$OUT/cfg-$idx.json" || echo "  [WARN] load generator exited non-zero"
+
+  curl -s -m 5 "http://127.0.0.1:$PORT/metrics" >"$OUT/metrics-$idx.txt" || true
+  docker logs "$NAME" >"$OUT/server-$idx.log" 2>&1 || true
+  kill "$SAMPLER" 2>/dev/null || true; SAMPLER=
+  read -r peak low <"$OUT/vram-$idx.txt" 2>/dev/null || { peak=""; low=""; }
+  guard=$(cat "$OUT/guard-$idx.txt" 2>/dev/null || true)
+  if [[ -f "$OUT/cfg-$idx.json" ]]; then
+    python3 -I -c 'import json,sys; p=sys.argv[1]; d=json.load(open(p)); d["vram_peak_mib"]=int(sys.argv[2]) if sys.argv[2] else None; d["gpu_free_min_mib"]=int(sys.argv[3]) if sys.argv[3] else None
+if sys.argv[4]: d["failed"]="stopped by the reserve guard: "+sys.argv[4]
+json.dump(d, open(p, "w"), indent=1)' "$OUT/cfg-$idx.json" "$peak" "$low" "$guard"
+  else
+    record_failure "$idx" "$cfg" "${guard:-load generator wrote no result}"
+  fi
+  echo "  server VRAM peak: ${peak:-?} MiB   GPU free low-water: ${low:-?} MiB${guard:+   [GUARD] $guard}"
+
+  docker stop "$NAME" >/dev/null 2>&1 || true
+  wait_gone "$pid"
+done
+
+echo
+python3 -I jev-bench-load.py summarize "$OUT"
+if [[ -n "$PROD_NAME" ]]; then echo "Results in $OUT. Start production again with $LAUNCHER"; else echo "Results in $OUT."; fi

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Load generator and summarizer for ./run-jev-4060-benchmark (stdlib only; run with python3 -I).
+"""Load generator and summarizer for ./run-jev-benchmark (stdlib only; run with python3 -I).
 
-  jev-bench-load.py run --url http://127.0.0.1:8702 --out cfg.json [--scale 1.0] [--phases ...]
-  jev-bench-load.py summarize RESULTS_DIR          # writes RESULTS_DIR/summary.md and prints it
+  jev-bench-load.py run --url http://127.0.0.1:8702 --out cfg.json [--target 6000] [--slot-ctx N] [--scale 1.0]
+  jev-bench-load.py summarize DIR [DIR ...]        # one dir: writes DIR/summary.md; several: one combined table
 
 Request shapes mirror what the jev OpenCode plugin really sends
 (opencode/container_data/config/opencode/plugins/jev.ts):
@@ -14,6 +14,11 @@ Request shapes mirror what the jev OpenCode plugin really sends
 
 QUESTIONS below is copied from jev.ts (__test.RISK_QUESTIONS, VERDICT_QUESTIONS, REVIEW_QUESTIONS,
 yesNoCriteria). Regenerate it from the plugin when those change.
+
+Long state (alone phase only): long27k, one yes/no question over ~100k chars of code (~27k tokens),
+just under the endpoint's state cap. /v1/systemone clips any state to ~32k tokens (the model card's
+32,000-token state) silently: the server log still says `truncated = 0`. cap_probe sends ~210k chars
+once and records how many tokens the server actually kept, so a build that lifts the cap shows up.
 
 Phases (per server config):
   alone        each scenario: 1 warmup + N sequential requests -> p50 latency
@@ -98,6 +103,14 @@ COMMANDS = [
 
 DEFAULT_CORPUS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "llama-proxy", "src")
 
+# Long single-request state (1 yes/no question): chars, and the per-request token room it needs.
+# This corpus runs ~3.5-3.7 chars/token (100k chars -> ~27k tokens measured), under the ~32k cap.
+# Bigger states are pointless to time: 2026-11-06 on b12169, "60k" and "114k" states both arrived
+# as ~32.1k tokens, so they measured the cap, not long contexts.
+LONG = {"long27k": (100_000, 32_768)}
+CAP_PROBE_CHARS = 210_000  # ~60k tokens of text; the server keeps ~32.1k of it
+LEGACY_LONG = ("long28k",)  # the same test under its old name, in results from before the cap was found
+
 
 # ---------------------------------------------------------------- payloads
 
@@ -120,6 +133,12 @@ class Payloads:
         return self.text[start:start + size]
 
     def build(self, scenario, fixed=False):
+        if scenario in LONG:
+            body = self._slice(LONG[scenario][0], fixed)
+            state = ("A coding agent asks a question about one long file. Answer from the whole text.\n\n"
+                     "Question: Does this file use a mutex or read-write lock?\n\n"
+                     f"File: src/big.rs (all of it)\n\n{body}")
+            return {"state": state, "questions": QUESTIONS["chunk"]}
         if scenario == "gate":
             with self.lock:
                 cmd = COMMANDS[0 if fixed else self.n % len(COMMANDS)]
@@ -226,7 +245,7 @@ def looper(client, payloads, scenario, until, sink):
 
 # ---------------------------------------------------------------- phases
 
-def phase_alone(client, payloads, reps):
+def phase_alone(client, payloads, reps, slot_ctx=0, long_reps=2):
     out = {}
     for sc in ("gate", "chunk", "verdict", "review"):
         client.ask(sc, payloads.build(sc))  # warmup
@@ -236,6 +255,24 @@ def phase_alone(client, payloads, reps):
             s["tok_per_s_single"] = round(s["tokens"] / max(1, len([r for r in recs if r["ok"]])) / (s["p50_ms"] / 1000), 1)
         out[sc] = s
         print(f"  alone {sc:8} p50 {s['p50_ms']} ms  ({s['errors']} errors)", flush=True)
+    # Long states, one request at a time, only where the config has room for them
+    for sc, (_, need) in LONG.items():
+        if slot_ctx and slot_ctx < need:
+            continue
+        recs = [client.ask(sc, payloads.build(sc)) for _ in range(long_reps)]
+        s = stats(recs)
+        if s["p50_ms"]:
+            s["tok_per_s_single"] = round(s["tokens"] / max(1, len([r for r in recs if r["ok"]])) / (s["p50_ms"] / 1000), 1)
+        out[sc] = s
+        print(f"  alone {sc:8} p50 {s['p50_ms']} ms, {s.get('tok_per_s_single')} tok/s  ({s['errors']} errors)", flush=True)
+    # How much of an oversized state the server keeps (the cap), when the config could hold it
+    if not slot_ctx or slot_ctx >= 40_960:
+        state = payloads.build("long27k")
+        state["state"] = state["state"][:-LONG["long27k"][0]] + payloads._slice(CAP_PROBE_CHARS, False)
+        r = client.ask("cap_probe", state)
+        out["cap_probe"] = {"ok": r["ok"], "chars": CAP_PROBE_CHARS, "tokens_kept": r.get("tokens"), "ms": r["ms"],
+                            "error": r.get("error")}
+        print(f"  state cap: {CAP_PROBE_CHARS} chars sent, server kept {r.get('tokens')} tokens", flush=True)
     return out
 
 
@@ -292,9 +329,10 @@ def cmd_run(a):
     phases = a.phases.split(",")
     reps = max(1, round(5 * a.scale))
     secs = lambda base: max(5.0, base * a.scale)  # noqa: E731
-    result = {"url": a.url, "config": a.config, "scale": a.scale, "started": time.strftime("%Y-%m-%d %H:%M:%S")}
+    result = {"url": a.url, "target": a.target, "config": a.config, "slot_ctx": a.slot_ctx, "scale": a.scale,
+              "started": time.strftime("%Y-%m-%d %H:%M:%S")}
     if "alone" in phases:
-        result["alone"] = phase_alone(client, payloads, reps)
+        result["alone"] = phase_alone(client, payloads, reps, a.slot_ctx, long_reps=max(1, round(2 * a.scale)))
     if "throughput" in phases:
         clients = [1, 2, 4, 8] if a.scale >= 0.5 else [1, 4]
         result["throughput"] = phase_throughput(client, payloads, clients, secs(20))
@@ -323,55 +361,81 @@ def drift(base, other):
     return round(worst, 3)
 
 
+VRAM_LIMIT_MIB = {"4060": 7782}  # the 4060 must fit whole; the 6000's limit is the run's reserve guard
+
+
+def target_of(r, path):
+    """Older results (before the 6000 existed) carry no target and were all 4060 runs."""
+    return r.get("target") or ("6000" if "jev-6000-" in path else "4060")
+
+
 def cmd_summarize(a):
     rows = []
-    for path in sorted(glob.glob(os.path.join(a.dir, "cfg-*.json"))):
-        with open(path) as f:
-            rows.append(json.load(f))
+    for d in a.dirs:
+        for path in sorted(glob.glob(os.path.join(d, "cfg-*.json"))):
+            with open(path) as f:
+                r = json.load(f)
+            r["_target"] = target_of(r, path)
+            rows.append(r)
     if not rows:
-        sys.exit(f"no cfg-*.json in {a.dir}")
+        sys.exit(f"no cfg-*.json in {' '.join(a.dirs)}")
     base = next((r.get("consistency") for r in rows if r.get("consistency")), None)
+    title = ", ".join(os.path.basename(os.path.abspath(d)) for d in a.dirs)
     lines = [
-        f"# jev server benchmark ({os.path.basename(os.path.abspath(a.dir))})", "",
-        "Config is NP:KV_UNIFIED:UB:CTX. Latencies in ms; tok/s is prefill tokens per second summed over clients.", "",
-        "| config | VRAM peak | gate alone | review alone | chunk tok/s C=1 / 2 / 4 / 8 | mixed gate p50 / p95 / max | mixed bg tok/s | drift vs #1 | errors |",
-        "|---|---|---|---|---|---|---|---|---|",
+        f"# jev server benchmark ({title})", "",
+        "Config is NP:KV_UNIFIED:UB:CTX[:BATCH]. Latencies in ms; tok/s is prefill tokens per second summed over clients. "
+        "VRAM is the server process's own. long 27k = one request with a ~27k-token state. "
+        "state cap = tokens the server kept of a ~60k-token state (/v1/systemone clips states at ~32k, silently). "
+        "Drift is against the first config listed.", "",
+        "| gpu | config | VRAM | gate alone | review alone | long 27k | state cap | chunk tok/s C=1 / 2 / 4 / 8 | mixed gate p50 / p95 / max | mixed bg tok/s | drift | errors |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|",
     ]
     candidates = []
     for r in rows:
-        cfg = r.get("config", "?")
-        if r.get("failed"):
-            lines.append(f"| `{cfg}` | — | failed to start: {r['failed']} | | | | | | |")
+        cfg, tgt = r.get("config", "?"), r["_target"]
+        if r.get("failed") and not r.get("alone"):
+            lines.append(f"| {tgt} | `{cfg}` | — | failed: {r['failed']} | | | | | | | | |")
             continue
         al, tp, mx = r.get("alone", {}), r.get("throughput", {}), r.get("mixed", {})
         tps = " / ".join(str(tp.get(c, {}).get("tok_s", "—")) for c in ("1", "2", "4", "8"))
+        long_row = next((al[k] for k in (*LONG, *LEGACY_LONG) if al.get(k, {}).get("p50_ms")), {})
+        longs = str(long_row.get("p50_ms", "—"))
+        cap = al.get("cap_probe", {}).get("tokens_kept")
+        if cap is None and al.get("long60k", {}).get("n"):  # older results: the "60k" test was the cap
+            cap = round(al["long60k"]["tokens"] / al["long60k"]["n"])
         g = mx.get("gate", {})
-        errs = sum(v.get("errors", 0) for v in al.values()) + sum(v.get("errors", 0) for v in tp.values()) \
+        errs = sum(v.get("errors", 0) for k, v in al.items() if k != "cap_probe") + sum(v.get("errors", 0) for v in tp.values()) \
             + g.get("errors", 0) + mx.get("background", {}).get("errors", 0)
         d = drift(base, r.get("consistency"))
         vram = r.get("vram_peak_mib")
+        note = f" ({r['failed']})" if r.get("failed") else ""
         lines.append(
-            f"| `{cfg}` | {vram if vram is not None else '—'} MiB | {al.get('gate', {}).get('p50_ms')} | {al.get('review', {}).get('p50_ms')} | "
-            f"{tps} | {g.get('p50_ms')} / {g.get('p95_ms')} / {g.get('max_ms')} | {mx.get('background', {}).get('tok_s')} | "
-            f"{d if d is not None else '—'} | {errs} |")
-        best_tp = max((tp.get(c, {}).get("tok_s") or 0) for c in ("4", "2", "1"))
-        candidates.append({"cfg": cfg, "errs": errs, "drift": d, "vram": vram, "gate_p95": g.get("p95_ms"),
-                           "tp4": tp.get("4", {}).get("tok_s") or best_tp, "bg": mx.get("background", {}).get("tok_s")})
+            f"| {tgt} | `{cfg}`{note} | {vram if vram is not None else '—'} MiB | {al.get('gate', {}).get('p50_ms')} | "
+            f"{al.get('review', {}).get('p50_ms')} | {longs} | {cap if cap is not None else '—'} | {tps} | "
+            f"{g.get('p50_ms')} / {g.get('p95_ms')} / {g.get('max_ms')} | "
+            f"{mx.get('background', {}).get('tok_s')} | {d if d is not None else '—'} | {errs} |")
+        candidates.append({"cfg": cfg, "tgt": tgt, "errs": errs + (1 if r.get("failed") else 0), "drift": d, "vram": vram,
+                           "gate_p95": g.get("p95_ms"), "bg": mx.get("background", {}).get("tok_s")})
     # Judge throughput under the mixed load jev really produces, not raw single-scenario prefill:
     # extra slots cost ~5% of raw chunk tok/s but run multi-question requests far faster.
-    top_bg = max((c["bg"] or 0) for c in candidates) if candidates else 0
-    ok = [c for c in candidates if c["errs"] == 0 and (c["drift"] is None or c["drift"] <= 0.02)
-          and (c["vram"] is None or c["vram"] <= 7782) and c["gate_p95"] is not None and (c["bg"] or 0) >= 0.9 * top_bg]
     lines.append("")
-    if ok:
-        pick = min(ok, key=lambda c: c["gate_p95"])
-        lines.append(f"**Suggestion: `{pick['cfg']}`**: lowest mixed-gate p95 ({pick['gate_p95']} ms) among configs with no errors, "
-                     f"drift ≤ 0.02, VRAM ≤ 7.6 GiB and mixed-load throughput within 10% of the best ({top_bg} tok/s).")
-    else:
-        lines.append("**No config met every rule** (no errors, drift ≤ 0.02, VRAM ≤ 7.6 GiB, mixed throughput within 10% of the best). Read the table.")
+    for tgt in sorted({c["tgt"] for c in candidates}):
+        group = [c for c in candidates if c["tgt"] == tgt]
+        top_bg = max((c["bg"] or 0) for c in group)
+        limit = VRAM_LIMIT_MIB.get(tgt)
+        ok = [c for c in group if c["errs"] == 0 and (c["drift"] is None or c["drift"] <= 0.02)
+              and (limit is None or c["vram"] is None or c["vram"] <= limit) and c["gate_p95"] is not None
+              and (c["bg"] or 0) >= 0.9 * top_bg]
+        rule = f"no errors, drift ≤ 0.02{f', VRAM ≤ {limit} MiB' if limit else ''}, mixed-load throughput within 10% of the best ({top_bg} tok/s)"
+        if ok:
+            pick = min(ok, key=lambda c: c["gate_p95"])
+            lines.append(f"**Suggestion for the {tgt}: `{pick['cfg']}`**: lowest mixed-gate p95 ({pick['gate_p95']} ms) among configs with {rule}.")
+        else:
+            lines.append(f"**No {tgt} config met every rule** ({rule}). Read the table.")
     text = "\n".join(lines) + "\n"
-    with open(os.path.join(a.dir, "summary.md"), "w") as f:
-        f.write(text)
+    if len(a.dirs) == 1:
+        with open(os.path.join(a.dirs[0], "summary.md"), "w") as f:
+            f.write(text)
     print(text)
 
 
@@ -382,12 +446,15 @@ def main():
     r.add_argument("--url", default="http://127.0.0.1:8702")
     r.add_argument("--out")
     r.add_argument("--config", default="?", help="label stored in the result, e.g. 4:1:512:40960")
+    r.add_argument("--target", default="?", help="GPU label stored in the result: 4060 or 6000")
+    r.add_argument("--slot-ctx", type=int, default=0,
+                   help="tokens one request may use (CTX when unified, CTX/NP otherwise); long states that don't fit are skipped")
     r.add_argument("--scale", type=float, default=1.0, help="phase length multiplier (--quick uses 0.33)")
     r.add_argument("--phases", default="alone,throughput,mixed,consistency")
     r.add_argument("--corpus", default=DEFAULT_CORPUS)
-    r.add_argument("--timeout", type=float, default=60.0)
-    s = sub.add_parser("summarize")
-    s.add_argument("dir")
+    r.add_argument("--timeout", type=float, default=180.0, help="per request; the 114k-token state needs room")
+    s = sub.add_parser("summarize", help="one or more result dirs; several dirs give one combined table")
+    s.add_argument("dirs", nargs="+")
     a = p.parse_args()
     if a.cmd == "run":
         cmd_run(a)
