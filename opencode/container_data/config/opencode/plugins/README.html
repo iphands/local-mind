@@ -208,7 +208,9 @@ JEV_MODE=share        # default: hooks on the first server up, scans on all
 JEV_MODE=split        # hooks on the last server (4060), scans on the first (6000)
 JEV_HOOK_URL=… / JEV_TOOL_URL=…   # override split mode's choice
 JEV_DISABLE=1         # register no hooks and no tool
-JEV_TRACE=1           # trace view always on</code></pre>
+JEV_TRACE=1           # trace view always on
+JEV_ROUTER=advise     # ask_jev router: advise (default), rg or off
+                      # or at runtime: echo rg &gt; ~/.config/opencode/jev-router</code></pre>
     <p>Set these in the <code>opencode serve</code> environment. Changes need a serve restart.</p>
   </div>
   <div class="panel">
@@ -368,7 +370,10 @@ jev answers are a 4B classifier's guesses: read a file before editing it, quotin
         <li><code>paths</code>: 1–20 files, directories or globs (<code>src/**/*.ts</code>), relative to the project, or a saved tool-output path</li>
         <li><code>question</code>: one question, answered per file</li>
         <li><code>options</code> (optional): <code>{label: description}</code>, 2–8 labels, with the question phrased as a choice ("Which of these…?"). Without it, the question is yes/no</li>
+        <li><code>pattern</code> (optional): a ripgrep regex, used by the router's <code>rg</code> mode</li>
+        <li><code>force</code> (optional): skip the router and scan; only if grep came up empty or the user asked for <code>ask_jev</code></li>
       </ul></dd>
+      <dt>Router</dt><dd>before any file is read, one request (~20–55 ms) asks whether a plain text search would answer the question. At p(grep) ≥ 0.80: <code>advise</code> (default) answers "use grep" instead of scanning; <code>rg</code> runs ripgrep for the agent's <code>pattern</code> and lists <code>N matches  path</code> (no pattern → advise); <code>off</code> always scans. Below that, with <code>force</code>, or if the router fails, it scans. Switch while running: <code>echo rg &gt; ~/.config/opencode/jev-router</code>. Calibrated on 40 questions: semantic ones 0.05–0.37 (none routed), grep-shaped ones 0.89–0.96 (15 of 17 routed). Live on "which files call send()": advise 56 ms, rg 36 ms with all 9 matching files, a scan 4.8 s that covered 17 of 40 files and answered "no" for two files that do call it</dd>
       <dt>Who sees it</dt><dd>every agent allowed to read: local-mind, chat, neckbeard, hoodie</dd>
       <dt>Permissions</dt><dd>each file gets the same <code>read</code> check as the read tool, so the reviewers' <code>*.env</code> denies apply. A denied file is listed and the call goes on</dd>
       <dt>Paths</dt><dd>inside the directory or project, plus <code>~/.local/share/opencode/tool-output/</code>. Globs and directories expand with <code>rg --files</code> (<code>.gitignore</code> respected, hidden files skipped). At most 50 files. Binary files are skipped</dd>
@@ -395,7 +400,7 @@ jev answers are a 4B classifier's guesses: read a file before editing it, quotin
     <div class="callout">Most false alarms are lookalikes: <code>tokio::spawn</code> (an async task) taken as "spawns a process", or <code>Path</code> in comments taken as disk I/O.
       A yes means "worth reading", not a fact.</div>
     <div class="callout ok">During a 400k-character scan, 10 F3 shell checks answered in 167–630 ms, all of them, and no cooldown was triggered.</div>
-    <div class="callout"><code>local-mind.md</code> tells the agent to use it first for scouting, read only what it points to, and never count an answer as verification.
+    <div class="callout"><code>local-mind.md</code> tells the agent to <b>grep first</b> whenever the question can be written as a pattern, to use <code>ask_jev</code> for questions no pattern can express, to follow the router's "use grep", and never to count an answer as verification.
       <code>neckbeard.md</code> and <code>hoodie.md</code> say a finding must come from code they read.</div>
   </div>
 </section>
@@ -514,6 +519,8 @@ jev answers are a 4B classifier's guesses: read a file before editing it, quotin
       <tr><td><code>ASK_NO_COLLAPSE</code></td><td class="num">0.90</td><td>confident <code>no</code> answers fold into one line</td></tr>
       <tr><td><code>ASK_LEAN_MIN</code></td><td class="num">0.60</td><td>options: note a part that leans to another label</td></tr>
       <tr><td><code>ASK_MAX_LINES</code></td><td class="num">60</td><td>lines in the tool result</td></tr>
+      <tr><td><code>ASK_ROUTER_GREP_MIN</code></td><td class="num">0.80</td><td>p(grep) at or above which the router answers instead of scanning</td></tr>
+      <tr><td><code>ASK_ROUTER_TIMEOUT_MS</code></td><td class="num">3000</td><td>router request timeout (a timeout means a scan)</td></tr>
     </tbody>
   </table>
 </div>

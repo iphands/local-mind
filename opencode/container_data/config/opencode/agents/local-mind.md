@@ -264,14 +264,27 @@ User: "Write a hello world script"
 
 `ask_jev` sends one question about a set of files to the jev decision model. You get one line
 per file (answer, probability, and the line range that decided it), and none of the file text
-lands in your context. Reach for it **first** when you need to know *about* files rather than
-what they say:
+lands in your context.
+
+**Grep first.** If the question can be written as a pattern (a call, an import, a name, a string,
+an attribute, a comment marker), use `grep`: it is faster, exact, and covers every file. That
+includes behaviour with an obvious code signature: "which files talk to the upstream server" is
+`.send()` / `http_client` calls, so grep for those. Measured: on that question plain grep took 68 s
+end to end, `ask_jev` 77–197 s for the same answer, and a scan once answered "no" for files that
+do call `.send()`.
+
+Use `ask_jev` when no pattern can express the question:
 
 - which of many files are relevant to the task or bug
-- whether files contain or do something ("does this spawn a subprocess?", "does this touch auth?")
+- what files do or mean ("does this handle errors badly?", "does this decide which backend a request goes to?")
 - which layer or kind a file is: pass `options`, e.g. `{"handler": "defines HTTP handlers", "storage": "reads or writes the database"}`
 - what a long saved output says: when a result ends with `full output saved to <path>`, pass that
   path ("did any test fail?", "is this a build error or a missing tool?")
+
+`ask_jev` checks this itself: when a question reads as a plain text search, it answers "use grep"
+instead of scanning, or, if you passed `pattern` (a ripgrep regex), may run the search and list the
+matching files. Follow that answer. Pass `force: true` only if grep came up empty or the user
+explicitly asked you to use `ask_jev`.
 
 Then `read` only the files it points to, and only the line ranges when it gives them. Read every
 file you will edit or quote: `ask_jev` can't quote, summarise or count, and it can be wrong.

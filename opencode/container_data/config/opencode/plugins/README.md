@@ -206,9 +206,41 @@ jev answers are a 4B classifier's guesses: read a file before editing it, quotin
 | `paths` | 1–20 entries: files, directories or globs (`src/**/*.ts`), relative to the project. One glob can cover the whole call (up to 50 files are checked), so there's no reason to batch. A saved tool-output path (see below) also works |
 | `question` | one question, 3–300 characters, answered per file |
 | `options` | optional `{label: description}` with 2–8 labels, e.g. `{"handler": "defines HTTP handlers", "storage": "reads or writes the database"}`, with a question phrased as a choice ("Which of these best describes this file?"). Without it the question is yes/no |
+| `pattern` | optional ripgrep regex, used by the router's `rg` mode when the question is a text search |
+| `force` | optional `true`: skip the router and scan. Only if grep came up empty or the user explicitly asked for `ask_jev` |
 
 There is one question per call because each question re-prefills the whole state anyway, so two
 questions in one call would cost the same as two calls.
+
+**Router: grep or scan?** Before reading any file, one request (~20–55 ms) asks the decision model
+whether a plain text search would answer the question:
+
+| Mode | When the answer is "text search" (p(grep) ≥ 0.80) |
+|---|---|
+| `advise` (default) | no scan: the tool answers at once that this is a text-search question and the agent should grep for the exact name / call / import / string |
+| `rg` | runs `rg --count-matches` for the agent's `pattern` over the same expanded, permission-checked files and lists `N matches  path`. Without a `pattern` it falls back to `advise` |
+| `off` | scans as before, so the router never answers |
+
+Below 0.80, with `force: true`, or when the router request fails, the tool scans as usual, so the router
+fails open. Switch modes while OpenCode runs with `echo rg > ~/.config/opencode/jev-router`
+(`off`, `advise` or `rg`; delete the file to go back to `JEV_ROUTER`, then `advise`). Every result
+records `metadata.router` (`mode`, `p_grep`, `action`, `ms`), which `opencode/scripts/session-report.py`
+lists.
+
+Calibrated 2026-11-06 on 40 questions against the live 6000:
+
+| Group | p(grep) | Routed to grep at 0.80 |
+|---|---|---|
+| Semantic (17), including the agent's own "Which of these best describes this file's relation to the upstream…" with options | 0.05–0.37 | 0 |
+| Grep-shaped (17): "which files call / import / mention / reference X" | 0.89–0.96, except "contain unsafe blocks" 0.50 and "derive Serialize" 0.45 | 15 |
+| Borderline (6): "uses a mutex or RwLock" 0.75, "talks to the upstream server" 0.33, … | 0.14–0.75 | 0 |
+
+The router catches questions *phrased* as text matches. A behaviour question with an obvious code
+signature ("which files talk to the upstream server") still scans, so `local-mind.md` tells the agent
+to turn those into a grep itself. On "Which files call reqwest's send()?" over `llama-proxy/src`, live:
+`advise` answered in 56 ms; `rg` listed the 9 files with matches out of 40 in 36 ms; `off` scanned only
+17 of the 40 files (budget) in 4.8 s and answered "no" for `augment.rs` and `preflight.rs`, which do
+call `.send()`.
 
 **Who can use it.** The tool runs under the `read` permission (`options.permission: "read"`), so
 every agent that may read sees it: local-mind, chat, and the reviewers neckbeard and hoodie.
@@ -276,9 +308,12 @@ Wording B and larger chunks cost recall, and for scouting a missed file costs mo
 read. Most false alarms are lookalikes: `tokio::spawn` (an async task) answered as "spawns a
 process", and `Path` in comments answered as "disk I/O". Treat a yes as "worth reading", not as a fact.
 
-`local-mind.md` tells the main agent to use `ask_jev` first when it needs to know *about* files or a
-long saved output, then read only what it points to, and never to count an answer as
-verification. `neckbeard.md` and `hoodie.md` say a finding must come from code they read.
+`local-mind.md` tells the main agent to **grep first** whenever the question can be written as a
+pattern (including behaviour with an obvious code signature), to use `ask_jev` for questions no
+pattern can express and for long saved outputs, to follow the router's "use grep", to pass `force`
+only when grep came up empty or the user asked for `ask_jev`, and never to count an answer as
+verification. `neckbeard.md` and `hoodie.md` say a finding must come from code they read, and to
+grep plain text matches.
 
 ## Trace view (request/response debugging)
 
@@ -429,6 +464,8 @@ That just means one missed hint and a 60 s pause, nothing more.
 | `JEV_URL` | A single server, used only when `JEV_URLS` is unset |
 | `JEV_DISABLE=1` | Registers no hooks and no `ask_jev` tool; logs `JEV_DISABLE=1, not registering hooks` |
 | `JEV_TRACE=1` | Trace view always on (same as the `jev-trace` file existing) |
+| `JEV_ROUTER` | `ask_jev` router mode when the toggle file is absent: `advise` (default), `rg` or `off` |
+| `$XDG_CONFIG_HOME/opencode/jev-router` | Router mode while this file exists; its content is the mode (read on every call) |
 | `$XDG_CONFIG_HOME/opencode/jev-trace` | Trace view on while this file exists (default `~/.config/opencode/jev-trace`) |
 
 Tunables live at the top of `jev.ts` and were set from a calibration run:
@@ -461,6 +498,8 @@ Tunables live at the top of `jev.ts` and were set from a calibration run:
 | `ASK_NO_COLLAPSE` | 0.90 | confident `no` answers fold into one line |
 | `ASK_LEAN_MIN` | 0.60 | custom options: note a part that leans to another label |
 | `ASK_MAX_LINES` | 60 | lines in the tool result |
+| `ASK_ROUTER_GREP_MIN` | 0.80 | p(grep) at or above which the router answers instead of scanning |
+| `ASK_ROUTER_TIMEOUT_MS` | 3000 | router request timeout (a timeout means a scan) |
 
 `jev.ts` also exports `__test` (the client, state builders, question sets and the `ask_jev`
 pieces, including `askFiles`) for calibration scripts. The plugin loader reads only `default`.

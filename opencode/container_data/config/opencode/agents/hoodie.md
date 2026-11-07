@@ -95,6 +95,8 @@ unless you find a must-fix issue.
 example "does this file make a network call inside a loop?" or "does this duplicate an existing
 helper?". Use it to decide which files to read. Every finding you report must come from code you
 read: an `ask_jev` answer alone is never a finding. Each call uses one of your steps.
+If the question is a plain text match (a name, call or import), `grep` it instead: `ask_jev` will
+answer "use grep" for those anyway.
 
 ## Delivering Your Answer
 

@@ -38,7 +38,7 @@
 // `rm` toggle it without a restart. Traces are part of the tool result, so the agent sees them too.
 
 import { execFile } from "node:child_process"
-import { existsSync } from "node:fs"
+import { existsSync, readFileSync } from "node:fs"
 import { readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path"
@@ -500,6 +500,49 @@ const ASK_NO_COLLAPSE = 0.9 // confident "no" answers are folded into one line
 const ASK_LEAN_MIN = 0.6 // custom options: note a part whose own answer differs at this level
 const ASK_MAX_LINES = 60 // lines in the tool result
 
+// Router: before a scan, one decision-model request asks "would a plain text search answer this?".
+// Calibrated 2026-11-06 on 40 questions (live 6000): semantic ones scored p(grep) 0.05-0.37, grep-
+// shaped ones 0.89-0.96 when they say call/import/mention/reference, so 0.8 routes none of the
+// semantic ones and 15 of 17 grep ones (the 2 misses fall back to a scan, the safe way).
+const ASK_ROUTER_GREP_MIN = 0.8
+const ASK_ROUTER_TIMEOUT_MS = 3_000
+const ROUTER_FILE = join(process.env.XDG_CONFIG_HOME || join(homedir(), ".config"), "opencode", "jev-router")
+type RouterMode = "off" | "advise" | "rg"
+
+// off: always scan. advise (default): on a grep verdict, skip the scan and tell the agent to grep.
+// rg: on a grep verdict, run ripgrep for the agent's `pattern` (advise when there is none).
+// Read on every call from the jev-router file (its content is the mode), then JEV_ROUTER, so
+// `echo rg > ~/.config/opencode/jev-router` switches modes without a restart.
+function routerMode(): RouterMode {
+  let raw = ""
+  try {
+    if (existsSync(ROUTER_FILE)) raw = readFileSync(ROUTER_FILE, "utf8")
+  } catch {
+    raw = ""
+  }
+  const m = (raw.trim() || process.env.JEV_ROUTER || "advise").toLowerCase()
+  return m === "off" || m === "rg" ? m : "advise"
+}
+
+const ROUTER_CRITERIA: Criteria = {
+  grep:
+    "a text search answers it: the question is about whether exact text appears, such as a name, call, import, " +
+    "string, flag, attribute or comment marker",
+  semantic:
+    "a text search cannot answer it: it needs understanding of what code does, its purpose, behaviour or role, " +
+    "or its relevance to a task or bug",
+}
+
+function routerState(question: string, options?: Record<string, string>): string {
+  let s =
+    "A coding agent is about to ask a question about many source files. Decide whether a plain text search (grep) " +
+    `would answer it, or whether it needs a model that understands the code.\n\nQuestion: ${question}`
+  if (options) s += "\nAnswer options: " + Object.entries(options).map(([k, v]) => `${k}: ${v}`).join("; ")
+  return s
+}
+
+type RouterInfo = { mode: RouterMode; p_grep: number | null; action: "scan" | "advise" | "rg"; ms: number; error?: string }
+
 const ASK_DESCRIPTION =
   "Ask the jev decision model one question about files WITHOUT reading them into your context. " +
   "Each file is judged separately and you get one line per file: answer, probability, and the line range " +
@@ -510,6 +553,9 @@ const ASK_DESCRIPTION =
   "With `options`, phrase the question as a choice (\"Which of these best describes this file?\"), not as yes/no. " +
   "It is a fast 4B classifier, not a reader: it cannot quote, summarise or count, and it can be wrong. " +
   "Read a file before editing it, quoting it, or relying on an answer as proof. " +
+  "Before scanning, jev checks whether the question is just a text search (a name, call, import or string): if so " +
+  "it answers \"use grep\" instead, or, when you pass `pattern`, runs ripgrep for you. Follow that. Pass " +
+  "`force: true` only if grep came up empty or the user explicitly asked for ask_jev. " +
   "If jev is unavailable the tool fails; then read the files instead."
 
 const ASK_INPUT_SCHEMA = {
@@ -542,11 +588,23 @@ const ASK_INPUT_SCHEMA = {
         '"domain": "business logic", "data": "database or storage access"}. Then ask "Which of these…?". ' +
         "Omit for a yes/no question.",
     },
+    pattern: {
+      type: "string",
+      minLength: 1,
+      maxLength: 300,
+      description:
+        "Optional ripgrep regex for a question that is really a text search (e.g. \"\\.send\\(\\)\" for \"which files call " +
+        'send()"). Used when jev decides the question is a text search.',
+    },
+    force: {
+      type: "boolean",
+      description: "Skip the text-search check and scan anyway. Only if grep came up empty or the user explicitly asked for ask_jev.",
+    },
   },
 }
 
 type Loc = { directory: string; project?: { directory?: string } }
-type AskInput = { paths: string[]; question: string; options?: Record<string, string> }
+type AskInput = { paths: string[]; question: string; options?: Record<string, string>; pattern?: string; force?: boolean }
 type AskCall = { sessionID?: string; agent?: string; messageID?: string; id?: string; signal?: AbortSignal }
 type Permission = { assert: (req: Record<string, unknown>) => Promise<unknown> }
 type Target = { abs: string; resource: string; shown: string }
@@ -753,6 +811,100 @@ function formatAnswers(s: AskSummary): string {
   return [head, ...shown, ...tailLines].join("\n")
 }
 
+// The read tool's permission check (FileAccess.authorizeRead) for one file; false when denied
+async function mayRead(f: Target, call: AskCall, permission: Permission): Promise<boolean> {
+  try {
+    const source = call.messageID && call.id ? { type: "tool", messageID: call.messageID, id: call.id } : undefined
+    await permission.assert({
+      action: "read",
+      resources: [f.resource],
+      save: ["*"],
+      ...(call.sessionID ? { sessionID: call.sessionID } : {}),
+      ...(call.agent ? { agent: call.agent } : {}),
+      ...(source ? { source } : {}),
+    })
+    return true
+  } catch {
+    if (call.signal?.aborted) throw new Error("aborted")
+    return false
+  }
+}
+
+// One request on the tool lane. Fails open: any problem means "scan".
+async function routeQuestion(question: string, options: Record<string, string> | undefined, force: boolean, signal?: AbortSignal): Promise<RouterInfo> {
+  const mode = routerMode()
+  if (mode === "off" || force) return { mode, p_grep: null, action: "scan", ms: 0, ...(force ? { error: "force" } : {}) }
+  const r = await query(routerState(question, options), { route: { type: "choice", criteria: ROUTER_CRITERIA } }, ASK_ROUTER_TIMEOUT_MS, {
+    signal,
+    lane: "tool",
+  })
+  if (!r.answers) return { mode, p_grep: null, action: "scan", ms: r.trace.ms, error: r.trace.error }
+  const p = r.answers.route.probabilities.grep ?? 0
+  if (p < ASK_ROUTER_GREP_MIN) return { mode, p_grep: p, action: "scan", ms: r.trace.ms }
+  return { mode, p_grep: p, action: mode === "rg" ? "rg" : "advise", ms: r.trace.ms }
+}
+
+function adviseGrep(question: string, router: RouterInfo, pattern?: string) {
+  const why = router.mode === "rg" && !pattern ? " (pass `pattern`, a ripgrep regex, and ask_jev will run the search for you)" : ""
+  const content =
+    `ask_jev: "${question}" reads as a text-search question (p=${pct(router.p_grep ?? 0)}), so a scan would be ` +
+    `slower than grep and no more accurate. Use grep for the exact name / call / import / string instead${why}. ` +
+    "Pass force: true only if grep comes up empty or the user explicitly asked for ask_jev."
+  return { content, metadata: { files: 0, chars: 0, tokens: 0, ms: router.ms, question, router } }
+}
+
+// rg mode: the same expanded, permission-checked file list, searched for the agent's pattern
+async function ripgrepFiles(
+  question: string,
+  pattern: string,
+  files: Target[],
+  more: number,
+  skipped: string[],
+  router: RouterInfo,
+  call: AskCall,
+  permission: Permission,
+  t0: number,
+) {
+  const allowed: Target[] = []
+  for (const f of files) {
+    if (call.signal?.aborted) throw new Error("aborted")
+    if (await mayRead(f, call, permission)) allowed.push(f)
+    else skipped.push(`${f.shown} (denied by permissions)`)
+  }
+  const counts = new Map<string, number>()
+  let rgError: string | undefined
+  if (allowed.length) {
+    const argv = ["--no-config", "--count-matches", "--with-filename", "-e", pattern, "--", ...allowed.map((f) => f.abs)]
+    await new Promise<void>((done) => {
+      execFile("rg", argv, { signal: call.signal, timeout: 10_000, maxBuffer: 16 << 20 }, (err: any, stdout) => {
+        if (err && err.code !== 1) rgError = String(err.message).split("\n").slice(0, 3).join(" ")
+        for (const line of String(stdout).split("\n")) {
+          const i = line.lastIndexOf(":")
+          if (i > 0) counts.set(line.slice(0, i), Number(line.slice(i + 1)) || 0)
+        }
+        done()
+      })
+    })
+  }
+  if (call.signal?.aborted) throw new Error("aborted")
+  const hits = allowed.filter((f) => counts.has(f.abs)).sort((a, b) => counts.get(b.abs)! - counts.get(a.abs)!)
+  const misses = allowed.filter((f) => !counts.has(f.abs))
+  const ms = Date.now() - t0
+  const lines = [
+    `ask_jev: "${question}" reads as a text-search question (p=${pct(router.p_grep ?? 0)}), so it ran ripgrep for /${pattern}/ ` +
+      `instead of a scan · ${allowed.length} file${allowed.length === 1 ? "" : "s"} searched in ${ms} ms`,
+  ]
+  if (rgError) lines.push(`ripgrep error: ${rgError}`)
+  for (const f of hits.slice(0, ASK_MAX_LINES - 6)) lines.push(`${counts.get(f.abs)} match${counts.get(f.abs) === 1 ? "" : "es"}  ${f.shown}`)
+  if (hits.length > ASK_MAX_LINES - 6) lines.push(`… ${hits.length - (ASK_MAX_LINES - 6)} more files with matches`)
+  if (misses.length)
+    lines.push(`no match: ${misses.length} file${misses.length === 1 ? "" : "s"} (${misses.slice(0, 10).map((f) => f.shown).join(", ")}${misses.length > 10 ? `, … +${misses.length - 10}` : ""})`)
+  if (more) lines.push(`+${more} more files matched the paths; narrow them to search those too`)
+  if (skipped.length) lines.push(`skipped: ${skipped.slice(0, 15).join(" · ")}`)
+  lines.push("These are exact text matches, not judgements: read a file before editing or quoting it. Pass force: true for a semantic scan.")
+  return { content: lines.join("\n"), metadata: { files: allowed.length, chars: 0, tokens: 0, ms, question, router, rg: { pattern, hits: hits.length } } }
+}
+
 // One chunk of one file, waiting for a server
 type AskTask = { file: number; chunk: Chunk; state: string; tries: number }
 
@@ -769,7 +921,14 @@ async function askFiles(input: AskInput, call: AskCall, loc: Loc, permission: Pe
   const labels = Object.keys(criteria)
   const questions: Questions = { answer: { type: "choice", criteria } }
 
+  // ---- route: would a plain text search answer this?
+  const router = await routeQuestion(question, input.options, input.force === true, signal)
+  if (signal?.aborted) throw new Error("aborted")
+  if (router.action === "rg" && !input.pattern) router.action = "advise" // rg mode needs a pattern to search for
+  if (router.action === "advise") return adviseGrep(question, router, input.pattern)
+
   const { files, more, skipped } = await expandPaths(loc, input.paths, signal)
+  if (router.action === "rg") return ripgrepFiles(question, input.pattern!, files, more, skipped, router, call, permission, t0)
   const notChecked: string[] = []
   const meta: { shown: string; lines: number; partial?: string; n: number }[] = []
   const tasks: AskTask[] = []
@@ -778,18 +937,7 @@ async function askFiles(input: AskInput, call: AskCall, loc: Loc, permission: Pe
   // ---- prepare
   for (const f of files) {
     if (signal?.aborted) throw new Error("aborted")
-    try {
-      const source = call.messageID && call.id ? { type: "tool", messageID: call.messageID, id: call.id } : undefined
-      await permission.assert({
-        action: "read",
-        resources: [f.resource],
-        save: ["*"],
-        ...(call.sessionID ? { sessionID: call.sessionID } : {}),
-        ...(call.agent ? { agent: call.agent } : {}),
-        ...(source ? { source } : {}),
-      })
-    } catch {
-      if (signal?.aborted) throw new Error("aborted")
+    if (!(await mayRead(f, call, permission))) {
       skipped.push(`${f.shown} (denied by permissions)`)
       continue
     }
@@ -907,7 +1055,8 @@ async function askFiles(input: AskInput, call: AskCall, loc: Loc, permission: Pe
     }
     content += "\n" + traceBlock("F4 ask_jev (first request shown)", trace)
   }
-  return { content, metadata: { files: verdicts.length, chars, tokens, ms, question, servers: perServer } }
+  if (tracing() && router.p_grep !== null) content += "\n" + `[jev trace] F4 router: ${JSON.stringify(router)}`
+  return { content, metadata: { files: verdicts.length, chars, tokens, ms, question, servers: perServer, router } }
 }
 
 // ---------------------------------------------------------------- hooks
@@ -1050,6 +1199,11 @@ export const __test = {
   downUntil,
   routes,
   ROUTES,
+  routerMode,
+  routerState,
+  routeQuestion,
+  ROUTER_FILE,
+  ASK_ROUTER_GREP_MIN,
   tracing,
   traceBlock,
   park,

@@ -135,17 +135,36 @@ below are what can still show whether `ask_jev` earns its place.
 
 ## Proposed changes
 
-1. **`agents/local-mind.md`: grep first.** If the question can be written as a pattern (a call,
-   an import, a name, a string), use grep. Use `ask_jev` only when no pattern can express the
-   question (semantic questions), or for a long saved output ("full output saved to <path>").
-   Today the prompt says to reach for `ask_jev` *first* when scouting; that sent this run down the
-   slow path. Mirror the rule in the tool description (`ASK_DESCRIPTION` in `plugins/jev.ts`) and
-   in the reviewers' `## ask_jev` sections.
+1. **Grep first: implemented, being compared.** Two halves:
+   - **`agents/local-mind.md`** now says to grep whenever the question can be written as a pattern,
+     including behaviour with an obvious code signature. The reviewers each got one line, and the
+     tool description matches.
+   - **`ask_jev` router** (`plugins/jev.ts`): before scanning, one decision-model request asks
+     whether a plain text search would answer the question. Calibrated on 40 questions: semantic
+     ones scored p(grep) 0.05–0.37 (none routed at the 0.80 threshold), grep-shaped ones 0.89–0.96
+     (15 of 17 routed). Modes, switchable at runtime via `~/.config/opencode/jev-router`:
+     - `advise` (default): answer "use grep"
+     - `rg`: run ripgrep for the agent's `pattern`
+     - `off`: always scan
+
+     `force: true` skips it. Live on "which files call send()": advise 56 ms; rg 36 ms with all 9
+     matching files; the old scan 4.8 s, covering only 17 of 40 files and answering "no" for two
+     files that do call it.
+
+   **Comparison protocol.** Each in a fresh local-mind session; numbers via
+   `python3 -I scripts/session-report.py --match "<prompt start>" --latest N`:
+   - Grep-shaped, once per mode (`echo off|advise|rg > container_data/config/opencode/jev-router`
+     before each):
+     "Without reading them, use ask_jev to find which files under llama-proxy/src call reqwest's
+     send(), then read only the hits."
+   - The same question with "Do not use the ask_jev tool; use your normal tools" as the control.
+   - Change 2's semantic question in `advise` mode, where the router must pass it through to a scan.
 2. **Run the semantic pair before judging `ask_jev` overall.** Same method (fresh sessions, one
    with and one with "Do not use the ask_jev tool"), with a question grep can't express, e.g.
    "Which files under llama-proxy/src decide which backend a request goes to, or retry/fail over
-   when one is down?" Then pull the numbers from opencode.db the same way. If `ask_jev` doesn't win
-   there either, narrow it to the saved-output case.
+   when one is down?" Pull the numbers with `scripts/session-report.py`. If `ask_jev` doesn't win
+   there either, narrow it to the saved-output case. (Live check: the router scored this question
+   p(grep) 0.12, so it scans.)
 3. **Combining chunks for `options`.** Today: a length-weighted mean, which turns multi-purpose
    files (`augment.rs`, `handler.rs`, `main.rs`) into "unsure". Option: count a label that any
    part of the file matches strongly (max per label, as yes/no already does), and show the line
