@@ -30,13 +30,14 @@ the plugin stays out of the way) on llama.cpp build >= 11773, probed against b12
 from `server/llamacpp/run-jev-benchmark`. `/v1/systemone` runs a request's questions in separate
 slots, and clips any state to ~32k tokens silently.
 
-**How the plugin uses both.** `JEV_URLS` lists the servers, fastest first (default
-`http://cosmo.lan:8710,http://cosmo.lan:8711`). `JEV_MODE` picks how they're used:
+**How the plugin uses both.** `JEV_URLS` lists the servers, preferred first (default
+`http://cosmo.lan:8711,http://cosmo.lan:8710`: the 4060 first, because basalt on the 6000 runs faster
+when jev's hooks stay off it). `JEV_MODE` picks how they're used:
 
 | Mode | Hooks (F1/F2/F3) | `ask_jev` scans |
 |---|---|---|
-| `share` (default) | the first server that is up (the 6000), failing over to the next | every server at once: each takes the next chunk when it's free, so the 6000 does ~5x more of them. Measured live: a 398k-char scan took 5.4 s, 48 requests on the 6000 and 11 on the 4060 |
-| `split` | the last server (the 4060), failing over to the other | the first server (the 6000), with the other on standby if it fails |
+| `share` (default) | the first server that is up (the 4060: shell check ~130 ms, review ~1.9 s), failing over to the 6000 | every server at once: each takes the next chunk when it's free, so the 6000 still does ~5x more of them whatever the order. Measured live: a 398k-char scan took 5.4 s, 48 requests on the 6000 and 11 on the 4060 |
+| `split` | the last server (the 6000), failing over to the other | the first server (the 4060), with the 6000 on standby if it fails: scans stay off basalt's GPU, at ~4k tok/s (a 400k-char scan ~29 s) |
 
 `split` keeps shell checks off the GPU that runs scans. That only matters when several sessions run
 at once: in one session the agent never runs a shell command while a scan is going (checked
@@ -463,7 +464,7 @@ That just means one missed hint and a 60 s pause, nothing more.
 
 | Env var | Effect |
 |---|---|
-| `JEV_URLS` | Decision servers, fastest first, comma-separated (default `http://cosmo.lan:8710,http://cosmo.lan:8711`: the 6000, then the 4060; trailing `/` is stripped) |
+| `JEV_URLS` | Decision servers, preferred first, comma-separated (default `http://cosmo.lan:8711,http://cosmo.lan:8710`: the 4060, then the 6000; trailing `/` is stripped) |
 | `JEV_MODE` | `share` (default: hooks on the first server that is up, scans on all) or `split` (hooks on the last server, scans on the first) |
 | `JEV_HOOK_URL` / `JEV_TOOL_URL` | Override which server split mode uses for hooks / for `ask_jev` |
 | `JEV_URL` | A single server, used only when `JEV_URLS` is unset |
@@ -512,7 +513,7 @@ pieces, including `askFiles`) for calibration scripts. The plugin loader reads o
 ## Checking it
 
 - On startup, the OpenCode log should show
-  `[jev] decision servers, share mode: hooks -> http://cosmo.lan:8710 then http://cosmo.lan:8711; ask_jev -> http://cosmo.lan:8710 + http://cosmo.lan:8711`.
+  `[jev] decision servers, share mode: hooks -> http://cosmo.lan:8711 then http://cosmo.lan:8710; ask_jev -> http://cosmo.lan:8711 + http://cosmo.lan:8710`.
 - To probe a server by hand from inside the LAN (8710 is the 6000, 8711 the 4060):
 
   ```sh

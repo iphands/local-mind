@@ -26,8 +26,8 @@
 //     one `choice` rather than one question per item
 //   - `choice` criteria descriptions are tokenized and carry the meaning of each option
 //
-// Env: JEV_URLS (servers, fastest first; default http://cosmo.lan:8710,http://cosmo.lan:8711, the
-//      6000 then the 4060), JEV_MODE (share, the default, or split), JEV_HOOK_URL / JEV_TOOL_URL
+// Env: JEV_URLS (servers, preferred first; default http://cosmo.lan:8711,http://cosmo.lan:8710, the
+//      4060 then the 6000), JEV_MODE (share, the default, or split), JEV_HOOK_URL / JEV_TOOL_URL
 //      (split-mode overrides), JEV_URL (a single server, when JEV_URLS is unset), JEV_DISABLE=1
 //      turns every feature off. See "decision servers" below for what each mode does.
 //
@@ -44,9 +44,10 @@ import { homedir } from "node:os"
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path"
 
 const norm = (u?: string) => (u ?? "").trim().replace(/\/+$/, "")
-// Fastest first. Default: the RTX PRO 6000 server (run-jev-6000, :8710) and the RTX 4060 server
-// (run-jev-4060, :8711). JEV_URL (one server) still works when JEV_URLS is unset.
-const JEV_URLS = (process.env.JEV_URLS ?? process.env.JEV_URL ?? "http://cosmo.lan:8710,http://cosmo.lan:8711")
+// Preferred first. Default: the RTX 4060 server (run-jev-4060, :8711), then the RTX PRO 6000 server
+// (run-jev-6000, :8710). The 4060 goes first so hooks stay off the 6000, where basalt runs faster
+// without them. JEV_URL (one server) still works when JEV_URLS is unset.
+const JEV_URLS = (process.env.JEV_URLS ?? process.env.JEV_URL ?? "http://cosmo.lan:8711,http://cosmo.lan:8710")
   .split(",")
   .map(norm)
   .filter(Boolean)
@@ -91,12 +92,13 @@ const log = (msg: string) => console.warn(`[jev] ${msg}`)
 
 // ---------------------------------------------------------------- decision servers
 
-// JEV_URLS lists the servers, fastest first. Two modes:
+// JEV_URLS lists the servers, preferred first. Two modes:
 //   share (default): hooks go to the first server that is up, failing over down the list; every
 //     ask_jev call hands its chunks to one worker per server, each pulling the next chunk when free,
-//     so the faster card simply does more of them.
+//     so the faster card does more of them whatever the order.
 //   split: hooks use JEV_HOOK_URL (default: the last server) and ask_jev uses JEV_TOOL_URL (default:
-//     the first), each failing over to the other servers. Keeps shell checks away from scans.
+//     the first), each failing over to the other servers. Keeps shell checks away from scans. With
+//     the default order that is scans on the 4060 and hooks on the 6000.
 // Every server has its own cooldown and its own one-at-a-time ask_jev queue.
 type Server = { url: string; downUntil: number; queue: Promise<void> }
 const servers = new Map<string, Server>()

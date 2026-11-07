@@ -203,9 +203,9 @@ touch opencode/container_data/config/opencode/jev-trace</code></pre>
   </div>
   <div class="panel">
     <h3>Environment (read at startup)</h3>
-<pre><code>JEV_URLS=http://cosmo.lan:8710,http://cosmo.lan:8711   # servers, fastest first (the default)
+<pre><code>JEV_URLS=http://cosmo.lan:8711,http://cosmo.lan:8710   # servers, preferred first (the default: 4060 first)
 JEV_MODE=share        # default: hooks on the first server up, scans on all
-JEV_MODE=split        # hooks on the last server (4060), scans on the first (6000)
+JEV_MODE=split        # hooks on the last server (6000), scans on the first (4060)
 JEV_HOOK_URL=… / JEV_TOOL_URL=…   # override split mode's choice
 JEV_DISABLE=1         # register no hooks and no tool
 JEV_TRACE=1           # trace view always on
@@ -232,7 +232,7 @@ jev flagged this command as irreversible (p=0.96); confirm to run it
   </div>
   <div class="panel">
     <h3>Logs (<code>opencode serve</code> log)</h3>
-<pre><code>[jev] decision servers, share mode: hooks -> http://cosmo.lan:8710 then http://cosmo.lan:8711; ask_jev -> … + …
+<pre><code>[jev] decision servers, share mode: hooks -> http://cosmo.lan:8711 then http://cosmo.lan:8710; ask_jev -> … + …
 [jev] escalated to ask: irreversible p=0.96: dd if=…
 [jev] http://cosmo.lan:8711 unavailable (&lt;error&gt;); skipping it for 60s</code></pre>
   </div>
@@ -471,8 +471,8 @@ jev answers are a 4B classifier's guesses: read a file before editing it, quotin
       <tr><th>Endpoint</th><td><code>http://cosmo.lan:8710/v1/systemone</code></td><td><code>http://cosmo.lan:8711/v1/systemone</code></td></tr>
       <tr><th>Slots</th><td>16, shared 40960-token KV pool, UB 2048 · ~8.2 GiB</td><td>8, shared 40960-token KV pool, UB 512 · ~7.1 GiB</td></tr>
       <tr><th>Speed</th><td>~20k tok/s prefill · shell check ~33 ms · review ~0.4 s</td><td>~4k tok/s · shell check ~130 ms · review ~1.9 s</td></tr>
-      <tr><th>Share mode (default)</th><td>first for hooks · takes most scan chunks</td><td>hook failover · takes scan chunks too</td></tr>
-      <tr><th>Split mode</th><td>scans (the 4060 on standby)</td><td>hooks (the 6000 on standby)</td></tr>
+      <tr><th>Share mode (default)</th><td>hook failover · takes most scan chunks</td><td>first for hooks (keeps them off basalt's GPU) · takes scan chunks too</td></tr>
+      <tr><th>Split mode</th><td>hooks (the 4060 on standby)</td><td>scans (the 6000 on standby): scans stay off basalt's GPU</td></tr>
     </tbody>
   </table>
 </div>

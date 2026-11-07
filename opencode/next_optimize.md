@@ -194,8 +194,8 @@ below are what can still show whether `ask_jev` earns its place.
   faster than the 4060, same answers; `/v1/systemone` clips states at ~32k tokens.
 - `ask_jev`: global queue (one request in flight across calls). Live test: 3 parallel calls, the
   server never had more than 3 slots busy, shell checks p50 583 ms / max 985 ms, no cooldown.
-- Both jev servers from the plugin (was change 7): `JEV_URLS` (default `http://cosmo.lan:8710,http://cosmo.lan:8711`,
-  the 6000 then the 4060; launchers now default to those ports), `JEV_MODE=share` (default: hooks on
+- Both jev servers from the plugin (was change 7): `JEV_URLS` (default `http://cosmo.lan:8711,http://cosmo.lan:8710`,
+  the 4060 then the 6000, swapped so hooks stay off basalt's GPU; launchers default to those ports), `JEV_MODE=share` (default: hooks on
   the first server up with failover, `ask_jev` chunks pulled by one worker per server) or
   `JEV_MODE=split` (hooks on the 4060, scans on the 6000, each failing over to the other), per-server
   cooldowns and queues, one retry per failed chunk on another server. Live: a 398k-char scan in 5.4 s
