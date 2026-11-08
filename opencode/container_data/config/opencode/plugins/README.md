@@ -169,6 +169,55 @@ when every target is a plain relative path inside the working directory: no `/`,
 bare `.`, globs, pipes, redirects, `;`, `&` or command substitution. That rm stays `allow`. Any
 other rm goes to the model as usual.
 
+#### Reads of the web, and `/tmp` scratch work (recalibrated 2026-11-08)
+
+The first criteria flagged far too much. In one session, 8 of 9 permission prompts were jev
+escalations of harmless commands. Any command with an internet URL scored `network` ~0.9, even a
+`curl … | jq` that only reads (`read_only` 0.92). `ln -sf /usr/bin/bash /tmp/opencode/fakebin/bash`
+scored `system` 0.78. Two changes fixed this:
+
+1. The criteria now spell it out. `routine` covers fetching a web page, API response or docs to read
+   or save as text, `git fetch`, and scratch files, directories and symlinks under `/tmp`. `network`
+   now means running or installing code from the internet, downloading model weights, binaries,
+   archives or container images, `POST`/`PUT`/`DELETE` to a remote API, and `git push`. `system`
+   no longer names `/usr`, which made any path mentioning it look like a system change.
+2. A `network` hit is dropped when `read_only` scores at least `READ_ONLY_NETWORK_MIN` (0.50). Only
+   `network` is dropped: `destructive`, `system` and the `irreversible` check still apply. Each
+   dropped hit is logged (`network p=… not escalated, read_only p=…`).
+
+Calibrated against 65 labelled commands: the session's 9 prompted commands, 25 random ones from the
+same session, 21 that must ask and 10 more harmless ones. Results were the same on two runs:
+
+| | missed asks | false asks |
+|---|---|---|
+| old criteria | 0 / 21 | 15 / 44 |
+| old criteria + read_only rule | 0 | 8 |
+| new criteria | 0 | 6 |
+| new criteria + read_only rule (shipped) | 0 | 1 |
+
+The margin is wide. Commands that must ask and score `network` reach `read_only` 0.27 at most
+(`docker pull`, model downloads, `curl -X POST`). The reads that the rule clears score 0.78–0.93. A
+`curl … | sh` scores `read_only` 0.02. The one false ask left is a bare
+`ln -sf /usr/bin/bash /tmp/…` (`system` 0.94). The same `ln` inside a longer scratch-setup command
+passes.
+
+#### "Always" does not stick for a jev prompt
+
+In OpenCode v2.2.6 (`Permission` service), a permission is decided in this order:
+
+1. The config rules and the saved "Always" approvals for the project are combined into one effect.
+2. The `permission` `evaluate` hook runs. This is where F3 runs.
+3. The hook's effect is final. The saved approvals are not checked again.
+
+Since the config already allows every shell command, a saved approval never changes step 1, and
+F3 decides again on every run. Answering **Always** to a jev prompt saves a rule per command in
+the chain (`curl *`, `python3 *`, `head *`, …) that has no effect, so answer **once**. To quiet a
+false ask, fix the criteria or thresholds here.
+
+Saved approvals are also keyed by project id. A project that gets `git init` mid-session is
+re-keyed from its directory to its root commit, and its earlier approvals are left behind under the
+old id.
+
 F3 can only move `allow` to `ask`. It never touches commands that are already `ask` or `deny`
 (the `git reset --hard`, `git clean`, `git push --force` and `git branch -D` rules in
 `opencode.jsonc` stay as they are), and it never turns anything into `deny`.
@@ -470,6 +519,7 @@ That just means one missed hint and a 60 s pause, nothing more.
 | `JEV_URL` | A single server, used only when `JEV_URLS` is unset |
 | `JEV_DISABLE=1` | Registers no hooks and no `ask_jev` tool; logs `JEV_DISABLE=1, not registering hooks` |
 | `JEV_TRACE=1` | Trace view always on (same as the `jev-trace` file existing) |
+| `JEV_LOG` | File every `[jev]` log line is appended to, timestamped, one line per entry (default `$XDG_DATA_HOME/opencode/log/jev.log`, i.e. `~/.local/share/opencode/log/jev.log`, which is `container_data/local/share/opencode/log/jev.log` on the host). Empty turns it off. OpenCode does not keep plugin console output, so this file is the only record of F3 escalations (`escalated to ask: …`) and dropped network hits |
 | `JEV_ROUTER` | `ask_jev` router mode when the toggle file is absent: `advise` (default), `rg` or `off` |
 | `$XDG_CONFIG_HOME/opencode/jev-router` | Router setting while this file exists: `off`, `advise` or `rg`, optionally followed by `strict` (ignore the agent's `force`). Read on every call |
 | `$XDG_CONFIG_HOME/opencode/jev-trace` | Trace view on while this file exists (default `~/.config/opencode/jev-trace`) |
@@ -491,6 +541,7 @@ Tunables live at the top of `jev.ts` and were set from a calibration run:
 | `RUNNER_UP_MIN` | 0.20 | show the second verdict label at or above this |
 | `ESCALATE_MIN` | 0.70 | shell `allow` -> `ask` threshold |
 | `IRREVERSIBLE_MIN` | 0.85 | shell `allow` -> `ask` on an `irreversible` answer alone |
+| `READ_ONLY_NETWORK_MIN` | 0.50 | a `network` hit is dropped when `read_only` is at least this |
 | `TRACE_STATE_CHARS` | 800 | state shown in a trace (head + tail) |
 | `TRACE_KEEP` | 16 | F1/F3 traces waiting for their tool result |
 | `TRACE_MAX_AGE_MS` | 600000 | a waiting trace older than this is dropped |

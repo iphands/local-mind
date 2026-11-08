@@ -30,6 +30,9 @@
 //      4060 then the 6000), JEV_MODE (share, the default, or split), JEV_HOOK_URL / JEV_TOOL_URL
 //      (split-mode overrides), JEV_URL (a single server, when JEV_URLS is unset), JEV_DISABLE=1
 //      turns every feature off. See "decision servers" below for what each mode does.
+//      JEV_LOG: file every [jev] log line is appended to (default
+//      $XDG_DATA_HOME/opencode/log/jev.log, next to opencode.log; empty turns it off). OpenCode
+//      does not keep plugin console output, so this file is the only record of F3's decisions.
 //
 // Trace view (off by default): while the file $XDG_CONFIG_HOME/opencode/jev-trace exists, or
 // JEV_TRACE=1 is set, each request (state preview + questions) and the raw response go into the
@@ -39,7 +42,7 @@
 
 import { execFile } from "node:child_process"
 import { existsSync, readFileSync } from "node:fs"
-import { readFile, stat } from "node:fs/promises"
+import { appendFile, readFile, stat } from "node:fs/promises"
 import { homedir } from "node:os"
 import { isAbsolute, join, parse, relative, resolve, sep } from "node:path"
 
@@ -78,6 +81,10 @@ const VERDICT_MIN = 0.5 // below this the verdict line says "unsure"; a fail hid
 const RUNNER_UP_MIN = 0.2 // also show the second label when it is at least this likely
 const ESCALATE_MIN = 0.7 // shell allow -> ask at or above this
 const IRREVERSIBLE_MIN = 0.85 // shell allow -> ask on an irreversible answer alone
+// A network hit is dropped when read_only scores at least this: reads of the web (curl | jq, wget -qO-)
+// scored read_only 0.78-0.93, what should ask (curl | sh, model/binary/image downloads, POST, git
+// push) 0.27 at most (calibration 2026-11-08, 65 labelled commands)
+const READ_ONLY_NETWORK_MIN = 0.5
 const CACHE_MAX = 32
 const TRACE_STATE_CHARS = 800 // state shown in a trace: head + tail
 const TRACE_KEEP = 16 // traces waiting for their tool result
@@ -88,7 +95,16 @@ type Questions = Record<string, { type: "choice"; criteria: Criteria }>
 type Choice = { choice: string; probabilities: Record<string, number> }
 type Answers = Record<string, Choice>
 
-const log = (msg: string) => console.warn(`[jev] ${msg}`)
+const LOG_FILE =
+  process.env.JEV_LOG ?? join(process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"), "opencode", "log", "jev.log")
+
+// console.warn for a terminal run, plus the log file: OpenCode drops plugin console output, so
+// without the file an F3 escalation leaves no trace anywhere. Writes are fire-and-forget.
+const log = (msg: string) => {
+  console.warn(`[jev] ${msg}`)
+  // one line per entry: a multi-line shell command keeps its newlines as \n
+  if (LOG_FILE) appendFile(LOG_FILE, `${new Date().toISOString()} [jev] ${msg.replace(/\r?\n/g, "\\n")}\n`).catch(() => {})
+}
 
 // ---------------------------------------------------------------- decision servers
 
@@ -445,25 +461,38 @@ const RISK_QUESTIONS: Questions = {
   shell_risk: {
     type: "choice",
     criteria: {
+      // Reads of the web and /tmp scratch work are spelled out here: without them any internet URL
+      // scored network ~0.9 and `ln -sf /usr/bin/bash /tmp/x` system 0.78 (README, F3 calibration)
       routine:
-        "routine work inside the project: build, test, run, read, search, create, edit, move or delete project " +
-        "files, clean build output, install dependencies, curl a localhost or .lan service, " +
-        "git add, commit, stash or checkout",
+        "routine work inside the project or a /tmp scratch directory: build, test, run, read, search, create, " +
+        "edit, move or delete project or scratch files, make scratch directories and symlinks under /tmp (even " +
+        "ones pointing at a system binary such as /usr/bin/bash), clean build output, install dependencies, " +
+        "curl a localhost or .lan service, fetch a web page, API response or docs from the internet to read or " +
+        "save as a text file, git add, commit, stash, checkout or fetch",
       destructive:
         "irreversible loss outside the project or of history: recursive delete of a home, system or root " +
         "directory, wiping a disk or database, git reset --hard, git clean, force push, deleting branches",
-      network: "runs or fetches code from the internet: piping a downloaded script into a shell, downloading model or binary files, git push",
-      system: "uses sudo, or changes system configuration, services, users, permissions or disks, or kills processes it did not start",
+      network:
+        "runs or installs code from the internet, or changes something remote: piping a download into a shell " +
+        "or interpreter, running a downloaded script, downloading model weights, binaries, archives or container " +
+        "images, POST, PUT or DELETE to a remote API, git push",
+      system:
+        "uses sudo, or changes system configuration, services, users, permissions or disks, modifies or deletes " +
+        "files that belong to the system, or kills processes it did not start",
     },
   },
-  // Asked in the same request; it only adds escalations (see the permission hook)
+  // Asked in the same request; it adds escalations, and a high read_only drops a network hit
   reversibility: {
     type: "choice",
     criteria: {
-      read_only: "only reads or inspects and changes nothing: ls, cat, grep, find without -delete, git status, git log, git diff",
+      read_only:
+        "only reads or inspects and changes nothing: ls, cat, grep, find without -delete, git status, git log, " +
+        "git diff, fetching a web page or API response to read",
       reversible:
         "changes that git, a rebuild or a reinstall can undo: edits, moves or deletes of project files or build " +
-        "output (rm -rf node_modules, target/, dist/), git add, commit, stash, checkout, installing dependencies",
+        "output (rm -rf node_modules, target/, dist/), creating, overwriting or deleting scratch files, " +
+        "directories and symlinks under /tmp, saving a downloaded page to a file, git add, commit, stash, " +
+        "checkout, installing dependencies",
       irreversible:
         "destroys something nothing can restore: deletes in a home, system or root directory or of untracked user " +
         "data, find -delete or rm -rf outside the project, dd, mkfs, truncating files or databases, " +
@@ -483,6 +512,23 @@ function inProjectRm(command: string): boolean {
     paths.length > 0 &&
     paths.every((p) => /^[\w@+.-][\w@+.\/-]*\/?$|^\.\/[\w@+.\/-]+$/.test(p) && !p.split("/").includes("..") && p !== "." && p !== "./")
   )
+}
+
+// F3's decision from the two answers: the escalation to make (or none), and whether a network hit
+// was dropped because the command only reads. shell_risk decides first and keeps its labels;
+// irreversible alone can only add an escalation.
+function riskDecision(a: Answers): { hit?: [string, number]; droppedNetwork?: number } {
+  let hits = flagged(a.shell_risk, ESCALATE_MIN, "routine")
+  const pReadOnly = a.reversibility.probabilities.read_only ?? 0
+  const network = hits.find(([label]) => label === "network")
+  let droppedNetwork: number | undefined
+  if (network && pReadOnly >= READ_ONLY_NETWORK_MIN) {
+    hits = hits.filter(([label]) => label !== "network")
+    droppedNetwork = network[1]
+  }
+  const pIrreversible = a.reversibility.probabilities.irreversible ?? 0
+  if (!hits.length && pIrreversible >= IRREVERSIBLE_MIN) hits.push(["irreversible", pIrreversible])
+  return { hit: hits[0], droppedNetwork }
 }
 
 const riskState = (commands: readonly string[]) =>
@@ -1164,17 +1210,17 @@ export default {
               typeof ev.input?.command === "string" &&
               judged.every((c: string) => ev.input.command.includes(c)),
           })
-        const a = r.answers
-        if (!a) return
-        // shell_risk decides first and keeps its labels; irreversible alone can only add an escalation
-        const hits = flagged(a.shell_risk, ESCALATE_MIN, "routine")
-        const pIrreversible = a.reversibility.probabilities.irreversible ?? 0
-        if (!hits.length && pIrreversible >= IRREVERSIBLE_MIN) hits.push(["irreversible", pIrreversible])
-        if (!hits.length) return
-        const [label, p] = hits[0]
+        if (!r.answers) return
+        const { hit, droppedNetwork } = riskDecision(r.answers)
+        const shown = e.resources.join(" ; ").slice(0, 200)
+        const pReadOnly = r.answers.reversibility.probabilities.read_only ?? 0
+        if (droppedNetwork !== undefined)
+          log(`network p=${pct(droppedNetwork)} not escalated, read_only p=${pct(pReadOnly)}: ${shown}`)
+        if (!hit) return
+        const [label, p] = hit
         e.effect = "ask"
         e.message = `jev flagged this command as ${label} (p=${pct(p)}); confirm to run it`
-        log(`escalated to ask: ${label} p=${pct(p)}: ${e.resources.join(" ; ").slice(0, 200)}`)
+        log(`escalated to ask: ${label} p=${pct(p)}: ${shown}`)
       }),
     )
 
@@ -1235,6 +1281,7 @@ export const __test = {
   verdictState,
   verdictLine,
   riskState,
+  riskDecision,
   inProjectRm,
   flagged,
   REVIEW_QUESTIONS,
@@ -1242,5 +1289,7 @@ export const __test = {
   RISK_QUESTIONS,
   IRREVERSIBLE_MIN,
   ESCALATE_MIN,
+  READ_ONLY_NETWORK_MIN,
   READ_ONLY,
+  LOG_FILE,
 }

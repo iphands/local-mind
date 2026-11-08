@@ -210,6 +210,7 @@ JEV_MODE=split        # hooks on the last server (6000), scans on the first (406
 JEV_HOOK_URL=… / JEV_TOOL_URL=…   # override split mode's choice
 JEV_DISABLE=1         # register no hooks and no tool
 JEV_TRACE=1           # trace view always on
+JEV_LOG=…             # log file (default ~/.local/share/opencode/log/jev.log); empty turns it off
 JEV_ROUTER=advise     # ask_jev router: advise (default), rg or off
                       # add "strict" to ignore the agent's force (A/B runs)
                       # or at runtime: echo "rg strict" &gt; ~/.config/opencode/jev-router</code></pre>
@@ -232,9 +233,11 @@ jev flagged this command as irreversible (p=0.96); confirm to run it
 ## Decision-model pre-screen (a 4B model's hints, not findings — …)</code></pre>
   </div>
   <div class="panel">
-    <h3>Logs (<code>opencode serve</code> log)</h3>
+    <h3>Logs (<code>jev.log</code>)</h3>
+    <p>OpenCode drops plugin console output, so jev appends its lines to <code>~/.local/share/opencode/log/jev.log</code> (on the host: <code>container_data/local/share/opencode/log/jev.log</code>).</p>
 <pre><code>[jev] decision servers, share mode: hooks -> http://cosmo.lan:8711 then http://cosmo.lan:8710; ask_jev -> … + …
 [jev] escalated to ask: irreversible p=0.96: dd if=…
+[jev] network p=0.79 not escalated, read_only p=0.92: curl -s https://api.github.com/… | jq …
 [jev] http://cosmo.lan:8711 unavailable (&lt;error&gt;); skipping it for 60s</code></pre>
   </div>
 </div>
@@ -323,7 +326,7 @@ jev flagged this command as irreversible (p=0.96); confirm to run it
     <dl class="kv">
       <dt>Runs on</dt><dd>shell commands with effect <code>allow</code> only. <code>ask</code> and <code>deny</code> rules in <code>opencode.jsonc</code> are never touched</dd>
       <dt>shell_risk</dt><dd><code>routine</code> / <code>destructive</code> / <code>network</code> / <code>system</code>. Any non-routine label ≥ <b>0.70</b> escalates</dd>
-      <dt>reversibility</dt><dd><code>read_only</code> / <code>reversible</code> / <code>irreversible</code>, with worked examples in each criterion. If shell_risk found nothing, irreversible ≥ <b>0.85</b> escalates. It only adds escalations: it never cancels a shell_risk hit</dd>
+      <dt>reversibility</dt><dd><code>read_only</code> / <code>reversible</code> / <code>irreversible</code>, with worked examples in each criterion. If shell_risk found nothing, irreversible ≥ <b>0.85</b> escalates. read_only ≥ <b>0.50</b> drops a <code>network</code> hit (reads of the web); it never cancels destructive or system</dd>
       <dt>Message</dt><dd>reports the shell_risk label when both fire. Otherwise it says <code>irreversible</code></dd>
       <dt>rm fast path</dt><dd>an <code>rm</code> whose every target is a plain relative path inside the working directory (no <code>/</code> <code>~</code> <code>$</code> <code>..</code>, bare <code>.</code>, globs, pipes, redirects, <code>;</code> <code>&amp;</code> or <code>$(…)</code>) stays <code>allow</code> with no model call. The model scores any rm as destructive (<code>rm -rf target/</code> 0.94 vs <code>rm -rf ~/x</code> 0.96)</dd>
     </dl>
@@ -350,6 +353,7 @@ jev flagged this command as irreversible (p=0.96); confirm to run it</code></pre
       </table>
     </div>
     <div class="callout ok">Everything that should ask scored irreversible ≥ 0.92. Routine commands scored ≤ 0.10. Each request with both questions took about 125 ms.</div>
+    <div class="callout">Recalibrated 2026-11-08: every internet URL had scored network ~0.9, even reads (<code>curl … | jq</code>), and scratch symlinks under <code>/tmp</code> scored system. New criteria plus the read_only rule: 65 labelled commands, 0 / 21 missed asks, false asks 15 → 1. Answer a jev prompt <b>once</b>, not <b>Always</b>: OpenCode runs this hook after the saved approvals, so an "Always" rule never stops it asking again.</div>
   </div>
 </section>
 
@@ -508,6 +512,7 @@ jev answers are a 4B classifier's guesses: read a file before editing it, quotin
       <tr><td><code>RUNNER_UP_MIN</code></td><td class="num">0.20</td><td>show the second verdict label</td></tr>
       <tr><td><code>ESCALATE_MIN</code></td><td class="num">0.70</td><td>shell_risk: <code>allow</code> → <code>ask</code></td></tr>
       <tr><td><code>IRREVERSIBLE_MIN</code></td><td class="num">0.85</td><td>reversibility: <code>allow</code> → <code>ask</code> on irreversible alone</td></tr>
+      <tr><td><code>READ_ONLY_NETWORK_MIN</code></td><td class="num">0.50</td><td>a network hit is dropped when read_only is at least this</td></tr>
       <tr><td><code>TRACE_STATE_CHARS</code></td><td class="num">800</td><td>state shown in a trace</td></tr>
       <tr><td><code>TRACE_KEEP</code></td><td class="num">16</td><td>traces waiting for their tool result</td></tr>
       <tr><td><code>TRACE_MAX_AGE_MS</code></td><td class="num">600000</td><td>a waiting trace older than this is dropped</td></tr>
