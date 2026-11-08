@@ -13,3 +13,5 @@
 /container_data/config/opencode/jev-router
 # model-switcher build output
 /helpers/model-switcher/target
+# local claude transcripts, never committed (same as opencode-legacy)
+/container_data/claude_transcripts
