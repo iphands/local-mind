@@ -6,6 +6,8 @@ RUN useradd iphands
 
 USER iphands
 
+RUN echo bump_000
+
 RUN curl -fsSL https://pi.dev/install.sh | sh
 
 WORKDIR /home/iphands
