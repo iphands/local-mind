@@ -4,12 +4,32 @@ ROOT=`git rev-parse --show-toplevel`
 
 # Container runtime: docker if present, else podman (override with CONTAINER_RUNTIME)
 CRT=${CONTAINER_RUNTIME:-$(command -v docker >/dev/null 2>&1 && echo docker || echo podman)}
+command -v "${CRT}" >/dev/null 2>&1 || { echo "no container runtime '${CRT}' on PATH" >&2; exit 1; }
 
-BUILD_ARGS=()
-if [ "$(uname -m)" != x86_64 ]; then
-  # separate arm64 tag of the pkgcache base image
-  BUILD_ARGS+=(--build-arg BASE_IMAGE=iphands/pkgcache-fedora:latest-arm64)
-fi
+# pkgcache-fedora tags x86_64 as :<release> and every other arch as
+# :<release>-<arch> (see ~/prog/slop/cache/containers/fedora/build). Same suffix
+# rule here, so both arches build against the SAME Fedora release, which is
+# declared once in Dockerfile.base as ARG FEDORA_RELEASE.
+case "$(uname -m)" in
+  x86_64)        ARCH_SUFFIX= ;;
+  aarch64|arm64) ARCH_SUFFIX=-arm64 ;;
+  *)             ARCH_SUFFIX=-$(uname -m) ;;
+esac
+BUILD_ARGS=(--build-arg ARCH_SUFFIX="${ARCH_SUFFIX}")
 
 cd "${ROOT}/opencode" || exit 1
+
+# Fail here, not 200 layers in, when this arch's base tag was never built.
+# Read the release back out of Dockerfile.base so there is still one source.
+RELEASE=$(sed -n 's/^ARG FEDORA_RELEASE=\(.*\)$/\1/p' Dockerfile.base | head -1)
+BASE_IMAGE=iphands/pkgcache-fedora:${RELEASE}${ARCH_SUFFIX}
+if ! ${CRT} image inspect "${BASE_IMAGE}" >/dev/null 2>&1; then
+  ${CRT} pull --quiet "${BASE_IMAGE}" >/dev/null 2>&1 || {
+    echo "no ${BASE_IMAGE} locally or on Docker Hub." >&2
+    echo "  build it on this machine first:" >&2
+    echo "    cd ~/prog/slop/cache/containers/fedora && FEDORA_RELEASE=${RELEASE} ./build && ./publish" >&2
+    exit 1
+  }
+fi
+
 ${CRT} build "${BUILD_ARGS[@]}" -f Dockerfile.base -t ocli-base .

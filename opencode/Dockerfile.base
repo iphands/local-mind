@@ -1,7 +1,16 @@
 # Shared base (ocli-base) for opencode/Dockerfile (ocli) and opencode-legacy/Dockerfile (ocli-legacy)
 # Built by ./bin/build-container-opencode-base
-ARG BASE_IMAGE=iphands/pkgcache-fedora:45
-FROM ${BASE_IMAGE} AS builder
+# One Fedora release for every arch, declared exactly once here.
+# iphands/pkgcache-fedora (built by ~/prog/slop/cache/containers/fedora/build)
+# tags x86_64 as :<release> and every other arch as :<release>-<arch> -- same
+# content, arch-suffixed tag -- so the release is shared and only ARCH_SUFFIX
+# (from bin/build-container-opencode-base) differs by arch. Never let the arches
+# ride different releases: arm64 on a floating :latest-arm64 (Fedora 44 while
+# this file says 45) fails as "No match for argument: openssl3-libs" in .dnf-deps
+# instead of a clear "wrong base image" error.
+ARG FEDORA_RELEASE=45
+ARG ARCH_SUFFIX=
+FROM iphands/pkgcache-fedora:${FEDORA_RELEASE}${ARCH_SUFFIX} AS builder
 
 RUN echo "bump_017"
 
