@@ -30,9 +30,10 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 08** — Repin Basalt to v0.4.1 and rebuild: in progress, 1/5 tasks done (T1: `./run` honours a
-  pack argument again, gate step 4 green); next **T2**, the repin itself, **blocked on the owner**:
-  `PREFLIGHT_ONLY=1 ./build`, then the agent adapts the `Dockerfile` from the checked-out tree, then `./build`. Owner decisions 2026-11-16: pin the v0.4.1 tag commit `d3b7574`; **Plans
+- **Plan 08** — Repin Basalt to v0.4.1 and rebuild: in progress, 2/5 tasks done (T1: `./run` honours a
+  pack argument again; T2: pin at `d3b7574`, image `cu1343-sm120-d3b7574` built, gate 1–6 pass on it);
+  next **T3**, **blocked on the owner**: `./run` and `./run --single`, a real reply each. The new image has
+  not been booted. Owner decisions 2026-11-16: pin the v0.4.1 tag commit `d3b7574`; **Plans
   02 and 03 are to be abandoned at Plan 08 T4** and the new pin re-audited under a new plan — do not start
   new work on either.
 - **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 5/15 tasks done

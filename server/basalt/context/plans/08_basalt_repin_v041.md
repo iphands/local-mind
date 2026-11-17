@@ -289,13 +289,15 @@ how it is known; `high_level.md`: the pin's rationale and the fired 27B "Revisit
    writers (Project Rule P1).** *Mitigation*: only `versions.env`, `Dockerfile`,
    `Dockerfile.dockerignore` and `README.md` are dirty, every handoff carries the `dirty:` line, and
    no `context/` or plan file is left uncommitted while the owner works.
-2. **Risk: `serve.config`'s helper names moved, so gate steps 5–6 fail for a reason that is the
-   gate's, not the image's.** *Mitigation*: T2 step 3 reads `serve/config.py` before the build;
+2. ~~**Risk: `serve.config`'s helper names moved, so gate steps 5–6 fail for a reason that is the
+   gate's, not the image's.**~~ RESOLVED (T2): all three are still defined in `serve/config.py` at the pin
+   (`engine_flags_of` :32, `server_options` :42, `build_parser` :519); steps 5–6 ran unchanged and pass. *Mitigation*: T2 step 3 reads `serve/config.py` before the build;
    the snippets change in the same commit and step 5's negative control is re-run.
 3. **Risk: the runtime stage misses something the new server reads** (it missed `tools/` once —
    `context/pitfalls.md`). *Mitigation*: upstream's own `Dockerfile` is read for what it ships; gate
    step 6 imports every `serve.*` module; T3 boots.
-4. **Risk: building every model lengthens the build.** Upstream reports 290–309 s for a clean Release
+4. ~~**Risk: building every model lengthens the build.**~~ RESOLVED (T2): the configure + build step took
+   319.6 s at `JOBS=16` for all three models (407 targets). Original text: Upstream reports 290–309 s for a clean Release
    build at 0.3.2 on its machine; ours is unmeasured. *Mitigation*: keep upstream's tested default;
    record the build time; narrowing `BASALT_MODELS` is a build-flag change and a later plan's.
 5. **Question: does Flash-Next still take a 362144-token context at v0.4.1?** *How we'll settle it*:
@@ -303,7 +305,8 @@ how it is known; `high_level.md`: the pin's rationale and the fired 27B "Revisit
 6. **Risk: the built pin is unaudited.** Plan 02's reading covered `dc047a7`. *Mitigation*: T4 says so
    in `audit/index.md` and registers the re-audit; `audit/posture.md`'s action list (the open LAN port
    with no API key) is about our launcher and is unchanged by the bump.
-7. **Question: is the v0.4.1 tag signed, and does the pin's tree equal GitHub's tree object?**
+7. **Question (deferred — the tag object is not in the clone, tracker Notes; goes to the re-audit plan):
+   is the v0.4.1 tag signed, and does the pin's tree equal GitHub's tree object?**
    (`high_level.md` § *Attesting the Basalt pin `dc047a77`* → Revisit if.) *How we'll settle it*: T2
    step 3 runs `git tag -v v0.4.1` and records the answer; the tree comparison belongs to the re-audit.
 
@@ -311,8 +314,8 @@ how it is known; `high_level.md`: the pin's rationale and the fired 27B "Revisit
 
 ## Verification Checklist
 
-- [ ] T1: `DRY_RUN=1 ./run /tmp/x.ninfer` exits 1; gate 1–6 pass on the old pin
-- [ ] T2: `image_for_pin` prints `…:cu1343-sm120-d3b7574`, its `ai.basalt.ref` label is the full new SHA, gate steps 5–6 pass on it, step 5's negative control fires
+- [x] T1: `DRY_RUN=1 ./run /tmp/x.ninfer` exits 1; gate 1–6 pass on the old pin *(2026-11-16, tracker Evidence rows 2–3)*
+- [x] T2: `image_for_pin` prints `…:cu1343-sm120-d3b7574`, its `ai.basalt.ref` label is the full new SHA, gate steps 5–6 pass on it, step 5's negative control fires *(2026-11-16, Evidence rows 5–7 — with one difference: `image_for_pin` printed the moving tag `…:cu1343-sm120`, which inspects to the same image id as `…-d3b7574`)*
 - [ ] T3: both boot logs name the `d3b7574` image and the pack; a real reply in each mode is quoted in the tracker
 - [ ] T4: Plans 02 and 03 are in `abandoned/` with their reason in SERIES; the re-audit has a row; no link points at the old paths
 - [ ] T5: each harvested fact is in the file the tracker names, re-read after writing

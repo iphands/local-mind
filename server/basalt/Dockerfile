@@ -7,13 +7,14 @@
 # deliberately empty so a bare `docker build` fails instead of building something unpinned. That is
 # exactly what InvalidDefaultArgInFrom warns about, hence the skip above.
 #
-# Layout: `basalt serve` chdirs into the source dir compiled into the binary (BASALT_SOURCE_DIR =
-# CMAKE_SOURCE_DIR) and runs `python -m serve.server` there, with <source>/.venv/bin/python as the
-# default interpreter; the default expert profile is <source>/data/profiles/; serve/ imports
+# Layout: the binary takes the directory above its own bin/ as its install root (since 0.3.2; the
+# compiled-in source path is gone). `basalt serve` runs `python -m serve.server` with
+# <root>/.venv/bin/python; the expert profiles are <root>/data/profiles/; serve/ imports
 # tools/model_file.py through sys.path (serve/engine/modelfile.py). So the build runs in /opt/basalt
-# and the runtime stage puts bin/, serve/, tools/, data/ and .venv/ back at /opt/basalt — what
-# upstream's docs/building.md says an install or container image ships.
-# (context/plans/01_flashnext_container.md § Why a source-built two-stage image.)
+# and the runtime stage puts bin/, serve/, tools/, data/ and .venv/ back at /opt/basalt — the same
+# tree upstream's own Dockerfile ships. That file sits in the build context since 0.3.3 and is not
+# used: -f names this one.
+# (context/plans/completed/01_flashnext_container.md § Why a source-built two-stage image.)
 
 ARG CUDA_DEVEL_IMAGE=
 ARG CUDA_RUNTIME_IMAGE=

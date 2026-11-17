@@ -8,10 +8,12 @@ API.
 Basalt loads only Flash-Next `.basalt` packs. `.ninfer` artifacts (for example the QUASAR 27B)
 belong in `../ninfer`.
 
-**Status (2026-11-04):** built (`iphands/basalt-blackwell:cu1343-sm120-dc047a7`) and booted in both
-modes from the local pack (Plan 01): `./run` loads in ~40 s, `./run --single` in ~34 s; every expert
-fits in VRAM (63.29 GiB); clients reach it as `cosmo-6000` on `cosmo.lan:8700`. The defaults are the
-owner's choices, not measured winners — tuning is a later plan.
+**Status (2026-11-16):** built on Basalt v0.4.1 (`iphands/basalt-blackwell:cu1343-sm120-d3b7574`,
+Plan 08) and the model-free gate passes on that image; **it has not been booted yet**. The last
+measured boots are the v0.2.1-era image's (`cu1343-sm120-dc047a7`, Plan 01, 2026-11-04, local pack):
+`./run` loaded in ~40 s, `./run --single` in ~34 s, a 63.29 GiB expert cache in VRAM; clients reach it
+as `cosmo-6000` on `cosmo.lan:8700`. The defaults are the owner's choices, not measured winners —
+tuning is a later plan.
 
 ## Prerequisites
 
@@ -28,20 +30,21 @@ owner's choices, not measured winners — tuning is a later plan.
 
 ## Pins
 
-`versions.env`: Basalt `dc047a77` (main on 2026-11-04, the v0.2.1 engine), CUDA 13.4.3 devel and
-runtime images by digest, image repository `iphands/basalt-blackwell`.
+`versions.env`: Basalt `d3b75742` (the v0.4.1 tag's commit, pinned 2026-11-16; before that
+`dc047a77`, the v0.2.1 engine), CUDA 13.4.3 devel and runtime images by digest, image repository
+`iphands/basalt-blackwell`. Moving the pin is a plan: `context/plans/RULES.md`.
 
 ## Build
 
 ```bash
 PREFLIGHT_ONLY=1 ./build   # checks only: vendor/basalt at the pin, base digests, Dockerfile lint
-./build                    # the image iphands/basalt-blackwell:cu1343-sm120-dc047a7 (log in captures/)
+./build                    # the image iphands/basalt-blackwell:cu1343-sm120-d3b7574 (log in captures/)
 ```
 
 `./build` manages `vendor/basalt` (cloned on first use, checked out at `BASALT_SHA`) and refuses
 a dirty checkout. The image keeps Basalt's source-tree layout at `/opt/basalt` (`bin/`, `serve/`,
-`data/`, and a `.venv` with upstream's pinned server dependencies) because `basalt serve` runs the
-Python server from the source directory compiled into the binary.
+`tools/`, `data/`, and a `.venv` with upstream's pinned server dependencies) because the binary takes
+the directory above its own `bin/` as its install root and runs the Python server from there.
 
 ## Publish
 
@@ -51,7 +54,7 @@ DRY_RUN=1 ./publish        # print the tags, touch nothing (also accepts PUSH_DR
 TAG=cu1343-sm120 ./publish # take the image from another local tag instead of the pin's own name
 ```
 
-Three tags go up: the immutable `cu1343-sm120-dc047a7` that `./build` made, the moving
+Three tags go up: the immutable `cu1343-sm120-d3b7574` that `./build` made, the moving
 `cu1343-sm120`, and `latest`. `./build` mints no `:latest`, so `./publish` owns it, and it only ever
 takes it for the newest local build of the pinned commit. Every name is read from the image's own
 `ai.basalt.*` labels, never from the tag it was handed. Needs a terminal on stdin and a
