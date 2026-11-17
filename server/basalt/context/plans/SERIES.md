@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `08`.** <!-- hp:next-free -->
+**Next free plan number: `09`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-11-04):** serve Qwen3.8-Flash-Next through
 > [Basalt](https://github.com/jesdga95/basalt), source-built from a pinned commit in our own
@@ -30,6 +30,11 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
+- **Plan 08** — Repin Basalt to v0.4.1 and rebuild: in progress, 0/5 tasks done; next **T1** (`./run`
+  honours a pack argument again — gate step 4 is red at `6275af2`), then **T2**, the repin itself, which
+  waits on the owner's `./build`. Owner decisions 2026-11-16: pin the v0.4.1 tag commit `d3b7574`; **Plans
+  02 and 03 are to be abandoned at Plan 08 T4** and the new pin re-audited under a new plan — do not start
+  new work on either.
 - **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 5/15 tasks done
   (T0–T3, T13; 5 skipped by the **2026-11-05 re-scope**); next **T4** (the outbound fetcher), then the rest of
   the boundary reading (≈14.9k lines) in the order `census.md` routes it. T13: the live server is open on the
@@ -54,6 +59,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 05 | Tune Basalt past the owner's defaults on this card | 01 | pending | Measured A/Bs: `basalt-probe` suggestions, `expert-profile-save`, `prefill-cpu-share`, `spec` depth, `kv` q4_0/k8v4; 4 slots vs `--single` under load. |
 | 06 | `sm_120a` build A/B | 01 | pending | Basalt accepts `120a` but tests only `120`; build both, compare decode/prefill and output identity. |
 | 07 | Boot from the defragmented NFS copy | 01 | pending | noir's pack now has 927 extents: does a boot from `/mnt/noir` load fast enough to retire `models.local/`? |
+| 08 | Repin Basalt to v0.4.1 and rebuild the image | 01 | in-progress | `dc047a7` → `d3b7574` (v0.4.1 tag commit, 707 commits on). Owner builds and boots; T4 abandons Plans 02/03 and registers the re-audit. |
 
 ## Dependency Chain <!-- hp:chain -->
 
@@ -79,6 +85,10 @@ completed/01_flashnext_container ──(builds the image Plan 03 observes; feeds
 - **04 — Engine bulk.** 125k lines of C++/CUDA cannot be read line-by-line in one plan at honest
   adversarial speed. Owner chose boundary-first now, this later (Plan 02 § Scope, dated 2026-11-05),
   so the deferral is a numbered plan rather than an invisible gap.
+- **08 — Repin to v0.4.1** (owner request, 2026-11-16). The pin was `main` on 2026-11-04; upstream has
+  since released 0.3.0–0.4.1 (multi-model engine, new RAM plan, a dense 27B). A pin change is a plan by
+  `RULES.md`'s first table: flags can vanish without shims, so the bump is proven by gate steps 5–6 on the
+  new image and by an owner boot, not by the build finishing.
 - **05–07 — Plan 01's follow-ups** (registered at its close, 2026-11-04). 05: the defaults are the
   owner's choices, not measured winners (ordering principle: boot before tune). 06: `120a` is accepted
   but untested upstream. 07: the NFS crawl was fragmentation + `O_DIRECT`; noir's copy is now
