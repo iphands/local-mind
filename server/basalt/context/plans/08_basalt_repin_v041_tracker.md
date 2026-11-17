@@ -26,7 +26,7 @@
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
 | 1 | T1: let a pack argument override the NFS default again | `run`, `README.md` | done | `./run`'s unconditional `PACK=` line folded into the default (NFS path kept); header, missing-pack hint and README now state the defaults the code has (`362144`, the NFS pack). Gate 1a/1b/1c/2/2b/3/4/5/6 pass on the old pin — Evidence rows 1–3. |
-| 2 | T2: repin to `d3b7574`, adapt the recipe, owner build, gate on the new image | `versions.env`, `Dockerfile`, `README.md` | pending | |
+| 2 | T2: repin to `d3b7574`, adapt the recipe, owner build, gate on the new image | `versions.env`, `Dockerfile`, `README.md` | blocked | **Waits on the owner (2026-11-16).** Step 1 (the `versions.env` edit) is made right after this row's commit and stays uncommitted by design: `dirty: versions.env (agent, in progress)`. Next is step 2, the owner's `PREFLIGHT_ONLY=1 ./build` (fetches the new SHA into `vendor/basalt`); then the agent's step 3 read of the checked-out tree; then the owner's `./build`. While `versions.env` is dirty, gate steps 5–6 fail in the working tree (no image for the new SHA) — expected, not a regression. |
 | 3 | T3: owner boots, default and `--single`, a real reply each | tracker Evidence | pending | |
 | 4 | T4: retire the `dc047a7` audit plans, register the re-audit | `SERIES.md`, `abandoned/`, `audit/index.md` | pending | |
 | 5 | T5: harvest and close | `context/` | pending | |
@@ -54,6 +54,11 @@ the last three always carry a reason in the row's Notes cell.
   `…:cu1343-sm120-dc047a7`: three tags share image `63d25a81f328` and `docker images` lists that one
   first. Same image, so steps 4–6 ran against the pinned build; after T2 the new image will carry
   only its `-d3b7574` tag until `./publish` moves the others.
+- **2026-11-16 — no pre-read of the v0.4.1 tree.** The agent tried to read upstream's `Dockerfile`,
+  build docs and `serve/config.py` at `d3b7574` from GitHub before the owner's fetch, to adapt our
+  `Dockerfile` ahead of one combined preflight + build; the session's permission layer refused the
+  download. T2 step 3 therefore happens as planned, from the tree the owner's preflight checks out,
+  and the owner runs two commands with a pause between them rather than one.
 
 ## Follow-ups
 
