@@ -449,7 +449,7 @@ falsely reported *as printed*, the guard.
   for everything, the abbreviated-SHA probes, the `%H%x00%B` record-split that reported 0 AI-trailed
   commits out of 367, and the unanchored `boundary` grep that published 0 where the anchored count is
   560 — each refuted by its own control, all four *after* being drafted for the record, 2026-11-05)
-- basalt: `context/plans/02_basalt_vendor_audit_tracker.md` (T1 Notes, 2026-11-05)
+- basalt: `context/plans/abandoned/02_basalt_vendor_audit_tracker.md` (T1 Notes, 2026-11-05)
 - related: § *Empty output from a failed command was recorded as a measurement* — the incident that
   produced R1–R3; and the three controls refinements folded into them (control the checker not just the
   data; tie two zeros together; size stderr).
@@ -521,8 +521,8 @@ or the GPU is busy` (`run:92-97`), and where a generic check is needed `curl -o 
 installed", "port Y is free" are facts about *the shell that ran them*: label them "agent sandbox view,
 host unknown" unless the owner's shell produced them.
 
-**Src:** `context/plans/02_basalt_vendor_audit.md` (Key Facts, both rows downgraded with limits);
-`context/plans/02_basalt_vendor_audit_tracker.md` § Notes/Deviations; `context/plans/completed/01_flashnext_container.md`
+**Src:** `context/plans/abandoned/02_basalt_vendor_audit.md` (Key Facts, both rows downgraded with limits);
+`context/plans/abandoned/02_basalt_vendor_audit_tracker.md` § Notes/Deviations; `context/plans/completed/01_flashnext_container.md`
 § *Gate status*.
 **Corrected in place 2026-11-05:** this entry once stated the socket *is* `root:rtkit 660` and the
 session "not in group `docker` (gid 991)". That named the **agent container's** `/etc/group`, where gid
@@ -547,7 +547,7 @@ step quietly become a "close enough" pass — if the owner proceeds anyway, reco
 degraded, owner decision, dated"*. Verify a restored tool with a **negative control** before trusting
 its clean output (Plan 02 T0 required SC2115 to fire on a deliberately bad script).
 
-**Src:** `RULES.md` § *Project gate* step 2, § *Prerequisites*; `context/plans/02_basalt_vendor_audit.md` and
+**Src:** `RULES.md` § *Project gate* step 2, § *Prerequisites*; `context/plans/abandoned/02_basalt_vendor_audit.md` and
 `context/plans/completed/01_flashnext_container.md`, both § *Gate status*.
 
 ## A live daily-driver server is not a test bench
@@ -719,7 +719,7 @@ recurring defect, same as the false-zero `grep boundary` and the all-404 sweep.
 
 **Grep:** `sed -n` · `STB_IMAGE_RELEASE` · `grep -c` · `v2.30`
 
-**Src:** `context/plans/02_basalt_vendor_audit.md` § *Pre-Identified Bug/Issue* **1**; tracker § Notes/Deviations
+**Src:** `context/plans/abandoned/02_basalt_vendor_audit.md` § *Pre-Identified Bug/Issue* **1**; tracker § Notes/Deviations
 (two stb entries, second correcting first); same shape across `wave0/t3-census-controls.txt`,
 `t3-tree-contamination.txt` and a recipe elided to `…` that four documents cited while nothing in the tree
 could fail on it (`wave0/t3-negctl-rechecks.txt` § *Re-fire*; `context/audit/scripts/t3-make-mutant.py`).

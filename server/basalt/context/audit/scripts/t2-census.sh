@@ -4,7 +4,7 @@
 # Usage:
 #   scripts/t2-census.sh <rows.tsv> <out.tsv> <err.log> <expect_rows> <repo> <pin>
 #   rows.tsv  headerless: path <TAB> loc <TAB> tier   (build it from the manifest, see § Build input
-#             in ../../plans/02_basalt_vendor_audit.md T2 Verify; expect 87 at the dc047a7 pin)
+#             in ../../plans/abandoned/02_basalt_vendor_audit.md T2 Verify; expect 87 at the dc047a7 pin)
 #   repo      path to the vendor clone      pin  the commit to census AT (never HEAD)
 #
 # WHAT IT PROVES. census_status=OK means: blame produced one attributed line per line of the file,

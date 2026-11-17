@@ -2,7 +2,7 @@
 
 ## Overview
 
-- Status: 40% complete (2/5 tasks)
+- Status: 60% complete (3/5 tasks)
 - Start date: 2026-11-16
 - Plan: `context/plans/08_basalt_repin_v041.md`
 - Evidence: the table below; build logs in `captures/build_<date>_<sha7>.log` (gitignored); boot
@@ -28,7 +28,7 @@
 | 1 | T1: let a pack argument override the NFS default again | `run`, `README.md` | done | `./run`'s unconditional `PACK=` line folded into the default (NFS path kept); header, missing-pack hint and README now state the defaults the code has (`362144`, the NFS pack). Gate 1a/1b/1c/2/2b/3/4/5/6 pass on the old pin — Evidence rows 1–3. |
 | 2 | T2: repin to `d3b7574`, adapt the recipe, owner build, gate on the new image | `versions.env`, `Dockerfile`, `Dockerfile.dockerignore`, `README.md` | done | `BASALT_SHA` is `d3b75742967c7f9fd892c6894a2b9ac6e36e0cf3`; the owner's `./build` made image `41619e9056f8` (`cu1343-sm120-d3b7574`, label `ai.basalt.ref` = the full SHA). The recipe needed **no functional change**: upstream's own `Dockerfile` at the pin ships the same tree (`bin/ serve/ tools/ data/ .venv`), and `serve.config` still has `build_parser`, `server_options`, `engine_flags_of`, so gate steps 5–6 ran unchanged. Comment-only edits to `Dockerfile` and `Dockerfile.dockerignore`. Gate 1a/1b/1c/2/2b/3/4/5/6 pass on the new image; step 5's negative control fires — Evidence rows 4–7. Not booted: that is T3. |
 | 3 | T3: owner boots, default and `--single`, a real reply each | tracker Evidence | blocked | **Waits on the owner (2026-11-16):** stop whatever holds `:8700`, `./run` + one `/v1/chat/completions` reply as `cosmo-6000`, then `./run --single` + one reply; paste `./run`'s `==` lines, the engine's start block and the reply. |
-| 4 | T4: retire the `dc047a7` audit plans, register the re-audit | `SERIES.md`, `abandoned/`, `audit/index.md` | pending | |
+| 4 | T4: retire the `dc047a7` audit plans, register the re-audit | `SERIES.md`, `abandoned/`, `audit/index.md`, `context/AGENTS.md` | done | Plans 02 and 03 + trackers `git mv`'d to `context/plans/abandoned/`, each headed `abandoned` with the reason; SERIES § *Abandoned / Superseded* carries both; **Plan 09** (audit of `d3b7574`) registered as a pending row with its rationale, next free number `10`, Plan 04 now depends on 09. 17 path references repointed in `distilled.md`, `pitfalls.md`, `audit/index.md`, the two census scripts and the moved files; `audit/index.md` opens with a dated note; raw captures under `audit/wave0/` left as captured. Done before T3 — see Notes. Gate: Evidence row 8. |
 | 5 | T5: harvest and close | `context/` | pending | |
 
 **Status values**: `pending` | `in-progress` | `done` | `blocked` | `skipped` | `invalid` —
@@ -45,6 +45,8 @@ the last three always carry a reason in the row's Notes cell.
 | 2026-11-16 | `docker image inspect` on `iphands/basalt-blackwell:cu1343-sm120-d3b7574` | id `sha256:41619e9056f8928f2808c689c94a5f362477f4f68ede1bd2b24a3bfd853e6f38`; labels `ai.basalt.ref=d3b75742967c7f9fd892c6894a2b9ac6e36e0cf3`, `ai.basalt.cuda=13.4.3`, `ai.basalt.arch=sm_120`, `ai.basalt.repo=https://github.com/jesdga95/basalt.git`; `/opt/basalt/bin` holds `basalt`, `basalt-bench`, `basalt-probe`, `basalt-vision`; `data/profiles` holds `qwen4exp-48x512.prof` and two `deepseek41` profiles | 1 | `git -C vendor/basalt rev-parse HEAD` = the pin, tree clean |
 | 2026-11-16 | project gate 1–6, new pin, image `41619e9056f8` | `PRODUCT_B=4 AUDIT_B=5`; `env ok`; `shellcheck ok (product)`; `shellcheck ok (audit)`; `preflight ok`; `dry-run ok (image: iphands/basalt-blackwell:cu1343-sm120)`; `flags ok (3 engine, 8 server: 153 engine flags known)`; `imports ok (40 serve modules)` | 1 | old image: 142 engine flags known, 32 serve modules. The dry run names the moving tag; `cu1343-sm120`, `cu1343-sm120-d3b7574` and `latest` all inspect to `41619e9056f8` |
 | 2026-11-16 | gate step 5 with `EXTRA_ARGS=--no-such-flag` | `FAIL(flags) --no-such-flag` | 1 | the negative control fires on the new image |
+| 2026-11-16 | audit freeze-check, `audit/index.md` command 1, against the new checkout | `AUDIT TREE DRIFTED — STOP` | 1 | expected: `vendor/basalt` is at `d3b7574`; quoted in the note that now opens `audit/index.md` |
+| 2026-11-16 | project gate 1–6 after T4's moves and edits (two audit scripts changed, path strings only) | `PRODUCT_B=4 AUDIT_B=5`; `env ok`; `shellcheck ok (product)`; `shellcheck ok (audit)`; `preflight ok`; `dry-run ok`; `flags ok (3 engine, 8 server: 153 engine flags known)`; `imports ok (40 serve modules)` | 1 | `grep -rIn -E 'plans/0[23]_basalt' context AGENTS.md README.md` outside `audit/wave0/` → no line |
 
 ## Notes / Deviations
 
@@ -82,6 +84,22 @@ the last three always carry a reason in the row's Notes cell.
 - **2026-11-16 — plan Open Question 7 is not settled.** With no tag object in the clone, `git tag -v
   v0.4.1` cannot run without a fetch; `git ls-remote` shows the tag is annotated (`33bd410c` →
   `d3b75742`), which says nothing about a signature. Deferred to the re-audit plan (Follow-ups).
+- **2026-11-16 — T4 ran before T3.** The plan orders the boots first. T3 waits on the owner and T4
+  depends only on the pin having moved, which T2 committed, so T4 was done while waiting.
+- **2026-11-16 — a figure this plan wrote was wrong: "707 commits" for the pin's move.** 707 is
+  `dc047a7` → `main`; `dc047a7` → `d3b7574` is 698 (`rev-list --count`, objects local). The plan
+  commit put 707 in SERIES row 08 and in T4's text; both corrected in T4's commit. Key Facts had the
+  707 attributed correctly and gained the 698.
+- **2026-11-16 — `context/audit/scripts/t3-census.sh` and `t2-census.sh` were edited, path strings
+  only** (the plan file's new location, three lines). They were not run: they are bound to `dc047a7`
+  and to a checkout that has moved, and re-targeting them is Plan 09's first job.
+- **2026-11-16 — commit `9039a73` claims more than it holds.** Its message describes all of T4; its
+  tree holds only the four renames. The staging command named the plans' old paths, which `git mv`
+  had already removed, so `git add` failed on the pathspec — and the commit was joined to it with
+  `;` through a `git status` instead of `&&`, so it ran anyway on what `git mv` had staged. That is
+  Rule B2.3's incident, repeated. Not amended (Rule B2): the next commit, `[basalt][P8][T4][series]
+  land the T4 edits 9039a73's message claimed`, carries the edits. Between the two, links to the
+  moved plans dangle and SERIES still lists Plans 02 and 03 as active.
 
 ## Follow-ups
 

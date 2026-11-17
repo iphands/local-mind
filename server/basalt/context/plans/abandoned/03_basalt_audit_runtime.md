@@ -1,7 +1,8 @@
 # Plan 03 — Basalt audit, runtime half: observed egress, exec and input capture
 
-> **Status**: pending
+> **Status**: abandoned
 > **Created**: 2026-11-05
+> **Revised**: 2026-11-16 — **abandoned 2026-11-16 (owner decision, Plan 08 T4): the pin moved 698 commits, from `dc047a7` to `d3b7574` (v0.4.1), and most of `src/` moved into per-model folders, so the 862-file manifest and the census no longer describe the code we build.** Never started (0/5 tasks); its target was the `dc047a7` image. Runtime observation of the new image is part of Plan 09 (`SERIES.md`). This file moved to `abandoned/`; the text below is as it stood.
 > **Depends on**: Plan 01 (the image for the pin). Gates Plan 02's verdict (`02_basalt_vendor_audit.md` § *Re-scope*).
 > **Goal**: Watch the pinned Basalt image serve real requests and record every packet it sends, every program it runs and every device or credential file it opens — so "does it phone home or keylog" is answered by observation, not by reading.
 > **Agent**: implementation agent (writes and reads); **the owner runs the boot**
@@ -151,7 +152,7 @@ credential open → 🔴 in Plan 02's `findings.md`, escalate to the owner.
 | File | Change | Priority |
 |------|--------|----------|
 | `context/audit/runtime.md` | new: the observed-behaviour table | P0 |
-| `context/plans/03_basalt_audit_runtime_tracker.md` | progress and evidence | P0 |
+| `context/plans/abandoned/03_basalt_audit_runtime_tracker.md` | progress and evidence | P0 |
 
 ---
 

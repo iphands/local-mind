@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `09`.** <!-- hp:next-free -->
+**Next free plan number: `10`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-11-04):** serve Qwen3.8-Flash-Next through
 > [Basalt](https://github.com/jesdga95/basalt), source-built from a pinned commit in our own
@@ -30,22 +30,10 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
      - **Plan NN** — <title>: in progress, X/Y tasks done; next TN (<short title>).
      When nothing is in progress: "None in progress — next up: Plan NN (`/hands-plan resume NN`)." -->
 
-- **Plan 08** — Repin Basalt to v0.4.1 and rebuild: in progress, 2/5 tasks done (T1: `./run` honours a
-  pack argument again; T2: pin at `d3b7574`, image `cu1343-sm120-d3b7574` built, gate 1–6 pass on it);
-  next **T3**, **blocked on the owner**: `./run` and `./run --single`, a real reply each. The new image has
-  not been booted. Owner decisions 2026-11-16: pin the v0.4.1 tag commit `d3b7574`; **Plans
-  02 and 03 are to be abandoned at Plan 08 T4** and the new pin re-audited under a new plan — do not start
-  new work on either.
-- **Plan 02** — Basalt vendor audit (leak / theft / keylog / phone-home): in progress, 5/15 tasks done
-  (T0–T3, T13; 5 skipped by the **2026-11-05 re-scope**); next **T4** (the outbound fetcher), then the rest of
-  the boundary reading (≈14.9k lines) in the order `census.md` routes it. T13: the live server is open on the
-  LAN with no API key (`posture.md`, action #1). T3's canaries found the census blind
-  to hard-coded URLs; a URL/encoded sweep closes it (`census.md`). The re-scope cut seven commits' worth of evidence-about-evidence work and the bug-hunting
-  tasks; plan § *Re-scope* and execution rule 7 (3-commit stop rule) govern. T2's findings stand: the pin's
-  862 blobs equal GitHub's tree; `jesdga95/basalt` and `Niko1221/Strata` share 0 SHAs — trust hashes,
-  not narrative history (`context/distilled.md`).
-- **Plan 03** — runtime observation: **next, alongside Plan 02's reading** (re-scope 2026-11-05). Unblocked:
-  an image for the pin exists and docker is reachable from an agent shell. The owner runs the boot.
+- **Plan 08** — Repin Basalt to v0.4.1 and rebuild: in progress, 3/5 tasks done (T1: `./run` honours a
+  pack argument again; T2: pin at `d3b7574`, image `cu1343-sm120-d3b7574` built, gate 1–6 pass on it; T4:
+  Plans 02 and 03 abandoned, Plan 09 registered); next **T3**, **blocked on the owner**: `./run` and
+  `./run --single`, a real reply each. The new image has not been booted. Then T5, harvest and close.
 
 ## Plans <!-- hp:plans -->
 
@@ -54,31 +42,35 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | Plan | Title | Depends on | Status | Notes |
 |------|-------|-----------|--------|-------|
 | 01 | Basalt Flash-Next container: pinned sm_120 image, `./run` on :8700 | — | done | `./run` boots the local DQ6_K pack in 40 s (4×262144) / 34 s (`--single`); all experts in VRAM; serves `cosmo-6000` on `cosmo.lan:8700`. → `completed/`. |
-| 02 | Basalt vendor audit: leak / theft / keylog / phone-home in `vendor/basalt` | — | in-progress | Re-scoped 2026-11-05 onto the question: census kept + canaries 1–3, ≈14.9k boundary lines read, Plan 03 alongside. Bug-hunting tasks → Follow-ups. |
-| 03 | Basalt audit, runtime half: observed egress, exec and input capture | 01 | pending | Owner-run boot on a no-egress network; capture every packet and every `connect`/`execve`/`openat`. **The gate on Plan 02's verdict.** Unblocked 2026-11-05 (image exists; docker reachable). |
-| 04 | Basalt audit, engine bulk line-by-line: `src/kernels` + `src/core` + `include/` | 02 | pending | The deferred half of "line by line" (~92k lines, 20–30 sessions). Plan 02 gives each file a census result + triage reason; none is read. |
+| 02 | Basalt vendor audit: leak / theft / keylog / phone-home in `vendor/basalt` | — | abandoned | 2026-11-16, at 5/15: the pin moved to `d3b7574`. Manifest, census and `posture.md` stand for `dc047a7`. → `abandoned/`; re-audit is Plan 09. |
+| 03 | Basalt audit, runtime half: observed egress, exec and input capture | 01 | abandoned | 2026-11-16, never started: its target was the `dc047a7` image. → `abandoned/`; folded into Plan 09. |
+| 04 | Basalt audit, engine bulk line-by-line: `src/kernels` + `src/core` + `include/` | 09 | pending | Was the deferred half of Plan 02 (~92k lines **at `dc047a7`**). Hypothesis only: paths and line counts must be re-derived at `d3b7574`, where model code moved to `src/models/<model>`. |
 | 05 | Tune Basalt past the owner's defaults on this card | 01 | pending | Measured A/Bs: `basalt-probe` suggestions, `expert-profile-save`, `prefill-cpu-share`, `spec` depth, `kv` q4_0/k8v4; 4 slots vs `--single` under load. |
 | 06 | `sm_120a` build A/B | 01 | pending | Basalt accepts `120a` but tests only `120`; build both, compare decode/prefill and output identity. |
 | 07 | Boot from the defragmented NFS copy | 01 | pending | noir's pack now has 927 extents: does a boot from `/mnt/noir` load fast enough to retire `models.local/`? |
-| 08 | Repin Basalt to v0.4.1 and rebuild the image | 01 | in-progress | `dc047a7` → `d3b7574` (v0.4.1 tag commit, 707 commits on). Owner builds and boots; T4 abandons Plans 02/03 and registers the re-audit. |
+| 08 | Repin Basalt to v0.4.1 and rebuild the image | 01 | in-progress | `dc047a7` → `d3b7574` (v0.4.1 tag commit, 698 commits on). Owner builds and boots; T4 abandons Plans 02/03 and registers the re-audit. |
+| 09 | Basalt vendor audit of the v0.4.1 pin `d3b7574`: static reading + runtime observation | 08 | pending | Row only, no plan file yet. Re-targets Plans 02 + 03; reuses `context/audit/scripts/` and the canary method; starts with tag signature + tree identity. |
 
 ## Dependency Chain <!-- hp:chain -->
 
 ```text
-completed/01_flashnext_container ──(builds the image Plan 03 observes; feeds 05, 06, 07)──┐
-                                                              ├── 03_audit_runtime  ← gates 02's verdict
-02_basalt_vendor_audit ──(manifest + census + verdict)────────┤
-                                                              └── 04_audit_engine_bulk
+completed/01_flashnext_container ──(recipe, ./build, ./run; feeds 05, 06, 07)── 08_basalt_repin_v041
+                                                                                      │
+                                                                  09 (audit of d3b7574, row only)
+                                                                                      │
+                                                                             04_audit_engine_bulk
+abandoned/02_basalt_vendor_audit, abandoned/03_basalt_audit_runtime ──(method, scripts, posture.md)──▶ 09
 ```
-*Re-scope 2026-11-05:* 03 now depends on **01** (it needs the image, not the audit) and runs alongside 02; it still gates 02's verdict.
+*2026-11-16:* Plans 02 and 03 audited `dc047a7`; Plan 08 moved the pin, so both are abandoned and Plan 09
+inherits their method. *(The 2026-11-05 chain, with 03 gating 02's verdict, is in git history.)*
 
 ## Backlog Rationale <!-- hp:backlog -->
 
-- **02 — Vendor audit.** The owner asked whether the vendored engine does anything beyond being a
+- **02 — Vendor audit.** *(Abandoned 2026-11-16; kept for the reasoning Plan 09 inherits.)* The owner asked whether the vendored engine does anything beyond being a
   nice LLM server. Recon (2026-11-05) says clean and security-conscious; the plan's job is to make
   that *provable* rather than plausible — a manifest so coverage is countable and a planted-canary
   census so "the grep found nothing" cannot be laundered into "audited".
-- **03 — Runtime half.** Every static method has the same blind spot (`dlopen`+`dlsym`, raw
+- **03 — Runtime half.** *(Abandoned 2026-11-16, never started; kept for the same reason.)* Every static method has the same blind spot (`dlopen`+`dlsym`, raw
   `syscall()`, venv C extensions opening their own sockets); only observed syscalls and network
   state close it. Split from 02 deliberately: Standing Constraints make it owner-run and Plan 01 is
   already stalled on owner boots, so the code verdict must land without inheriting that stall.
@@ -90,6 +82,13 @@ completed/01_flashnext_container ──(builds the image Plan 03 observes; feeds
   since released 0.3.0–0.4.1 (multi-model engine, new RAM plan, a dense 27B). A pin change is a plan by
   `RULES.md`'s first table: flags can vanish without shims, so the bump is proven by gate steps 5–6 on the
   new image and by an owner boot, not by the build finishing.
+- **09 — Audit of the v0.4.1 pin** (registered 2026-11-16 at Plan 08 T4, owner decision). The built
+  engine is now unaudited: Plan 02 read none of `d3b7574`. What carries over is method, not results — the
+  manifest-then-census shape, the planted canaries, `context/audit/scripts/` (which hard-code the old pin
+  and Plan 02's path and must be re-targeted first), and Plan 03's design for watching a boot on a
+  no-egress network. First tasks: fetch the `v0.4.1` tag and check its signature, compare the pin's tree
+  with GitHub's tree object (`high_level.md` § *Attesting the Basalt pin `dc047a77`*), rebuild the
+  manifest. `audit/posture.md`'s action list (the LAN-open port with no API key) needs no re-audit to act on.
 - **05–07 — Plan 01's follow-ups** (registered at its close, 2026-11-04). 05: the defaults are the
   owner's choices, not measured winners (ordering principle: boot before tune). 06: `120a` is accepted
   but untested upstream. 07: the NFS crawl was fragmentation + `O_DIRECT`; noir's copy is now
@@ -119,6 +118,8 @@ completed/01_flashnext_container ──(builds the image Plan 03 observes; feeds
 
 | Plan | Reason | Superseded by | Date |
 |------|--------|---------------|------|
+| 02 — Basalt vendor audit | Owner decision at the repin (Plan 08). The pin moved from `dc047a7` to `d3b7574` (v0.4.1): 698 commits between them, most of `src/` moved into per-model folders, two models added. The 862-file manifest, the census and the 5 finished tasks (T0–T3, T13) describe a tree we no longer build; finishing the read would audit code the server does not run. Not a failure of method. `audit/posture.md` still applies. | Plan 09 | 2026-11-16 |
+| 03 — Basalt audit, runtime half | Same decision. Never started; it was to observe the `dc047a7` image, which is now only the rollback image. | Plan 09 | 2026-11-16 |
 
 *(Record the reason. A plan dropped without one gets re-attempted six months later by someone who
 doesn't know it failed.)*

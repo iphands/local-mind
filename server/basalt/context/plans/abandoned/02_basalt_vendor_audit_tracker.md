@@ -2,6 +2,7 @@
 
 ## Overview
 
+- Status: **abandoned 2026-11-16** (owner decision, Plan 08 T4 — the pin moved to `d3b7574`; reason in `SERIES.md` § *Abandoned / Superseded*). No row below was changed; open rows stay as they were.
 - Status: **33% (5/15)** — T13 done 2026-11-05.
 - Status: **27% (4/15)** — T3 done 2026-11-05. *(Next line: the re-scope reading, kept.)*
 - Status: **20% (3/15)** after the 2026-11-05 re-scope — 20 Progress rows, **5 skipped** (T5, T6b, T11b–d), 3 done (T0–T2), 12 open; T3 in progress. *(The line below is the pre-re-scope reading, kept.)*
@@ -9,7 +10,7 @@
   commit on T1's artifacts, `3c27913`, which moved no manifest row and read nothing. **Still nothing of
   Basalt's source has been read** — T2 examined git objects and commit metadata, not behavior.)
 - Start date: 2026-11-05 (T0)
-- Plan: `context/plans/02_basalt_vendor_audit.md` — **read its Gate status block and Execution rules first**
+- Plan: `context/plans/abandoned/02_basalt_vendor_audit.md` — **read its Gate status block and Execution rules first**
 - Evidence: `context/audit/` — `index.md` (entry point), `manifest/` (per-dir TSVs, fixed headerless
   schema), `census.md`, `argv-table.md`, `findings.md`, `coverage_ledger.md`, `verdict.md`, plus
   `context/audit/wave<N>/` for **raw command output** (raw output goes there, never pasted into this

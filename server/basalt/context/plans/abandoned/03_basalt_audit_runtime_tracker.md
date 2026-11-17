@@ -2,9 +2,10 @@
 
 ## Overview
 
+- Status: **abandoned 2026-11-16** (owner decision, Plan 08 T4 — the pin moved to `d3b7574`; reason in `SERIES.md` § *Abandoned / Superseded*). No row below was changed; open rows stay as they were.
 - Status: 0% complete (0/5 tasks)
 - Start date: — (set when T1 starts)
-- Plan: `context/plans/03_basalt_audit_runtime.md`
+- Plan: `context/plans/abandoned/03_basalt_audit_runtime.md`
 - Evidence: `context/audit/runtime.md` (T4) and raw output under `context/audit/wave-runtime/`; captures in a
   durable path chosen in T1, **never `/tmp`** (a reboot wiped Plan 02's batch on 2026-11-05)
 

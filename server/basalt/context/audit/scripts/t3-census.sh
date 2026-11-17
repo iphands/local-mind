@@ -142,7 +142,7 @@ MAN="$(cd "$(dirname "$0")" && pwd)/../manifest"
 SELF="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 [ -d "$MAN" ] || { echo "MANIFEST_DIR_NOT_FOUND=$MAN" >&2; exit 2; }
 PROJ="$(cd "$MAN/../../../" && pwd)"   # server/basalt — resolves the plan file for the task-id gate
-[ -f "$PROJ/context/plans/02_basalt_vendor_audit.md" ] || { echo "PLAN_NOT_FOUND=$PROJ" >&2; exit 2; }
+[ -f "$PROJ/context/plans/abandoned/02_basalt_vendor_audit.md" ] || { echo "PLAN_NOT_FOUND=$PROJ" >&2; exit 2; }
 cd "$ROOT" || exit 2
 
 # the shared scratch inputs (derived from the manifest by scripts/t3-inputs.sh; see § inputs).
@@ -1457,7 +1457,7 @@ if [ "$TAG" = real ]; then
   # you can bulk-fill and leave a residue. Task ids are extracted from the plan itself, with
   # en-dash ranges expanded (a naive '^### T[0-9]+' grep misses T6b/T6c/T11b-d and would then
   # flag legitimately-routed rows as fabricated).
-  PLAN="$PROJ/context/plans/02_basalt_vendor_audit.md"
+  PLAN="$PROJ/context/plans/abandoned/02_basalt_vendor_audit.md"
   PLAN_TASKS=$(python3 - "$PLAN" <<'PY'
 import re, sys
 ids=set()

@@ -1,11 +1,19 @@
 Target dc047a7 / tree 3f7b69ae — if that is not the tree you are looking at, you are in the wrong audit.
 
+> **2026-11-16 — closed, and no longer the tree we build.** `versions.env` pins `d3b7574` (Basalt v0.4.1)
+> since Plan 08, and `vendor/basalt` is checked out there. Plans 02 and 03 were abandoned by owner decision
+> (`../plans/SERIES.md` § *Abandoned / Superseded*); everything on this page and under this directory
+> **stands for `dc047a7` only** and says nothing about the engine now running. Command 1 below prints
+> `AUDIT TREE DRIFTED — STOP` by design (run 2026-11-16) — that is the checkout, not tampering; the
+> `dc047a7` objects are still in the clone for commands that name the commit. The re-audit is Plan 09.
+> [`posture.md`](posture.md) is about our own launcher and still applies as written.
+
 # `context/audit/` — Plan 02 artifacts (entry point)
 
 Everything Plan 02 produces, and the tree it describes: `vendor/basalt` @
 `dc047a77beeddf1e91234d983a91d6bf929e9619`, tree `3f7b69ae4054969ed15b9b6f02d306eb44e0ebe4`,
-frozen 2026-11-05. Plan: [`../plans/02_basalt_vendor_audit.md`](../plans/02_basalt_vendor_audit.md)
-· tracker: [`../plans/02_basalt_vendor_audit_tracker.md`](../plans/02_basalt_vendor_audit_tracker.md).
+frozen 2026-11-05. Plan: [`../plans/abandoned/02_basalt_vendor_audit.md`](../plans/abandoned/02_basalt_vendor_audit.md)
+· tracker: [`../plans/abandoned/02_basalt_vendor_audit_tracker.md`](../plans/abandoned/02_basalt_vendor_audit_tracker.md).
 
 **If you are resuming, read [`manifest/index.md`](manifest/index.md) next** — it holds the schema and
 the `reviewed-in` column state, which is what tells you which *file* to open. This page only routes.
@@ -80,7 +88,7 @@ forked from (`Niko1221/Strata`) were run here, gave confident answers, and were 
   between these two repositories** — they share none, so every such comparison is a null set that a plausible
   sentence can dress up as a result. This ban is on **commit** identity only: **blob** SHAs and
   `git patch-id --stable` are the *legitimate* join keys across the two repos, and
-  `plans/02_basalt_vendor_audit.md` § **T2b: Content lineage of the boundary** (Open Unknown U12) requires
+  `plans/abandoned/02_basalt_vendor_audit.md` § **T2b: Content lineage of the boundary** (Open Unknown U12) requires
   them to ask whether the seam files' *bytes* are original. Do not read this line as licence to skip U12.
   Details, controls and the refuted hypotheses: that file, § 0–§ 4.
 

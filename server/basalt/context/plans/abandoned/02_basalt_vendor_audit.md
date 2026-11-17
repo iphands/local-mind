@@ -1,7 +1,8 @@
 # Plan 02 — Basalt vendor audit: does `vendor/basalt` leak, steal, keylog, or phone home?
 
-> **Status**: in-progress
+> **Status**: abandoned
 > **Created**: 2026-11-05
+> **Revised**: 2026-11-16 — **abandoned 2026-11-16 (owner decision, Plan 08 T4): the pin moved 698 commits, from `dc047a7` to `d3b7574` (v0.4.1), and most of `src/` moved into per-model folders, so the 862-file manifest and the census no longer describe the code we build.** Closed at 5/15 tasks (T0–T3, T13). Everything it produced stands for `dc047a7` only; `context/audit/posture.md` is about our own launcher and still applies. The re-audit of the new pin is Plan 09 (`SERIES.md`). This file moved to `abandoned/`; the text below is as it stood.
 > **Revised**: 2026-11-05 — same day, before execution: added T0 (gate restoration) and a gate-status block; three Key Facts downgraded after self-check; T5 upgraded from "stale dependency" to a sourced CVE finding; T8 widened to cover the **Python** side of argv assembly; T6 and T11 split against the ≤1,500-line slice rule; canaries 3 → 6 (cross-file, side-channel, second-hop); explicit bypass checklist pre-committed in T4; effort corrected 10–14 → 14–19 sessions.
 > **Revised**: 2026-11-05 — **re-scoped onto the owner's question** (owner-approved). After 28 commits no line of Basalt had been read, and T3 had grown five layers of verification-of-verification, the last of which OOMed the host. Cut: evidence-about-evidence work and the bug-hunting tasks that do not answer "does it leak, steal, keylog or phone home". Pulled forward: runtime observation (Plan 03). **§ Re-scope below is authoritative over every task section it names.**
 > **Depends on**: N/A (shares Plan 01's `BASALT_SHA` pin; no code dependency — a pin bump invalidates this audit, see Risk 1)

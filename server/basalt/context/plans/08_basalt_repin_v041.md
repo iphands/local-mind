@@ -94,7 +94,7 @@ ninfer rc=0 (gate expects non-zero)
 | Fact | Value | How confirmed |
 |---|---|---|
 | New pin | `d3b75742967c7f9fd892c6894a2b9ac6e36e0cf3` = `refs/tags/v0.4.1^{}`, released 2026-11-16 | `git ls-remote`, above |
-| Distance | `dc047a7` → `main` is 707 commits; v0.4.1 → `main` is 9 | `GET …/compare/dc047a77…main` and `…/compare/v0.4.1...main`, 2026-11-16 |
+| Distance | `dc047a7` → `main` is 707 commits; v0.4.1 → `main` is 9; `dc047a7` → `d3b7574` is 698 | `GET …/compare/dc047a77…main` and `…/compare/v0.4.1...main`, 2026-11-16; `GIT_NO_LAZY_FETCH=1 git -C vendor/basalt rev-list --count dc047a7..d3b7574` → 698, same day |
 | `./build` handles a new SHA | fetches origin when the SHA is not local, checks out detached, refuses a dirty tree, tags `cu<digits>-sm120-<sha7>` | `build:54-58`, `build:71` |
 | Flags removed since 0.2.1 | `--peer-prefill-rows`, engine `--vision-mmproj`, `--no-answer-room` — `./run` passes none | `[DOC]` 0.3.1, 0.3.3 Upgrading; `run` `serve_args`; confirm with gate step 5 in T2 |
 | `--kv int8` | still valid for Flash-Next (`fp16`, `int8`, `q4_0`, `k8v4`) | `[DOC]` 0.3.1 Upgrading 6; confirm at boot (T3) |
@@ -235,7 +235,7 @@ the same request. Paste `./run`'s `== image/pack/mode` lines, the engine's start
 **File**: `context/plans/SERIES.md`, `context/plans/abandoned/` (Plans 02, 03 + trackers), `context/audit/index.md`, `context/AGENTS.md`
 
 **What to do**: `git mv` the four files to `context/plans/abandoned/`; add both plans to SERIES
-§ *Abandoned / Superseded* with the reason (the pin moved 707 commits to `d3b7574` and most of `src/`
+§ *Abandoned / Superseded* with the reason (the pin moved 698 commits to `d3b7574` — *corrected 2026-11-16 at T4 from 707, which is the distance to `main`* — and most of `src/`
 moved into per-model folders; the manifest, census and findings stand for `dc047a7` only;
 `audit/posture.md` on our own launcher still applies). Register the re-audit as a pending SERIES row
 under the next free number with a Backlog Rationale line (reuse `context/audit/scripts/` and the
@@ -317,7 +317,7 @@ how it is known; `high_level.md`: the pin's rationale and the fired 27B "Revisit
 - [x] T1: `DRY_RUN=1 ./run /tmp/x.ninfer` exits 1; gate 1–6 pass on the old pin *(2026-11-16, tracker Evidence rows 2–3)*
 - [x] T2: `image_for_pin` prints `…:cu1343-sm120-d3b7574`, its `ai.basalt.ref` label is the full new SHA, gate steps 5–6 pass on it, step 5's negative control fires *(2026-11-16, Evidence rows 5–7 — with one difference: `image_for_pin` printed the moving tag `…:cu1343-sm120`, which inspects to the same image id as `…-d3b7574`)*
 - [ ] T3: both boot logs name the `d3b7574` image and the pack; a real reply in each mode is quoted in the tracker
-- [ ] T4: Plans 02 and 03 are in `abandoned/` with their reason in SERIES; the re-audit has a row; no link points at the old paths
+- [x] T4: Plans 02 and 03 are in `abandoned/` with their reason in SERIES; the re-audit has a row; no link points at the old paths *(2026-11-16; the re-audit is Plan 09; `context/audit/wave0/` captures still name the old paths and were left as captured)*
 - [ ] T5: each harvested fact is in the file the tracker names, re-read after writing
 - [ ] All: the project gate (Rule A) passes on the final commit
 - [ ] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read
