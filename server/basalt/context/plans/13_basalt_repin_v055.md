@@ -258,7 +258,9 @@ they land. Then `git mv` this plan and its tracker to `completed/` and mark SERI
 3. **Risk: Flash-Next or Hy4-flash behaves differently at boot or under long prompts** (22 and 16
    files of their model folders changed, and shared `src/core`, `src/prefill`, `src/kernels`).
    *Mitigation*: T2's two boots; the v0.5.0 image stays on disk as the rollback.
-4. **Risk: the image is published before it has booted.** The owner asked for the repin in order to
+4. ~~**Risk: the image is published before it has booted.**~~ RESOLVED (T2): the owner published and
+   booted it within minutes of each other, and `./run` serves on it (tracker Evidence row 11); Hy4-flash
+   has not been booted on the published image. The owner asked for the repin in order to
    build and publish, and gate 1–6 is model-free. *Mitigation*: the immutable tag names the commit;
    the moving tags are the owner's to move; T2 records the first boot whenever it happens.
 5. **Risk: four plans are open underneath this one** (08, 10, 11, 12), three of them waiting on

@@ -54,8 +54,9 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   on Engram reads from NFS. It needs `./preload` (or a local copy), a boot, and a quoted reply. Then
   T4, harvest and close.
 - **Plan 13** — Repin Basalt to v0.5.5 and rebuild: in progress, 1/3 tasks done (T1: pin at `ff0b978`,
-  image `cu1343-sm120-ff0b978` built with the buffered-io patch, gate 1–6 with 5b pass on it); next
-  **T2**, an owner boot per launcher with a real reply each, then T3, harvest and close.
+  image `cu1343-sm120-ff0b978` built with the buffered-io patch, gate 1–6 with 5b pass on it); **T2 is
+  half recorded and blocked on the owner**: `./run` serves on the new image (engine 0.5.5, buffered reads,
+  3 × 362144); still needed, `./run-hy4` on it with a reply. Then T3, harvest and close.
 
 ## Plans <!-- hp:plans -->
 

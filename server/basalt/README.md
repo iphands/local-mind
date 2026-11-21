@@ -9,12 +9,14 @@ Engine flags are per model, so each launcher takes only its own model's packs an
 when handed the wrong one. `.ninfer` artifacts (for example the QUASAR 27B) belong in `../ninfer`.
 
 **Status (2026-11-21):** built on Basalt v0.5.5 (`iphands/basalt-blackwell:cu1343-sm120-ff0b978`,
-Plan 13) with our buffered-io patch (§ *Build*), and the model-free gate passes on that image; its
-boots are Plan 13 T2. The v0.5.0 image (`cu1343-sm120-ad274aa`, Plan 10, rebuilt with the patch) is
+Plan 13) with our buffered-io patch (§ *Build*), and the model-free gate passes on that image.
+`./run` booted on it on 2026-11-21 from the NFS pack with buffered reads (Plan 13 T2): 68.4 GiB
+loaded in 149.7 s, 3 slots × 362144, a 108,314-token prompt read in 9.4 s, requests answered;
+`./run --single` and `./run-hy4` have not been booted on it. The v0.5.0 image (`cu1343-sm120-ad274aa`, Plan 10, rebuilt with the patch) is
 kept as the rollback: `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-ad274aa ./run`. The
 image holds five models and this project serves two; Inkling 2 Mini, new in v0.5.5, has no launcher
-here. The last measured
-boots are the v0.2.1-era image's (`cu1343-sm120-dc047a7`, Plan 01, 2026-11-04, local pack):
+here. The last boots
+recorded in both modes are the v0.2.1-era image's (`cu1343-sm120-dc047a7`, Plan 01, 2026-11-04, local pack):
 `./run` loaded in ~40 s, `./run --single` in ~34 s, a 63.29 GiB expert cache in VRAM; clients reach it
 as `cosmo-6000` on `cosmo.lan:8700`. The defaults are the owner's choices, not measured winners —
 tuning is a later plan. **Hy4-flash** (`./run-hy4`, Plan 11) booted from the NFS pack on 2026-11-20:
