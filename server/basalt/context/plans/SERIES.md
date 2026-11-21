@@ -35,8 +35,9 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   Plans 02 and 03 abandoned, Plan 09 registered); next **T3**, **blocked on the owner**: `./run` and
   `./run --single`, a real reply each. The new image has not been booted. Then T5, harvest and close.
 - **Plan 10** — Repin Basalt to v0.5.0 and rebuild: in progress, 1/3 tasks done (T1: pin at `ad274aa`,
-  image `cu1343-sm120-ad274aa` built, gate 1–6 pass on it); next **T2**, **blocked on the owner's
-  paste**: `./run` and `./run --single`, a real reply each. Then T3, harvest and close. Plan 08 stays
+  image `cu1343-sm120-ad274aa` built, gate 1–6 pass on it); next **T2**, half recorded (the default
+  boot came up on engine 0.5.0 with 3 × 362144) and **blocked on the owner**: a real reply from that
+  boot, then `./run --single` with a reply. Then T3, harvest and close. Plan 08 stays
   open beneath it (owner decision 2026-11-20: settle it later).
 
 ## Plans <!-- hp:plans -->
