@@ -68,6 +68,10 @@ the last three always carry a reason in the row's Notes cell.
   holds it (`dd … iflag=direct,skip_bytes,count_bytes skip=92641689600 count=63360615936`, from cosmo;
   not run — a 59 GiB read of noir's array is the owner's step). The second lasts until noir evicts
   the pages or reboots. Neither has been booted against.
+- **2026-11-20 (T3) — a later boot read the long prompt.** At 21:44 PST the owner booted again with
+  the `engram` section in noir's cache: the 14,150-token prompt finished in 29.4 s (481 tok/s), `end=stop`
+  (Plan 12 tracker, Evidence row 5, where it is the baseline for the buffered-io boot). T3 stays
+  `blocked` only for want of a quoted reply; Plan 12 T4's boot is meant to supply it.
 - **2026-11-20 (T3) — the owner booted before being asked and pasted nothing.** Everything in rows
   8–9 was read by the agent from the running container and its log; `./run-hy4`'s `==` lines are
   inferred from the container's arguments, not seen. No reply text exists in the logs.
