@@ -53,6 +53,11 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   on the owner**: the first boot loaded and answered a short prompt, then a 14,150-token prompt stalled
   on Engram reads from NFS. It needs `./preload` (or a local copy), a boot, and a quoted reply. Then
   T4, harvest and close.
+- **Plan 13** — Repin Basalt to v0.5.5 and rebuild: in progress, 0/3 tasks done; **T1 is blocked on the
+  owner's `./build`**. The pin edit in `versions.env` (`ad274aa` → `ff0b978`) is uncommitted in the
+  worktree until the image exists (gate steps 5, 5b and 6 need one for `BASALT_SHA`); until then a plain
+  `./run` refuses, and `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-ad274aa ./run` boots the
+  v0.5.0 image. Then T2, an owner boot per launcher, and T3, harvest and close.
 
 ## Plans <!-- hp:plans -->
 
@@ -72,7 +77,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 10 | Repin Basalt to v0.5.0 and rebuild the image | 01 | in-progress | `d3b7574` → `ad274aa` (v0.5.0 tag commit, 206 commits on). Owner builds and boots. Plan 08's open rows and Plan 09's target left for later (owner, 2026-11-20). |
 | 11 | Hy4-flash launcher: `./run-hy4` | 10 (T1's image) | in-progress | `./run` passes Flash-Next's flags, which Hy4-flash refuses (`--ple-io`, `--kv int8`). Second launcher, per-pack flag check in the gate (step 5b), one owner boot. |
 | 12 | Local patch: a switch that stops Basalt's `O_DIRECT` reads | 10 (T1), 11 | in-progress | `BASALT_BUFFERED_IO=1`, a 3-file patch applied in the image build; the launchers and `./preload` turn it on. Owner rebuild and one Hy4-flash boot from NFS. |
-| 13 | Repin Basalt to v0.5.5 and rebuild the image | 10 (T1), 12 (T1) | pending | `ad274aa` → `ff0b978` (v0.5.5 tag commit, 177 commits on; a fifth model, Inkling 2 Mini). The patch fits unchanged. Owner builds and boots. |
+| 13 | Repin Basalt to v0.5.5 and rebuild the image | 10 (T1), 12 (T1) | in-progress | `ad274aa` → `ff0b978` (v0.5.5 tag commit, 177 commits on; a fifth model, Inkling 2 Mini). The patch fits unchanged. Owner builds and boots. |
 
 ## Dependency Chain <!-- hp:chain -->
 

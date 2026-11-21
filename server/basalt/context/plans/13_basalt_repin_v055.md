@@ -1,6 +1,6 @@
 # Plan 13 — Repin Basalt to v0.5.5 and rebuild the image
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-11-21
 > **Depends on**: Plan 10 T1 (the pin `ad274aa` this starts from); Plan 12 T1 (`patches/0001`, which must fit the new pin); Plan 01 (the image recipe, `./build`, the gate)
 > **Goal**: `versions.env` pins Basalt `ff0b978` (v0.5.5), the image `iphands/basalt-blackwell:cu1343-sm120-ff0b978` is built from it with the buffered-io patch, the full gate passes against that image, and each launcher boots its pack on it with a real reply.

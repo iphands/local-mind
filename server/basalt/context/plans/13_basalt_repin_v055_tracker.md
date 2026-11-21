@@ -3,7 +3,7 @@
 ## Overview
 
 - Status: 0% complete (0/3 tasks)
-- Start date: — (set when T1 starts)
+- Start date: 2026-11-21
 - Plan: `context/plans/13_basalt_repin_v055.md`
 - Evidence: the table below; build logs in `captures/build_<date>_<sha7>.log` (gitignored); boot
   start blocks pasted by the owner. Test environment: host `cosmo`, RTX PRO 6000 (GPU 0), the packs
@@ -26,7 +26,7 @@
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
-| 1 | T1: repin to `ff0b978`, preflight, owner build, gate on the new image | `versions.env`, `README.md` | pending | |
+| 1 | T1: repin to `ff0b978`, preflight, owner build, gate on the new image | `versions.env`, `README.md` | blocked | **Waits on the owner's `./build` (2026-11-21).** Steps 1–2 (the `versions.env` edit, the agent's `PREFLIGHT_ONLY=1 ./build`, the sweep of the patch's callers, gate 1–4) are made right after this commit; `versions.env` then stays uncommitted until the image exists, because gate steps 5, 5b and 6 fail with no image for `BASALT_SHA`. Owner: `./build` → `iphands/basalt-blackwell:cu1343-sm120-ff0b978`. Then steps 4–5: gate 1–6 with 5b on that image, `README.md`, this row, the commit. dirty: `versions.env` (the agent's, in progress). |
 | 2 | T2: owner boots, `./run` and `./run-hy4`, a real reply each | tracker Evidence | pending | |
 | 3 | T3: harvest and close | `context/` | pending | |
 
