@@ -103,6 +103,7 @@ name the model `cosmo-6000`; any other name gets a 404. Stop the server with Ctr
 | `KV` | `int8` | `--kv` (`fp16`, `int8`, `q4_0`, `k8v4`) |
 | `PLE_IO` | `ram` | `--ple-io`: `ram` locks the 28.8 GB PLE n-gram table in RAM at boot (~27 GiB, held for the server's life); `direct` reads 16 random 4 KiB rows per prompt token from the pack |
 | `VISION` | `dynamic` | `--vision` (`off`, `dynamic`, `cpu`, a GPU number) |
+| `BUFFERED_IO` | `1` | `-e BASALT_BUFFERED_IO=1`: the engine reads files through the page cache (our patch, § *Build*); `0` is upstream's `O_DIRECT`, which no cache on this machine can serve. An image built before the patch ignores it, and the launcher says so |
 | `PORT` | `8700` | `--port`, published on `0.0.0.0` |
 | `ALIAS` | `cosmo-6000` | `--alias`: the one model name requests must use |
 | `ALLOWED_HOSTS` | `cosmo.lan` and `$(hostname)` | `--allowed-host` per name: Basalt refuses unknown `Host` names (IPs and `localhost` always pass) |
@@ -138,6 +139,7 @@ because Hy4-flash takes none of Flash-Next's. `PORT`, `ALIAS`, `ALLOWED_HOSTS`, 
 | `PARALLEL` | `1` | `--parallel` (1..8); upstream lists no parallel slots for Hy4-flash, so above 1 is unproven |
 | `SLOT_FULL_CONTEXT` | `1` (only when `PARALLEL` > 1) | `--slot-full-context` |
 | `VISION` | `dynamic` | `--vision` (`off`, `dynamic` — the only image mode; no video) |
+| `BUFFERED_IO` | `1` | as for `./run`; `./preload` takes the same knob and must be given the same value |
 
 ```bash
 ./preload                  # read the pack's engram section (59 GiB) from NFS so the server caches it, then check
@@ -147,9 +149,10 @@ DRY_RUN=1 ./preload        # print the dd command, read nothing
 ```
 
 `./preload` is for a pack served from NFS. It takes the section's offset and size from the pack's own
-table and reads it with `O_DIRECT`, so noir's page cache fills and this machine's does not. The effect
-lasts until noir evicts those pages or reboots; `--check` times 200 random 4 KiB reads (about 0.5 ms
-each when cached, 14 ms when noir has to seek). A local pack needs none of this.
+table and reads it the way the engine will: through the page cache with `BUFFERED_IO=1` (the default;
+this machine and noir both keep it), with `O_DIRECT` under `BUFFERED_IO=0` (only noir keeps it). The
+effect lasts until the pages are evicted or noir reboots; `--check` times 200 random 4 KiB reads
+(about 0.5 ms each when cached, 14 ms when noir has to seek). A local pack needs none of this.
 
 There is no `PLE_IO`: `--ple-io` is Flash-Next's flag and Hy4-flash refuses it. These defaults are
 starting values (`./run`'s context, upstream's KV default), not measured and not yet the owner's

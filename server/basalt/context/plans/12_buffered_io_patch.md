@@ -243,7 +243,7 @@ Then `git mv` to `completed/`, SERIES done.
 ## Verification Checklist
 
 - [x] T1 *(2026-11-20, tracker Evidence rows 2–3)*: `PREFLIGHT_ONLY=1 ./build` prints `== patch fits: 0001-buffered-io-switch.patch` and `preflight ok`; a damaged patch makes it die by name
-- [ ] T2: all three launcher dry runs carry `-e BASALT_BUFFERED_IO=1`; `BUFFERED_IO=0` gives `io=direct`; the `serve` words are unchanged
+- [x] T2 *(2026-11-20, tracker Evidence row 4)*: all three launcher dry runs carry `-e BASALT_BUFFERED_IO=1`; `BUFFERED_IO=0` gives `io=direct`; the `serve` words are unchanged
 - [ ] T3: gate step 6b prints `patches ok (1)` on the rebuilt image
 - [ ] T4: the engine log shows the switch on, and a prompt of 14k tokens or more is read from the NFS pack with no stall report
 - [ ] T5: each harvested fact is in the file the tracker names, re-read after writing

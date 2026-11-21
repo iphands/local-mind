@@ -438,7 +438,7 @@ did. Pass: no `FAIL` line, last line `dry-run ok`, and `storage/` was not create
 img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin'); export IMAGE_OVERRIDE=${img:-stub:none}
 d=$(DRY_RUN=1 ./run 2>&1); s=$(DRY_RUN=1 ./run --single 2>&1)
 need() { local where=$1 out=$2 w; shift 2; for w; do [[ $out == *"$w"* ]] || echo "FAIL(dry:$where) missing: $w"; done; }
-both=('-p 0.0.0.0:8700:8700' '--gpus device=0' '--ulimit memlock=-1' ':/models:ro' '--host 0.0.0.0'
+both=('-p 0.0.0.0:8700:8700' '--gpus device=0' '--ulimit memlock=-1' ':/models:ro' '-e BASALT_BUFFERED_IO=1' '--host 0.0.0.0'
       '--port 8700' '--alias cosmo-6000' '--allowed-host cosmo.lan' '--max-context 362144' '--kv int8'
       '--ple-io ram'
       '--vision dynamic' 'serve /models/Qwen3.8-FN-NVFP4-DQ6_K.basalt' '(DRY_RUN) nothing started')
@@ -452,7 +452,7 @@ DRY_RUN=1 ./run README.md >/dev/null 2>&1 && echo 'FAIL(dry:not-a-pack) exit 0'
 k=$(API_KEY=k3y DRY_RUN=1 ./run --single 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(dry:api-key) printed'
 # ./run-hy4: Hy4-flash's flags, none of Flash-Next's, and only a Hy4-flash pack
 hy=$(DRY_RUN=1 ./run-hy4 2>&1)
-need hy4 "$hy" '-p 0.0.0.0:8700:8700' '--gpus device=0' '--ulimit memlock=-1' ':/models:ro' '--host 0.0.0.0' \
+need hy4 "$hy" '-p 0.0.0.0:8700:8700' '--gpus device=0' '--ulimit memlock=-1' ':/models:ro' '-e BASALT_BUFFERED_IO=1' '--host 0.0.0.0' \
      '--port 8700' '--alias cosmo-6000' '--allowed-host cosmo.lan' '--max-context 362144' '--kv fp16' \
      '--parallel 1' '--vision dynamic' 'serve /models/Hy4-flash-NVFP4.basalt' '(DRY_RUN) nothing started'
 [[ $hy == *--ple-io* ]] && echo 'FAIL(dry:hy4) passes --ple-io'
@@ -469,7 +469,13 @@ y=$(DRY_RUN=1 ./run "$h4" 2>&1) && echo 'FAIL(dry:run-arch) took a Hy4-flash pac
 # ./preload: the dd it would run takes its range from the pack's own table, and reads nothing dry
 pl=$(DRY_RUN=1 ./preload 2>&1)
 row=$(./preload --list 2>/dev/null | awk '$1 == "engram" { print "skip=" $2 " count=" $3 }')
-need preload "$pl" 'iflag=direct,skip_bytes,count_bytes' "${row:-NO-ENGRAM-ROW}" '(DRY_RUN) nothing read'
+need preload "$pl" 'iflag=skip_bytes,count_bytes' "${row:-NO-ENGRAM-ROW}" '(DRY_RUN) nothing read'
+# BUFFERED_IO=0 is upstream's direct reads, in the launchers and in the preload that must match them
+for l in './run' './run --single' './run-hy4'; do
+  read -r -a cmd <<<"$l"; o=$(BUFFERED_IO=0 DRY_RUN=1 "${cmd[@]}" 2>&1)
+  [[ $o == *'-e BASALT_BUFFERED_IO=0'* && $o == *'io=direct'* ]] || echo "FAIL(dry:buffered-io) $l ignores BUFFERED_IO=0"
+done
+need preload-direct "$(BUFFERED_IO=0 DRY_RUN=1 ./preload 2>&1)" 'iflag=direct,skip_bytes,count_bytes'
 DRY_RUN=1 ./preload no-such-section >/dev/null 2>&1 && echo 'FAIL(dry:preload) took an unknown section'
 echo "dry-run ok (image: $IMAGE_OVERRIDE)"; unset IMAGE_OVERRIDE
 ```

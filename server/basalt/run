@@ -16,6 +16,9 @@
 #                    table, 16 hashed 4 KiB rows per prompt token. ram locks it in RAM at boot (~27 GiB,
 #                    one sequential read); direct reads it per token, which NFS (~2.9k IOPS) cannot keep up with
 #   VISION           dynamic                                    --vision   (off | dynamic | cpu | <gpu>)
+#   BUFFERED_IO      1                                          -e BASALT_BUFFERED_IO: 1 = the engine reads files through the
+#                    page cache (our patch 0001, Plan 12); 0 = upstream's O_DIRECT reads, which no cache on this
+#                    machine can serve
 #   PORT             8700                                       --port, and -p 0.0.0.0:$PORT:$PORT
 #   ALIAS            cosmo-6000                                 --alias   (the one name requests must use)
 #   ALLOWED_HOSTS    "cosmo.lan <hostname>"                     --allowed-host, one per name (Host-header check)
@@ -58,6 +61,7 @@ MAX_CONTEXT=${MAX_CONTEXT:-362144}
 KV=${KV:-int8}
 PLE_IO=${PLE_IO:-ram}
 VISION=${VISION:-dynamic}
+BUFFERED_IO=${BUFFERED_IO:-1}
 PORT=${PORT:-8700}
 ALIAS=${ALIAS:-cosmo-6000}
 ALLOWED_HOSTS=${ALLOWED_HOSTS-"cosmo.lan $(hostname)"}
@@ -72,6 +76,7 @@ EXTRA_ARGS=${EXTRA_ARGS:-}
 [[ $MAX_CONTEXT =~ ^[1-9][0-9]*$ ]] || die "MAX_CONTEXT must be a positive integer, got '$MAX_CONTEXT'."
 if ! [[ $PORT =~ ^[1-9][0-9]*$ ]] || (( PORT > 65535 )); then die "PORT must be 1..65535, got '$PORT'."; fi
 [[ -n $ALIAS ]] || die "ALIAS is empty: every request must name the served model."
+[[ $BUFFERED_IO =~ ^[01]$ ]] || die "BUFFERED_IO must be 0 or 1, got '$BUFFERED_IO'."
 [[ $PLE_IO == ram || $PLE_IO == direct ]] || die "PLE_IO must be ram or direct, got '$PLE_IO'."
 
 # ------------------------------------------------------------------ the pack
@@ -146,6 +151,7 @@ docker_args=(
   run --rm --name "$NAME"
   --user "$RUN_UID:$RUN_GID"
   -e HOME=/home/ubuntu
+  -e "BASALT_BUFFERED_IO=$BUFFERED_IO"             # 1: read through the page cache (patches/0001)
   --gpus device=0                                  # the RTX PRO 6000 only, never the 4060
   -p "0.0.0.0:$PORT:$PORT"
   --ulimit memlock=-1                              # resident experts are page-locked RAM
@@ -163,9 +169,15 @@ for w in "${DOCKER[@]}" "${docker_args[@]}" "${serve_args[@]}"; do
   shown+=("$w")
 done
 
+if [[ $BUFFERED_IO == 1 ]]; then io=buffered; else io=direct; fi
+if [[ $BUFFERED_IO == 1 && $(image_patches "$RUN_IMAGE") != *buffered-io* ]]; then
+  echo "== note:  $RUN_IMAGE was built without the buffered-io patch (label ai.basalt.patches):"
+  echo "==        BUFFERED_IO=1 changes nothing in it, its reads stay O_DIRECT. Rebuild with ./build."
+  io="buffered asked, image reads direct"
+fi
 echo "== image: $RUN_IMAGE"
 echo "== pack:  $pack_real ($pack_bytes bytes, $(( pack_bytes / 1073741824 )) GiB)"
-echo "== mode:  $slots, kv=$KV, ple-io=$PLE_IO, vision=$VISION, http://0.0.0.0:$PORT/v1 as '$ALIAS'"
+echo "== mode:  $slots, kv=$KV, ple-io=$PLE_IO, vision=$VISION, io=$io, http://0.0.0.0:$PORT/v1 as '$ALIAS'"
 echo "== cache: $CACHE_DIR"
 printf '%q ' "${shown[@]}"
 echo

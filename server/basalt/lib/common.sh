@@ -180,6 +180,14 @@ pack_arch() {
   return 0
 }
 
+# Print an image's ai.basalt.patches label ("<file>:<hash> …", or "none"); nothing when the image or
+# the label is absent (every image built before Plan 12). It never fails its caller.
+image_patches() {
+  "${DOCKER[@]}" image inspect -f '{{index .Config.Labels "ai.basalt.patches"}}' \
+    "${1:?image_patches needs an image}" 2>/dev/null || true
+  return 0
+}
+
 # Print the newest $IMAGE tag whose ai.basalt.ref label is BASALT_SHA; print nothing if none.
 # `docker images` lists newest first. mapfile, not `| head -1`: head closing the pipe would make
 # docker exit on SIGPIPE, which pipefail turns into a failure.

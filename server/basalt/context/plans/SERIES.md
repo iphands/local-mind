@@ -44,9 +44,10 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   boot came up on engine 0.5.0 with 3 × 362144) and **blocked on the owner**: a real reply from that
   boot, then `./run --single` with a reply. Then T3, harvest and close. Plan 08 stays
   open beneath it (owner decision 2026-11-20: settle it later).
-- **Plan 12** — Buffered-io patch: in progress, 1/5 tasks done (T1: `patches/0001`, the Dockerfile
-  step, `./build`'s fit check); next **T2** (`BUFFERED_IO` in the launchers and `./preload`), then
-  **T3**, which waits on the owner's `./build`, and **T4**, the owner's Hy4-flash boot from NFS.
+- **Plan 12** — Buffered-io patch: in progress, 2/5 tasks done (T1: `patches/0001`, the Dockerfile
+  step, `./build`'s fit check; T2: `BUFFERED_IO=1` by default in `./run`, `./run-hy4`, `./preload`);
+  next **T3**, **blocked on the owner's `./build`** (the image on disk has no patch, so the switch
+  does nothing yet), then **T4**, the owner's Hy4-flash boot from NFS.
 - **Plan 11** — Hy4-flash launcher `./run-hy4`: in progress, 3/5 tasks done (T1: the launcher,
   `pack_arch`, gate step 5b; T2: `./run` refuses a Hy4-flash pack; T5: `./preload`); **T3 is blocked
   on the owner**: the first boot loaded and answered a short prompt, then a 14,150-token prompt stalled

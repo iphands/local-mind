@@ -10,13 +10,16 @@
 #
 # Knobs (env)        default                                    Basalt setting
 #   PACK / $1        /mnt/noir/…/vllm/jesdga/Hy4-flash-NVFP4.basalt   serve <pack> (its dir mounted :ro at /models)
-#                    (the NFS copy, which boots but stalls on prompts past a few thousand tokens unless
-#                    ./preload ran first — see the note this prints; a local one: PACK=models.local/<pack> ./run-hy4)
+#                    (the NFS copy: run ./preload before it, or prompts past a few thousand tokens stall —
+#                    see the note this prints; a local one: PACK=models.local/<pack> ./run-hy4)
 #   MAX_CONTEXT      362144                                     --max-context (1024..1048576)
 #   KV               fp16                                       --kv   (fp16 | fp8); fp8 rows are about 0.6× the size
 #   PARALLEL         1                                          --parallel (1..8); above 1 is unproven for this model
 #   SLOT_FULL_CONTEXT 1 (only when PARALLEL > 1)                --slot-full-context (each slot gets MAX_CONTEXT)
 #   VISION           dynamic                                    --vision   (off | dynamic); no video
+#   BUFFERED_IO      1                                          -e BASALT_BUFFERED_IO: 1 = the engine reads files through the
+#                    page cache (our patch 0001, Plan 12); 0 = upstream's O_DIRECT reads, which no cache on this
+#                    machine can serve
 #   PORT             8700                                       --port, and -p 0.0.0.0:$PORT:$PORT
 #   ALIAS            cosmo-6000                                 --alias   (the one name requests must use)
 #   ALLOWED_HOSTS    "cosmo.lan <hostname>"                     --allowed-host, one per name (Host-header check)
@@ -59,6 +62,7 @@ KV=${KV:-fp16}
 PARALLEL=${PARALLEL:-1}
 SLOT_FULL_CONTEXT=${SLOT_FULL_CONTEXT:-1}
 VISION=${VISION:-dynamic}
+BUFFERED_IO=${BUFFERED_IO:-1}
 PORT=${PORT:-8700}
 ALIAS=${ALIAS:-cosmo-6000}
 ALLOWED_HOSTS=${ALLOWED_HOSTS-"cosmo.lan $(hostname)"}
@@ -79,6 +83,7 @@ fi
 [[ $VISION == off || $VISION == dynamic ]] || die "VISION must be off or dynamic for Hy4-flash, got '$VISION'."
 if ! [[ $PORT =~ ^[1-9][0-9]*$ ]] || (( PORT > 65535 )); then die "PORT must be 1..65535, got '$PORT'."; fi
 [[ -n $ALIAS ]] || die "ALIAS is empty: every request must name the served model."
+[[ $BUFFERED_IO =~ ^[01]$ ]] || die "BUFFERED_IO must be 0 or 1, got '$BUFFERED_IO'."
 
 # ------------------------------------------------------------------ the pack
 
@@ -153,6 +158,7 @@ docker_args=(
   run --rm --name "$NAME"
   --user "$RUN_UID:$RUN_GID"
   -e HOME=/home/ubuntu
+  -e "BASALT_BUFFERED_IO=$BUFFERED_IO"             # 1: read through the page cache (patches/0001)
   --gpus device=0                                  # the RTX PRO 6000 only, never the 4060
   -p "0.0.0.0:$PORT:$PORT"
   --ulimit memlock=-1                              # the RAM tier's experts are page-locked
@@ -170,19 +176,29 @@ for w in "${DOCKER[@]}" "${docker_args[@]}" "${serve_args[@]}"; do
   shown+=("$w")
 done
 
+if [[ $BUFFERED_IO == 1 ]]; then io=buffered; else io=direct; fi
+if [[ $BUFFERED_IO == 1 && $(image_patches "$RUN_IMAGE") != *buffered-io* ]]; then
+  echo "== note:  $RUN_IMAGE was built without the buffered-io patch (label ai.basalt.patches):"
+  echo "==        BUFFERED_IO=1 changes nothing in it, its reads stay O_DIRECT. Rebuild with ./build."
+  io="buffered asked, image reads direct"
+fi
 echo "== image: $RUN_IMAGE"
 echo "== pack:  $pack_real ($pack_bytes bytes, $(( pack_bytes / 1073741824 )) GiB)"
-echo "== mode:  $slots, kv=$KV, vision=$VISION, http://0.0.0.0:$PORT/v1 as '$ALIAS'"
+echo "== mode:  $slots, kv=$KV, vision=$VISION, io=$io, http://0.0.0.0:$PORT/v1 as '$ALIAS'"
 echo "== cache: $CACHE_DIR"
 if [[ $pack_fs == nfs* ]]; then
-  # Measured on the first boot (Plan 11 T3, 2026-11-20, the pack on noir): prompts were read at
-  # 53 tok/s, nearly all of it Engram reads, and a 14150-token prompt made no progress for 60 s, so
-  # the engine's watchdog stopped it. Hy4-flash has no RAM mode for the table: say so before a prompt does.
-  echo "== note:  the pack is on $pack_fs. Hy4-flash reads its Engram table from the pack for every prompt"
-  echo "==        token (64 random 4 KiB reads, no RAM mode): from NFS that was 53 tok/s here, and a"
-  echo "==        14150-token prompt hit the engine's 60 s watchdog (2026-11-20). Either have the NFS"
-  echo "==        server hold the table in RAM first (./preload; ./preload --check tells if it still does),"
-  echo "==        or serve a local copy: PACK=models.local/$pack_file ./run-hy4"
+  # Measured on the first boot (Plan 11 T3, 2026-11-20, O_DIRECT reads, the table in nobody's cache):
+  # prompts were read at 53 tok/s, nearly all of it Engram reads, and a 14150-token prompt made no
+  # progress for 60 s, so the engine's watchdog stopped it. Hy4-flash has no RAM mode for the table.
+  echo "== note:  the pack is on $pack_fs. Hy4-flash looks up 64 Engram rows in the pack for every prompt token,"
+  echo "==        and a row no cache holds is a 12 ms seek on the server: 53 tok/s, and a 14150-token prompt"
+  echo "==        hit the engine's 60 s watchdog (2026-11-20). Run ./preload first; ./preload --check tells"
+  if [[ $BUFFERED_IO == 1 ]]; then
+    echo "==        whether the table is still cached (here or on the server)."
+  else
+    echo "==        whether the server still has it (BUFFERED_IO=0: this machine's page cache is not used)."
+  fi
+  echo "==        Or serve a local copy: PACK=models.local/$pack_file ./run-hy4"
 fi
 printf '%q ' "${shown[@]}"
 echo

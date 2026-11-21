@@ -1,22 +1,27 @@
 #!/usr/bin/env bash
-# Read a pack's Engram table once, so the NFS server holds it in RAM: ./preload [--check|--list] [PACK.basalt] [SECTION…]
+# Read a pack's Engram table once, so it is in RAM before prompts need it: ./preload [--check|--list] [PACK.basalt] [SECTION…]
 #
 #   ./preload               read the Hy4-flash pack's engram section (59 GiB) from NFS, then check it
-#   ./preload --check       only sample it: is it still in the server's RAM?
+#   ./preload --check       only sample it: is it still cached?
 #   ./preload --list        print the pack's sections (name, offset, bytes)
 #   DRY_RUN=1 ./preload     print the dd command; read nothing
 #
-# Why: Hy4-flash looks up 64 rows of its Engram table for every prompt token, each a 4 KiB O_DIRECT
-# read from the pack. O_DIRECT skips this machine's page cache, and loading the model never touches
-# that section, so from NFS every lookup is a seek on the server's disks (about 1k reads/s, 12 ms
-# each) until the server has the section in its own RAM (164k reads/s, 0.05 ms; Plan 11, 2026-11-20).
-# This reads the section through the mount with O_DIRECT: the server caches it, this machine does
-# not. It lasts until the server evicts those pages or reboots — hence --check. The offsets come
+# Why: Hy4-flash looks up 64 rows of its Engram table for every prompt token, each a 4 KiB read from
+# the pack, and loading the model never touches that section. From NFS a row that no cache holds is
+# a seek on the server's disks (about 1k reads/s, 12 ms each); cached on the server it is 0.05 ms
+# (164k reads/s; Plan 11, 2026-11-20), and cached on this machine it is no round trip at all.
+# BUFFERED_IO says which caches count, and must match the launcher's:
+#   1 (default)  the engine reads through the page cache (./run-hy4's default, patch 0001): this reads
+#                the section the same way, so this machine AND the server both keep it
+#   0            the engine reads with O_DIRECT, which skips this machine's cache: this reads with
+#                O_DIRECT too, so only the server keeps it
+# Either lasts until the pages are evicted (or the server reboots) — hence --check. The offsets come
 # from the pack's own section table.
 #
 # Knobs (env)   default
 #   PACK / *.basalt argument   /mnt/noir/…/vllm/jesdga/Hy4-flash-NVFP4.basalt
 #   sections (other arguments) engram
+#   BUFFERED_IO 1       see above
 #   BS          16M     dd block size for the read
 #   SAMPLES     200     random 4 KiB reads per section for the check
 set -euo pipefail
@@ -47,6 +52,9 @@ DRY_RUN=${DRY_RUN:-0}
 PACK=${pack_arg:-${PACK:-/mnt/noir/scratch/ai/llm/models/vllm/jesdga/Hy4-flash-NVFP4.basalt}}
 BS=${BS:-16M}
 SAMPLES=${SAMPLES:-200}
+BUFFERED_IO=${BUFFERED_IO:-1}
+[[ $BUFFERED_IO =~ ^[01]$ ]] || die "BUFFERED_IO must be 0 or 1, got '$BUFFERED_IO'."
+if [[ $BUFFERED_IO == 1 ]]; then direct=''; where="this machine's page cache or the server's"; else direct='direct,'; where="the server's RAM"; fi
 [[ $SAMPLES =~ ^[1-9][0-9]*$ ]] || die "SAMPLES must be a positive integer, got '$SAMPLES'."
 
 [[ -f $PACK && -r $PACK ]] || die "pack not found or not readable: $PACK"
@@ -67,25 +75,25 @@ fi
 
 fs=$(stat -f -c '%T' -- "$PACK")
 if [[ $fs != nfs* ]]; then
-  echo "== $PACK is on $fs, not NFS: Basalt reads it with O_DIRECT straight from the disk, so there is no cache to warm."
+  echo "== $PACK is on $fs, not NFS: its rows come from the local disk at its own speed. Nothing to preload."
   exit 0
 fi
 
-# Mean time of SAMPLES random 4 KiB O_DIRECT reads in [off, off+size), in microseconds. Each read is
+# Mean time of SAMPLES random 4 KiB reads in [off, off+size), in microseconds, read as the engine will. Each read is
 # its own dd, about 1 ms of process start: a cached page lands near that, a seek well above it.
 sample_us() {
   local off=$1 pages=$(( $2 / 4096 )) i pg t0 t1
   t0=${EPOCHREALTIME/[.,]/}
   for (( i = 0; i < SAMPLES; i++ )); do
     pg=$(( ( (RANDOM << 30) | (RANDOM << 15) | RANDOM ) % pages ))
-    dd if="$PACK" of=/dev/null bs=4096 count=1 iflag=direct,skip_bytes skip=$(( off + pg * 4096 )) 2>/dev/null
+    dd if="$PACK" of=/dev/null bs=4096 count=1 "iflag=${direct}skip_bytes" skip=$(( off + pg * 4096 )) 2>/dev/null
   done
   t1=${EPOCHREALTIME/[.,]/}
   echo $(( (t1 - t0) / SAMPLES ))
   return 0
 }
 
-echo "== pack:  $PACK ($fs)"
+echo "== pack:  $PACK ($fs), BUFFERED_IO=$BUFFERED_IO"
 cold=0
 for w in "${want[@]}"; do
   off='' size=''
@@ -96,7 +104,7 @@ for w in "${want[@]}"; do
   [[ -n $off ]] || die "$PACK has no section '$w' (./preload --list)."
 
   if [[ $mode == read ]]; then
-    cmd=(dd "if=$PACK" of=/dev/null "bs=$BS" "iflag=direct,skip_bytes,count_bytes" "skip=$off" "count=$size" status=progress)
+    cmd=(dd "if=$PACK" of=/dev/null "bs=$BS" "iflag=${direct}skip_bytes,count_bytes" "skip=$off" "count=$size" status=progress)
     echo "== read:  $w, $size bytes ($(( size / 1073741824 )) GiB) at offset $off"
     echo "${cmd[*]}"
     if [[ $DRY_RUN == 1 ]]; then continue; fi
@@ -111,9 +119,9 @@ for w in "${want[@]}"; do
   us=$(sample_us "$off" "$size")
   ms="$(( us / 1000 )).$(( us % 1000 / 100 ))"
   if (( us < 4000 )); then
-    echo "== check: $w — $SAMPLES random 4 KiB reads, $ms ms each: in the server's RAM"
+    echo "== check: $w — $SAMPLES random 4 KiB reads, $ms ms each: cached ($where)"
   else
-    echo "== check: $w — $SAMPLES random 4 KiB reads, $ms ms each: COLD, the server is seeking (./preload reads it in)"
+    echo "== check: $w — $SAMPLES random 4 KiB reads, $ms ms each: COLD, not in $where (./preload reads it in)"
     cold=1
   fi
 done
