@@ -1,0 +1,97 @@
+Local patch for iphands/local-mind server/basalt (Plan 12) — not upstream.
+
+BASALT_BUFFERED_IO=1 in the environment makes every file read go through the OS cache:
+open_unbuffered() answers -1, so each caller takes the cached path it already has for a
+file system that refuses O_DIRECT, and DirectFile (POSIX) opens without the flag. Unset,
+empty or anything but "1": upstream's behaviour, byte for byte. Fits jesdga95/basalt at
+ad274aa8 (v0.5.0); ./build checks the fit before building.
+
+diff -u -r a/include/basalt/platform/file.hpp b/include/basalt/platform/file.hpp
+--- a/include/basalt/platform/file.hpp
++++ b/include/basalt/platform/file.hpp
+@@ -118,6 +118,12 @@
+ /// instead.
+ int open_unbuffered(const std::string& path);
+ 
++/// Local patch, not upstream (iphands/local-mind server/basalt, patches/0001): true when the environment has
++/// BASALT_BUFFERED_IO=1. Then no read descriptor bypasses the OS cache: `open_unbuffered` answers -1, so each caller
++/// takes the cached path it already has, and `DirectFile` opens without the unbuffered flag. Read once, said once on
++/// stderr. POSIX only; false on Windows.
++bool buffered_io();
++
+ /// Creates or truncates `path` for writing, binary, readable and writable by its owner only where the platform has
+ /// file modes (a new Windows file takes its folder's inherited access list). A descriptor for `pwrite_all`; -1 on
+ /// failure.
+diff -u -r a/src/platform/direct_file.cpp b/src/platform/direct_file.cpp
+--- a/src/platform/direct_file.cpp
++++ b/src/platform/direct_file.cpp
+@@ -384,7 +384,7 @@
+     close();
+     if (!valid_workers(workers, err)) return false;
+     (void) mapped_elsewhere;   // a mapping of the file does not hold up O_DIRECT reads of it here
+-    impl_->fd = ::open(path.c_str(), O_RDONLY | O_DIRECT | O_CLOEXEC);
++    impl_->fd = ::open(path.c_str(), O_RDONLY | (buffered_io() ? 0 : O_DIRECT) | O_CLOEXEC);
+     if (impl_->fd < 0) { err = "DirectFile: cannot open " + path; return false; }
+     return finish_open(path, err, workers);
+ }
+@@ -416,7 +416,7 @@
+ }
+ 
+ bool DirectFile::is_open() const { return impl_->fd >= 0; }
+-bool DirectFile::bypasses_cache() const { return is_open(); }
++bool DirectFile::bypasses_cache() const { return is_open() && !buffered_io(); }
+ uint64_t DirectFile::size() const { return impl_->size; }
+ 
+ bool DirectFile::submit(uint64_t offset, void* buffer, uint32_t length, uint64_t tag, std::string& err) {
+diff -u -r a/src/platform/file.cpp b/src/platform/file.cpp
+--- a/src/platform/file.cpp
++++ b/src/platform/file.cpp
+@@ -7,6 +7,9 @@
+ #include <cerrno>
+ #include <chrono>
+ #include <cstdint>
++#include <cstdio>
++#include <cstdlib>
++#include <cstring>
+ #include <filesystem>
+ #include <string>
+ #include <system_error>
+@@ -27,6 +30,21 @@
+ 
+ namespace basalt::platform {
+ 
++// Local patch, not upstream: see file.hpp.
++bool buffered_io() {
++#if defined(_WIN32)
++    return false;
++#else
++    static const bool on = [] {
++        const char* v = std::getenv("BASALT_BUFFERED_IO");
++        const bool set = v != nullptr && std::strcmp(v, "1") == 0;
++        if (set) std::fputs("basalt: BASALT_BUFFERED_IO=1: file reads go through the OS cache (no O_DIRECT)\n", stderr);
++        return set;
++    }();
++    return on;
++#endif
++}
++
+ #if defined(_WIN32)
+ // --------------------------------------------------------------------------------------------- Windows
+ 
+@@ -349,7 +367,7 @@
+ }
+ 
+ int open_unbuffered(int fd) {
+-    if (fd < 0) return -1;
++    if (fd < 0 || buffered_io()) return -1;
+     // The descriptor's own path, reopened: /proc/self/fd names the file a descriptor stands for, so this is a second
+     // handle on it with the unbuffered flag, and the first keeps its mapping and its cached reads.
+     const std::string self = "/proc/self/fd/" + std::to_string(fd);
+@@ -359,6 +377,7 @@
+ int open_unbuffered(const std::string& path) {
+     // The same flag taken from the path directly. A file system that refuses it answers -1, and the caller reads the
+     // bytes cached, which is the copy the flag exists to avoid.
++    if (buffered_io()) return -1;
+     return ::open(path.c_str(), O_RDONLY | O_DIRECT);
+ }
+ 

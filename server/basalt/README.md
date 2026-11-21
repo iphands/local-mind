@@ -58,7 +58,12 @@ PREFLIGHT_ONLY=1 ./build   # checks only: vendor/basalt at the pin, base digests
 ```
 
 `./build` manages `vendor/basalt` (cloned on first use, checked out at `BASALT_SHA`) and refuses
-a dirty checkout. The image keeps Basalt's source-tree layout at `/opt/basalt` (`bin/`, `serve/`,
+a dirty checkout. It also applies our local patches, `patches/*.patch`, inside the image build
+(never in `vendor/basalt`): each must fit the pin exactly or the build stops, and the image's
+`ai.basalt.patches` label names each with its hash. One so far (Plan 12):
+`0001-buffered-io-switch.patch` — with `BASALT_BUFFERED_IO=1` in its environment the engine reads
+files through the OS cache instead of with `O_DIRECT`; without it, upstream's behaviour. **The image
+on disk today predates the patch**: it takes effect at the next `./build`. The image keeps Basalt's source-tree layout at `/opt/basalt` (`bin/`, `serve/`,
 `tools/`, `data/`, and a `.venv` with upstream's pinned server dependencies) because the binary takes
 the directory above its own `bin/` as its install root and runs the Python server from there.
 

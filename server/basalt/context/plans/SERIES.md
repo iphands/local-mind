@@ -44,6 +44,9 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   boot came up on engine 0.5.0 with 3 × 362144) and **blocked on the owner**: a real reply from that
   boot, then `./run --single` with a reply. Then T3, harvest and close. Plan 08 stays
   open beneath it (owner decision 2026-11-20: settle it later).
+- **Plan 12** — Buffered-io patch: in progress, 1/5 tasks done (T1: `patches/0001`, the Dockerfile
+  step, `./build`'s fit check); next **T2** (`BUFFERED_IO` in the launchers and `./preload`), then
+  **T3**, which waits on the owner's `./build`, and **T4**, the owner's Hy4-flash boot from NFS.
 - **Plan 11** — Hy4-flash launcher `./run-hy4`: in progress, 3/5 tasks done (T1: the launcher,
   `pack_arch`, gate step 5b; T2: `./run` refuses a Hy4-flash pack; T5: `./preload`); **T3 is blocked
   on the owner**: the first boot loaded and answered a short prompt, then a 14,150-token prompt stalled
@@ -67,7 +70,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 09 | Basalt vendor audit of the v0.4.1 pin `d3b7574`: static reading + runtime observation | 08 | pending | Row only, no plan file yet. Re-targets Plans 02 + 03; reuses `context/audit/scripts/` and the canary method; starts with tag signature + tree identity. |
 | 10 | Repin Basalt to v0.5.0 and rebuild the image | 01 | in-progress | `d3b7574` → `ad274aa` (v0.5.0 tag commit, 206 commits on). Owner builds and boots. Plan 08's open rows and Plan 09's target left for later (owner, 2026-11-20). |
 | 11 | Hy4-flash launcher: `./run-hy4` | 10 (T1's image) | in-progress | `./run` passes Flash-Next's flags, which Hy4-flash refuses (`--ple-io`, `--kv int8`). Second launcher, per-pack flag check in the gate (step 5b), one owner boot. |
-| 12 | Local patch: a switch that stops Basalt's `O_DIRECT` reads | 10 (T1), 11 | pending | `BASALT_BUFFERED_IO=1`, a 3-file patch applied in the image build; the launchers and `./preload` turn it on. Owner rebuild and one Hy4-flash boot from NFS. |
+| 12 | Local patch: a switch that stops Basalt's `O_DIRECT` reads | 10 (T1), 11 | in-progress | `BASALT_BUFFERED_IO=1`, a 3-file patch applied in the image build; the launchers and `./preload` turn it on. Owner rebuild and one Hy4-flash boot from NFS. |
 
 ## Dependency Chain <!-- hp:chain -->
 

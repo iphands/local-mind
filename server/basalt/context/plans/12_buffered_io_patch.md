@@ -1,6 +1,6 @@
 # Plan 12 — Local patch: a switch that stops Basalt's `O_DIRECT` reads
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-11-20
 > **Depends on**: Plan 10 T1 (the pin `ad274aa` and its image recipe); Plan 11 (`./run-hy4`, `./preload`, whose blocked T3 this plan's boot also settles)
 > **Goal**: the image is built from the pinned commit plus one local patch that makes `BASALT_BUFFERED_IO=1` read every file through the OS cache; `./run`, `./run-hy4` and `./preload` turn it on by default; one owner boot of Hy4-flash from the NFS pack reads a long prompt without the watchdog firing.
@@ -242,7 +242,7 @@ Then `git mv` to `completed/`, SERIES done.
 
 ## Verification Checklist
 
-- [ ] T1: `PREFLIGHT_ONLY=1 ./build` prints `== patch fits: 0001-buffered-io-switch.patch` and `preflight ok`; a damaged patch makes it die by name
+- [x] T1 *(2026-11-20, tracker Evidence rows 2–3)*: `PREFLIGHT_ONLY=1 ./build` prints `== patch fits: 0001-buffered-io-switch.patch` and `preflight ok`; a damaged patch makes it die by name
 - [ ] T2: all three launcher dry runs carry `-e BASALT_BUFFERED_IO=1`; `BUFFERED_IO=0` gives `io=direct`; the `serve` words are unchanged
 - [ ] T3: gate step 6b prints `patches ok (1)` on the rebuilt image
 - [ ] T4: the engine log shows the switch on, and a prompt of 14k tokens or more is read from the NFS pack with no stall report

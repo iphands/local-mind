@@ -6,6 +6,8 @@
 #                              `preflight ok`, exit 0. No image.
 #   JOBS=N ./build             compile parallelism (default: half the cores).
 #
+# patches/*.patch are applied inside the image build (Dockerfile); here each is checked against the
+# pin first, and the image gets the label ai.basalt.patches.
 # vendor/basalt is managed here: cloned if absent, refused if dirty (untracked files count),
 # checked out detached at BASALT_SHA — never --force, never reset or clean
 # (context/plans/RULES.md § Rule B2). The full build is the owner's to run (SERIES Standing
@@ -70,8 +72,26 @@ cuda_ver=${cuda_ver%%-*}
 [[ $cuda_ver =~ ^[0-9]+(\.[0-9]+)+$ ]] || die "cannot read a CUDA version from CUDA_RUNTIME_IMAGE ($CUDA_RUNTIME_IMAGE)."
 TAG="$IMAGE:cu${cuda_ver//./}-sm120-${BASALT_SHA:0:7}"
 
+# Local patches (Plan 12): every patches/*.patch must fit the checked-out pin exactly — checked here,
+# with nothing applied to vendor/basalt — and the image is labelled with each one's name and hash.
+PATCH_DIR=$HERE/patches
+[[ -d $PATCH_DIR ]] || die "$PATCH_DIR is missing (the Dockerfile mounts it as the build context 'patches')."
+patch_ids=()
+for p in "$PATCH_DIR"/*.patch; do
+  [[ -e $p ]] || continue
+  GIT_NO_LAZY_FETCH=1 git -C "$VENDOR" apply --check "$p" \
+    || die "patch does not fit vendor/basalt at ${BASALT_SHA:0:7}: ${p#"$HERE/"}" \
+           "  re-fit it to the new tree (context/plans/completed/ or 12_buffered_io_patch.md says how it was made)."
+  echo "== patch fits: ${p##*/}"
+  sum=$(sha256sum -- "$p")
+  patch_ids+=("${p##*/}:${sum:0:12}")
+done
+BASALT_PATCHES=${patch_ids[*]:-none}
+
 BUILD_ARGS=(
   -f "$HERE/Dockerfile"
+  --build-context "patches=$PATCH_DIR"
+  --build-arg "BASALT_PATCHES=$BASALT_PATCHES"
   --build-arg "CUDA_DEVEL_IMAGE=$CUDA_DEVEL_IMAGE"
   --build-arg "CUDA_RUNTIME_IMAGE=$CUDA_RUNTIME_IMAGE"
   --build-arg "BASALT_REPO=$BASALT_REPO"
