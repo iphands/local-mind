@@ -3,7 +3,7 @@
 ## Overview
 
 - Status: 0% complete (0/3 tasks)
-- Start date: — (set when T1 starts)
+- Start date: 2026-11-20
 - Plan: `context/plans/10_basalt_repin_v050.md`
 - Evidence: the table below; build logs in `captures/build_<date>_<sha7>.log` (gitignored); boot
   start blocks pasted by the owner. Test environment: host `cosmo`, RTX PRO 6000 (GPU 0), the pack on
@@ -26,7 +26,7 @@
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
-| 1 | T1: repin to `ad274aa`, owner build, read the tree, gate on the new image | `versions.env`, `README.md` | pending | |
+| 1 | T1: repin to `ad274aa`, owner build, read the tree, gate on the new image | `versions.env`, `README.md` | blocked | **Waits on the owner (2026-11-20):** step 1, the `versions.env` edit, is made right after this row's commit and stays uncommitted (`dirty: versions.env`) until the image exists — gate steps 5–6 need an image for `BASALT_SHA`. Owner: `PREFLIGHT_ONLY=1 ./build` (fetches, checks out `ad274aa`; last line `preflight ok`), then `./build`; paste the image id and labels lines. Then the agent's tree read (step 3), gate 1–6, README, commit. |
 | 2 | T2: owner boots, default and `--single`, a real reply each | tracker Evidence | pending | |
 | 3 | T3: harvest and close | `context/` | pending | |
 

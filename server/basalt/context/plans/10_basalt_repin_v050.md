@@ -1,6 +1,6 @@
 # Plan 10 — Repin Basalt to v0.5.0 and rebuild the image
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-11-20
 > **Depends on**: Plan 01 (the image recipe, `./build`, `./run`, gate steps 3–6); starts from Plan 08 T2's pin (`d3b7574`)
 > **Goal**: `versions.env` pins Basalt `ad274aa` (v0.5.0), the image `iphands/basalt-blackwell:cu1343-sm120-ad274aa` is built from it, the full gate passes against that image, and `./run` boots the Flash-Next pack on it with a real reply in both modes.

@@ -34,6 +34,9 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   pack argument again; T2: pin at `d3b7574`, image `cu1343-sm120-d3b7574` built, gate 1–6 pass on it; T4:
   Plans 02 and 03 abandoned, Plan 09 registered); next **T3**, **blocked on the owner**: `./run` and
   `./run --single`, a real reply each. The new image has not been booted. Then T5, harvest and close.
+- **Plan 10** — Repin Basalt to v0.5.0 and rebuild: in progress, 0/3 tasks done; **T1 blocked on the
+  owner**: `PREFLIGHT_ONLY=1 ./build`, then `./build`, with `versions.env` edited and uncommitted until
+  the image exists. Plan 08 stays open beneath it (owner decision 2026-11-20: settle it later).
 
 ## Plans <!-- hp:plans -->
 
@@ -50,7 +53,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 07 | Boot from the defragmented NFS copy | 01 | pending | noir's pack now has 927 extents: does a boot from `/mnt/noir` load fast enough to retire `models.local/`? |
 | 08 | Repin Basalt to v0.4.1 and rebuild the image | 01 | in-progress | `dc047a7` → `d3b7574` (v0.4.1 tag commit, 698 commits on). Owner builds and boots; T4 abandons Plans 02/03 and registers the re-audit. |
 | 09 | Basalt vendor audit of the v0.4.1 pin `d3b7574`: static reading + runtime observation | 08 | pending | Row only, no plan file yet. Re-targets Plans 02 + 03; reuses `context/audit/scripts/` and the canary method; starts with tag signature + tree identity. |
-| 10 | Repin Basalt to v0.5.0 and rebuild the image | 01 | pending | `d3b7574` → `ad274aa` (v0.5.0 tag commit, 206 commits on). Owner builds and boots. Plan 08's open rows and Plan 09's target left for later (owner, 2026-11-20). |
+| 10 | Repin Basalt to v0.5.0 and rebuild the image | 01 | in-progress | `d3b7574` → `ad274aa` (v0.5.0 tag commit, 206 commits on). Owner builds and boots. Plan 08's open rows and Plan 09's target left for later (owner, 2026-11-20). |
 
 ## Dependency Chain <!-- hp:chain -->
 
