@@ -44,9 +44,9 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   boot came up on engine 0.5.0 with 3 × 362144) and **blocked on the owner**: a real reply from that
   boot, then `./run --single` with a reply. Then T3, harvest and close. Plan 08 stays
   open beneath it (owner decision 2026-11-20: settle it later).
-- **Plan 11** — Hy4-flash launcher `./run-hy4`: in progress, 1/4 tasks done (T1: the launcher,
-  `pack_arch`, gate step 5b); next **T2** (`./run` refuses a Hy4-flash pack), then **T3**, the owner's
-  boot of `./run-hy4` with a real reply, then T4, harvest and close.
+- **Plan 11** — Hy4-flash launcher `./run-hy4`: in progress, 2/4 tasks done (T1: the launcher,
+  `pack_arch`, gate step 5b; T2: `./run` refuses a Hy4-flash pack); next **T3**, the owner's boot of
+  `./run-hy4` with a real reply, then T4, harvest and close.
 
 ## Plans <!-- hp:plans -->
 

@@ -76,7 +76,7 @@ if ! [[ $PORT =~ ^[1-9][0-9]*$ ]] || (( PORT > 65535 )); then die "PORT must be 
 
 # ------------------------------------------------------------------ the pack
 
-# Basalt loads only Flash-Next .basalt packs. A .ninfer artifact is NInfer's (context/pitfalls.md):
+# This launcher serves Flash-Next .basalt packs. A .ninfer artifact is NInfer's (context/pitfalls.md):
 # refuse it by name before anything else, so the pointer is the first thing the owner reads.
 case $PACK in
   *.ninfer) die "$PACK is a NInfer artifact; Basalt loads only .basalt packs." \
@@ -87,6 +87,12 @@ esac
 [[ -r $PACK ]] || die "pack not readable: $PACK"
 magic=$(LC_ALL=C head -c 8 -- "$PACK" | tr -d '\0')
 [[ $magic == BASALTMF ]] || die "$PACK is not a .basalt pack (first bytes '$magic', want 'BASALTMF')."
+# Engine flags are per model, and the ones below are Flash-Next's. A Hy4-flash pack has its own
+# launcher; any other architecture (or an unreadable one) still goes to the engine to judge.
+case $(pack_arch "$PACK") in
+  hy4flash|hy_v4_flash) die "$PACK is a Hy4-flash pack; it refuses the Flash-Next flags ./run passes (--ple-io, --kv int8)." \
+                            "  serve it with ./run-hy4 instead." ;;
+esac
 pack_real=$(realpath -e -- "$PACK")
 pack_dir=$(dirname -- "$pack_real")
 pack_file=$(basename -- "$pack_real")

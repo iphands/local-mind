@@ -463,6 +463,9 @@ x=$(DRY_RUN=1 ./run-hy4 "$fn" 2>&1) && echo 'FAIL(dry:hy4-arch) took a Flash-Nex
 KV=int8 DRY_RUN=1 ./run-hy4 >/dev/null 2>&1 && echo 'FAIL(dry:hy4-kv) took KV=int8'
 MAX_CONTEXT=1048577 DRY_RUN=1 ./run-hy4 >/dev/null 2>&1 && echo 'FAIL(dry:hy4-ctx) took MAX_CONTEXT=1048577'
 k=$(API_KEY=k3y DRY_RUN=1 ./run-hy4 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(dry:hy4-api-key) printed'
+h4=$(sed -n 's/^== pack:  \(.*\) ([0-9]* bytes, .*/\1/p' <<<"$hy")     # and the other way round
+y=$(DRY_RUN=1 ./run "$h4" 2>&1) && echo 'FAIL(dry:run-arch) took a Hy4-flash pack'
+[[ $y == *'./run-hy4 instead'* ]] || echo 'FAIL(dry:run-arch) no ./run-hy4 pointer'
 echo "dry-run ok (image: $IMAGE_OVERRIDE)"; unset IMAGE_OVERRIDE
 ```
 

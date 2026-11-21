@@ -6,9 +6,7 @@
 Anthropic-compatible API: `./run` for Flash-Next, `./run-hy4` for Tencent's **Hy4-flash**.
 
 Engine flags are per model, so each launcher takes only its own model's packs and names the other
-when handed the wrong one *(`./run-hy4` does today; `./run` still hands a Hy4-flash pack to the
-engine, which refuses `--ple-io` — Plan 11 T2)*. `.ninfer` artifacts (for example the QUASAR 27B)
-belong in `../ninfer`.
+when handed the wrong one. `.ninfer` artifacts (for example the QUASAR 27B) belong in `../ninfer`.
 
 **Status (2026-11-20):** built on Basalt v0.5.0 (`iphands/basalt-blackwell:cu1343-sm120-ad274aa`,
 Plan 10) and the model-free gate passes on that image; **its boots are not recorded yet** (Plan 10
@@ -104,7 +102,7 @@ name the model `cosmo-6000`; any other name gets a 404. Stop the server with Ctr
 
 `./run` refuses to start while anything publishes `:8700` or a `vllm`, `ninfer`, `ignis` or
 `basalt` container runs, and refuses a pack that is not a `.basalt` file (a `.ninfer` path is named
-as NInfer's). Requests from the host arrive through the docker bridge, so Basalt treats them as
+as NInfer's) or that is a Hy4-flash pack (it names `./run-hy4`). Requests from the host arrive through the docker bridge, so Basalt treats them as
 remote for images: `data:` URLs work; image URLs and paths need `--image-url-host` /
 `--image-dir` in `EXTRA_ARGS`.
 

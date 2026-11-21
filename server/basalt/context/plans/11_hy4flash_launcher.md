@@ -295,7 +295,7 @@ Re-read each file after writing. Then `git mv` this plan and its tracker to `com
 ## Verification Checklist
 
 - [x] T1 *(2026-11-20, tracker Evidence rows 4–6)*: `DRY_RUN=1 ./run-hy4` prints a `serve` line with `--kv fp16`, `--parallel 1` and no `--ple-io`; gate step 5b prints `pack flags ok` three times and both negative controls print `FAIL(pack-flags)`
-- [ ] T2: `DRY_RUN=1 ./run <the Hy4 pack>` exits 1 naming `./run-hy4`; the default and `--single` dry runs are byte-identical before and after
+- [x] T2 *(2026-11-20, tracker Evidence row 7)*: `DRY_RUN=1 ./run <the Hy4 pack>` exits 1 naming `./run-hy4`; the default and `--single` dry runs are byte-identical before and after
 - [ ] T3: the boot log names the `ad274aa` image and the Hy4 pack; a real reply is quoted in the tracker
 - [ ] T4: each harvested fact is in the file the tracker names, re-read after writing
 - [ ] All: the project gate (Rule A) passes on the final commit
