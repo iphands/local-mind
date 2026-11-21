@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `12`.** <!-- hp:next-free -->
+**Next free plan number: `13`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-11-04):** serve Qwen3.8-Flash-Next through
 > [Basalt](https://github.com/jesdga95/basalt), source-built from a pinned commit in our own
@@ -67,6 +67,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 09 | Basalt vendor audit of the v0.4.1 pin `d3b7574`: static reading + runtime observation | 08 | pending | Row only, no plan file yet. Re-targets Plans 02 + 03; reuses `context/audit/scripts/` and the canary method; starts with tag signature + tree identity. |
 | 10 | Repin Basalt to v0.5.0 and rebuild the image | 01 | in-progress | `d3b7574` → `ad274aa` (v0.5.0 tag commit, 206 commits on). Owner builds and boots. Plan 08's open rows and Plan 09's target left for later (owner, 2026-11-20). |
 | 11 | Hy4-flash launcher: `./run-hy4` | 10 (T1's image) | in-progress | `./run` passes Flash-Next's flags, which Hy4-flash refuses (`--ple-io`, `--kv int8`). Second launcher, per-pack flag check in the gate (step 5b), one owner boot. |
+| 12 | Local patch: a switch that stops Basalt's `O_DIRECT` reads | 10 (T1), 11 | pending | `BASALT_BUFFERED_IO=1`, a 3-file patch applied in the image build; the launchers and `./preload` turn it on. Owner rebuild and one Hy4-flash boot from NFS. |
 
 ## Dependency Chain <!-- hp:chain -->
 
@@ -76,7 +77,7 @@ completed/01_flashnext_container ──(recipe, ./build, ./run; feeds 05, 06, 07
                                                                   09 (audit of d3b7574, row only)
                                                                                       │
                                                                              04_audit_engine_bulk
-10_basalt_repin_v050 ──(the v0.5.0 image, built at T1)── 11_hy4flash_launcher
+10_basalt_repin_v050 ──(the v0.5.0 image, built at T1)── 11_hy4flash_launcher ──(the NFS stall at T3; ./preload)── 12_buffered_io_patch
 abandoned/02_basalt_vendor_audit, abandoned/03_basalt_audit_runtime ──(method, scripts, posture.md)──▶ 09
 ```
 *2026-11-16:* Plans 02 and 03 audited `dc047a7`; Plan 08 moved the pin, so both are abandoned and Plan 09
@@ -109,6 +110,11 @@ inherits their method. *(The 2026-11-05 chain, with 03 gating 02's verdict, is i
   through `./run` and the server refused `--ple-io`: engine flags are per model, and gate step 5 checks a
   name against the whole binary. A new launcher profile is a plan by `RULES.md`'s first table. Depends
   on Plan 10 only for its image (T1, done); it does not wait for Plan 10's boots.
+- **12 — Buffered-io patch** (owner request, 2026-11-20). Plan 11's first boot stalled because Basalt
+  reads with `O_DIRECT`, so cosmo's page cache never holds the Engram table and every lookup went to
+  noir's disks. The owner asked for a switch, off in the engine by default and on in our launchers. It
+  is the project's first carried patch: a Dockerfile change and a launcher default, both plans by
+  `RULES.md`'s first table. Its boot (T4) is also the boot Plan 11 T3 is blocked on.
 - **09 — Audit of the v0.4.1 pin** (registered 2026-11-16 at Plan 08 T4, owner decision). The built
   engine is now unaudited: Plan 02 read none of `d3b7574`. What carries over is method, not results — the
   manifest-then-census shape, the planted canaries, `context/audit/scripts/` (which hard-code the old pin
