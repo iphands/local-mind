@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `11`.** <!-- hp:next-free -->
+**Next free plan number: `12`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-11-04):** serve Qwen3.8-Flash-Next through
 > [Basalt](https://github.com/jesdga95/basalt), source-built from a pinned commit in our own
@@ -20,6 +20,11 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
 > `jesdga/Qwen3.8-27B-QUASAR-DFlash2-nvfp4-NInfer` artifact first named for `./run`. It is a
 > `.ninfer` file of the dense 27B; Basalt loads only Flash-Next `.basalt` packs
 > (`context/distilled.md`). It belongs in `../ninfer`.
+>
+> **Widened (owner request, 2026-11-20):** also serve Tencent's **Hy4-flash**, which Basalt builds from
+> v0.5.0 on, through a second launcher, `./run-hy4` (Plan 11). The out-of-scope note above predates
+> that release: Basalt now loads four model families, and this project serves two of them. `.ninfer`
+> files are still NInfer's.
 >
 > **Ordering principle:** boot before tune — a pinned image and a `./run` that boots a pack land
 > before any setting is called optimized.
@@ -56,6 +61,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 08 | Repin Basalt to v0.4.1 and rebuild the image | 01 | in-progress | `dc047a7` → `d3b7574` (v0.4.1 tag commit, 698 commits on). Owner builds and boots; T4 abandons Plans 02/03 and registers the re-audit. |
 | 09 | Basalt vendor audit of the v0.4.1 pin `d3b7574`: static reading + runtime observation | 08 | pending | Row only, no plan file yet. Re-targets Plans 02 + 03; reuses `context/audit/scripts/` and the canary method; starts with tag signature + tree identity. |
 | 10 | Repin Basalt to v0.5.0 and rebuild the image | 01 | in-progress | `d3b7574` → `ad274aa` (v0.5.0 tag commit, 206 commits on). Owner builds and boots. Plan 08's open rows and Plan 09's target left for later (owner, 2026-11-20). |
+| 11 | Hy4-flash launcher: `./run-hy4` | 10 (T1's image) | pending | `./run` passes Flash-Next's flags, which Hy4-flash refuses (`--ple-io`, `--kv int8`). Second launcher, per-pack flag check in the gate (step 5b), one owner boot. |
 
 ## Dependency Chain <!-- hp:chain -->
 
@@ -65,6 +71,7 @@ completed/01_flashnext_container ──(recipe, ./build, ./run; feeds 05, 06, 07
                                                                   09 (audit of d3b7574, row only)
                                                                                       │
                                                                              04_audit_engine_bulk
+10_basalt_repin_v050 ──(the v0.5.0 image, built at T1)── 11_hy4flash_launcher
 abandoned/02_basalt_vendor_audit, abandoned/03_basalt_audit_runtime ──(method, scripts, posture.md)──▶ 09
 ```
 *2026-11-16:* Plans 02 and 03 audited `dc047a7`; Plan 08 moved the pin, so both are abandoned and Plan 09
@@ -93,6 +100,10 @@ inherits their method. *(The 2026-11-05 chain, with 03 gating 02's verdict, is i
   renamed. Still a plan by `RULES.md`'s first table, proven the same way as Plan 08: gate steps 5–6 on
   the new image and an owner boot. Plan 08 is still open beneath it and Plan 09's row still names
   `d3b7574` — the owner's call to settle both later (Plan 10 tracker, Follow-ups).
+- **11 — Hy4-flash launcher** (owner request, 2026-11-20). The owner ran the new `Hy4-flash-NVFP4` pack
+  through `./run` and the server refused `--ple-io`: engine flags are per model, and gate step 5 checks a
+  name against the whole binary. A new launcher profile is a plan by `RULES.md`'s first table. Depends
+  on Plan 10 only for its image (T1, done); it does not wait for Plan 10's boots.
 - **09 — Audit of the v0.4.1 pin** (registered 2026-11-16 at Plan 08 T4, owner decision). The built
   engine is now unaudited: Plan 02 read none of `d3b7574`. What carries over is method, not results — the
   manifest-then-census shape, the planted canaries, `context/audit/scripts/` (which hard-code the old pin
