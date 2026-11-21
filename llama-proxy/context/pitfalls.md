@@ -25,8 +25,31 @@ entry in place, dated — do not append a second entry for the same thing.
   `justfile` or `RULES.md` to match — both are authoritative; change them only with human sign-off
   (the real fix is `RUSTFLAGS` env or `-Dwarnings` with no `--`). Record the command you *actually* ran
   in the tracker's Evidence line, and note "`just gate` broken" there so the gap doesn't read as agent
-  error. **Staleness trigger:** re-run `just gate` after any toolchain update; if it passes, delete
-  this entry.
+  error. **Re-verified 2026-11-21** on `cargo 1.100.0` / `rustc 1.100.0`: unchanged, and `just gate`
+  run verbatim reproduces `error: unexpected argument '-D' found` at `justfile:16` — so it is the
+  form that is broken, not someone's quoting. **Staleness trigger:** re-run `just gate` after any
+  toolchain update; if it passes, delete this entry.
+
+- **[OBSERVED 2026-11-21] The `--features influxdb` half of the gate cannot build on this box, and it
+  looks like your diff broke it.** Symptom: `cargo check --workspace --features influxdb` (and
+  `clippy --all-targets --features influxdb`) exit 101 with `failed to run custom build command for
+  openssl-sys v0.9.111` → "only compatible with OpenSSL (1.0.2 through 1.1.1, or 3), or LibreSSL 3.5
+  through 4.2.x". Default features build fine in the same tree, so the failure appears exactly when
+  you add the flag. Why: the influxdb feature pulls `reqwest 0.11` → `native-tls` → `openssl-sys`,
+  which caps below the system's `OpenSSL 4.0.3`; the default-feature chain is `reqwest 0.12.28` with
+  no native-tls (`cargo tree --features influxdb -i openssl-sys --depth 3` is the one-command proof).
+  Environment drift, not repo drift — the same legs passed on 2026-10-16. Do this: prove pre-existing
+  with a **control on clean HEAD** (`git worktree add --detach /tmp/… HEAD`, its own
+  `CARGO_TARGET_DIR`, same command — identical 101), confirm with `grep 'Checking llama-proxy'` that
+  your crate was never reached, then state the **coverage delta** in the tracker rather than calling
+  the gate green: `cargo test --workspace --lib` runs 955 vs the ~976 the feature-on matrix would,
+  and name which tests are the difference. `context/CLAUDE.md`'s "run both feature states" is
+  currently unsatisfiable here — say so, don't imply you ran it. Do **not** hack it green with
+  `OPENSSL_DIR`, a vendored OpenSSL, or `--no-default-features` (the feature-off stub tests and the
+  feature-on tests cover different code; see the entry above); the fix is a dependency bump or moving
+  that chain to rustls, which is a human call. **Staleness trigger:** any `cargo update` touching
+  `openssl-sys`/`native-tls`/`reqwest`, an `influxdb-client` upgrade, or an OpenSSL change; if the
+  legs build, delete this entry.
 
 - **[HAZARD — verified 2026-10-16, bit once] `cargo test --workspace --lib` never executes the
   influxdb exporter's tests, so a wire-format test can be dead on arrival while the gate stays
@@ -82,6 +105,26 @@ entry in place, dated — do not append a second entry for the same thing.
   substring `tps=`, so that grep is weaker than it looks; record the grep's real output in Evidence
   rather than asserting it is empty. **Staleness trigger:** any change to a compact key, cell width,
   or the tier rules in `rate_group`.
+
+- **[OBSERVED 2026-11-21] The head's documented `cut -c` offsets stop matching on a real log line,
+  because ANSI escapes live *inside* the prefix.** Symptom: README says `cut -c1-23` is the rate
+  group; against `journalctl`/a captured line it returns `^[[2m2026-11-21T20:36:25` — and after a
+  naive `sed 's/.*llama_proxy::stats: //'` the offsets look fine, so the bug only shows on the raw
+  shape an operator actually pipes. Why: `main.rs:119` builds the subscriber as
+  `fmt().with_env_filter(..).init()` without `.with_ansi(false)`, and tracing-subscriber 0.3.22
+  enables colour by default with **no tty check** — so the escapes survive a redirect to a file
+  (verified: a redirected log still carries them). They wrap the timestamp, the level and the target
+  separately, i.e. *before* the `tg=` glyph, which is why pattern recipes survive and byte counting
+  does not. Do this: strip colour **and** prefix before positional work —
+  `sed -e 's/\x1b\[[0-9;]*m//g' -e 's/.*llama_proxy::stats: //'` — or start the proxy with
+  `NO_COLOR=1` **in the proxy's own environment**: it is read by the process that formats the
+  line, so exporting it on the pipeline that greps the log changes nothing (verified A/B on a
+  live stats line: escapes gone, plain `cut -c1-23` correct). `grep`/`sed` extraction needs no
+  pre-pass: they match, not count. Do **not** write that colour "cannot be turned off", and do not infer tty-ness from a
+  terminal session — check the crate you depend on (`~/.cargo/registry/src/*/tracing-subscriber-*/src`
+  is two commands away) before documenting upstream behaviour. **Staleness trigger:** any change to
+  the subscriber setup in `main.rs` (a `.with_ansi(false)` makes this entry obsolete), or a
+  tracing-subscriber upgrade.
 
 - **[OBSERVED 2026-10-16] A fix can live entirely in the branch your deployment never runs, and both
   the tests and the docs will agree with you.** Symptom: the prefix-cache prefill discount was real

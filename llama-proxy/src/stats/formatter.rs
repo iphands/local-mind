@@ -306,43 +306,66 @@ fn count_cell(count: Option<u64>) -> String {
 /// hand-spaced tier string is 22, 23 or 24 cells depending on how many spaces someone
 /// typed (`tg>=` is inherently one wider than `tg=`, and `pp=…k` is one wider than
 /// `pp=…n/a`), and only the first of those is the contract's 23. Fixing the widths
-/// makes every tier land on 23 by construction AND pins the decode number's right edge,
-/// so `tg=  195.5` and `tg>= 146.3` stack in a wall of mixed-tier lines.
+/// makes every tier land on 23 by construction.
 ///
-/// `pp` gets 12 cells and `tg` 10 because the two fields span very different ranges:
-/// prefill legitimately runs 50 → 580,000 tok/s (a full prefix-cache hit is left
-/// un-discounted by design), and the kilo suffix is what keeps that four-order spread
-/// inside a fixed cell without clamping. `tg` must hold `10000.0`, which is what
-/// 9999.99 rounds to at one decimal — so it needs 7, not 6.
+/// **Decode leads**, because decode is the number an operator scans a wall of lines
+/// for: it is the first glyph on the head in every tier. The order costs the group its
+/// old right-edge pin (when `tg` was the group's LAST field, the variable-length
+/// `tg=`/`tg>=` put every decode number's right edge on the group's right edge), so the
+/// pin moved INSIDE the leading field: `tg` gets 11 cells on every tier — `tg=` pads its
+/// value to 8, `tg>=` to 7 — so `tg=   195.5` and `tg>=  146.3` stack regardless of tier,
+/// and `pp` is left 11 cells on every tier too.
+///
+/// Both fields are 11 cells, and each has a ceiling it widens past rather than clamping a
+/// backend-reported number — the sweep pins the in-range behaviour,
+/// `a_rate_past_a_cells_field_widens_rather_than_clamps` pins the overflow.
+///
+/// * `pp` is `{:>7.3}k`, so **999,999 tok/s** is the top of the cell, and the worst figure
+///   this deployment has recorded — llama.cpp's cache-inflated 880k, the value this cell was
+///   originally sized against — sits at `880.000`, **edge to edge with no headroom**. One
+///   tok/s past 999,999 the group is 24 cells and `dur=`..`finish=` each move right.
+/// * The two decode fields are the same width but not the same range: tier 1's `{:>8.1}`
+///   holds 999,999.9, tier 2's `{:>7.1}` only 99,999.9. `decode_tps_min` is derived
+///   (`completion / wall`), so a pathological near-zero wall with counted tokens can reach
+///   its ceiling; the widening witness covers both sides.
 fn rate_group(m: &RequestMetrics) -> String {
     // `pp` prints ONLY on tier 1. A half split (backend-reported prefill, no usable
     // decode rate) is tier 2, and printing its cache-inflated prefill there put a huge
     // figure in the column the eye lands on while the column that matters stayed empty
-    // — the exact failure `tps_tier` exists to prevent. Absent, not zero.
+    // — the exact failure `tps_tier` exists to prevent. Absent, not zero. Its `n/a`
+    // sits in the same 11 cells tier 1 spends on a measured rate: the whitespace is
+    // evidence of absence, not a slow prefill.
     match tps_tier(m) {
         1 => format!(
-            "pp={:>8.3}k tg={:>7.1}",
-            m.prompt_tps.unwrap_or(0.0) / 1000.0,
-            m.generation_tps.unwrap_or(0.0)
+            "tg={:>8.1} pp={:>7.3}k",
+            m.generation_tps.unwrap_or(0.0),
+            m.prompt_tps.unwrap_or(0.0) / 1000.0
         ),
-        // The absent `pp` side gives up one cell (11, not tier 1's 12) so the floor
-        // number gets the SAME 7 cells tier 1 gives a measured decode: `{:>6.1}` renders
-        // 10000.0 -- which 9999.95 rounds up to -- as 7 chars, making the group 24 and
-        // moving `dur=` off its pinned cell. The `n/a` sits in whitespace either way.
-        2 => format!("pp=     n/a tg>={:>7.1}", m.decode_tps_min),
-        3 => "pp=     n/a tg=     n/a".to_string(),
+        // `tg>=` is one char wider than `tg=`, so the floor gets 7 cells to tier 1's 8
+        // and both fields end at 11: the decode digits stay stacked and `dur=` keeps
+        // its cell. `{:>7.1}` still renders 10000.0 -- which 9999.95 rounds up to --
+        // without pushing the group to 24. Its ceiling is 99,999.9, one order below
+        // tier 1's 8-cell decode; past it the group widens, as on the `pp` side.
+        2 => format!("tg>={:>7.1} pp=     n/a", m.decode_tps_min),
+        3 => "tg=     n/a pp=     n/a".to_string(),
         _ => unreachable!("tps_tier returns 1..=3"),
     }
 }
 
 /// Compact single-line format: a pinned-width head followed by a free-form tail.
+/// Head order is **rate group, dur, ctx, tok, model, stream, finish** — measured
+/// quantities left, identity and diagnostics right, so the cell an operator scans for
+/// (decode tok/s) is the head's first glyph. `model=` is the only free-form cell here;
+/// everything to its left is therefore immune to a wide-glyph or over-long name.
 /// A cell is columnar only if its width is constant, so no conditional cell may sit
 /// inside the head — `group=`, `work=`, `queue=`, `concurrent=` and `cache=` are all
 /// present-or-absent and therefore live in the tail, `cache=` last because a cell that
 /// appears only on cache hits must sit after everything that has to line up.
 ///
 /// The widths are the contract's (`HEAD`/`head_offsets` in the test module); changing
-/// one means changing the plan's table and the tracker in the same commit, never here.
+/// one means changing README's `cut -c` table and the Plan 03 tracker's dated rows in the
+/// same commit, never here. The plan's own T6 width table is written history — it describes
+/// the 2026-10-16 layout, not this one.
 fn format_compact(m: &RequestMetrics) -> String {
     // Truncated THEN padded, both in display cells: a 50-cell GGUF name is what shifts
     // every column today, and padding a 46-cell value to 16 is a no-op.
@@ -398,7 +421,7 @@ fn format_compact(m: &RequestMetrics) -> String {
     };
     let finish = format!("finish={}", pad_cells(&finish_value, 10));
 
-    let head = [format!("model={model}"), rate_group(m), dur, ctx, tok, stream, finish].join(" ");
+    let head = [rate_group(m), dur, ctx, tok, format!("model={model}"), stream, finish].join(" ");
 
     let mut tail: Vec<String> = Vec::new();
     if let Some(g) = &m.group_name {
@@ -480,8 +503,8 @@ mod tests {
 
         let output = format_compact(&m);
         assert!(output.contains("test-model"));
-        // Pinned head order: model, rate group, dur, ctx, tok, stream, finish.
-        assert!(output.contains("pp=   0.201k tg=   42.5"), "got: {output}");
+        // Pinned head order: rate group, dur, ctx, tok, model, stream, finish.
+        assert!(output.contains("tg=    42.5 pp=  0.201k"), "got: {output}");
         assert!(output.contains("dur=   1200ms"), "got: {output}");
         assert!(output.contains("tok=   100/    50"), "got: {output}");
         assert!(output.contains("stream=ok"));
@@ -573,7 +596,7 @@ mod tests {
         m.decode_tps_min = 0.0; // so no floor exists either
 
         let out = format_compact(&m);
-        assert!(out.contains("pp=   0.201k tg=   42.5"), "got: {out}");
+        assert!(out.contains("tg=    42.5 pp=  0.201k"), "got: {out}");
         assert!(!out.contains(">="), "a bound replaced a measurement: {out}");
         assert!(!out.contains("work="), "tier 3 leaked into tier 1: {out}");
     }
@@ -586,7 +609,7 @@ mod tests {
         assert!(m.has_timing_split);
 
         let output = format_compact(&m);
-        assert!(output.contains("pp=   0.201k tg=   42.5"), "got: {output}");
+        assert!(output.contains("tg=    42.5 pp=  0.201k"), "got: {output}");
         assert!(!output.contains("work="), "tier 3 leaked into a tier-1 line: {output}");
         assert!(!output.contains(">="), "tier 2 leaked into a tier-1 line: {output}");
     }
@@ -944,8 +967,8 @@ mod tests {
         let output = format_compact(&m);
         // pref/decode are k tok/s and raw tok/s respectively, so the raw figures
         // appear only through those two cells.
-        assert!(output.contains("pp=   0.123k"), "got: {output}");
-        assert!(output.contains("tg=  150.0"), "got: {output}");
+        assert!(output.contains("pp=  0.123k"), "got: {output}");
+        assert!(output.contains("tg=   150.0"), "got: {output}");
         assert!(output.contains("length"));
         assert!(output.contains("600"));
     }
@@ -1139,17 +1162,21 @@ mod tests {
     const SEP: usize = 1;
 
     /// The head, in order, as (label to probe, display width). The rate cell is
-    /// probed by POSITION, not by label: tier 1 renders `pp=`/`tg=`, tier 2 `tg>=`
-    /// (`work=` is a tail cell, not part of the group), tier 3 `n/a` for both, so the
-    /// group has no stable label -- and keeping a 2-char needle out of a line whose
-    /// leading field is free-form backend text removes a whole class of probe
-    /// false-positives.
+    /// probed by MEASURED WIDTH (`rate_group(m)`), not by label: tier 1 renders
+    /// `tg=`/`pp=`, tier 2 `tg>=` (`work=` is a tail cell, not part of the group), tier 3
+    /// `n/a` for both, so the group has no stable label -- and it now leads the head, so
+    /// no needle in front of it can anchor its left edge either.
+    ///
+    /// `model=` is the head's only free-form cell, and it sits at position 5: a backend
+    /// name carrying `ctx=` or `dur=` makes those probes `Ambiguous`, which is a value the
+    /// contract reports rather than a panic. It was equally exposed at position 1; what
+    /// the move bought is that the four cells to its left can no longer be shifted by it.
     const HEAD: [(&str, usize); 7] = [
-        ("model=", CELL_MODEL),
         ("", CELL_RATE),
         ("dur=", CELL_DUR),
         ("ctx=", CELL_CTX),
         ("tok=", CELL_TOK),
+        ("model=", CELL_MODEL),
         ("stream=", CELL_STREAM),
         ("finish=", CELL_FINISH),
     ];
@@ -1211,23 +1238,23 @@ mod tests {
         Probe::At(UnicodeWidthStr::width(&line[..first.0]))
     }
 
-    /// Cells the rate group occupies, derived from where `dur=` actually landed.
-    ///
-    /// The rate cell is bracketed by TWO separators -- one after the model cell, one
-    /// before `dur=` -- so both must come off: `47 - (22 + 2*1) == CELL_RATE`. Shared
-    /// by the contract test and the golden control, so this derivation cannot rot on
-    /// its own the way a copy in one place did (a single-separator version demanded
-    /// `dur=` at 46 while the offsets table demands 47, which no formatter can satisfy).
-    fn rate_group_cells(dur_at: usize) -> usize {
-        dur_at.saturating_sub(CELL_MODEL + 2 * SEP)
+    /// Cells the rate group occupies, MEASURED off the renderer's own output. This used
+    /// to be a derivation from where `dur=` landed (`dur_at - CELL_MODEL - 2*SEP`), which
+    /// restates the `dur=` offset assertion the same tests already run -- and with the
+    /// group leading the head the only derivation left is `dur_at - SEP`, a pure
+    /// tautology. Expectation comes from the table, width from `rate_group`.
+    fn rate_group_cells(m: &RequestMetrics) -> usize {
+        UnicodeWidthStr::width(rate_group(m).as_str())
     }
 
     /// The offsets are pinned over a MAGNITUDE sweep, not only the fixture rows. The
     /// bug class this exists for is a field that fits every healthy value and then grows
     /// one cell at a boundary, moving `dur=`..`finish=` with it -- a wall-bounded floor
     /// of 10000.0 rendered `tg>= 10000.0`, a 24-cell rate group with `dur=` at 48. The
-    /// sweep runs to the documented ceilings: prefill 580,000 tok/s on a full
-    /// prefix-cache hit, and a decode floor below 100k, past which no engine decodes.
+    /// sweep runs to each cell's own ceiling: prefill up to the 999,999 tok/s `pp` holds
+    /// (the legitimate range tops out at 580,000 on a full prefix-cache hit; beyond it
+    /// see `a_rate_past_a_cells_field_widens_rather_than_clamps`), and a decode floor
+    /// below 100k, past which no engine decodes.
     #[test]
     fn head_offsets_survive_every_rate_magnitude() {
         let mut rows: Vec<(String, RequestMetrics)> = Vec::new();
@@ -1238,7 +1265,7 @@ mod tests {
             m.decode_tps_min = floor;
             rows.push((format!("tier2 floor {floor}"), m));
         }
-        for prefill in [1.0, 200.5, 14_765.0, 580_000.0, 1_000_000.0, 9_999_999.0] {
+        for prefill in [1.0, 200.5, 14_765.0, 580_000.0, 999_999.0] {
             let mut m = fixture("qwen3", "stop");
             m.has_timing_split = true;
             m.prompt_tps = Some(prefill);
@@ -1252,6 +1279,15 @@ mod tests {
 
         for (label, m) in &rows {
             let line = format_compact(m);
+            // Independent of the offsets below: the group's own rendered width, so a
+            // tier that overflows its field is attributable to the group and not just
+            // to the columns it pushed right.
+            assert_eq!(
+                rate_group_cells(m),
+                CELL_RATE,
+                "{label}: the rate group renders {} cells, expected {CELL_RATE}: {line}",
+                rate_group_cells(m)
+            );
             for (needle, want) in head_offsets() {
                 match probe(&line, needle) {
                     Probe::At(at) => assert_eq!(at, want, "{label}: `{needle}` at {at}: {line}"),
@@ -1259,6 +1295,51 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Past a field's own ceiling the group **widens**; a backend-reported rate is never
+    /// rounded into its cell. Both sides are pinned because the two decode fields share a
+    /// width without sharing a range (tier 1 `{:>8.1}` → 999,999.9, tier 2 `{:>7.1}` →
+    /// 99,999.9) and `pp`'s `{:>7.3}k` caps at 999,999 tok/s -- the worst figure this
+    /// deployment has recorded, llama.cpp's cache-inflated 880k, already fills that cell
+    /// edge to edge.
+    ///
+    /// This is the price of the 11/11 split the human chose on 2026-11-21 (the alternative
+    /// kept `pp` at 12 cells and let the decode digits sit one cell apart across tiers), and
+    /// it is what the magnitude sweep gave up: it used to pin offsets for 1M and 9.99M
+    /// tok/s prefill. Recorded in the Plan 03 tracker. Same rule
+    /// `an_over_wide_context_is_never_clamped` states for counts.
+    #[test]
+    fn a_rate_past_a_cells_field_widens_rather_than_clamps() {
+        let mut prefill = fixture("qwen3", "stop");
+        prefill.has_timing_split = true;
+        prefill.prompt_tps = Some(1_000_000.0);
+        prefill.generation_tps = Some(42.5);
+
+        let mut floor = fixture("qwen3", "stop");
+        floor.completion_tokens = Some(10);
+        floor.decode_tps_min = 100_000.0; // one past tier 2's 7-cell ceiling
+
+        for (label, m, printed) in [
+            ("prefill 1,000,000 tok/s", &prefill, "1000.000k"),
+            ("decode floor 100,000.0 tok/s", &floor, "100000.0"),
+        ] {
+            let group = rate_group(m);
+            assert!(
+                group.contains(printed),
+                "{label}: the rate was rounded into its cell: {group:?}"
+            );
+            assert_eq!(
+                rate_group_cells(m),
+                CELL_RATE + 1,
+                "{label}: an out-of-band rate must widen the group, not shift inside it: {group:?}"
+            );
+        }
+
+        assert!(
+            !format_compact(&prefill).contains("999.999k"),
+            "the cell's ceiling was printed as though it were the measurement"
+        );
     }
 
     /// `dur` is the one cell that saturates, and the one value that must NOT saturate: a
@@ -1531,10 +1612,18 @@ mod tests {
     #[test]
     fn head_constants_are_self_consistent() {
         let offsets = head_offsets();
+        // The head LEADS with the rate group, whose three tiers spell `tg=`, `tg>=` and
+        // `tg=` -- no label in common, so `head_offsets()` skips it and cannot pin the
+        // left edge. The table's own order does.
         assert_eq!(
-            offsets.first().map(|(_, o)| *o),
-            Some(0),
-            "the head starts with the model cell"
+            HEAD[0],
+            ("", CELL_RATE),
+            "the head starts with the rate cell, not with a labelled cell"
+        );
+        assert_eq!(
+            offsets.first(),
+            Some(&("dur=", CELL_RATE + SEP)),
+            "`dur=` is the head's first probeable cell: one separator past the group"
         );
         assert_eq!(
             offsets.last().map(|(_, o)| *o + CELL_FINISH),
@@ -1543,8 +1632,10 @@ mod tests {
         );
         assert_eq!(
             HEAD_CELLS, 129,
-            "the head is 123 cells of content plus 6 separators; if this moves, \
-             update the table in the plan and the tracker together, never here alone"
+            "the head is 123 cells of content plus 6 separators; the cell ORDER moved on \
+             2026-11-21 (rate group leads, `model=` sits between `tok=` and `stream=`) and \
+             the total did not. If either moves, update README's `cut -c` table and the \
+             measured table in the Plan 03 tracker together, never here alone"
         );
     }
 
@@ -1552,20 +1643,23 @@ mod tests {
     /// anything: with every single assertion red, "the formatter is ragged" and "the
     /// expected offsets are simply wrong" look identical, and a permanently-red
     /// contract test gets reconciled by editing its constants. These two literals are
-    /// typed out by hand and asserted against `head_offsets()` -- if the table is wrong,
-    /// THIS fails today.
+    /// built from the cell widths (`fmt` + pad, never eyeballed spacing -- the first
+    /// hand-typed pair here measured 127 cells, see the Plan 03 tracker) and asserted
+    /// against `head_offsets()` -- if the table is wrong, THIS fails today.
     ///
-    /// It is a control on the OFFSETS TABLE, not a sample of the output: the rate group
-    /// here is the plan table's shape (`{:>9.3}k` / `{:>6.1}`) while the formatter emits
-    /// `{:>8.3}k` / `{:>7.1}`. Both total `CELL_RATE` and only the total is asserted, so
-    /// do not paste this line into a ticket as an example of what the proxy prints.
+    /// It is a control on the OFFSETS TABLE, not a sample of the output: only the rate
+    /// group's TOTAL is asserted against `CELL_RATE`; the 11/11 split of its two fields
+    /// is pinned where `rate_group` is measured per magnitude, in
+    /// `head_offsets_survive_every_rate_magnitude`. So do not paste this line into a
+    /// ticket as an example of what the proxy prints -- the README's example block is
+    /// the pinned copy of the real rendering.
     ///
     /// `GOLDEN_CJK` is why the head must be padded in DISPLAY CELLS: its model field
     /// is 8 chars but 16 cells, so `{:<16}` char padding puts every column after it
     /// eight cells out.
-    const GOLDEN_ASCII: &str = "model=qwen3-7b         pp=   88.000k tg=9999.9 dur=    184ms ctx=999999/262144 tok=186417/   498 stream=ok      finish=stop      ";
+    const GOLDEN_ASCII: &str = "tg=  9999.9 pp= 88.000k dur=    184ms ctx=999999/262144 tok=186417/   498 model=qwen3-7b         stream=ok      finish=stop      ";
 
-    const GOLDEN_CJK: &str = "model=本地大模型量化版 pp=   88.000k tg=9999.9 dur=    184ms ctx=999999/262144 tok=186417/   498 stream=ok      finish=stop      ";
+    const GOLDEN_CJK: &str = "tg=  9999.9 pp= 88.000k dur=    184ms ctx=999999/262144 tok=186417/   498 model=本地大模型量化版 stream=ok      finish=stop      ";
 
     #[test]
     fn the_head_offsets_describe_a_buildable_line() {
@@ -1581,18 +1675,6 @@ mod tests {
                     other => panic!("{tag} golden: `{label}` not uniquely found: {other:?}"),
                 }
             }
-
-            // A derivation only the ragged contract test runs is an unexercised
-            // assertion -- that is how a one-cell error here survived a fully-red run.
-            let found = probe(golden, "dur=");
-            let Probe::At(dur_at) = found else {
-                panic!("{tag} golden: `dur=` not uniquely found: {found:?}")
-            };
-            assert_eq!(
-                rate_group_cells(dur_at),
-                CELL_RATE,
-                "{tag} golden: rate-group derivation disagrees with CELL_RATE"
-            );
         }
     }
 
@@ -1638,13 +1720,26 @@ mod tests {
         for (name, m) in &rows {
             let line = format_compact(m);
 
-            match probe(&line, "model=") {
-                Probe::At(0) => {}
-                Probe::At(off) => bad.push(format!("{name}: `model=` must start the line at cell 0, found {off}")),
-                Probe::Absent => bad.push(format!("{name}: `model=` absent from {line:?}")),
-                Probe::Ambiguous(n) => bad.push(format!(
-                    "{name}: `model=` occurs {n} times, so no column can be attributed to it  ({line:?})"
-                )),
+            // The head's first cell is the rate group, which shares no label across its
+            // three tiers, so it is measured off `rate_group` rather than anchored to a
+            // string prefix: `context/pitfalls.md` bans encoding a column guarantee in
+            // `contains`/`starts_with`/field counts, all of which are blind to interior
+            // holes. The absolute offsets in the loop below pin the left edge on their
+            // own -- a cell inserted ahead of the group moves every one of them.
+            let occupied = rate_group_cells(m);
+            if occupied != CELL_RATE {
+                bad.push(format!(
+                    "{name}: the rate group occupies {occupied} cells, expected {CELL_RATE}  ({line:?})"
+                ));
+            }
+            // And that the head is actually BUILT from it. `HEAD[0]` pins the table and the
+            // offsets pin the render, so without this the composition link between them is
+            // unasserted. This is not the banned pattern: `context/pitfalls.md` forbids a
+            // substring AS the column guarantee; the guarantee stays the offsets loop.
+            if !line.starts_with(rate_group(m).as_str()) {
+                bad.push(format!(
+                    "{name}: the line does not begin with the rendered rate group  ({line:?})"
+                ));
             }
 
             for (label, want) in &offsets {
@@ -1657,19 +1752,6 @@ mod tests {
                     Probe::Ambiguous(n) => bad.push(format!(
                         "{name}: `{label}` occurs {n} times; the probe cannot attribute it to a column  ({line:?})"
                     )),
-                }
-            }
-
-            // The rate group is probed by position, since no label is common to all
-            // three tiers. Until the model cell is padded this also absorbs the
-            // model's shortfall: it restates the `dur=` assertion above rather than
-            // measuring the rate cell independently.
-            if let Probe::At(dur) = probe(&line, "dur=") {
-                let occupied = rate_group_cells(dur);
-                if occupied != CELL_RATE {
-                    bad.push(format!(
-                        "{name}: the rate group occupies {occupied} cells, expected {CELL_RATE}  ({line:?})"
-                    ));
                 }
             }
 
