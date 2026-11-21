@@ -241,9 +241,10 @@ if the line is ever used as a *threshold*, it needs a guard first. **A paste wit
 not a step failure**: it is an incomplete evidence file, and the remedy is to re-paste, not to mark the gate
 red. Do not infer redness from the absence of a `FAIL` that was never written.
 **Expected counts — two sets, split on 2026-11-05 at Plan 02 T3** (decision recorded below):
-**`6 b` product** (`lib/common.sh` from Plan 01 T1, `build` T2, `run` T3, `publish` — added
-2026-11-05 outside a plan, the owner's image publisher — and, from Plan 11 on 2026-11-20, `run-hy4`
-(T1, `4 b` → `5 b`) and `preload` (T5, → `6 b`); no `.py`, no `.json`) and
+**`7 b` product** (`lib/common.sh` from Plan 01 T1, `build` T2, `run` T3, `publish` — added
+2026-11-05 outside a plan, the owner's image publisher — from Plan 11 on 2026-11-20, `run-hy4`
+(T1, `4 b` → `5 b`) and `preload` (T5, → `6 b`), and from Plan 14 on 2026-11-21, `run-ink` (T1,
+→ `7 b`); no `.py`, no `.json`) and
 **`5 b` audit helpers** (`context/audit/scripts/ledger-grid.sh`, `t2-census.sh`,
 `t3-model-file-poc.sh`, `t3-census.sh`, `t3-inputs.sh`). Bump these when a file is added or removed on
 purpose — a count that silently drops is the failure this step exists for. *(Moved `3 b` → `5 b` on
@@ -336,7 +337,7 @@ echo "PRODUCT_B=$PRODUCT_B AUDIT_B=$AUDIT_B TOTAL_B=$((PRODUCT_B+AUDIT_B))"
 # context/audit/ the paths are `scripts/t2-census.sh`, from the project root `context/audit/scripts/…`.
 # No count can detect that; only naming the files can. This is a locally-owned sentinel — do not DRY
 # it into a pointer at the expected-count line, because a sentinel replaced by a citation cannot fail.
-for f in run run-hy4 preload build lib/common.sh; do
+for f in run run-hy4 run-ink preload build lib/common.sh; do
   awk -F'\t' -v w="$f" '$2==w{g=1} END{exit !g}' "$TSV" || echo "FAIL(1b) missing product bash: $f"
 done
 # enumeration: the printed sets are the sets the two numbers count, per Rule A.4 "look at it"
@@ -371,7 +372,7 @@ linted *before* `git add` — see the decision note above. (An earlier draft of 
 sentence contradicted the decision note two pages back. Corrected 2026-11-05.)
 
 ```bash
-# 2 — product bash set: run, run-hy4, preload, build, publish, lib/common.sh (audit generators go to 2b)
+# 2 — product bash set: run, run-hy4, run-ink, preload, build, publish, lib/common.sh (audit generators go to 2b)
 git ls-files -z . | while IFS= read -r -d '' f; do
   case "$f" in context/audit/scripts/*) continue ;; esac
   case "$(head -n1 "$f" 2>/dev/null)" in
@@ -426,9 +427,14 @@ network is **fail**, not skip.
 PREFLIGHT_ONLY=1 ./build 2>&1 | tail -1    # → preflight ok
 ```
 
-**4. `./run` and `./run-hy4` dry runs** (Plan 01 T3; `./run-hy4` from Plan 11 T1, 2026-11-20). Both
-default packs must be readable (`/mnt/noir` mounted): each launcher reads its pack's header and
-architecture. `DRY_RUN=1` runs every check the launcher makes and prints the
+**4. `./run`, `./run-hy4` and `./run-ink` dry runs** (Plan 01 T3; `./run-hy4` from Plan 11 T1,
+2026-11-20; `./run-ink` from Plan 14 T1, 2026-11-21). The default packs of `./run` and `./run-hy4`
+must be readable (`/mnt/noir` mounted): each launcher reads its pack's header and
+architecture. `./run-ink` is checked on two packs this step writes and removes — a whole `inkling2`
+one, and one whose header claims more bytes than the file holds, which no real file can stand in for
+(they hold only what a launcher reads: the magic, the section count, the file length, one table
+entry and a `meta` section; the engine would not load them, and step 5b is where a real pack meets
+the model's own parser). `DRY_RUN=1` runs every check the launcher makes and prints the
 docker command; it starts nothing and creates nothing (a busy `:8700` is reported, not refused —
 vLLM is the daily driver). The image is the newest one built for `BASALT_SHA`; before one exists
 the step uses the stub `stub:none` and prints `image: stub:none` — say so in the tracker when it
@@ -466,6 +472,37 @@ k=$(API_KEY=k3y DRY_RUN=1 ./run-hy4 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(dry:h
 h4=$(sed -n 's/^== pack:  \(.*\) ([0-9]* bytes, .*/\1/p' <<<"$hy")     # and the other way round
 y=$(DRY_RUN=1 ./run "$h4" 2>&1) && echo 'FAIL(dry:run-arch) took a Hy4-flash pack'
 [[ $y == *'./run-hy4 instead'* ]] || echo 'FAIL(dry:run-arch) no ./run-hy4 pointer'
+# ./run-ink: Inkling 2 Mini's flags, none of the others', only an inkling2 pack, and only a whole one
+ikd=$(mktemp -d)
+mkpack() {   # mkpack <file> <architecture> <bytes the header claims beyond the file's real length>
+  python3 -c '
+import struct, sys
+path, arch, extra = sys.argv[1], sys.argv[2], int(sys.argv[3])
+meta = ("{\"gguf_kv\": {\"general.architecture\": \"%s\"}}" % arch).encode()
+off = 64 + 128
+head = struct.pack("<8sIIQ40s", b"BASALTMF", 2, 1, off + len(meta) + extra, b"")
+entry = struct.pack("<64sQQ32s16s", b"meta", off, len(meta), b"", b"")
+open(path, "wb").write(head + entry + meta)' "$@"
+}
+mkpack "$ikd/Fake-Inkling.basalt" inkling2 0; mkpack "$ikd/Cut-Short.basalt" inkling2 1048576
+ik=$(DRY_RUN=1 ./run-ink "$ikd/Fake-Inkling.basalt" 2>&1)
+need ink "$ik" '-p 0.0.0.0:8700:8700' '--gpus device=0' '--ulimit memlock=-1' ':/models:ro' '-e BASALT_BUFFERED_IO=1' '--host 0.0.0.0' \
+     '--port 8700' '--alias cosmo-6000' '--allowed-host cosmo.lan' '--max-context 362144' '--kv fp16' \
+     '--parallel 1' '--vision dynamic' 'serve /models/Fake-Inkling.basalt' '(DRY_RUN) nothing started'
+[[ $ik == *--ple-io* ]] && echo 'FAIL(dry:ink) passes --ple-io'
+[[ $ik == *--slot-full-context* ]] && echo 'FAIL(dry:ink) has --slot-full-context'
+c=$(DRY_RUN=1 ./run-ink "$ikd/Cut-Short.basalt" 2>&1) && echo 'FAIL(dry:ink-cut) took a pack shorter than its header says'
+[[ $c == *incomplete* ]] || echo 'FAIL(dry:ink-cut) does not say incomplete'
+x=$(DRY_RUN=1 ./run-ink "$fn" 2>&1) && echo 'FAIL(dry:ink-arch) took a Flash-Next pack'
+[[ $x == *'./run instead'* ]] || echo 'FAIL(dry:ink-arch) no ./run pointer'
+x=$(DRY_RUN=1 ./run-ink "$h4" 2>&1) && echo 'FAIL(dry:ink-arch) took a Hy4-flash pack'
+[[ $x == *'./run-hy4 instead'* ]] || echo 'FAIL(dry:ink-arch) no ./run-hy4 pointer'
+KV=int8 DRY_RUN=1 ./run-ink "$ikd/Fake-Inkling.basalt" >/dev/null 2>&1 && echo 'FAIL(dry:ink-kv) took KV=int8'
+MAX_CONTEXT=1048577 DRY_RUN=1 ./run-ink "$ikd/Fake-Inkling.basalt" >/dev/null 2>&1 && echo 'FAIL(dry:ink-ctx) took MAX_CONTEXT=1048577'
+k=$(API_KEY=k3y DRY_RUN=1 ./run-ink "$ikd/Fake-Inkling.basalt" 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(dry:ink-api-key) printed'
+o=$(BUFFERED_IO=0 DRY_RUN=1 ./run-ink "$ikd/Fake-Inkling.basalt" 2>&1)
+[[ $o == *'-e BASALT_BUFFERED_IO=0'* && $o == *'io=direct'* ]] || echo 'FAIL(dry:buffered-io) ./run-ink ignores BUFFERED_IO=0'
+rm -rf "$ikd"
 # ./preload: the dd it would run takes its range from the pack's own table, and reads nothing dry
 pl=$(DRY_RUN=1 ./preload 2>&1)
 row=$(./preload --list 2>/dev/null | awk '$1 == "engram" { print "skip=" $2 " count=" $3 }')

@@ -1,6 +1,6 @@
 # Plan 14 — Inkling 2 Mini launcher: `./run-ink`
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-11-21
 > **Depends on**: Plan 13 T1 (the v0.5.5 image, the first that builds `inkling2`); Plan 11 (the launcher this one is shaped after, `pack_arch`, gate steps 4 and 5b)
 > **Goal**: `./run-ink` serves Thinking Machines Lab's Inkling 2 Mini pack on `:8700` with that model's own flags, refuses any other model's pack and a pack that is still downloading, and one owner boot answers a real request.
@@ -252,12 +252,18 @@ rates T4 saw), the pack's header length field and what a download in progress lo
    this plan; the knob exists, the default is 1, a Follow-ups row.
 5. **Risk: `:8700` serves one model at a time**, so booting Inkling stops Flash-Next. *Mitigation*:
    `./run-ink` refuses while a `basalt` container runs, as the others do; T4 is the owner's to time.
+6. **Risk (found at T1): the completeness check sees length, not holes.** The owner's second download
+   wrote a temp file that already had the pack's full length while a tenth of it was still unwritten
+   (tracker Evidence row 3), and `./run-ink` accepted it. Under its own name such a file would be
+   served. *Mitigation*: `hf download` gives the file its name only when it is whole; T3 hashes the
+   pack once; the engine verifies sections it reads. A check of every byte at each start is not
+   worth 20 GB of reads.
 
 ---
 
 ## Verification Checklist
 
-- [ ] T1: `DRY_RUN=1 ./run-ink` on a complete synthetic `inkling2` pack prints Inkling's flags and none of Flash-Next's; on a cut-short one it exits 1 with "incomplete"; gate step 4 asserts both
+- [x] T1 *(2026-11-21, tracker Evidence rows 2–4)*: `DRY_RUN=1 ./run-ink` on a complete synthetic `inkling2` pack prints Inkling's flags and none of Flash-Next's; on a cut-short one it exits 1 with "incomplete"; gate step 4 asserts both
 - [ ] T2: `./run` and `./run-hy4` refuse an `inkling2` pack and name `./run-ink`; their own `serve` words are unchanged
 - [ ] T3: the pack's sha256 is the card's; gate step 5b prints a `pack flags ok (./run-ink: inkling2 …)` line
 - [ ] T4: the boot log names the `ff0b978` image and the pack; a real reply is quoted in the tracker

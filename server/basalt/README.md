@@ -2,10 +2,11 @@
 
 [Basalt](https://github.com/jesdga95/basalt) (a local inference engine, first for
 **Qwen3.8-Flash-Next**) built from a pinned commit in our own image for the RTX PRO 6000 Blackwell
-(sm_120), and two launchers that serve a `.basalt` pack on `:8700` with an OpenAI- and
-Anthropic-compatible API: `./run` for Flash-Next, `./run-hy4` for Tencent's **Hy4-flash**.
+(sm_120), and three launchers that serve a `.basalt` pack on `:8700` with an OpenAI- and
+Anthropic-compatible API: `./run` for Flash-Next, `./run-hy4` for Tencent's **Hy4-flash**,
+`./run-ink` for Thinking Machines Lab's **Inkling 2 Mini**.
 
-Engine flags are per model, so each launcher takes only its own model's packs and names the other
+Engine flags are per model, so each launcher takes only its own model's packs and says so
 when handed the wrong one. `.ninfer` artifacts (for example the QUASAR 27B) belong in `../ninfer`.
 
 **Status (2026-11-21):** built on Basalt v0.5.5 (`iphands/basalt-blackwell:cu1343-sm120-ff0b978`,
@@ -14,8 +15,8 @@ Plan 13) with our buffered-io patch (§ *Build*), and the model-free gate passes
 loaded in 149.7 s, 3 slots × 362144, a 108,314-token prompt read in 9.4 s, requests answered;
 `./run --single` and `./run-hy4` have not been booted on it. The v0.5.0 image (`cu1343-sm120-ad274aa`, Plan 10, rebuilt with the patch) is
 kept as the rollback: `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-ad274aa ./run`. The
-image holds five models and this project serves two; Inkling 2 Mini, new in v0.5.5, has no launcher
-here. The last boots
+image holds five models and this project has launchers for three; **Inkling 2 Mini** (`./run-ink`,
+Plan 14, new in v0.5.5) has a launcher that passes its dry runs and has not been booted. The last boots
 recorded in both modes are the v0.2.1-era image's (`cu1343-sm120-dc047a7`, Plan 01, 2026-11-04, local pack):
 `./run` loaded in ~40 s, `./run --single` in ~34 s, a 63.29 GiB expert cache in VRAM; clients reach it
 as `cosmo-6000` on `cosmo.lan:8700`. The defaults are the owner's choices, not measured winners —
@@ -46,6 +47,12 @@ a local copy of the pack (below); no boot from one is recorded yet.
   not the limit (the same reads run at 164k IOPS once noir has the pages in RAM, about 1k when it
   does not): **serve Hy4-flash from local NVMe**, or run `./preload` first (below), which reads the
   pack's `engram` section once so noir caches it.
+- For `./run-ink`, the Inkling 2 Mini pack (19.7 GB, one file, from
+  `huggingface.co/jesdga/Inkling-2-Mini-Basalt`; sha256 `f7b4e5f8…3787` on its model card). It
+  defaults to `/mnt/noir/scratch/ai/llm/models/vllm/jesdga/Inkling-2-Mini-NVFP4-q8.basalt`. The model
+  has no n-gram table, so nothing here needs `./preload`. `./run-ink` refuses a pack that is shorter
+  than its own header says (a download still running under the final name); a downloader that
+  writes a full-size temp file and renames it at the end is simply "pack not found" until then.
 - Nothing else on `:8700`: stop `vllm` (`../vllmcustom`), `../ninfer` or `../ignis` first.
 
 ## Pins
@@ -163,3 +170,32 @@ effect lasts until the pages are evicted or noir reboots; `--check` times 200 ra
 There is no `PLE_IO`: `--ple-io` is Flash-Next's flag and Hy4-flash refuses it. These defaults are
 starting values (`./run`'s context, upstream's KV default), not measured and not yet the owner's
 choices.
+
+### Inkling 2 Mini: `./run-ink`
+
+```bash
+./run-ink                  # 1 slot, 362144 tokens
+DRY_RUN=1 ./run-ink        # every check, print the docker command, start nothing
+./run-ink --help           # the knob table
+```
+
+Same container, port, alias, cache directory and refusals as `./run`; the engine flags are Inkling 2
+Mini's own. `PORT`, `ALIAS`, `ALLOWED_HOSTS`, `API_KEY`, `NAME`, `CACHE_DIR`, `EXTRA_ARGS`,
+`IMAGE_OVERRIDE` and `BUFFERED_IO` work as above. The rest:
+
+| Knob (env) | Default | Basalt setting |
+|---|---|---|
+| `PACK` / first argument | `/mnt/noir/scratch/ai/llm/models/vllm/jesdga/Inkling-2-Mini-NVFP4-q8.basalt` | `serve <pack>`; must be a whole Inkling 2 Mini pack (`general.architecture` `inkling2`) — a Flash-Next pack is refused with a pointer to `./run`, a Hy4-flash pack to `./run-hy4`, an incomplete file with both byte counts |
+| `MAX_CONTEXT` | `362144` | `--max-context`, 1024 to 1048576 (the model's maximum; the engine's own default is 8192) |
+| `KV` | `fp16` | `--kv` (`fp16`, `fp8`): 32 KiB a position, 16 KiB with `fp8` |
+| `PARALLEL` | `1` | `--parallel` (1..8); upstream has not measured parallel slots for this model |
+| `SLOT_FULL_CONTEXT` | `1` (only when `PARALLEL` > 1) | `--slot-full-context` |
+| `VISION` | `dynamic` | `--vision` (`off`, `dynamic` — the only image mode; no video) |
+
+The model runs on one card: about 16.3 GiB of weights, so on this one every expert should stay in
+VRAM at any context (arithmetic from upstream's figures, not measured here). Drafting is on by
+default; `EXTRA_ARGS='--spec 1'` turns it off. Thinking is set per request (`reasoning_effort`:
+`none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, or 1 to 100), and there is no hard
+switch: at `none` the model still writes a short thinking block, so leave room in `max_tokens`.
+These defaults are starting values (`./run`'s context, upstream's KV default), not measured and not
+yet the owner's choices.

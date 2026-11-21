@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared guards and helpers for ./build, ./run, ./run-hy4 and ./preload (sourced, not executed).
+# Shared guards and helpers for ./build, ./run, ./run-hy4, ./run-ink and ./preload (sourced, not executed).
 #
 # Sourcing it RUNS the guards: a DOCKER that is an array, empty, or names sudo; a root launcher; a
 # docker socket that does not answer. Each one exits 1 at source time, before the caller's first
@@ -164,8 +164,19 @@ pack_sections() {
   return 0
 }
 
+# Print the file length a pack's header declares — a u64 at byte 16 (tools/model_file.py's HEADER,
+# "<8sIIQ40s": magic, version, section count, file_bytes) — or nothing when it cannot be read. A file
+# shorter than this is a download in progress or a copy that was cut short. At most 18 digits, so
+# the caller can compare it in bash arithmetic. It never fails its caller, and does not check the magic.
+pack_declared_bytes() {
+  local p=${1:?pack_declared_bytes needs a path} n
+  n=$(od -An -tu8 -j16 -N8 -- "$p" 2>/dev/null | tr -d ' \n') || true
+  if [[ $n =~ ^[1-9][0-9]{0,17}$ ]]; then printf '%s\n' "$n"; fi
+  return 0
+}
+
 # Print a pack's architecture id — "general.architecture" in its meta section: qwen4exp (Flash-Next),
-# hy4flash, … — or nothing when it cannot be read. It never fails its caller.
+# hy4flash, inkling2, … — or nothing when it cannot be read. It never fails its caller.
 pack_arch() {
   local p=${1:?pack_arch needs a path} name off size hit
   local re='"general\.architecture": *"([^"]*)"'

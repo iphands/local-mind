@@ -57,6 +57,9 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   image `cu1343-sm120-ff0b978` built with the buffered-io patch, gate 1–6 with 5b pass on it); **T2 is
   half recorded and blocked on the owner**: `./run` serves on the new image (engine 0.5.5, buffered reads,
   3 × 362144); still needed, `./run-hy4` on it with a reply. Then T3, harvest and close.
+- **Plan 14** — Inkling 2 Mini launcher `./run-ink`: in progress, 1/5 tasks done (T1: the launcher, the
+  completeness check, gate steps 1 and 4); next **T2** (`./run` and `./run-hy4` name `./run-ink`), then
+  **T3**, which waits on the owner's download of the pack, and **T4**, the owner's boot.
 
 ## Plans <!-- hp:plans -->
 
@@ -77,7 +80,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 11 | Hy4-flash launcher: `./run-hy4` | 10 (T1's image) | in-progress | `./run` passes Flash-Next's flags, which Hy4-flash refuses (`--ple-io`, `--kv int8`). Second launcher, per-pack flag check in the gate (step 5b), one owner boot. |
 | 12 | Local patch: a switch that stops Basalt's `O_DIRECT` reads | 10 (T1), 11 | in-progress | `BASALT_BUFFERED_IO=1`, a 3-file patch applied in the image build; the launchers and `./preload` turn it on. Owner rebuild and one Hy4-flash boot from NFS. |
 | 13 | Repin Basalt to v0.5.5 and rebuild the image | 10 (T1), 12 (T1) | in-progress | `ad274aa` → `ff0b978` (v0.5.5 tag commit, 177 commits on; a fifth model, Inkling 2 Mini). The patch fits unchanged. Owner builds and boots. |
-| 14 | Inkling 2 Mini launcher: `./run-ink` | 13 (T1's image), 11 | pending | Third launcher, for the model v0.5.5 added: `--kv fp16`, no table flags; refuses a pack still downloading. Gate step 4 on synthetic packs until the real one lands; one owner boot. |
+| 14 | Inkling 2 Mini launcher: `./run-ink` | 13 (T1's image), 11 | in-progress | Third launcher, for the model v0.5.5 added: `--kv fp16`, no table flags; refuses a pack still downloading. Gate step 4 on synthetic packs until the real one lands; one owner boot. |
 
 ## Dependency Chain <!-- hp:chain -->
 
