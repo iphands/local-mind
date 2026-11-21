@@ -107,8 +107,9 @@ entry in place, dated — do not append a second entry for the same thing.
   or the tier rules in `rate_group`.
 
 - **[OBSERVED 2026-11-21] The head's documented `cut -c` offsets stop matching on a real log line,
-  because ANSI escapes live *inside* the prefix.** Symptom: README says `cut -c1-23` is the rate
-  group; against `journalctl`/a captured line it returns `^[[2m2026-11-21T20:36:25` — and after a
+  because ANSI escapes live *inside* the prefix.** Symptom: README says the rate
+  group is `cut -c1-22` (`1-23` until the same-day cell trim on this entry's date — the number moves
+  whenever a cell width changes, which is the entry's point); against `journalctl`/a captured line it returns `^[[2m2026-11-21T20:36:25` — and after a
   naive `sed 's/.*llama_proxy::stats: //'` the offsets look fine, so the bug only shows on the raw
   shape an operator actually pipes. Why: `main.rs:119` builds the subscriber as
   `fmt().with_env_filter(..).init()` without `.with_ansi(false)`, and tracing-subscriber 0.3.22
@@ -119,12 +120,42 @@ entry in place, dated — do not append a second entry for the same thing.
   `sed -e 's/\x1b\[[0-9;]*m//g' -e 's/.*llama_proxy::stats: //'` — or start the proxy with
   `NO_COLOR=1` **in the proxy's own environment**: it is read by the process that formats the
   line, so exporting it on the pipeline that greps the log changes nothing (verified A/B on a
-  live stats line: escapes gone, plain `cut -c1-23` correct). `grep`/`sed` extraction needs no
+  live stats line: escapes gone, plain `cut -c1-22` correct — that slice as of 2026-11-21, `1-23` when first measured; the finding is untouched by which number it is). `grep`/`sed` extraction needs no
   pre-pass: they match, not count. Do **not** write that colour "cannot be turned off", and do not infer tty-ness from a
   terminal session — check the crate you depend on (`~/.cargo/registry/src/*/tracing-subscriber-*/src`
   is two commands away) before documenting upstream behaviour. **Staleness trigger:** any change to
   the subscriber setup in `main.rs` (a `.with_ansi(false)` makes this entry obsolete), or a
   tracing-subscriber upgrade.
+
+- **[OBSERVED 2026-11-21] A fixed-width field with two label renderings shares ONE value width, so
+  "trim a cell from each rendering" is a ONE-cell saving, not two.** Symptom: an option list handed
+  to a human that under-promises the saving, and cell arithmetic that does not close. Why:
+  `rate_group` writes `tg=` (3 cells) on tiers 1/3 and `tg>=` (4 cells) on tier 2, and the group's
+  contract is that both put the number's **right edge on the same cell** — so the label's extra `>`
+  is paid for out of the value field. An 11-cell `tg` field was `{:>8.1}` on tier 1 and `{:>7.1}` on
+  tier 2; one cell off gives `{:>7.1}`/`{:>6.1}`, and the two tiers' **ceilings then differ by an
+  order of magnitude on purpose** (99,999.9 vs 9,999.9). Do this: count in **value cells**, and state
+  a ceiling as "the largest value whose RENDERING fits", never as a numeric range — `{:>6.1}` of
+  9,999.95 is `10000.0`, seven characters in a six-cell field, so the real ceiling is below the
+  nominal range. When the freed cell gets spent, check which trade the human was actually offered:
+  this trim could buy line length *or* `pp`'s headroom, not both. **Instance:** the 2026-11-21
+  rate-cell trim (group 23 → 22, `HEAD_CELLS` 129 → 128); I offered a two-cell saving and corrected
+  it mid-decision. **Staleness trigger:** any proposal to resize a multi-rendering fixed-width field,
+  or a new tier added to `rate_group`.
+
+- **[OBSERVED 2026-11-21] A published start offset survives two shapes of review because the slice
+  it documents comes back non-empty.** Symptom: README's offset table read `tail | 130-` while the
+  tail's first key measured **131** — cell 130 was the head/tail separator, so `cut -c130-` returned
+  the right tail behind a leading space and nothing looked wrong. It had stood that way since Plan
+  03's first table, inside a row that claimed the table was "measured". Why: a start offset is right
+  only if the key's **first glyph** sits at that cell, and "the slice contains the payload" is a
+  weaker property that a separator satisfies for free. In the session that caught it, both a reviewer
+  and I re-derived the number by arithmetic and **both were a cell out**; `cut` was the only thing
+  that was right. Do this: measure every start offset as `line.find(key) + 1` or
+  `cut -cN-N | cat -A`, on the widest and the narrowest rendered line, and say in the table which
+  cell the separator occupies — a reader who guesses will guess exactly the wrong way, as I did.
+  **Staleness trigger:** any change to a cell width (everything right of it moves), or any new row in
+  a `cut -c` table.
 
 - **[OBSERVED 2026-10-16] A fix can live entirely in the branch your deployment never runs, and both
   the tests and the docs will agree with you.** Symptom: the prefix-cache prefill discount was real

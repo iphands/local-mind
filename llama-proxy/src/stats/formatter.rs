@@ -302,32 +302,48 @@ fn count_cell(count: Option<u64>) -> String {
 /// shape**, not the request: an Anthropic `/v1/messages` body carries no per-request
 /// timing block at all, so it is tier 2 whatever backend serves it.
 ///
-/// Built as two fixed-width fields rather than three hand-spaced literals. A
-/// hand-spaced tier string is 22, 23 or 24 cells depending on how many spaces someone
-/// typed (`tg>=` is inherently one wider than `tg=`, and `pp=…k` is one wider than
-/// `pp=…n/a`), and only the first of those is the contract's 23. Fixing the widths
-/// makes every tier land on 23 by construction.
+/// Built as two fixed-width fields rather than three hand-spaced literals. A hand-spaced
+/// tier string drifts by a cell every time someone types it (`tg>=` is inherently one wider
+/// than `tg=`, and `pp=…k` one wider than `pp=…n/a`), and the group has exactly one legal
+/// width — `CELL_RATE`, 22 cells — which every tier reaches here by construction rather than
+/// by counting spaces. Tier 3's `n/a` pair is formatted for the same reason.
 ///
 /// **Decode leads**, because decode is the number an operator scans a wall of lines
 /// for: it is the first glyph on the head in every tier. The order costs the group its
 /// old right-edge pin (when `tg` was the group's LAST field, the variable-length
 /// `tg=`/`tg>=` put every decode number's right edge on the group's right edge), so the
-/// pin moved INSIDE the leading field: `tg` gets 11 cells on every tier — `tg=` pads its
-/// value to 8, `tg>=` to 7 — so `tg=   195.5` and `tg>=  146.3` stack regardless of tier,
-/// and `pp` is left 11 cells on every tier too.
+/// pin moved INSIDE the leading field: the `tg` field is 10 cells on every tier — `tg=`
+/// pads its value to 7, `tg>=` to 6 — so `tg=  195.5` and `tg>= 146.3` end their digits on
+/// cell 10 whatever tier they arrived from, and `pp` keeps the other 11.
 ///
-/// Both fields are 11 cells, and each has a ceiling it widens past rather than clamping a
-/// backend-reported number — the sweep pins the in-range behaviour,
-/// `a_rate_past_a_cells_field_widens_rather_than_clamps` pins the overflow.
+/// Two fields, two ceilings, and each widens past its own rather than clamping a
+/// backend-reported number — the sweep pins in-range behaviour,
+/// `a_rate_past_a_cells_field_widens_rather_than_clamps` pins the overflow. A ceiling is
+/// "the largest value whose RENDERING fits", not the field's nominal range: `{:>6.1}` holds
+/// six characters and 9,999.95 rounds up to `10000.0`, seven, so it widens the group.
 ///
-/// * `pp` is `{:>7.3}k`, so **999,999 tok/s** is the top of the cell, and the worst figure
-///   this deployment has recorded — llama.cpp's cache-inflated 880k, the value this cell was
-///   originally sized against — sits at `880.000`, **edge to edge with no headroom**. One
-///   tok/s past 999,999 the group is 24 cells and `dur=`..`finish=` each move right.
-/// * The two decode fields are the same width but not the same range: tier 1's `{:>8.1}`
-///   holds 999,999.9, tier 2's `{:>7.1}` only 99,999.9. `decode_tps_min` is derived
-///   (`completion / wall`), so a pathological near-zero wall with counted tokens can reach
-///   its ceiling; the widening witness covers both sides.
+/// * `pp` is `{:>7.3}k` → **999,999 tok/s**, and the worst figure this deployment has
+///   recorded — llama.cpp's cache-inflated 880k, the value this cell was sized against —
+///   sits at `880.000`, **edge to edge with no headroom**. One tok/s past 999,999 the group
+///   is 23 cells and `dur=`..`finish=` each move right.
+/// * The decode field is 10 cells on both tiers without sharing a range: tier 1's `{:>7.1}`
+///   holds 99,999.9, tier 2's `{:>6.1}` only 9,999.9, because `tg>=` spends one of the ten
+///   on its label. Sized from the recorded distribution rather than generously: the highest
+///   decode rate anywhere in this repo is **247.2 tok/s** (the `captures/vllm_metrics_*.json`
+///   read 10.9–99.2), leaving tier 1 400x. Tier 2 is the tighter field **and** the less
+///   trustworthy input: `decode_tps_min` is derived (`completion / wall`) and `finite_rate`
+///   (`collector.rs:379-385`) passes every finite value through, so a near-zero wall beside
+///   counted tokens reaches 9,999.9 long before it looks absurd. A canned test backend
+///   through this code path rendered `dur=1ms` beside 412 counted tokens; `dur` prints whole
+///   milliseconds, so that is a wall under 1.5 ms and a derived floor of roughly 3–8×10⁵
+///   tok/s. No real engine is within ~40× of that, so the demonstration is of the *input
+///   class* (a wall containing no generation time makes a `completion / wall` floor
+///   meaningless), not of production behaviour. The trim moved this trip point from 99,999.9
+///   to 9,999.9; it did not create it. Widening is the right answer *in the renderer*; the
+///   plausibility bound belongs at the source (`collector.rs:241`) and is filed as a
+///   follow-up, because such a sample is already absurd in `total_tps` — printed on tiers
+///   2–3 as the free-form `work=` cell, finite and merely enormous — making a shifted head
+///   the least interesting of its symptoms.
 fn rate_group(m: &RequestMetrics) -> String {
     // `pp` prints ONLY on tier 1. A half split (backend-reported prefill, no usable
     // decode rate) is tier 2, and printing its cache-inflated prefill there put a huge
@@ -337,17 +353,19 @@ fn rate_group(m: &RequestMetrics) -> String {
     // evidence of absence, not a slow prefill.
     match tps_tier(m) {
         1 => format!(
-            "tg={:>8.1} pp={:>7.3}k",
+            "tg={:>7.1} pp={:>7.3}k",
             m.generation_tps.unwrap_or(0.0),
             m.prompt_tps.unwrap_or(0.0) / 1000.0
         ),
-        // `tg>=` is one char wider than `tg=`, so the floor gets 7 cells to tier 1's 8
-        // and both fields end at 11: the decode digits stay stacked and `dur=` keeps
-        // its cell. `{:>7.1}` still renders 10000.0 -- which 9999.95 rounds up to --
-        // without pushing the group to 24. Its ceiling is 99,999.9, one order below
-        // tier 1's 8-cell decode; past it the group widens, as on the `pp` side.
-        2 => format!("tg>={:>7.1} pp=     n/a", m.decode_tps_min),
-        3 => "tg=     n/a pp=     n/a".to_string(),
+        // `tg>=` spends one of the ten cells on its label, so the floor gets 6 to tier 1's
+        // 7 and both fields still end at 10: the decode digits stay stacked and `dur=`
+        // keeps its cell. The cost is a ceiling an order lower — `{:>6.1}` cannot hold
+        // 10000.0, which is what 9999.95 rounds up to, so such a value widens the group to
+        // 23 rather than being squeezed into it.
+        2 => format!("tg>={:>6.1} pp=     n/a", m.decode_tps_min),
+        // Formatted rather than spelled so both fields land on 10 and 11 by construction;
+        // the sweep's tier-3 row measures the result either way.
+        3 => format!("tg={:>7} pp={:>8}", "n/a", "n/a"),
         _ => unreachable!("tps_tier returns 1..=3"),
     }
 }
@@ -504,7 +522,7 @@ mod tests {
         let output = format_compact(&m);
         assert!(output.contains("test-model"));
         // Pinned head order: rate group, dur, ctx, tok, model, stream, finish.
-        assert!(output.contains("tg=    42.5 pp=  0.201k"), "got: {output}");
+        assert!(output.contains("tg=   42.5 pp=  0.201k"), "got: {output}");
         assert!(output.contains("dur=   1200ms"), "got: {output}");
         assert!(output.contains("tok=   100/    50"), "got: {output}");
         assert!(output.contains("stream=ok"));
@@ -524,7 +542,7 @@ mod tests {
         m.decode_tps_min = 50.0 / 1.2;
 
         let output = format_compact(&m);
-        assert!(output.contains("tg>=   41.7"), "got: {output}");
+        assert!(output.contains("tg>=  41.7"), "got: {output}");
         assert!(output.contains("work=125.00"), "got: {output}");
         assert!(!output.contains("/0.00"), "must not print a fabricated split: {output}");
         // The old key read as a measured speed; it must not come back.
@@ -555,7 +573,7 @@ mod tests {
         );
 
         let output = format_compact(&m);
-        assert!(output.contains("tg=     n/a"), "got: {output}");
+        assert!(output.contains("tg=    n/a"), "got: {output}");
         assert!(output.contains("work=125.00"), "got: {output}");
         assert!(!output.contains("tg>="), "a zero is not a floor: {output}");
     }
@@ -596,7 +614,7 @@ mod tests {
         m.decode_tps_min = 0.0; // so no floor exists either
 
         let out = format_compact(&m);
-        assert!(out.contains("tg=    42.5 pp=  0.201k"), "got: {out}");
+        assert!(out.contains("tg=   42.5 pp=  0.201k"), "got: {out}");
         assert!(!out.contains(">="), "a bound replaced a measurement: {out}");
         assert!(!out.contains("work="), "tier 3 leaked into tier 1: {out}");
     }
@@ -609,7 +627,7 @@ mod tests {
         assert!(m.has_timing_split);
 
         let output = format_compact(&m);
-        assert!(output.contains("tg=    42.5 pp=  0.201k"), "got: {output}");
+        assert!(output.contains("tg=   42.5 pp=  0.201k"), "got: {output}");
         assert!(!output.contains("work="), "tier 3 leaked into a tier-1 line: {output}");
         assert!(!output.contains(">="), "tier 2 leaked into a tier-1 line: {output}");
     }
@@ -662,7 +680,7 @@ mod tests {
         // but under a key that cannot be read as a speed, next to the honest
         // floor: 146 tokens over a 1731ms wall is "at least 84", not "6000".
         assert!(output.contains("work=22753.32"), "got: {output}");
-        assert!(output.contains("tg>=   84.3"), "got: {output}");
+        assert!(output.contains("tg>=  84.3"), "got: {output}");
     }
 
     #[test]
@@ -968,7 +986,7 @@ mod tests {
         // pref/decode are k tok/s and raw tok/s respectively, so the raw figures
         // appear only through those two cells.
         assert!(output.contains("pp=  0.123k"), "got: {output}");
-        assert!(output.contains("tg=   150.0"), "got: {output}");
+        assert!(output.contains("tg=  150.0"), "got: {output}");
         assert!(output.contains("length"));
         assert!(output.contains("600"));
     }
@@ -1143,7 +1161,18 @@ mod tests {
     const CELL_MODEL: usize = 6 + 16;
     /// ONE width for all three rate tiers. Which tier you see is a fact about the
     /// backend, not about the request, so the line must not betray which it was.
-    const CELL_RATE: usize = 23;
+    /// 22 = the 10-cell `tg` field (7 value cells behind `tg=`, 6 behind `tg>=`) + a
+    /// separator + the 11-cell `pp` field. Trimmed from 23 on 2026-11-21: the highest
+    /// decode rate recorded anywhere in this repo is 247.2 tok/s, so the 8 value cells
+    /// tier 1 used were decorative headroom every reader paid for. See `rate_group`.
+    const CELL_RATE: usize = 22;
+    /// The `tg` half of the group: 10 cells on every tier — 7 value cells behind the 3-cell
+    /// `tg=`, 6 behind the 4-cell `tg>=`, so the digits end on cell 10 whichever tier wrote
+    /// them. Also the bound README's renderings are checked against.
+    const CELL_TG: usize = 10;
+    /// The `pp` half: `pp=` + `{:>7.3}` + `k`, and the same 11 cells when the tier has no
+    /// prefill rate to report.
+    const CELL_PP: usize = 11;
     /// "dur=" + `{:>7.0}` + "ms". Seven, not six: a reprompt loop against
     /// `timeout_seconds: 300` overflows six digits and re-breaks everything right.
     const CELL_DUR: usize = 4 + 7 + 2;
@@ -1249,21 +1278,33 @@ mod tests {
 
     /// The offsets are pinned over a MAGNITUDE sweep, not only the fixture rows. The
     /// bug class this exists for is a field that fits every healthy value and then grows
-    /// one cell at a boundary, moving `dur=`..`finish=` with it -- a wall-bounded floor
-    /// of 10000.0 rendered `tg>= 10000.0`, a 24-cell rate group with `dur=` at 48. The
-    /// sweep runs to each cell's own ceiling: prefill up to the 999,999 tok/s `pp` holds
-    /// (the legitimate range tops out at 580,000 on a full prefix-cache hit; beyond it
-    /// see `a_rate_past_a_cells_field_widens_rather_than_clamps`), and a decode floor
-    /// below 100k, past which no engine decodes.
+    /// one cell at a boundary, moving `dur=`..`finish=` with it. The sweep runs to each
+    /// field's own ceiling and no further: prefill to the 999,999 tok/s `pp` holds, a tier-2
+    /// floor to the 9,999.9 its `{:>6.1}` holds, a tier-1 decode to the 99,999.9 its
+    /// `{:>7.1}` holds. Past a ceiling a row does not belong here -- it belongs in
+    /// `a_rate_past_a_cells_field_widens_rather_than_clamps`, which is where the three
+    /// tier-2 rows that used to top out at 99,999.9 went when the field lost a cell on
+    /// 2026-11-21 (that test names the trip points that replaced them).
+    ///
+    /// `generation_tps` gets its own rows because it is the field that was trimmed and had
+    /// never been swept: the prefill rows below hold it at 42.5, and the decode rows hold
+    /// `prompt_tps` pinned so a decode row can never be blamed for a `pp` overflow.
     #[test]
     fn head_offsets_survive_every_rate_magnitude() {
         let mut rows: Vec<(String, RequestMetrics)> = Vec::new();
 
-        for floor in [0.07, 41.67, 999.9, 9_999.9, 9_999.95, 10_000.0, 99_999.9] {
+        for floor in [0.07, 41.67, 999.9, 9_999.9] {
             let mut m = fixture("qwen3", "stop");
             m.completion_tokens = Some(10);
             m.decode_tps_min = floor;
             rows.push((format!("tier2 floor {floor}"), m));
+        }
+        for decode in [0.07, 42.5, 999.9, 9_999.9, 99_999.9] {
+            let mut m = fixture("qwen3", "stop");
+            m.has_timing_split = true;
+            m.prompt_tps = Some(14_765.0);
+            m.generation_tps = Some(decode);
+            rows.push((format!("tier1 decode {decode}"), m));
         }
         for prefill in [1.0, 200.5, 14_765.0, 580_000.0, 999_999.0] {
             let mut m = fixture("qwen3", "stop");
@@ -1272,6 +1313,24 @@ mod tests {
             m.generation_tps = Some(42.5);
             rows.push((format!("tier1 prefill {prefill}"), m));
         }
+        // A non-finite rate renders PADDED into the narrowed field (`{:>6.1}` of inf is
+        // `   inf`), so it cannot widen the group -- the mirror image of the overflow
+        // property, and unreachable in production (`finite_rate` maps it to 0.0 first).
+        // Pinned on the renderer anyway: a narrow field that truncated instead of padding
+        // would shift the head here. Both reachable non-finite paths are covered, one per
+        // `tg` side. `NaN` is NOT a width row because it has no width to measure:
+        // `tps_tier` gates on `> 0.0` and `NaN > 0.0` is false, so a NaN floor renders
+        // tier 3's `n/a` and never reaches `{:>6.1}`. Asserted as a tier fact below.
+        let mut inf_floor = fixture("qwen3", "stop");
+        inf_floor.completion_tokens = Some(10);
+        inf_floor.decode_tps_min = f64::INFINITY;
+        rows.push(("tier2 floor inf (pads, cannot widen)".to_string(), inf_floor));
+
+        let mut inf_decode = fixture("qwen3", "stop");
+        inf_decode.has_timing_split = true;
+        inf_decode.prompt_tps = Some(14_765.0);
+        inf_decode.generation_tps = Some(f64::INFINITY);
+        rows.push(("tier1 decode inf (pads, cannot widen)".to_string(), inf_decode));
         let mut quiet = fixture("qwen3", "stop");
         quiet.completion_tokens = None;
         quiet.decode_tps_min = 0.0;
@@ -1288,6 +1347,30 @@ mod tests {
                 "{label}: the rate group renders {} cells, expected {CELL_RATE}: {line}",
                 rate_group_cells(m)
             );
+            // And the group's TWO HALVES measured, not just its total. This is the
+            // property the total cannot see: a tier whose sides went 11+10 still sums to
+            // 22, sails through the assert above, and breaks the digit stacking that is
+            // the group's entire purpose -- the claim README teaches in prose ("146.3 and
+            // 131.0 end their digits on cell 10"). Measured per row, per tier, here.
+            let group = rate_group(m);
+            // Split on the FIELD boundary, not the first space: the first space is inside
+            // the `tg` cell's own padding (`tg>=   0.1`), which is exactly the padding this
+            // assert exists to measure.
+            let (tg_side, pp_tail) = group
+                .split_once(" pp=")
+                .expect("rate_group renders its two fields space-separated");
+            let pp_side = format!("pp={pp_tail}");
+            let tg_cells = UnicodeWidthStr::width(tg_side);
+            let pp_cells = pp_side.width();
+            assert_eq!(
+                tg_cells, CELL_TG,
+                "{label}: the `tg` field renders {tg_cells} cells, not {CELL_TG} -- decode \
+                 digits no longer end on the same cell across tiers: {group:?}"
+            );
+            assert_eq!(
+                pp_cells, CELL_PP,
+                "{label}: the `pp` field renders {pp_cells} cells, not {CELL_PP}: {group:?}"
+            );
             for (needle, want) in head_offsets() {
                 match probe(&line, needle) {
                     Probe::At(at) => assert_eq!(at, want, "{label}: `{needle}` at {at}: {line}"),
@@ -1295,20 +1378,49 @@ mod tests {
                 }
             }
         }
+
+        // NaN is read as ABSENCE, not as an enormous rate: both `tps_tier` gates are
+        // `> 0.0`, and `NaN > 0.0` is false. So a NaN floor falls to tier 3 (which the
+        // sweep pins as a width) and a NaN measured decode cannot buy tier 1 either.
+        // Asserted where it is actually a fact -- about the tier, not the cell width --
+        // because a row labelled "tier 2 NaN" would have measured tier 3 in silence.
+        let mut nan_floor = fixture("qwen3", "stop");
+        nan_floor.completion_tokens = Some(10);
+        nan_floor.decode_tps_min = f64::NAN;
+        assert_eq!(tps_tier(&nan_floor), 3, "a NaN floor must render as absence, never as a rate");
+        let mut nan_decode = fixture("qwen3", "stop");
+        nan_decode.has_timing_split = true;
+        nan_decode.generation_tps = Some(f64::NAN);
+        nan_decode.decode_tps_min = 0.0;
+        assert_eq!(
+            tps_tier(&nan_decode),
+            3,
+            "a NaN measured decode must not buy tier 1 and print `tg=    NaN`"
+        );
     }
 
     /// Past a field's own ceiling the group **widens**; a backend-reported rate is never
-    /// rounded into its cell. Both sides are pinned because the two decode fields share a
-    /// width without sharing a range (tier 1 `{:>8.1}` → 999,999.9, tier 2 `{:>7.1}` →
-    /// 99,999.9) and `pp`'s `{:>7.3}k` caps at 999,999 tok/s -- the worst figure this
-    /// deployment has recorded, llama.cpp's cache-inflated 880k, already fills that cell
-    /// edge to edge.
+    /// rounded, truncated or clamped into its cell. One case per field, each exactly one
+    /// cell past its ceiling, so each asserts `CELL_RATE + 1`:
     ///
-    /// This is the price of the 11/11 split the human chose on 2026-11-21 (the alternative
-    /// kept `pp` at 12 cells and let the decode digits sit one cell apart across tiers), and
-    /// it is what the magnitude sweep gave up: it used to pin offsets for 1M and 9.99M
-    /// tok/s prefill. Recorded in the Plan 03 tracker. Same rule
-    /// `an_over_wide_context_is_never_clamped` states for counts.
+    /// * `pp` `{:>7.3}k` → 999,999 tok/s, the trip point the recorded 880k worst case sits
+    ///   under with 1.14x to spare.
+    /// * tier 2 `tg>={:>6.1}` → **9,999.9 as rendered**, so `9,999.95` is already a widening
+    ///   value: it rounds up to `10000.0`, seven characters in a six-cell field. That case is
+    ///   not decoration -- `10000.0` is the bug this sweep was originally written for, and it
+    ///   is why a ceiling is stated as a rendering rather than as a numeric range.
+    /// * tier 1 `tg={:>7.1}` → 99,999.9, exact: `{:>7.1}` of 99,999.9 is seven characters.
+    ///
+    /// What this replaced, stated so the loss stays countable rather than rhetorical: before
+    /// 2026-11-21 tier 2's field held 99,999.9 and the sweep pinned offsets up to it. The
+    /// field lost a cell, so the trip point is 9,999.9 -- 40x above the worst decode this
+    /// repo has recorded (247.2 tok/s) but 10x closer than before, and on the one rate that
+    /// is DERIVED (`completion / wall`) rather than measured. The rows moved here rather than
+    /// being deleted, so the trip point stays a tested fact at its new value. A plausibility
+    /// bound at the source is the durable fix and is filed as a follow-up against
+    /// `collector.rs:241`.
+    ///
+    /// Same rule `an_over_wide_context_is_never_clamped` states for counts.
     #[test]
     fn a_rate_past_a_cells_field_widens_rather_than_clamps() {
         let mut prefill = fixture("qwen3", "stop");
@@ -1318,11 +1430,23 @@ mod tests {
 
         let mut floor = fixture("qwen3", "stop");
         floor.completion_tokens = Some(10);
-        floor.decode_tps_min = 100_000.0; // one past tier 2's 7-cell ceiling
+        floor.decode_tps_min = 10_000.0;
+
+        let mut rounds = fixture("qwen3", "stop");
+        rounds.completion_tokens = Some(10);
+        // Below the field's nominal range, above its rendered ceiling.
+        rounds.decode_tps_min = 9_999.95;
+
+        let mut decode = fixture("qwen3", "stop");
+        decode.has_timing_split = true;
+        decode.prompt_tps = Some(14_765.0);
+        decode.generation_tps = Some(100_000.0);
 
         for (label, m, printed) in [
             ("prefill 1,000,000 tok/s", &prefill, "1000.000k"),
-            ("decode floor 100,000.0 tok/s", &floor, "100000.0"),
+            ("tier2 floor 10,000.0 tok/s", &floor, "10000.0"),
+            ("tier2 floor 9,999.95 tok/s (rounds up)", &rounds, "10000.0"),
+            ("tier1 decode 100,000.0 tok/s", &decode, "100000.0"),
         ] {
             let group = rate_group(m);
             assert!(
@@ -1334,6 +1458,47 @@ mod tests {
                 CELL_RATE + 1,
                 "{label}: an out-of-band rate must widen the group, not shift inside it: {group:?}"
             );
+            // And the columns move WITH it. README's claim is not just "the group widens",
+            // it is "every column right of it moves" -- which nothing here tested until
+            // 2026-11-21, and the widened group is the only place that claim can live
+            // (`an_over_wide_context_is_never_clamped` proves values reach the log, not
+            // positions).
+            let line = format_compact(m);
+            match probe(&line, "dur=") {
+                Probe::At(at) => assert_eq!(
+                    at,
+                    rate_group_cells(m) + SEP,
+                    "{label}: the group widened to {} cells but `dur=` stayed at {at}: {line}",
+                    rate_group_cells(m)
+                ),
+                other => panic!("{label}: `dur=` {other:?} -- {line}"),
+            }
+        }
+
+        // Far past a ceiling the group keeps growing instead of pinning the number: the
+        // digits reach the log at their full width and the columns move by exactly as much
+        // as they need to. Measured, not guessed -- `{:>6.1}` of 12,345,678.99 is
+        // `12345679.0`, ten characters in a six-cell field.
+        let mut absurd = fixture("qwen3", "stop");
+        absurd.completion_tokens = Some(10);
+        absurd.decode_tps_min = 12_345_678.99;
+        let group = rate_group(&absurd);
+        assert!(
+            group.contains("12345679.0"),
+            "an extreme derived floor was clamped rather than printed: {group:?}"
+        );
+        assert!(
+            rate_group_cells(&absurd) > CELL_RATE + 1,
+            "the group stopped growing at some hidden cap: {group:?}"
+        );
+        match probe(&format_compact(&absurd), "dur=") {
+            Probe::At(at) => assert_eq!(
+                at,
+                rate_group_cells(&absurd) + SEP,
+                "the group grew to {} cells but `dur=` did not follow it",
+                rate_group_cells(&absurd)
+            ),
+            other => panic!("far-past floor: `dur=` {other:?}"),
         }
 
         assert!(
@@ -1453,6 +1618,10 @@ mod tests {
         let mut s2 = fixture("Qwen3-14B-128K-Q3_K_S.gguf-batch-instruct-realigned", "content_filter");
         s2.has_timing_split = true;
         s2.prompt_tps = Some(88_000.0);
+        // Sits on tier 1's `{:>7.1}` ceiling on purpose: 9,999.99 renders `10000.0`, seven
+        // characters, exactly the field. It is the file's tightest fixture -- if a future
+        // trim narrows that field, THIS is the assertion that goes red first, and the fix is
+        // to move the ceiling into the sweep, not to soften this row.
         s2.generation_tps = Some(9_999.99);
         s2.duration_ms = 1_234_567.0;
         s2.context_used = Some(999_999);
@@ -1621,6 +1790,16 @@ mod tests {
             "the head starts with the rate cell, not with a labelled cell"
         );
         assert_eq!(
+            CELL_TG + SEP + CELL_PP,
+            CELL_RATE,
+            "the group's two documented halves must add up to the group. Both consts are \
+             load-bearing OUTSIDE this assert: CELL_TG is the bound \
+             `readme_never_renders_a_retired_tg_field` enforces on README's renderings, so a \
+             typo here both fails here and would silently loosen that docs bound. Neither \
+             const can see the format strings -- `head_offsets_survive_every_rate_magnitude` \
+             measures both sides of every rendered group against them"
+        );
+        assert_eq!(
             offsets.first(),
             Some(&("dur=", CELL_RATE + SEP)),
             "`dur=` is the head's first probeable cell: one separator past the group"
@@ -1631,11 +1810,12 @@ mod tests {
             "`finish=` is the last head cell, so its end is the head width"
         );
         assert_eq!(
-            HEAD_CELLS, 129,
-            "the head is 123 cells of content plus 6 separators; the cell ORDER moved on \
-             2026-11-21 (rate group leads, `model=` sits between `tok=` and `stream=`) and \
-             the total did not. If either moves, update README's `cut -c` table and the \
-             measured table in the Plan 03 tracker together, never here alone"
+            HEAD_CELLS, 128,
+            "the head is 122 cells of content plus 6 separators; the cell ORDER moved on \
+             2026-11-21 (rate group leads, `model=` sits between `tok=` and `stream=`) and the \
+             rate group lost a cell the same day (23 -> 22), so the total went 129 -> 128. If \
+             either moves, update README's `cut -c` table and the measured table in the Plan 03 \
+             tracker together, never here alone"
         );
     }
 
@@ -1648,7 +1828,7 @@ mod tests {
     /// against `head_offsets()` -- if the table is wrong, THIS fails today.
     ///
     /// It is a control on the OFFSETS TABLE, not a sample of the output: only the rate
-    /// group's TOTAL is asserted against `CELL_RATE`; the 11/11 split of its two fields
+    /// group's TOTAL is asserted against `CELL_RATE`; the 10/11 split of its two fields
     /// is pinned where `rate_group` is measured per magnitude, in
     /// `head_offsets_survive_every_rate_magnitude`. So do not paste this line into a
     /// ticket as an example of what the proxy prints -- the README's example block is
@@ -1657,9 +1837,9 @@ mod tests {
     /// `GOLDEN_CJK` is why the head must be padded in DISPLAY CELLS: its model field
     /// is 8 chars but 16 cells, so `{:<16}` char padding puts every column after it
     /// eight cells out.
-    const GOLDEN_ASCII: &str = "tg=  9999.9 pp= 88.000k dur=    184ms ctx=999999/262144 tok=186417/   498 model=qwen3-7b         stream=ok      finish=stop      ";
+    const GOLDEN_ASCII: &str = "tg= 9999.9 pp= 88.000k dur=    184ms ctx=999999/262144 tok=186417/   498 model=qwen3-7b         stream=ok      finish=stop      ";
 
-    const GOLDEN_CJK: &str = "tg=  9999.9 pp= 88.000k dur=    184ms ctx=999999/262144 tok=186417/   498 model=本地大模型量化版 stream=ok      finish=stop      ";
+    const GOLDEN_CJK: &str = "tg= 9999.9 pp= 88.000k dur=    184ms ctx=999999/262144 tok=186417/   498 model=本地大模型量化版 stream=ok      finish=stop      ";
 
     #[test]
     fn the_head_offsets_describe_a_buildable_line() {
@@ -1681,9 +1861,10 @@ mod tests {
     /// A 1M-token vLLM window (`1048576`) and a prompt of similar size do not fit the
     /// `{:>6}` fields the plan pins, so the head cannot stay aligned for them. That
     /// widening (2 cells of head, against OQ7's width concern) is a human decision, not
-    /// this test's. What IS pinned here, and stays pinned however the width question is
-    /// answered: an out-of-band number shifts the columns rather than being clamped,
-    /// rounded or dropped.
+    /// this test's -- and OQ7's premise that the head only ever grows is now outdated: on
+    /// 2026-11-21 the repo voluntarily took a cell OUT of the rate group. What IS pinned
+    /// here, and stays pinned however the width question is answered: an out-of-band number
+    /// shifts the columns rather than being clamped, rounded or dropped.
     #[test]
     fn an_over_wide_context_is_never_clamped() {
         let mut m = fixture("cosmo-6000", "stop");
@@ -1878,7 +2059,7 @@ mod tests {
 
         // 5. The cells every dashboard keys on that no other line here exercises: a
         // model name past the 16-cell budget (truncated with an ASCII "...", so the head
-        // still measures 129 and a full-name grep never matches) and `finish=tool_calls`,
+        // still measures 128 and a full-name grep never matches) and `finish=tool_calls`,
         // the dominant agent value, which fills its 10 cells exactly. `group=` is the
         // multi-backend tail cell. Rates are the deployment's warm corrected cluster.
         const AT_PROMPT: u64 = 4_100;
@@ -2010,5 +2191,205 @@ mod tests {
                  emit (near line {anchor})"
             );
         }
+    }
+
+    /// A retired cell width must not survive in README's PROSE either.
+    ///
+    /// The pin above covers the fenced block. It cannot reach the tier table, the tier-3
+    /// paragraph or the "the `tg` field is 10 cells on every tier" claim — all hand-typed —
+    /// and when the rate group lost a cell on 2026-11-21 four rendered cells in prose were
+    /// left showing 11-cell `tg` fields with the suite green. Same defect Plan 03 logged for
+    /// retired KEYS, one level down: the tier table is where an operator copies a rendering
+    /// from, so a stale padding there is a stale grep, not just stale prose.
+    ///
+    /// It is a WIDTH bound rather than a ban on the old paddings because "the old padding" is
+    /// not a fixed string: `tg=   51.1` is correct today (two digits pad to three spaces) and
+    /// `tg=  146.3` was correct yesterday. What cannot be correct is any `tg` field wider
+    /// than `CELL_TG`, which is exactly what every pre-trim rendering is.
+    ///
+    /// Deliberately one-sided on width: `pp` cannot be bounded, because `pp=1000.000k` is 12
+    /// cells and README teaches it as the widening tell. Its retired padding is instead
+    /// banned by exact match, and the scan is guarded against vacuity by a bound DERIVED
+    /// from `readme_examples()` plus a both-tag-classes check.
+    #[test]
+    fn readme_never_renders_a_retired_tg_field() {
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
+            .expect("README.md must sit beside Cargo.toml for the docs pin");
+
+        let mut stale: Vec<String> = Vec::new();
+        let mut measured = 0usize;
+        let mut seen_plain = false;
+        let mut seen_bound = false;
+        for (idx, line) in readme.lines().enumerate() {
+            let mut from = 0usize;
+            while let Some(pos) = line[from..].find("tg") {
+                let start = from + pos;
+                let rest = &line[start..];
+                let label = match rest {
+                    r if r.starts_with("tg>=") => 4,
+                    r if r.starts_with("tg=") => 3,
+                    // bare `tg` (a column name, a format string) — not a rendering
+                    _ => {
+                        from = start + 2;
+                        continue;
+                    }
+                };
+                let b = rest.as_bytes();
+                let mut j = label;
+                while j < b.len() && b[j] == b' ' {
+                    j += 1;
+                }
+                let mut k = j;
+                while k < b.len() && b[k] != b' ' && b[k] != b'`' {
+                    k += 1;
+                }
+                // A `{`/`$`/`(`/`[` opener is a format spec or a shell pattern, not a
+                // rendered cell, and it is not width that the contract cares about.
+                let value = &rest[j..k];
+                if value.starts_with(['{', '$', '(', '[', '*']) {
+                    from = start + label;
+                    continue;
+                }
+                let field = &rest[..k];
+                let cells = UnicodeWidthStr::width(field);
+                measured += 1;
+                if label == 4 {
+                    seen_bound = true;
+                } else {
+                    seen_plain = true;
+                }
+                if cells > CELL_TG {
+                    stale.push(format!(
+                        "line {}: `{field}` is {cells} cells, the `tg` field is {CELL_TG}. If \
+                         this is prose rather than a rendering, put a space or a backtick \
+                         between the label and the value so the scanner sees a cell, not a \
+                         glued word.",
+                        idx + 1
+                    ));
+                }
+                from = start + label;
+            }
+        }
+
+        assert!(
+            stale.is_empty(),
+            "README renders `tg` cells wider than the field the formatter has (a retired \
+             width the docs still teach):\n{}",
+            stale.join("\n")
+        );
+        // Vacuity guards. `stale.is_empty()` is trivially satisfied by a README the scanner
+        // found nothing in, and by a rewrite whose renderings all begin with a skipped
+        // opener -- so the scan itself is asserted. The lower bound is DERIVED from the
+        // fixture list the docs pin already forces into the example block (one `tg` field
+        // per pinned line), so it moves with the docs instead of rotting as a magic number,
+        // which is the same trick as the pin's line-count bijection.
+        let floor = readme_examples().len();
+        assert!(
+            measured >= floor,
+            "the scanner measured {measured} `tg` renderings in README, fewer than the \
+             {floor} lines the pinned example block must carry -- either the docs stopped \
+             teaching renderings or the scanner stopped finding them, and this test is now \
+             protecting nothing"
+        );
+        assert!(
+            seen_plain && seen_bound,
+            "the scanner saw only one tag class (`tg=`: {seen_plain}, `tg>=`: {seen_bound}); \
+             a docs rewrite that dropped a tier would halve this test's coverage in silence"
+        );
+        // The retired 12-cell `pp` form, banned by EXACT match rather than by a width bound:
+        // `pp` cannot be width-bounded (`pp=1000.000k` is 12 cells and README teaches it as
+        // the widening tell), but its pre-trim padding `pp=  14.765k` -- two spaces, 12
+        // cells -- was legal under the old 12-cell field and is not a rendering any current
+        // tier produces.
+        assert!(
+            !readme.contains("pp=  14.765k"),
+            "README still shows the retired 12-cell `pp` padding (`pp=  14.765k`); the field \
+             has been `{{:>7.3}}k` since 2026-11-21, which renders `pp= 14.765k`"
+        );
+    }
+
+    /// Each tier's rate group must also appear in README **outside** the example block.
+    ///
+    /// The width bound above only says the hand-typed tier table is not too WIDE: `tg= 146.3`
+    /// (9 cells, wrong padding, wrong grep) passes it, and the docs pin reaches only the
+    /// fenced block. The three tier-table cells and the tier-3 paragraph are the remaining
+    /// hand-typed renderings, so they are pinned verbatim here.
+    ///
+    /// Scoped deliberately to the README MINUS the located block: the block already contains
+    /// all three group strings, so a file-wide `contains` would pass with the tier table
+    /// deleted. Same reasoning as the pin's refusal to `contains` over the whole file.
+    #[test]
+    fn readme_teaches_each_tiers_rendering_outside_the_example_block() {
+        let readme = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/README.md"))
+            .expect("README.md must sit beside Cargo.toml for the docs pin");
+        let block = readme
+            .split("```")
+            .find(|b| b.contains("model=cosmo-6000"))
+            .expect("README must carry the fenced compact example block");
+        let prose = readme.replace(block, "");
+
+        // One group string per tier, taken from the fixtures the docs pin already uses.
+        let mut wanted: Vec<(u8, String)> = Vec::new();
+        for (label, m) in readme_examples() {
+            let tier = tps_tier(&m);
+            if !wanted.iter().any(|(t, _)| *t == tier) {
+                wanted.push((tier, rate_group(&m)));
+            }
+            let _ = label;
+        }
+        assert_eq!(
+            wanted.len(),
+            3,
+            "the docs fixtures must cover all three rate tiers, found {:?}",
+            wanted.iter().map(|(t, _)| *t).collect::<Vec<_>>()
+        );
+        for (tier, group) in wanted {
+            assert!(
+                prose.contains(&group),
+                "tier {tier} renders {group:?} and README no longer shows that rendering \
+                 anywhere outside the example block -- the tier table and the tier-3 \
+                 paragraph are where an operator copies a grep from"
+            );
+        }
+    }
+
+    /// README's `tail` row is the one offset in the table that is not a cell of `HEAD`, and
+    /// it has been WRONG TWICE: it read `130-` through two shapes whose tail's first key
+    /// measured 131, because the row was accepted on "the slice comes back with the payload"
+    /// rather than "the key's first glyph is here" (cell 130 was the join space). The trim to
+    /// a 128-cell head moved the tail to 130, where the docs had always claimed it, so the
+    /// number is unchanged and only now true -- which is exactly why it needs a test rather
+    /// than a measurement someone re-derives wrongly a third time.
+    ///
+    /// The rule, in 1-based cells: `HEAD_CELLS + 2` (head's last cell, join space, first tail
+    /// key). Both halves are asserted on one real rendered line.
+    #[test]
+    fn the_tail_begins_one_space_past_the_head() {
+        let mut m = fixture("qwen3", "stop");
+        // One tail key only, so "first tail key" is unambiguous and the head keeps its pad.
+        m.group_name = None;
+        m.queue_ms = None;
+        m.cached_tokens = None;
+        m.total_tps = 0.0;
+        m.concurrent_requests = Some(3);
+
+        let line = format_compact(&m);
+        let at = UnicodeWidthStr::width(&line[..line.find("concurrent=").expect("fixture must render a tail key")]);
+        assert_eq!(
+            at + 1,
+            HEAD_CELLS + 2,
+            "the first tail key starts at cell {}, and README's `tail` row must say \
+             {}- (the head's last cell, then the join space)",
+            at + 1,
+            HEAD_CELLS + 2
+        );
+        // The head itself, joined-space excluded, is exactly HEAD_CELLS wide: the two
+        // README rows (`whole head 1-{}`, `{}`-) are one fact, not two typed numbers.
+        assert_eq!(
+            UnicodeWidthStr::width(&line[..at - 1]),
+            HEAD_CELLS,
+            "the head is not {HEAD_CELLS} cells on a tailed line, so every offset right of \
+             the change point is wrong in README: {line}"
+        );
     }
 }
