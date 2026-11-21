@@ -428,13 +428,14 @@ PREFLIGHT_ONLY=1 ./build 2>&1 | tail -1    # → preflight ok
 ```
 
 **4. `./run`, `./run-hy4` and `./run-ink` dry runs** (Plan 01 T3; `./run-hy4` from Plan 11 T1,
-2026-11-20; `./run-ink` from Plan 14 T1, 2026-11-21). The default packs of `./run` and `./run-hy4`
+2026-11-20; `./run-ink` from Plan 14 T1, 2026-11-21). All three default packs
 must be readable (`/mnt/noir` mounted): each launcher reads its pack's header and
-architecture. `./run-ink` is checked on two packs this step writes and removes — a whole `inkling2`
-one, and one whose header claims more bytes than the file holds, which no real file can stand in for
-(they hold only what a launcher reads: the magic, the section count, the file length, one table
-entry and a `meta` section; the engine would not load them, and step 5b is where a real pack meets
-the model's own parser). `DRY_RUN=1` runs every check the launcher makes and prints the
+architecture. `./run-ink` is also checked on two packs this step writes and removes — a whole
+`inkling2` one, and one whose header claims more bytes than the file holds, which no real file can
+stand in for (they hold only what a launcher reads: the magic, the section count, the file length,
+one table entry and a `meta` section; the engine would not load them, and step 5b is where the real
+pack meets the model's own parser). The real Inkling pack joined at Plan 14 T3, once it had been
+downloaded. `DRY_RUN=1` runs every check the launcher makes and prints the
 docker command; it starts nothing and creates nothing (a busy `:8700` is reported, not refused —
 vLLM is the daily driver). The image is the newest one built for `BASALT_SHA`; before one exists
 the step uses the stub `stub:none` and prints `image: stub:none` — say so in the tracker when it
@@ -502,9 +503,15 @@ MAX_CONTEXT=1048577 DRY_RUN=1 ./run-ink "$ikd/Fake-Inkling.basalt" >/dev/null 2>
 k=$(API_KEY=k3y DRY_RUN=1 ./run-ink "$ikd/Fake-Inkling.basalt" 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(dry:ink-api-key) printed'
 o=$(BUFFERED_IO=0 DRY_RUN=1 ./run-ink "$ikd/Fake-Inkling.basalt" 2>&1)
 [[ $o == *'-e BASALT_BUFFERED_IO=0'* && $o == *'io=direct'* ]] || echo 'FAIL(dry:buffered-io) ./run-ink ignores BUFFERED_IO=0'
+ir=$(DRY_RUN=1 ./run-ink 2>&1)          # its default: the real pack
+need ink-default "$ir" '--max-context 362144' '--kv fp16' '--parallel 1' '--vision dynamic' \
+     'serve /models/Inkling-2-Mini-NVFP4-q8.basalt' '(DRY_RUN) nothing started'
+ink=$(sed -n 's/^== pack:  \(.*\) ([0-9]* bytes, .*/\1/p' <<<"$ir")
 for l in './run' './run-hy4'; do        # and the other two send an Inkling pack to ./run-ink
-  x=$(DRY_RUN=1 "$l" "$ikd/Fake-Inkling.basalt" 2>&1) && echo "FAIL(dry:ink-pointer) $l took an Inkling pack"
-  [[ $x == *'./run-ink instead'* ]] || echo "FAIL(dry:ink-pointer) $l does not name ./run-ink"
+  for p in "$ikd/Fake-Inkling.basalt" "${ink:-/nonexistent/no-default-inkling-pack}"; do
+    x=$(DRY_RUN=1 "$l" "$p" 2>&1) && echo "FAIL(dry:ink-pointer) $l took an Inkling pack"
+    [[ $x == *'./run-ink instead'* ]] || echo "FAIL(dry:ink-pointer) $l does not name ./run-ink for $p"
+  done
 done
 rm -rf "$ikd"
 # ./preload: the dd it would run takes its range from the pack's own table, and reads nothing dry
@@ -522,7 +529,7 @@ echo "dry-run ok (image: $IMAGE_OVERRIDE)"; unset IMAGE_OVERRIDE
 ```
 
 **5. Flags vs the built image** (Plan 01 T5). Every `--flag` the dry runs (`./run`, `./run --single`,
-`./run-hy4`) pass to `serve` must
+`./run-hy4`, `./run-ink`) pass to `serve` must
 be one the built image accepts, decided by the image's own server code — the check Basalt makes at
 startup: a server option from `serve.config.build_parser()`, or an engine flag found in
 `bin/basalt` by `serve.config.engine_flags_of` (the server stops at start on any other name). No
@@ -532,7 +539,7 @@ Negative control (run it when this step changes): `EXTRA_ARGS=--no-such-flag` �
 ```bash
 img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin')
 if [[ -z $img ]]; then echo 'FAIL(flags) no image for BASALT_SHA — run ./build'; else
-mapfile -t flags < <({ DRY_RUN=1 ./run; DRY_RUN=1 ./run --single; DRY_RUN=1 ./run-hy4; } 2>/dev/null \
+mapfile -t flags < <({ DRY_RUN=1 ./run; DRY_RUN=1 ./run --single; DRY_RUN=1 ./run-hy4; DRY_RUN=1 ./run-ink; } 2>/dev/null \
   | grep -o ' serve /models/.*' | tr ' ' '\n' | grep -E '^--[a-z]' | sort -u)
 docker run --rm --network none -w /opt/basalt --entrypoint /opt/basalt/.venv/bin/python "$img" -c '
 import sys
@@ -553,15 +560,17 @@ Bug/Issue*). This step runs the check the server itself makes before it loads an
 run's words go through `serve.config.parse_settings` and `serve.engine.vision.model_plan`
 (`basalt --model <pack> <engine words> --gpu-plan`), which parses them by the rules of the model **in
 that pack** and loads nothing. `--network none`; the pack's directory is mounted read-only; no
-`--gpus` flag is passed. Pass: one `pack flags ok (…)` line per launcher mode — three — and no `FAIL`.
+`--gpus` flag is passed. Pass: one `pack flags ok (…)` line per launcher mode — four, `./run-ink`
+from Plan 14 T3 — and no `FAIL`.
 No image for `BASALT_SHA` is **fail**. Negative controls (run them when this step or a launcher's
 flags change): `EXTRA_ARGS='--ple-io ram'` → `FAIL(pack-flags) ./run-hy4: unknown argument: --ple-io`
-while both `./run` lines stay ok; `EXTRA_ARGS='--kv int8'` → `FAIL(pack-flags) ./run-hy4: --kv int8: …`.
+(and the same line for `./run-ink`) while both `./run` lines stay ok; `EXTRA_ARGS='--kv int8'` → `FAIL(pack-flags) ./run-hy4: --kv int8: …`
+and `FAIL(pack-flags) ./run-ink: --kv int8: …`.
 
 ```bash
 img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin')
 if [[ -z $img ]]; then echo 'FAIL(pack-flags) no image for BASALT_SHA — run ./build'; else
-for l in './run' './run --single' './run-hy4'; do
+for l in './run' './run --single' './run-hy4' './run-ink'; do
   read -r -a cmd <<<"$l"
   out=$(DRY_RUN=1 "${cmd[@]}" 2>/dev/null)
   pack=$(sed -n 's/^== pack:  \(.*\) ([0-9]* bytes, .*/\1/p' <<<"$out")

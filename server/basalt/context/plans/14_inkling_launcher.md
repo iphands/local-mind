@@ -238,8 +238,9 @@ rates T4 saw), the pack's header length field and what a download in progress lo
 
 ## Open Questions / Risks
 
-1. **Risk: the launcher is written before its pack can be read.** Every engine-side fact is from the
-   pinned source and the card. *Mitigation*: T1 checks flag names against the built binary; T3 runs
+1. ~~**Risk: the launcher is written before its pack can be read.**~~ RESOLVED (T3) for the pack and the
+   flags: the hash matches and the model's parser takes the launcher's words (tracker Evidence rows
+   7–8); the boot is still T4. Every engine-side fact was from the pinned source and the card. *Mitigation*: T1 checks flag names against the built binary; T3 runs
    the model's own parser on the real pack (gate 5b); T4 boots. T1 is `done` as a launcher that
    dry-runs, not as one that has served.
 2. **Risk: gate step 4's synthetic pack drifts from the real format.** It has only what the launcher
@@ -265,7 +266,7 @@ rates T4 saw), the pack's header length field and what a download in progress lo
 
 - [x] T1 *(2026-11-21, tracker Evidence rows 2–4)*: `DRY_RUN=1 ./run-ink` on a complete synthetic `inkling2` pack prints Inkling's flags and none of Flash-Next's; on a cut-short one it exits 1 with "incomplete"; gate step 4 asserts both
 - [x] T2 *(2026-11-21, tracker Evidence row 5)*: `./run` and `./run-hy4` refuse an `inkling2` pack and name `./run-ink`; their own `serve` words are unchanged
-- [ ] T3: the pack's sha256 is the card's; gate step 5b prints a `pack flags ok (./run-ink: inkling2 …)` line
+- [x] T3 *(2026-11-21, tracker Evidence rows 7–8)*: the pack's sha256 is the card's; gate step 5b prints a `pack flags ok (./run-ink: inkling2 …)` line
 - [ ] T4: the boot log names the `ff0b978` image and the pack; a real reply is quoted in the tracker
 - [ ] T5: each harvested fact is in the file the tracker names, re-read after writing
 - [ ] All: the project gate (Rule A) passes on the final commit

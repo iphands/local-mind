@@ -16,7 +16,8 @@ loaded in 149.7 s, 3 slots × 362144, a 108,314-token prompt read in 9.4 s, requ
 `./run --single` and `./run-hy4` have not been booted on it. The v0.5.0 image (`cu1343-sm120-ad274aa`, Plan 10, rebuilt with the patch) is
 kept as the rollback: `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-ad274aa ./run`. The
 image holds five models and this project has launchers for three; **Inkling 2 Mini** (`./run-ink`,
-Plan 14, new in v0.5.5) has a launcher that passes its dry runs and has not been booted. The last boots
+Plan 14, new in v0.5.5) has a launcher that passes its dry runs, and the engine's parser takes its
+flags for the downloaded pack (sha256 as on the model card); it has not been booted. The last boots
 recorded in both modes are the v0.2.1-era image's (`cu1343-sm120-dc047a7`, Plan 01, 2026-11-04, local pack):
 `./run` loaded in ~40 s, `./run --single` in ~34 s, a 63.29 GiB expert cache in VRAM; clients reach it
 as `cosmo-6000` on `cosmo.lan:8700`. The defaults are the owner's choices, not measured winners —
