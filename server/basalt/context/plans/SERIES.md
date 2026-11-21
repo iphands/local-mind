@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `10`.** <!-- hp:next-free -->
+**Next free plan number: `11`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-11-04):** serve Qwen3.8-Flash-Next through
 > [Basalt](https://github.com/jesdga95/basalt), source-built from a pinned commit in our own
@@ -50,11 +50,12 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 07 | Boot from the defragmented NFS copy | 01 | pending | noir's pack now has 927 extents: does a boot from `/mnt/noir` load fast enough to retire `models.local/`? |
 | 08 | Repin Basalt to v0.4.1 and rebuild the image | 01 | in-progress | `dc047a7` → `d3b7574` (v0.4.1 tag commit, 698 commits on). Owner builds and boots; T4 abandons Plans 02/03 and registers the re-audit. |
 | 09 | Basalt vendor audit of the v0.4.1 pin `d3b7574`: static reading + runtime observation | 08 | pending | Row only, no plan file yet. Re-targets Plans 02 + 03; reuses `context/audit/scripts/` and the canary method; starts with tag signature + tree identity. |
+| 10 | Repin Basalt to v0.5.0 and rebuild the image | 01 | pending | `d3b7574` → `ad274aa` (v0.5.0 tag commit, 206 commits on). Owner builds and boots. Plan 08's open rows and Plan 09's target left for later (owner, 2026-11-20). |
 
 ## Dependency Chain <!-- hp:chain -->
 
 ```text
-completed/01_flashnext_container ──(recipe, ./build, ./run; feeds 05, 06, 07)── 08_basalt_repin_v041
+completed/01_flashnext_container ──(recipe, ./build, ./run; feeds 05, 06, 07)── 08_basalt_repin_v041 ──(the pin at T2)── 10_basalt_repin_v050
                                                                                       │
                                                                   09 (audit of d3b7574, row only)
                                                                                       │
@@ -82,6 +83,11 @@ inherits their method. *(The 2026-11-05 chain, with 03 gating 02's verdict, is i
   since released 0.3.0–0.4.1 (multi-model engine, new RAM plan, a dense 27B). A pin change is a plan by
   `RULES.md`'s first table: flags can vanish without shims, so the bump is proven by gate steps 5–6 on the
   new image and by an owner boot, not by the build finishing.
+- **10 — Repin to v0.5.0** (owner request, 2026-11-20). Upstream released 0.5.0 on 2026-11-19: a fourth
+  model (Hy4-flash) and shared-engine cache work; its notes say no flag or config key was removed or
+  renamed. Still a plan by `RULES.md`'s first table, proven the same way as Plan 08: gate steps 5–6 on
+  the new image and an owner boot. Plan 08 is still open beneath it and Plan 09's row still names
+  `d3b7574` — the owner's call to settle both later (Plan 10 tracker, Follow-ups).
 - **09 — Audit of the v0.4.1 pin** (registered 2026-11-16 at Plan 08 T4, owner decision). The built
   engine is now unaudited: Plan 02 read none of `d3b7574`. What carries over is method, not results — the
   manifest-then-census shape, the planted canaries, `context/audit/scripts/` (which hard-code the old pin
