@@ -2,6 +2,7 @@
 
 > **Status**: in-progress
 > **Created**: 2026-11-20
+> **Revised**: 2026-11-20 — T5 added at the owner's request after T3's stall: `./preload`, which reads a pack's `engram` section so the NFS server caches it. Scope gains `preload` (new).
 > **Depends on**: Plan 10 T1 (the v0.5.0 image, `cu1343-sm120-ad274aa`: the first pin that builds `hy4flash`); Plan 01 (`./run`, `lib/common.sh`, gate steps 4–6)
 > **Goal**: `./run-hy4` serves a Hy4-flash `.basalt` pack on `:8700` with flags that model accepts, `./run` and `./run-hy4` each refuse the other's pack by name, the gate checks a launcher's flags against the pack's own adapter, and one owner boot with a real reply is recorded.
 > **Agent**: implementation agent
@@ -250,6 +251,34 @@ Re-read each file after writing. Then `git mv` this plan and its tracker to `com
 
 **Commit**: `[basalt][P11][close] Hy4-flash launcher: <outcome>`
 
+### T5: `./preload` — have the NFS server cache the Engram section
+
+*(Added 2026-11-20; numbered after T4 because tasks are never renumbered. It runs before T4.)*
+
+**File**: `preload` (new), `lib/common.sh` (`pack_sections`; `pack_arch` now reads through it), `run-hy4` (its note), `context/plans/RULES.md` (Expected counts, steps 1b, 4), `README.md`
+
+**What to do**: the owner asked for a script so the `dd` range need not be guessed. `./preload [PACK]
+[SECTION…]` finds the section (default `engram`) in the pack's own table and reads it with
+`dd iflag=direct,skip_bytes,count_bytes`; then, and alone with `--check`, it times `SAMPLES` random
+4 KiB direct reads and says whether the server holds the section (exit 1 when cold). `--list` prints
+the table; `DRY_RUN=1` prints the `dd` and reads nothing; a pack that is not on NFS is told there is
+nothing to warm.
+
+**Verify**:
+```bash
+shellcheck -x preload lib/common.sh            # → no output
+DRY_RUN=1 ./preload                            # → the dd line with the engram row's offset and size; nothing read
+./preload dfly                                 # → a real read of a 1.6 GiB section, then "in the server's RAM"
+./preload --check; echo $?                     # → before any preload of engram: COLD, 1
+# + the full project gate 1–6 with 5b
+```
+
+**Expected observation**: the check must separate the two states measured in T3 (0.05 ms cached,
+12.4 ms cold, plus about 1 ms of process start per read). **Refutes if** a cached section and the
+cold `engram` section land on the same side of the 4 ms line.
+
+**Commit**: `[basalt][P11][T5][preload] add ./preload to warm a pack's Engram section on the NFS server`
+
 ---
 
 ## Critical Files
@@ -260,6 +289,7 @@ Re-read each file after writing. Then `git mv` this plan and its tracker to `com
 | `lib/common.sh` | `pack_arch` | P0 |
 | `context/plans/RULES.md` | Expected counts, gate steps 1b, 4, 5, new 5b | P0 |
 | `run` | one refusal after the magic check | P1 |
+| `preload` | new (T5) | P1 |
 | `README.md`, `AGENTS.md` | the second launcher | P1 |
 | `context/plans/SERIES.md` | bookkeeping | P1 |
 | `context/distilled.md`, `context/pitfalls.md`, `context/high_level.md` | harvest | P1 |
@@ -301,6 +331,7 @@ Re-read each file after writing. Then `git mv` this plan and its tracker to `com
 
 - [x] T1 *(2026-11-20, tracker Evidence rows 4–6)*: `DRY_RUN=1 ./run-hy4` prints a `serve` line with `--kv fp16`, `--parallel 1` and no `--ple-io`; gate step 5b prints `pack flags ok` three times and both negative controls print `FAIL(pack-flags)`
 - [x] T2 *(2026-11-20, tracker Evidence row 7)*: `DRY_RUN=1 ./run <the Hy4 pack>` exits 1 naming `./run-hy4`; the default and `--single` dry runs are byte-identical before and after
+- [x] T5 *(2026-11-20, tracker Evidence row 11)*: `./preload dfly` reads the section and reports it cached; `./preload --check` on the never-read `engram` section reports COLD and exits 1
 - [ ] T3: the boot log names the `ad274aa` image and the Hy4 pack; a real reply is quoted in the tracker
 - [ ] T4: each harvested fact is in the file the tracker names, re-read after writing
 - [ ] All: the project gate (Rule A) passes on the final commit

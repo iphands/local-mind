@@ -1,5 +1,5 @@
 # shellcheck shell=bash
-# Shared guards and helpers for ./build, ./run and ./run-hy4 (sourced, not executed).
+# Shared guards and helpers for ./build, ./run, ./run-hy4 and ./preload (sourced, not executed).
 #
 # Sourcing it RUNS the guards: a DOCKER that is an array, empty, or names sudo; a root launcher; a
 # docker socket that does not answer. Each one exits 1 at source time, before the caller's first
@@ -143,30 +143,40 @@ refuse_busy() {
   return 0
 }
 
-# Print a pack's architecture id — "general.architecture" in its meta section: qwen4exp (Flash-Next),
-# hy4flash, … — or nothing when it cannot be read. It never fails its caller.
+# Print a pack's section table, one "name<TAB>offset<TAB>size" line per section (bytes), or nothing
+# when the header cannot be read. It never fails its caller, and does not check the magic.
 # Layout (vendor/basalt/tools/model_file.py): a 64-byte header with the section count at byte 12, then
 # 128-byte entries: a 64-byte NUL-padded name, a u64 offset, a u64 size. Every reader below reads to
 # the end of its input: under pipefail, a writer killed by SIGPIPE would fail the pipeline.
-pack_arch() {
-  local p=${1:?pack_arch needs a path} n i at name off size hit
-  local re='"general\.architecture": *"([^"]*)"'
+pack_sections() {
+  local p=${1:?pack_sections needs a path} n i at name off size
   n=$(od -An -tu4 -j12 -N4 -- "$p" 2>/dev/null | tr -d ' \n') || true
   [[ $n =~ ^[0-9]+$ ]] || return 0
   (( n <= 511 )) || return 0                       # (64 KiB - 64) / 128 entries at most
   for (( i = 0; i < n; i++ )); do
     at=$(( 64 + 128 * i ))
     name=$(dd if="$p" bs=64 skip=$(( at / 64 )) count=1 2>/dev/null | tr -d '\0') || true
-    [[ $name == meta ]] || continue
     off=$(od -An -tu8 -j$(( at + 64 )) -N8 -- "$p" 2>/dev/null | tr -d ' \n') || true
     size=$(od -An -tu8 -j$(( at + 72 )) -N8 -- "$p" 2>/dev/null | tr -d ' \n') || true
-    [[ $off =~ ^[0-9]+$ && $size =~ ^[0-9]+$ ]] || return 0
+    [[ -n $name && $off =~ ^[0-9]+$ && $size =~ ^[0-9]+$ ]] || return 0
+    printf '%s\t%s\t%s\n' "$name" "$off" "$size"
+  done
+  return 0
+}
+
+# Print a pack's architecture id — "general.architecture" in its meta section: qwen4exp (Flash-Next),
+# hy4flash, … — or nothing when it cannot be read. It never fails its caller.
+pack_arch() {
+  local p=${1:?pack_arch needs a path} name off size hit
+  local re='"general\.architecture": *"([^"]*)"'
+  while IFS=$'\t' read -r name off size; do
+    [[ $name == meta ]] || continue
     (( size <= 268435456 )) || return 0            # meta is a few MiB of JSON; a wild size is a damaged table
     hit=$(dd if="$p" bs=1M iflag=skip_bytes,count_bytes skip="$off" count="$size" 2>/dev/null \
             | LC_ALL=C grep -a -o '"general\.architecture": *"[^"]*"') || true
     if [[ $hit =~ $re ]]; then printf '%s\n' "${BASH_REMATCH[1]}"; fi
     return 0
-  done
+  done < <(pack_sections "$p")
   return 0
 }
 

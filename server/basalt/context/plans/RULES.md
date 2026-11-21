@@ -241,9 +241,9 @@ if the line is ever used as a *threshold*, it needs a guard first. **A paste wit
 not a step failure**: it is an incomplete evidence file, and the remedy is to re-paste, not to mark the gate
 red. Do not infer redness from the absence of a `FAIL` that was never written.
 **Expected counts — two sets, split on 2026-11-05 at Plan 02 T3** (decision recorded below):
-**`5 b` product** (`lib/common.sh` from Plan 01 T1, `build` T2, `run` T3, `publish` — added
-2026-11-05 outside a plan, the owner's image publisher — and `run-hy4`, Plan 11 T1, 2026-11-20, which
-moved the count from `4 b`; no `.py`, no `.json`) and
+**`6 b` product** (`lib/common.sh` from Plan 01 T1, `build` T2, `run` T3, `publish` — added
+2026-11-05 outside a plan, the owner's image publisher — and, from Plan 11 on 2026-11-20, `run-hy4`
+(T1, `4 b` → `5 b`) and `preload` (T5, → `6 b`); no `.py`, no `.json`) and
 **`5 b` audit helpers** (`context/audit/scripts/ledger-grid.sh`, `t2-census.sh`,
 `t3-model-file-poc.sh`, `t3-census.sh`, `t3-inputs.sh`). Bump these when a file is added or removed on
 purpose — a count that silently drops is the failure this step exists for. *(Moved `3 b` → `5 b` on
@@ -336,7 +336,7 @@ echo "PRODUCT_B=$PRODUCT_B AUDIT_B=$AUDIT_B TOTAL_B=$((PRODUCT_B+AUDIT_B))"
 # context/audit/ the paths are `scripts/t2-census.sh`, from the project root `context/audit/scripts/…`.
 # No count can detect that; only naming the files can. This is a locally-owned sentinel — do not DRY
 # it into a pointer at the expected-count line, because a sentinel replaced by a citation cannot fail.
-for f in run run-hy4 build lib/common.sh; do
+for f in run run-hy4 preload build lib/common.sh; do
   awk -F'\t' -v w="$f" '$2==w{g=1} END{exit !g}' "$TSV" || echo "FAIL(1b) missing product bash: $f"
 done
 # enumeration: the printed sets are the sets the two numbers count, per Rule A.4 "look at it"
@@ -371,7 +371,7 @@ linted *before* `git add` — see the decision note above. (An earlier draft of 
 sentence contradicted the decision note two pages back. Corrected 2026-11-05.)
 
 ```bash
-# 2 — product bash set: run, run-hy4, build, publish, lib/common.sh (audit generators go to 2b)
+# 2 — product bash set: run, run-hy4, preload, build, publish, lib/common.sh (audit generators go to 2b)
 git ls-files -z . | while IFS= read -r -d '' f; do
   case "$f" in context/audit/scripts/*) continue ;; esac
   case "$(head -n1 "$f" 2>/dev/null)" in
@@ -466,6 +466,11 @@ k=$(API_KEY=k3y DRY_RUN=1 ./run-hy4 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(dry:h
 h4=$(sed -n 's/^== pack:  \(.*\) ([0-9]* bytes, .*/\1/p' <<<"$hy")     # and the other way round
 y=$(DRY_RUN=1 ./run "$h4" 2>&1) && echo 'FAIL(dry:run-arch) took a Hy4-flash pack'
 [[ $y == *'./run-hy4 instead'* ]] || echo 'FAIL(dry:run-arch) no ./run-hy4 pointer'
+# ./preload: the dd it would run takes its range from the pack's own table, and reads nothing dry
+pl=$(DRY_RUN=1 ./preload 2>&1)
+row=$(./preload --list 2>/dev/null | awk '$1 == "engram" { print "skip=" $2 " count=" $3 }')
+need preload "$pl" 'iflag=direct,skip_bytes,count_bytes' "${row:-NO-ENGRAM-ROW}" '(DRY_RUN) nothing read'
+DRY_RUN=1 ./preload no-such-section >/dev/null 2>&1 && echo 'FAIL(dry:preload) took an unknown section'
 echo "dry-run ok (image: $IMAGE_OVERRIDE)"; unset IMAGE_OVERRIDE
 ```
 

@@ -40,8 +40,8 @@ a local copy of the pack (below); no boot from one is recorded yet.
   prompts read at 53 tok/s (a 456-token prompt took 8.6 s, 8.3 s of it Engram reads), and a
   14,150-token prompt made no progress for 60 s, so the engine's watchdog stopped it. The link is
   not the limit (the same reads run at 164k IOPS once noir has the pages in RAM, about 1k when it
-  does not): **serve Hy4-flash from local NVMe**, or read the pack's `engram` section once so noir
-  caches it (`context/plans/11_hy4flash_launcher_tracker.md`, Notes).
+  does not): **serve Hy4-flash from local NVMe**, or run `./preload` first (below), which reads the
+  pack's `engram` section once so noir caches it.
 - Nothing else on `:8700`: stop `vllm` (`../vllmcustom`), `../ninfer` or `../ignis` first.
 
 ## Pins
@@ -133,6 +133,18 @@ because Hy4-flash takes none of Flash-Next's. `PORT`, `ALIAS`, `ALLOWED_HOSTS`, 
 | `PARALLEL` | `1` | `--parallel` (1..8); upstream lists no parallel slots for Hy4-flash, so above 1 is unproven |
 | `SLOT_FULL_CONTEXT` | `1` (only when `PARALLEL` > 1) | `--slot-full-context` |
 | `VISION` | `dynamic` | `--vision` (`off`, `dynamic` — the only image mode; no video) |
+
+```bash
+./preload                  # read the pack's engram section (59 GiB) from NFS so the server caches it, then check
+./preload --check          # only sample it: still in the server's RAM? (exit 1 when cold)
+./preload --list           # the pack's sections: name, offset, bytes
+DRY_RUN=1 ./preload        # print the dd command, read nothing
+```
+
+`./preload` is for a pack served from NFS. It takes the section's offset and size from the pack's own
+table and reads it with `O_DIRECT`, so noir's page cache fills and this machine's does not. The effect
+lasts until noir evicts those pages or reboots; `--check` times 200 random 4 KiB reads (about 0.5 ms
+each when cached, 14 ms when noir has to seek). A local pack needs none of this.
 
 There is no `PLE_IO`: `--ple-io` is Flash-Next's flag and Hy4-flash refuses it. These defaults are
 starting values (`./run`'s context, upstream's KV default), not measured and not yet the owner's

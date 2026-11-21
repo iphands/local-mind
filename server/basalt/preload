@@ -1,0 +1,124 @@
+#!/usr/bin/env bash
+# Read a pack's Engram table once, so the NFS server holds it in RAM: ./preload [--check|--list] [PACK.basalt] [SECTION…]
+#
+#   ./preload               read the Hy4-flash pack's engram section (59 GiB) from NFS, then check it
+#   ./preload --check       only sample it: is it still in the server's RAM?
+#   ./preload --list        print the pack's sections (name, offset, bytes)
+#   DRY_RUN=1 ./preload     print the dd command; read nothing
+#
+# Why: Hy4-flash looks up 64 rows of its Engram table for every prompt token, each a 4 KiB O_DIRECT
+# read from the pack. O_DIRECT skips this machine's page cache, and loading the model never touches
+# that section, so from NFS every lookup is a seek on the server's disks (about 1k reads/s, 12 ms
+# each) until the server has the section in its own RAM (164k reads/s, 0.05 ms; Plan 11, 2026-11-20).
+# This reads the section through the mount with O_DIRECT: the server caches it, this machine does
+# not. It lasts until the server evicts those pages or reboots — hence --check. The offsets come
+# from the pack's own section table.
+#
+# Knobs (env)   default
+#   PACK / *.basalt argument   /mnt/noir/…/vllm/jesdga/Hy4-flash-NVFP4.basalt
+#   sections (other arguments) engram
+#   BS          16M     dd block size for the read
+#   SAMPLES     200     random 4 KiB reads per section for the check
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+# shellcheck source-path=SCRIPTDIR source=lib/common.sh
+source "$HERE/lib/common.sh"
+
+usage() { sed -n '2,/^set -euo/{/^set -euo/d;s/^# \{0,1\}//;p}' "${BASH_SOURCE[0]}"; exit 0; }
+
+mode='read'
+pack_arg=
+want=()
+for a in "$@"; do
+  case $a in
+    --check) mode=check ;;
+    --list) mode=list ;;
+    -h|--help) usage ;;
+    -*) die "unknown option '$a' (./preload --help)." ;;
+    *.basalt) [[ -z $pack_arg ]] || die "one pack only, got '$pack_arg' and '$a'."
+              pack_arg=$a ;;
+    *) want+=("$a") ;;
+  esac
+done
+(( ${#want[@]} )) || want=(engram)
+
+DRY_RUN=${DRY_RUN:-0}
+PACK=${pack_arg:-${PACK:-/mnt/noir/scratch/ai/llm/models/vllm/jesdga/Hy4-flash-NVFP4.basalt}}
+BS=${BS:-16M}
+SAMPLES=${SAMPLES:-200}
+[[ $SAMPLES =~ ^[1-9][0-9]*$ ]] || die "SAMPLES must be a positive integer, got '$SAMPLES'."
+
+[[ -f $PACK && -r $PACK ]] || die "pack not found or not readable: $PACK"
+magic=$(LC_ALL=C head -c 8 -- "$PACK" | tr -d '\0')
+[[ $magic == BASALTMF ]] || die "$PACK is not a .basalt pack (first bytes '$magic', want 'BASALTMF')."
+PACK=$(realpath -e -- "$PACK")
+mapfile -t table < <(pack_sections "$PACK")
+(( ${#table[@]} )) || die "$PACK: its section table could not be read."
+
+if [[ $mode == list ]]; then
+  printf '%-32s %15s %15s\n' section offset bytes
+  for row in "${table[@]}"; do
+    IFS=$'\t' read -r name off size <<<"$row"
+    printf '%-32s %15s %15s\n' "$name" "$off" "$size"
+  done
+  exit 0
+fi
+
+fs=$(stat -f -c '%T' -- "$PACK")
+if [[ $fs != nfs* ]]; then
+  echo "== $PACK is on $fs, not NFS: Basalt reads it with O_DIRECT straight from the disk, so there is no cache to warm."
+  exit 0
+fi
+
+# Mean time of SAMPLES random 4 KiB O_DIRECT reads in [off, off+size), in microseconds. Each read is
+# its own dd, about 1 ms of process start: a cached page lands near that, a seek well above it.
+sample_us() {
+  local off=$1 pages=$(( $2 / 4096 )) i pg t0 t1
+  t0=${EPOCHREALTIME/[.,]/}
+  for (( i = 0; i < SAMPLES; i++ )); do
+    pg=$(( ( (RANDOM << 30) | (RANDOM << 15) | RANDOM ) % pages ))
+    dd if="$PACK" of=/dev/null bs=4096 count=1 iflag=direct,skip_bytes skip=$(( off + pg * 4096 )) 2>/dev/null
+  done
+  t1=${EPOCHREALTIME/[.,]/}
+  echo $(( (t1 - t0) / SAMPLES ))
+  return 0
+}
+
+echo "== pack:  $PACK ($fs)"
+cold=0
+for w in "${want[@]}"; do
+  off='' size=''
+  for row in "${table[@]}"; do
+    IFS=$'\t' read -r name o s <<<"$row"
+    if [[ $name == "$w" ]]; then off=$o size=$s; fi
+  done
+  [[ -n $off ]] || die "$PACK has no section '$w' (./preload --list)."
+
+  if [[ $mode == read ]]; then
+    cmd=(dd "if=$PACK" of=/dev/null "bs=$BS" "iflag=direct,skip_bytes,count_bytes" "skip=$off" "count=$size" status=progress)
+    echo "== read:  $w, $size bytes ($(( size / 1073741824 )) GiB) at offset $off"
+    echo "${cmd[*]}"
+    if [[ $DRY_RUN == 1 ]]; then continue; fi
+    "${cmd[@]}"
+  fi
+  if [[ $DRY_RUN == 1 ]]; then continue; fi
+
+  if (( size < 4096 * 1024 )); then
+    echo "== check: $w is too small to sample"
+    continue
+  fi
+  us=$(sample_us "$off" "$size")
+  ms="$(( us / 1000 )).$(( us % 1000 / 100 ))"
+  if (( us < 4000 )); then
+    echo "== check: $w — $SAMPLES random 4 KiB reads, $ms ms each: in the server's RAM"
+  else
+    echo "== check: $w — $SAMPLES random 4 KiB reads, $ms ms each: COLD, the server is seeking (./preload reads it in)"
+    cold=1
+  fi
+done
+if [[ $DRY_RUN == 1 ]]; then
+  echo "== (DRY_RUN) nothing read"
+  exit 0
+fi
+exit "$cold"

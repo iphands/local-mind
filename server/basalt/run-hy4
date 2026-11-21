@@ -10,8 +10,8 @@
 #
 # Knobs (env)        default                                    Basalt setting
 #   PACK / $1        /mnt/noir/…/vllm/jesdga/Hy4-flash-NVFP4.basalt   serve <pack> (its dir mounted :ro at /models)
-#                    (the NFS copy, which boots but stalls on prompts past a few thousand tokens — see the
-#                    note this prints; a local one: PACK=models.local/<pack> ./run-hy4)
+#                    (the NFS copy, which boots but stalls on prompts past a few thousand tokens unless
+#                    ./preload ran first — see the note this prints; a local one: PACK=models.local/<pack> ./run-hy4)
 #   MAX_CONTEXT      362144                                     --max-context (1024..1048576)
 #   KV               fp16                                       --kv   (fp16 | fp8); fp8 rows are about 0.6× the size
 #   PARALLEL         1                                          --parallel (1..8); above 1 is unproven for this model
@@ -180,8 +180,9 @@ if [[ $pack_fs == nfs* ]]; then
   # the engine's watchdog stopped it. Hy4-flash has no RAM mode for the table: say so before a prompt does.
   echo "== note:  the pack is on $pack_fs. Hy4-flash reads its Engram table from the pack for every prompt"
   echo "==        token (64 random 4 KiB reads, no RAM mode): from NFS that was 53 tok/s here, and a"
-  echo "==        14150-token prompt hit the engine's 60 s watchdog (2026-11-20). Serve a local copy:"
-  echo "==        PACK=models.local/$pack_file ./run-hy4"
+  echo "==        14150-token prompt hit the engine's 60 s watchdog (2026-11-20). Either have the NFS"
+  echo "==        server hold the table in RAM first (./preload; ./preload --check tells if it still does),"
+  echo "==        or serve a local copy: PACK=models.local/$pack_file ./run-hy4"
 fi
 printf '%q ' "${shown[@]}"
 echo
