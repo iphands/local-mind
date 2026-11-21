@@ -92,11 +92,14 @@ esac
 [[ -r $PACK ]] || die "pack not readable: $PACK"
 magic=$(LC_ALL=C head -c 8 -- "$PACK" | tr -d '\0')
 [[ $magic == BASALTMF ]] || die "$PACK is not a .basalt pack (first bytes '$magic', want 'BASALTMF')."
-# Engine flags are per model, and the ones below are Flash-Next's. A Hy4-flash pack has its own
-# launcher; any other architecture (or an unreadable one) still goes to the engine to judge.
+# Engine flags are per model, and the ones below are Flash-Next's. A Hy4-flash or an Inkling 2 Mini
+# pack has its own launcher; any other architecture (or an unreadable one) still goes to the engine
+# to judge.
 case $(pack_arch "$PACK") in
   hy4flash|hy_v4_flash) die "$PACK is a Hy4-flash pack; it refuses the Flash-Next flags ./run passes (--ple-io, --kv int8)." \
                             "  serve it with ./run-hy4 instead." ;;
+  inkling2) die "$PACK is an Inkling 2 Mini pack; it refuses the Flash-Next flags ./run passes (--ple-io, --kv int8)." \
+                "  serve it with ./run-ink instead." ;;
 esac
 pack_real=$(realpath -e -- "$PACK")
 pack_dir=$(dirname -- "$pack_real")

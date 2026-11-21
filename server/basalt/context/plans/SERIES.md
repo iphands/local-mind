@@ -57,9 +57,10 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   image `cu1343-sm120-ff0b978` built with the buffered-io patch, gate 1–6 with 5b pass on it); **T2 is
   half recorded and blocked on the owner**: `./run` serves on the new image (engine 0.5.5, buffered reads,
   3 × 362144); still needed, `./run-hy4` on it with a reply. Then T3, harvest and close.
-- **Plan 14** — Inkling 2 Mini launcher `./run-ink`: in progress, 1/5 tasks done (T1: the launcher, the
-  completeness check, gate steps 1 and 4); next **T2** (`./run` and `./run-hy4` name `./run-ink`), then
-  **T3**, which waits on the owner's download of the pack, and **T4**, the owner's boot.
+- **Plan 14** — Inkling 2 Mini launcher `./run-ink`: in progress, 2/5 tasks done (T1: the launcher, the
+  completeness check, gate steps 1 and 4; T2: `./run` and `./run-hy4` name `./run-ink`); next **T3**, the
+  hash and gate steps 4, 5 and 5b on the real pack, which waits on the owner's download, then **T4**, the
+  owner's boot.
 
 ## Plans <!-- hp:plans -->
 

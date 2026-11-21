@@ -7,6 +7,7 @@
 # Hy4-flash is not Flash-Next, and ./run's flags do not fit it: it has no --ple-io (its 63 GB Engram
 # n-gram table is always read from the pack, 64 rows per prompt token, never held in RAM), its KV
 # formats are fp16 and fp8, and upstream lists no parallel slots for it. Flash-Next packs: ./run.
+# Inkling 2 Mini packs: ./run-ink.
 #
 # Knobs (env)        default                                    Basalt setting
 #   PACK / $1        /mnt/noir/…/vllm/jesdga/Hy4-flash-NVFP4.basalt   serve <pack> (its dir mounted :ro at /models)
@@ -102,6 +103,8 @@ case $arch in
   hy4flash|hy_v4_flash) ;;
   qwen4exp) die "$PACK is a Flash-Next pack (architecture qwen4exp)." \
                 "  serve it with ./run instead." ;;
+  inkling2) die "$PACK is an Inkling 2 Mini pack (architecture inkling2)." \
+                "  serve it with ./run-ink instead." ;;
   *) die "$PACK is not a Hy4-flash pack (architecture '${arch:-unreadable}', want hy4flash)." \
          "  ./run-hy4 passes Hy4-flash's flags only." ;;
 esac

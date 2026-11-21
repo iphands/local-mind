@@ -128,7 +128,7 @@ name the model `cosmo-6000`; any other name gets a 404. Stop the server with Ctr
 
 `./run` refuses to start while anything publishes `:8700` or a `vllm`, `ninfer`, `ignis` or
 `basalt` container runs, and refuses a pack that is not a `.basalt` file (a `.ninfer` path is named
-as NInfer's) or that is a Hy4-flash pack (it names `./run-hy4`). Requests from the host arrive through the docker bridge, so Basalt treats them as
+as NInfer's) or that is a Hy4-flash or an Inkling 2 Mini pack (it names `./run-hy4` or `./run-ink`). Requests from the host arrive through the docker bridge, so Basalt treats them as
 remote for images: `data:` URLs work; image URLs and paths need `--image-url-host` /
 `--image-dir` in `EXTRA_ARGS`.
 

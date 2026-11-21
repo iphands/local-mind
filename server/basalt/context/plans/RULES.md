@@ -502,6 +502,10 @@ MAX_CONTEXT=1048577 DRY_RUN=1 ./run-ink "$ikd/Fake-Inkling.basalt" >/dev/null 2>
 k=$(API_KEY=k3y DRY_RUN=1 ./run-ink "$ikd/Fake-Inkling.basalt" 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(dry:ink-api-key) printed'
 o=$(BUFFERED_IO=0 DRY_RUN=1 ./run-ink "$ikd/Fake-Inkling.basalt" 2>&1)
 [[ $o == *'-e BASALT_BUFFERED_IO=0'* && $o == *'io=direct'* ]] || echo 'FAIL(dry:buffered-io) ./run-ink ignores BUFFERED_IO=0'
+for l in './run' './run-hy4'; do        # and the other two send an Inkling pack to ./run-ink
+  x=$(DRY_RUN=1 "$l" "$ikd/Fake-Inkling.basalt" 2>&1) && echo "FAIL(dry:ink-pointer) $l took an Inkling pack"
+  [[ $x == *'./run-ink instead'* ]] || echo "FAIL(dry:ink-pointer) $l does not name ./run-ink"
+done
 rm -rf "$ikd"
 # ./preload: the dd it would run takes its range from the pack's own table, and reads nothing dry
 pl=$(DRY_RUN=1 ./preload 2>&1)
