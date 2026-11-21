@@ -1,11 +1,13 @@
 # basalt — Basalt in a container, on :8700
 
-[Basalt](https://github.com/jesdga95/basalt) (a local inference engine for **Qwen3.8-Flash-Next**)
-built from a pinned commit in our own image for the RTX PRO 6000 Blackwell (sm_120), and one
-launcher, `./run`, that serves a `.basalt` pack on `:8700` with an OpenAI- and Anthropic-compatible
-API.
+[Basalt](https://github.com/jesdga95/basalt) (a local inference engine, first for
+**Qwen3.8-Flash-Next**) built from a pinned commit in our own image for the RTX PRO 6000 Blackwell
+(sm_120), and two launchers that serve a `.basalt` pack on `:8700` with an OpenAI- and
+Anthropic-compatible API: `./run` for Flash-Next, `./run-hy4` for Tencent's **Hy4-flash**.
 
-Basalt loads only Flash-Next `.basalt` packs. `.ninfer` artifacts (for example the QUASAR 27B)
+Engine flags are per model, so each launcher takes only its own model's packs and names the other
+when handed the wrong one *(`./run-hy4` does today; `./run` still hands a Hy4-flash pack to the
+engine, which refuses `--ple-io` — Plan 11 T2)*. `.ninfer` artifacts (for example the QUASAR 27B)
 belong in `../ninfer`.
 
 **Status (2026-11-20):** built on Basalt v0.5.0 (`iphands/basalt-blackwell:cu1343-sm120-ad274aa`,
@@ -15,7 +17,8 @@ rollback: `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-d3b7574 ./run`. 
 boots are the v0.2.1-era image's (`cu1343-sm120-dc047a7`, Plan 01, 2026-11-04, local pack):
 `./run` loaded in ~40 s, `./run --single` in ~34 s, a 63.29 GiB expert cache in VRAM; clients reach it
 as `cosmo-6000` on `cosmo.lan:8700`. The defaults are the owner's choices, not measured winners —
-tuning is a later plan.
+tuning is a later plan. **Hy4-flash has not been booted here**: `./run-hy4` (Plan 11, 2026-11-20)
+passes the gate, whose step 5b runs the engine's own no-load flag check against the pack.
 
 ## Prerequisites
 
@@ -28,6 +31,12 @@ tuning is a later plan.
   gitignored `models.local/`. Prefill reads the PLE n-gram table at random, 16 rows a
   token, so `PLE_IO=direct` from NFS (~2.9k IOPS, 4 KiB random reads, 2026-11-06) stalls a cold
   121k-token prompt past the engine's 60 s watchdog; the default `PLE_IO=ram` reads it once at boot.
+- For `./run-hy4`, the Hy4-flash pack (158.7 GB). It defaults to the NFS copy,
+  `/mnt/noir/scratch/ai/llm/models/vllm/jesdga/Hy4-flash-NVFP4.basalt`. Hy4-flash reads its 63 GB
+  Engram n-gram table from the pack for every prompt token (64 rows, the reader behind Flash-Next's
+  `PLE_IO=direct`) and has no RAM mode, so the NFS caveat above applies with nothing to switch:
+  `./run-hy4` prints a note when the pack is on NFS, and a local copy is
+  `PACK=models.local/Hy4-flash-NVFP4.basalt ./run-hy4`. Not measured for this model yet.
 - Nothing else on `:8700`: stop `vllm` (`../vllmcustom`), `../ninfer` or `../ignis` first.
 
 ## Pins
@@ -98,3 +107,28 @@ name the model `cosmo-6000`; any other name gets a 404. Stop the server with Ctr
 as NInfer's). Requests from the host arrive through the docker bridge, so Basalt treats them as
 remote for images: `data:` URLs work; image URLs and paths need `--image-url-host` /
 `--image-dir` in `EXTRA_ARGS`.
+
+### Hy4-flash: `./run-hy4`
+
+```bash
+./run-hy4                  # 1 slot, 362144 tokens
+DRY_RUN=1 ./run-hy4        # every check, print the docker command, start nothing
+./run-hy4 --help           # the knob table
+```
+
+Same container, port, alias, cache directory and refusals as `./run`; the engine flags differ,
+because Hy4-flash takes none of Flash-Next's. `PORT`, `ALIAS`, `ALLOWED_HOSTS`, `API_KEY`, `NAME`,
+`CACHE_DIR`, `EXTRA_ARGS` and `IMAGE_OVERRIDE` work as above. The rest:
+
+| Knob (env) | Default | Basalt setting |
+|---|---|---|
+| `PACK` / first argument | `/mnt/noir/scratch/ai/llm/models/vllm/jesdga/Hy4-flash-NVFP4.basalt` | `serve <pack>`; must be a Hy4-flash pack (`general.architecture` `hy4flash`) — a Flash-Next pack is refused with a pointer to `./run` |
+| `MAX_CONTEXT` | `362144` | `--max-context`, 1024 to 1048576 (the model's maximum) |
+| `KV` | `fp16` | `--kv` (`fp16`, `fp8`); `int8` is refused by the model |
+| `PARALLEL` | `1` | `--parallel` (1..8); upstream lists no parallel slots for Hy4-flash, so above 1 is unproven |
+| `SLOT_FULL_CONTEXT` | `1` (only when `PARALLEL` > 1) | `--slot-full-context` |
+| `VISION` | `dynamic` | `--vision` (`off`, `dynamic` — the only image mode; no video) |
+
+There is no `PLE_IO`: `--ple-io` is Flash-Next's flag and Hy4-flash refuses it. These defaults are
+starting values (`./run`'s context, upstream's KV default), not measured and not yet the owner's
+choices.

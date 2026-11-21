@@ -1,6 +1,6 @@
 # Plan 11 — Hy4-flash launcher: `./run-hy4`
 
-> **Status**: pending
+> **Status**: in-progress
 > **Created**: 2026-11-20
 > **Depends on**: Plan 10 T1 (the v0.5.0 image, `cu1343-sm120-ad274aa`: the first pin that builds `hy4flash`); Plan 01 (`./run`, `lib/common.sh`, gate steps 4–6)
 > **Goal**: `./run-hy4` serves a Hy4-flash `.basalt` pack on `:8700` with flags that model accepts, `./run` and `./run-hy4` each refuse the other's pack by name, the gate checks a launcher's flags against the pack's own adapter, and one owner boot with a real reply is recorded.
@@ -294,7 +294,7 @@ Re-read each file after writing. Then `git mv` this plan and its tracker to `com
 
 ## Verification Checklist
 
-- [ ] T1: `DRY_RUN=1 ./run-hy4` prints a `serve` line with `--kv fp16`, `--parallel 1` and no `--ple-io`; gate step 5b prints `pack flags ok` three times and both negative controls print `FAIL(pack-flags)`
+- [x] T1 *(2026-11-20, tracker Evidence rows 4–6)*: `DRY_RUN=1 ./run-hy4` prints a `serve` line with `--kv fp16`, `--parallel 1` and no `--ple-io`; gate step 5b prints `pack flags ok` three times and both negative controls print `FAIL(pack-flags)`
 - [ ] T2: `DRY_RUN=1 ./run <the Hy4 pack>` exits 1 naming `./run-hy4`; the default and `--single` dry runs are byte-identical before and after
 - [ ] T3: the boot log names the `ad274aa` image and the Hy4 pack; a real reply is quoted in the tracker
 - [ ] T4: each harvested fact is in the file the tracker names, re-read after writing

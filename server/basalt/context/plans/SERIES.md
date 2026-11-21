@@ -44,6 +44,9 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   boot came up on engine 0.5.0 with 3 × 362144) and **blocked on the owner**: a real reply from that
   boot, then `./run --single` with a reply. Then T3, harvest and close. Plan 08 stays
   open beneath it (owner decision 2026-11-20: settle it later).
+- **Plan 11** — Hy4-flash launcher `./run-hy4`: in progress, 1/4 tasks done (T1: the launcher,
+  `pack_arch`, gate step 5b); next **T2** (`./run` refuses a Hy4-flash pack), then **T3**, the owner's
+  boot of `./run-hy4` with a real reply, then T4, harvest and close.
 
 ## Plans <!-- hp:plans -->
 
@@ -61,7 +64,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 08 | Repin Basalt to v0.4.1 and rebuild the image | 01 | in-progress | `dc047a7` → `d3b7574` (v0.4.1 tag commit, 698 commits on). Owner builds and boots; T4 abandons Plans 02/03 and registers the re-audit. |
 | 09 | Basalt vendor audit of the v0.4.1 pin `d3b7574`: static reading + runtime observation | 08 | pending | Row only, no plan file yet. Re-targets Plans 02 + 03; reuses `context/audit/scripts/` and the canary method; starts with tag signature + tree identity. |
 | 10 | Repin Basalt to v0.5.0 and rebuild the image | 01 | in-progress | `d3b7574` → `ad274aa` (v0.5.0 tag commit, 206 commits on). Owner builds and boots. Plan 08's open rows and Plan 09's target left for later (owner, 2026-11-20). |
-| 11 | Hy4-flash launcher: `./run-hy4` | 10 (T1's image) | pending | `./run` passes Flash-Next's flags, which Hy4-flash refuses (`--ple-io`, `--kv int8`). Second launcher, per-pack flag check in the gate (step 5b), one owner boot. |
+| 11 | Hy4-flash launcher: `./run-hy4` | 10 (T1's image) | in-progress | `./run` passes Flash-Next's flags, which Hy4-flash refuses (`--ple-io`, `--kv int8`). Second launcher, per-pack flag check in the gate (step 5b), one owner boot. |
 
 ## Dependency Chain <!-- hp:chain -->
 

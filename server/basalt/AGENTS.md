@@ -2,7 +2,8 @@
 
 Self-owned [Basalt](https://github.com/jesdga95/basalt) stack for the RTX PRO 6000 Blackwell
 (sm_120): the engine built from a pinned commit in our own image, a Qwen3.8-Flash-Next `.basalt`
-pack, one launcher (`./run`) serving on `:8700`. Basalt runs Flash-Next only; `.ninfer` artifacts
+pack served by `./run` on `:8700`, and (Plan 11, 2026-11-20) a Hy4-flash pack served by `./run-hy4`.
+Engine flags are per model: a pack goes to its own launcher. `.ninfer` artifacts
 (e.g. the QUASAR 27B) belong in `../ninfer`. `README.md` is the user-facing reference (once it
 exists); this file is the working contract.
 

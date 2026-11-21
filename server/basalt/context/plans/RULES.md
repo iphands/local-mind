@@ -241,8 +241,9 @@ if the line is ever used as a *threshold*, it needs a guard first. **A paste wit
 not a step failure**: it is an incomplete evidence file, and the remedy is to re-paste, not to mark the gate
 red. Do not infer redness from the absence of a `FAIL` that was never written.
 **Expected counts — two sets, split on 2026-11-05 at Plan 02 T3** (decision recorded below):
-**`4 b` product** (`lib/common.sh` from Plan 01 T1, `build` T2, `run` T3, `publish` — added
-2026-11-05 outside a plan, the owner's image publisher; no `.py`, no `.json`) and
+**`5 b` product** (`lib/common.sh` from Plan 01 T1, `build` T2, `run` T3, `publish` — added
+2026-11-05 outside a plan, the owner's image publisher — and `run-hy4`, Plan 11 T1, 2026-11-20, which
+moved the count from `4 b`; no `.py`, no `.json`) and
 **`5 b` audit helpers** (`context/audit/scripts/ledger-grid.sh`, `t2-census.sh`,
 `t3-model-file-poc.sh`, `t3-census.sh`, `t3-inputs.sh`). Bump these when a file is added or removed on
 purpose — a count that silently drops is the failure this step exists for. *(Moved `3 b` → `5 b` on
@@ -335,7 +336,7 @@ echo "PRODUCT_B=$PRODUCT_B AUDIT_B=$AUDIT_B TOTAL_B=$((PRODUCT_B+AUDIT_B))"
 # context/audit/ the paths are `scripts/t2-census.sh`, from the project root `context/audit/scripts/…`.
 # No count can detect that; only naming the files can. This is a locally-owned sentinel — do not DRY
 # it into a pointer at the expected-count line, because a sentinel replaced by a citation cannot fail.
-for f in run build lib/common.sh; do
+for f in run run-hy4 build lib/common.sh; do
   awk -F'\t' -v w="$f" '$2==w{g=1} END{exit !g}' "$TSV" || echo "FAIL(1b) missing product bash: $f"
 done
 # enumeration: the printed sets are the sets the two numbers count, per Rule A.4 "look at it"
@@ -370,7 +371,7 @@ linted *before* `git add` — see the decision note above. (An earlier draft of 
 sentence contradicted the decision note two pages back. Corrected 2026-11-05.)
 
 ```bash
-# 2 — product bash set: run, build, lib/common.sh (audit generators go to 2b)
+# 2 — product bash set: run, run-hy4, build, publish, lib/common.sh (audit generators go to 2b)
 git ls-files -z . | while IFS= read -r -d '' f; do
   case "$f" in context/audit/scripts/*) continue ;; esac
   case "$(head -n1 "$f" 2>/dev/null)" in
@@ -425,7 +426,9 @@ network is **fail**, not skip.
 PREFLIGHT_ONLY=1 ./build 2>&1 | tail -1    # → preflight ok
 ```
 
-**4. `./run` dry run** (Plan 01 T3). `DRY_RUN=1` runs every check `./run` makes and prints the
+**4. `./run` and `./run-hy4` dry runs** (Plan 01 T3; `./run-hy4` from Plan 11 T1, 2026-11-20). Both
+default packs must be readable (`/mnt/noir` mounted): each launcher reads its pack's header and
+architecture. `DRY_RUN=1` runs every check the launcher makes and prints the
 docker command; it starts nothing and creates nothing (a busy `:8700` is reported, not refused —
 vLLM is the daily driver). The image is the newest one built for `BASALT_SHA`; before one exists
 the step uses the stub `stub:none` and prints `image: stub:none` — say so in the tracker when it
@@ -447,10 +450,24 @@ n=$(DRY_RUN=1 ./run /tmp/x.ninfer 2>&1) && echo 'FAIL(dry:ninfer) exit 0'
 DRY_RUN=1 ./run /nonexistent/x.basalt >/dev/null 2>&1 && echo 'FAIL(dry:missing) exit 0'
 DRY_RUN=1 ./run README.md >/dev/null 2>&1 && echo 'FAIL(dry:not-a-pack) exit 0'
 k=$(API_KEY=k3y DRY_RUN=1 ./run --single 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(dry:api-key) printed'
+# ./run-hy4: Hy4-flash's flags, none of Flash-Next's, and only a Hy4-flash pack
+hy=$(DRY_RUN=1 ./run-hy4 2>&1)
+need hy4 "$hy" '-p 0.0.0.0:8700:8700' '--gpus device=0' '--ulimit memlock=-1' ':/models:ro' '--host 0.0.0.0' \
+     '--port 8700' '--alias cosmo-6000' '--allowed-host cosmo.lan' '--max-context 362144' '--kv fp16' \
+     '--parallel 1' '--vision dynamic' 'serve /models/Hy4-flash-NVFP4.basalt' '(DRY_RUN) nothing started'
+[[ $hy == *--ple-io* ]] && echo 'FAIL(dry:hy4) passes --ple-io'
+[[ $hy == *--slot-full-context* ]] && echo 'FAIL(dry:hy4) has --slot-full-context'
+fn=$(sed -n 's/^== pack:  \(.*\) ([0-9]* bytes, .*/\1/p' <<<"$d")      # ./run's default pack, a Flash-Next one
+x=$(DRY_RUN=1 ./run-hy4 "$fn" 2>&1) && echo 'FAIL(dry:hy4-arch) took a Flash-Next pack'
+[[ $x == *'./run instead'* ]] || echo 'FAIL(dry:hy4-arch) no ./run pointer'
+KV=int8 DRY_RUN=1 ./run-hy4 >/dev/null 2>&1 && echo 'FAIL(dry:hy4-kv) took KV=int8'
+MAX_CONTEXT=1048577 DRY_RUN=1 ./run-hy4 >/dev/null 2>&1 && echo 'FAIL(dry:hy4-ctx) took MAX_CONTEXT=1048577'
+k=$(API_KEY=k3y DRY_RUN=1 ./run-hy4 2>&1); [[ $k == *k3y* ]] && echo 'FAIL(dry:hy4-api-key) printed'
 echo "dry-run ok (image: $IMAGE_OVERRIDE)"; unset IMAGE_OVERRIDE
 ```
 
-**5. Flags vs the built image** (Plan 01 T5). Every `--flag` the two dry runs pass to `serve` must
+**5. Flags vs the built image** (Plan 01 T5). Every `--flag` the dry runs (`./run`, `./run --single`,
+`./run-hy4`) pass to `serve` must
 be one the built image accepts, decided by the image's own server code — the check Basalt makes at
 startup: a server option from `serve.config.build_parser()`, or an engine flag found in
 `bin/basalt` by `serve.config.engine_flags_of` (the server stops at start on any other name). No
@@ -460,7 +477,7 @@ Negative control (run it when this step changes): `EXTRA_ARGS=--no-such-flag` �
 ```bash
 img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin')
 if [[ -z $img ]]; then echo 'FAIL(flags) no image for BASALT_SHA — run ./build'; else
-mapfile -t flags < <({ DRY_RUN=1 ./run; DRY_RUN=1 ./run --single; } 2>/dev/null \
+mapfile -t flags < <({ DRY_RUN=1 ./run; DRY_RUN=1 ./run --single; DRY_RUN=1 ./run-hy4; } 2>/dev/null \
   | grep -o ' serve /models/.*' | tr ' ' '\n' | grep -E '^--[a-z]' | sort -u)
 docker run --rm --network none -w /opt/basalt --entrypoint /opt/basalt/.venv/bin/python "$img" -c '
 import sys
@@ -472,6 +489,42 @@ print("\n".join("FAIL(flags) " + f for f in bad) if bad or not fl else
       f"flags ok ({len(fl) - ns} engine, {ns} server: {len(eng)} engine flags known)")
 if not fl: print("FAIL(flags) ./run emitted no flags")' "${flags[@]}"
 fi
+```
+
+**5b. Flags vs the pack's own model** (Plan 11 T1, 2026-11-20). Step 5 matches a name against every
+flag in the binary, whichever model owns it, so it passed `--ple-io` for a Hy4-flash pack that the
+server then refused at start (2026-11-20; engine flags are per model — Plan 11 § *Pre-Identified
+Bug/Issue*). This step runs the check the server itself makes before it loads anything: each dry
+run's words go through `serve.config.parse_settings` and `serve.engine.vision.model_plan`
+(`basalt --model <pack> <engine words> --gpu-plan`), which parses them by the rules of the model **in
+that pack** and loads nothing. `--network none`; the pack's directory is mounted read-only; no
+`--gpus` flag is passed. Pass: one `pack flags ok (…)` line per launcher mode — three — and no `FAIL`.
+No image for `BASALT_SHA` is **fail**. Negative controls (run them when this step or a launcher's
+flags change): `EXTRA_ARGS='--ple-io ram'` → `FAIL(pack-flags) ./run-hy4: unknown argument: --ple-io`
+while both `./run` lines stay ok; `EXTRA_ARGS='--kv int8'` → `FAIL(pack-flags) ./run-hy4: --kv int8: …`.
+
+```bash
+img=$(bash -c 'source lib/common.sh; load_pins; image_for_pin')
+if [[ -z $img ]]; then echo 'FAIL(pack-flags) no image for BASALT_SHA — run ./build'; else
+for l in './run' './run --single' './run-hy4'; do
+  read -r -a cmd <<<"$l"
+  out=$(DRY_RUN=1 "${cmd[@]}" 2>/dev/null)
+  pack=$(sed -n 's/^== pack:  \(.*\) ([0-9]* bytes, .*/\1/p' <<<"$out")
+  read -r -a words < <(grep -o ' serve /models/.*' <<<"$out")     # serve, the pack, then the flags
+  if [[ -z $pack || ${#words[@]} -lt 3 ]]; then echo "FAIL(pack-flags) $l: no pack or serve line in its dry run"; continue; fi
+  docker run --rm --network none --user 1000:1000 -v "$(dirname "$pack"):/models:ro" -w /opt/basalt \
+    --entrypoint /opt/basalt/.venv/bin/python "$img" -c '
+import sys
+from serve.config import build_parser, parse_settings
+from serve.engine.vision import model_plan
+who, pack, *cli = sys.argv[1:]
+try:
+    a, _, file_words, cli_words = parse_settings(build_parser(), cli)
+    plan = model_plan("/opt/basalt/bin/basalt", pack, None, file_words + cli_words)
+    print("pack flags ok (%s: %s takes %s)" % (who, plan["arch"], " ".join(file_words + cli_words)))
+except (ValueError, SystemExit) as e:
+    print("FAIL(pack-flags) %s: %s" % (who, e))' "$l" "${words[@]:1}"
+done; fi
 ```
 
 **6. Server imports in the image** (Plan 01 T6). Imports every non-test `serve.*` module with the
@@ -496,8 +549,9 @@ fi
 
 **Blind spots.** Steps 1–6 never boot. They cannot see a code path only a loaded model reaches, a
 container that cannot reach the GPU or lock memory, a pack the engine refuses, or a port that is
-already taken. Step 5 checks flag *names*, not values: a value Basalt rejects (`--kv fp8`) still
-shows only at boot.
+already taken. Step 5 checks flag *names*, not values. Step 5b adds the values a model checks while it
+parses its flags (Hy4-flash's `--kv int8`), per pack; a value checked only at load — a `--max-context`
+past the pack's maximum, which `--gpu-plan` accepts — still shows only at boot.
 
 **Build actually loaded.** Behavior is verified on a boot the owner runs (SERIES *Standing
 Constraints*): the boot log must name the Basalt commit and the pack `./run` was asked for —
