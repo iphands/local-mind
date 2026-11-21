@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `13`.** <!-- hp:next-free -->
+**Next free plan number: `14`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-11-04):** serve Qwen3.8-Flash-Next through
 > [Basalt](https://github.com/jesdga95/basalt), source-built from a pinned commit in our own
@@ -72,6 +72,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 10 | Repin Basalt to v0.5.0 and rebuild the image | 01 | in-progress | `d3b7574` → `ad274aa` (v0.5.0 tag commit, 206 commits on). Owner builds and boots. Plan 08's open rows and Plan 09's target left for later (owner, 2026-11-20). |
 | 11 | Hy4-flash launcher: `./run-hy4` | 10 (T1's image) | in-progress | `./run` passes Flash-Next's flags, which Hy4-flash refuses (`--ple-io`, `--kv int8`). Second launcher, per-pack flag check in the gate (step 5b), one owner boot. |
 | 12 | Local patch: a switch that stops Basalt's `O_DIRECT` reads | 10 (T1), 11 | in-progress | `BASALT_BUFFERED_IO=1`, a 3-file patch applied in the image build; the launchers and `./preload` turn it on. Owner rebuild and one Hy4-flash boot from NFS. |
+| 13 | Repin Basalt to v0.5.5 and rebuild the image | 10 (T1), 12 (T1) | pending | `ad274aa` → `ff0b978` (v0.5.5 tag commit, 177 commits on; a fifth model, Inkling 2 Mini). The patch fits unchanged. Owner builds and boots. |
 
 ## Dependency Chain <!-- hp:chain -->
 
@@ -82,6 +83,7 @@ completed/01_flashnext_container ──(recipe, ./build, ./run; feeds 05, 06, 07
                                                                                       │
                                                                              04_audit_engine_bulk
 10_basalt_repin_v050 ──(the v0.5.0 image, built at T1)── 11_hy4flash_launcher ──(the NFS stall at T3; ./preload)── 12_buffered_io_patch
+10_basalt_repin_v050 ──(the pin at T1)── 13_basalt_repin_v055 ──(patches/0001 must fit the new pin)── 12_buffered_io_patch
 abandoned/02_basalt_vendor_audit, abandoned/03_basalt_audit_runtime ──(method, scripts, posture.md)──▶ 09
 ```
 *2026-11-16:* Plans 02 and 03 audited `dc047a7`; Plan 08 moved the pin, so both are abandoned and Plan 09
@@ -119,6 +121,11 @@ inherits their method. *(The 2026-11-05 chain, with 03 gating 02's verdict, is i
   noir's disks. The owner asked for a switch, off in the engine by default and on in our launchers. It
   is the project's first carried patch: a Dockerfile change and a launcher default, both plans by
   `RULES.md`'s first table. Its boot (T4) is also the boot Plan 11 T3 is blocked on.
+- **13 — Repin to v0.5.5** (owner request, 2026-11-21: "repin to this version so I can build and publish").
+  Upstream released 0.5.5 on 2026-11-21: a fifth model (Inkling 2 Mini) and shared-engine work; its notes
+  say no flag or config key was removed or renamed. The first repin with a carried patch: the three files
+  `patches/0001` touches are the same blobs at both pins. Proven as Plans 08 and 10 were: gate steps 5, 5b
+  and 6 on the new image and an owner boot per launcher. Plans 08, 10, 11 and 12 stay open beneath it.
 - **09 — Audit of the v0.4.1 pin** (registered 2026-11-16 at Plan 08 T4, owner decision). The built
   engine is now unaudited: Plan 02 read none of `d3b7574`. What carries over is method, not results — the
   manifest-then-census shape, the planted canaries, `context/audit/scripts/` (which hard-code the old pin
