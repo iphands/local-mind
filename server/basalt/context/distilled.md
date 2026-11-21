@@ -320,7 +320,12 @@ point is `CMakeLists.txt` (287 commits, `unassigned` in the manifest).
 - Prompt reading from NFS: 53 tok/s, bound by Engram reads (64 per token, 4 KiB direct, no RAM mode);
   a 14,150-token prompt tripped the 60 s watchdog. Not measured from local NVMe yet. Decode: one
   30-token reply at 24.3 tok/s — too short to quote as a speed.
-- Means: Hy4-flash fits this card whole; the pack must be local for real prompts.
+- Why NFS was slow `[MEASURED 2026-11-20]` (`fio`, 4 KiB direct random reads of the `engram` section):
+  1053 IOPS at QD 256 and 12.4 ms a read at QD 1 on first touch; 163934 IOPS and 0.05 ms once noir
+  held the pages. The link is not the limit; uncached pages are seeks on noir's spinning array, and
+  `O_DIRECT` keeps cosmo's own page cache out of it.
+- Means: Hy4-flash fits this card whole; for real prompts the pack must be local, or its `engram`
+  section must be in noir's page cache.
   Src: `context/plans/11_hy4flash_launcher_tracker.md` Evidence.
 
 ## Open Questions

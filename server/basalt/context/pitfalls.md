@@ -646,7 +646,15 @@ prompt token, each a 4 KiB direct read from the pack; from this NFS that is abou
 (`456 read in 8617 ms`, `8326 ms in the Engram's host step`). The stall report advises `--ple-io ram`,
 which is Flash-Next's flag: Hy4-flash refuses it and has no RAM mode.
 
-**Guard.** Serve Hy4-flash from local NVMe: `PACK=models.local/Hy4-flash-NVFP4.basalt ./run-hy4`.
+*Cause, measured the same evening* `[MEASURED 2026-11-20, Plan 11 T3]`: not the link. 4 KiB direct reads
+of the `engram` section ran at 1053 IOPS (QD 256) and 12.4 ms each (QD 1) on first touch, and at 163934
+IOPS / 0.05 ms once noir had the pages in RAM. `O_DIRECT` skips cosmo's page cache; noir's cache would
+serve the table, but nothing reads that 59 GiB section at load, so every lookup was a seek on noir's
+spinning array.
+
+**Guard.** Serve Hy4-flash from local NVMe: `PACK=models.local/Hy4-flash-NVFP4.basalt ./run-hy4`. Or
+read the `engram` section once so noir caches it (the `dd` in the Plan 11 tracker's Notes) — good until
+noir evicts it or reboots, and not yet booted against.
 `run-hy4` prints a `== note:` when the pack is on NFS. A boot is not verified by its load line or by one
 short reply — send a prompt of the size the clients send (R-rules: observe the behaviour, not a proxy).
 Diagnose as the entry below: `nfs_file_direct_read` in state `D`.

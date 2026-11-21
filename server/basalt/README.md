@@ -38,8 +38,10 @@ a local copy of the pack (below); no boot from one is recorded yet.
   `./run-hy4` prints a note when the pack is on NFS, and a local copy is
   `PACK=models.local/Hy4-flash-NVFP4.basalt ./run-hy4`. Measured 2026-11-20 from the NFS copy:
   prompts read at 53 tok/s (a 456-token prompt took 8.6 s, 8.3 s of it Engram reads), and a
-  14,150-token prompt made no progress for 60 s, so the engine's watchdog stopped it. **Serve
-  Hy4-flash from local NVMe** for anything past a few thousand prompt tokens.
+  14,150-token prompt made no progress for 60 s, so the engine's watchdog stopped it. The link is
+  not the limit (the same reads run at 164k IOPS once noir has the pages in RAM, about 1k when it
+  does not): **serve Hy4-flash from local NVMe**, or read the pack's `engram` section once so noir
+  caches it (`context/plans/11_hy4flash_launcher_tracker.md`, Notes).
 - Nothing else on `:8700`: stop `vllm` (`../vllmcustom`), `../ninfer` or `../ignis` first.
 
 ## Pins
