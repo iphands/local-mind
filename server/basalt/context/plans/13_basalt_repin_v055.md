@@ -250,8 +250,9 @@ they land. Then `git mv` this plan and its tracker to `completed/` and mark SERI
    writers (Project Rule P1).** *Mitigation*: only `versions.env` is dirty (and `README.md` at step
    5), every handoff carries the `dirty:` line, and no `context/` or plan file is left uncommitted
    while the owner works.
-2. **Risk: between the pin edit and the build, `./run` and `./run-hy4` refuse** ("no … image is
-   labelled `ai.basalt.ref`=…; run `./build` first"). *Mitigation*: the server that is up keeps
+2. ~~**Risk: between the pin edit and the build, `./run` and `./run-hy4` refuse** ("no … image is
+   labelled `ai.basalt.ref`=…; run `./build` first").~~ RESOLVED (T1): the image exists; the window
+   was about an hour and the dry run printed exactly that refusal (tracker Evidence row 6). *Mitigation*: the server that is up keeps
    running; a restart meanwhile is
    `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-ad274aa ./run`.
 3. **Risk: Flash-Next or Hy4-flash behaves differently at boot or under long prompts** (22 and 16
@@ -273,7 +274,7 @@ they land. Then `git mv` this plan and its tracker to `completed/` and mark SERI
 
 ## Verification Checklist
 
-- [ ] T1: `image_for_pin` prints a tag whose `ai.basalt.ref` label is `ff0b978d2ee9ff195d113b6feb80961b2d2f99ef` and whose `ai.basalt.patches` label names `0001-buffered-io-switch.patch:a3553ec6bb8c`; gate steps 5, 5b and 6 pass on it; step 5's negative control fires
+- [x] T1: `image_for_pin` prints a tag whose `ai.basalt.ref` label is `ff0b978d2ee9ff195d113b6feb80961b2d2f99ef` and whose `ai.basalt.patches` label names `0001-buffered-io-switch.patch:a3553ec6bb8c`; gate steps 5, 5b and 6 pass on it; step 5's negative control fires *(2026-11-21, tracker Evidence rows 8–10; the tag printed is the moving `cu1343-sm120`, same image id as `…-ff0b978`)*
 - [ ] T2: both boot logs name the `ff0b978` image and the pack; a real reply from each launcher is quoted in the tracker
 - [ ] T3: each harvested fact is in the file the tracker names, re-read after writing
 - [ ] All: the project gate (Rule A) passes on the final commit

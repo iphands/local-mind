@@ -53,11 +53,9 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   on the owner**: the first boot loaded and answered a short prompt, then a 14,150-token prompt stalled
   on Engram reads from NFS. It needs `./preload` (or a local copy), a boot, and a quoted reply. Then
   T4, harvest and close.
-- **Plan 13** — Repin Basalt to v0.5.5 and rebuild: in progress, 0/3 tasks done; **T1 is blocked on the
-  owner's `./build`**. The pin edit in `versions.env` (`ad274aa` → `ff0b978`) is uncommitted in the
-  worktree until the image exists (gate steps 5, 5b and 6 need one for `BASALT_SHA`); until then a plain
-  `./run` refuses, and `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-ad274aa ./run` boots the
-  v0.5.0 image. Then T2, an owner boot per launcher, and T3, harvest and close.
+- **Plan 13** — Repin Basalt to v0.5.5 and rebuild: in progress, 1/3 tasks done (T1: pin at `ff0b978`,
+  image `cu1343-sm120-ff0b978` built with the buffered-io patch, gate 1–6 with 5b pass on it); next
+  **T2**, an owner boot per launcher with a real reply each, then T3, harvest and close.
 
 ## Plans <!-- hp:plans -->
 

@@ -8,10 +8,12 @@ Anthropic-compatible API: `./run` for Flash-Next, `./run-hy4` for Tencent's **Hy
 Engine flags are per model, so each launcher takes only its own model's packs and names the other
 when handed the wrong one. `.ninfer` artifacts (for example the QUASAR 27B) belong in `../ninfer`.
 
-**Status (2026-11-20):** built on Basalt v0.5.0 (`iphands/basalt-blackwell:cu1343-sm120-ad274aa`,
-Plan 10) and the model-free gate passes on that image; **its boots are not recorded yet** (Plan 10
-T2), and neither were the v0.4.1 image's (`cu1343-sm120-d3b7574`, Plan 08), which is kept as the
-rollback: `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-d3b7574 ./run`. The last measured
+**Status (2026-11-21):** built on Basalt v0.5.5 (`iphands/basalt-blackwell:cu1343-sm120-ff0b978`,
+Plan 13) with our buffered-io patch (§ *Build*), and the model-free gate passes on that image; its
+boots are Plan 13 T2. The v0.5.0 image (`cu1343-sm120-ad274aa`, Plan 10, rebuilt with the patch) is
+kept as the rollback: `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-ad274aa ./run`. The
+image holds five models and this project serves two; Inkling 2 Mini, new in v0.5.5, has no launcher
+here. The last measured
 boots are the v0.2.1-era image's (`cu1343-sm120-dc047a7`, Plan 01, 2026-11-04, local pack):
 `./run` loaded in ~40 s, `./run --single` in ~34 s, a 63.29 GiB expert cache in VRAM; clients reach it
 as `cosmo-6000` on `cosmo.lan:8700`. The defaults are the owner's choices, not measured winners —
@@ -46,15 +48,15 @@ a local copy of the pack (below); no boot from one is recorded yet.
 
 ## Pins
 
-`versions.env`: Basalt `ad274aa8` (the v0.5.0 tag's commit, pinned 2026-11-20; before that
-`d3b75742`, v0.4.1, and `dc047a77`, the v0.2.1 engine), CUDA 13.4.3 devel and runtime images by digest, image repository
+`versions.env`: Basalt `ff0b978d` (the v0.5.5 tag's commit, pinned 2026-11-21; before that
+`ad274aa8`, v0.5.0, `d3b75742`, v0.4.1, and `dc047a77`, the v0.2.1 engine), CUDA 13.4.3 devel and runtime images by digest, image repository
 `iphands/basalt-blackwell`. Moving the pin is a plan: `context/plans/RULES.md`.
 
 ## Build
 
 ```bash
 PREFLIGHT_ONLY=1 ./build   # checks only: vendor/basalt at the pin, base digests, Dockerfile lint
-./build                    # the image iphands/basalt-blackwell:cu1343-sm120-ad274aa (log in captures/)
+./build                    # the image iphands/basalt-blackwell:cu1343-sm120-ff0b978 (log in captures/)
 ```
 
 `./build` manages `vendor/basalt` (cloned on first use, checked out at `BASALT_SHA`) and refuses
@@ -62,8 +64,10 @@ a dirty checkout. It also applies our local patches, `patches/*.patch`, inside t
 (never in `vendor/basalt`): each must fit the pin exactly or the build stops, and the image's
 `ai.basalt.patches` label names each with its hash. One so far (Plan 12):
 `0001-buffered-io-switch.patch` — with `BASALT_BUFFERED_IO=1` in its environment the engine reads
-files through the OS cache instead of with `O_DIRECT`; without it, upstream's behaviour. **The image
-on disk today predates the patch**: it takes effect at the next `./build`. The image keeps Basalt's source-tree layout at `/opt/basalt` (`bin/`, `serve/`,
+files through the OS cache instead of with `O_DIRECT`; without it, upstream's behaviour. The image
+built for the pin carries it (label `ai.basalt.patches=0001-buffered-io-switch.patch:a3553ec6bb8c`).
+A repin must show the patch still fits: `PREFLIGHT_ONLY=1 ./build` prints `== patch fits: …` or
+stops. The image keeps Basalt's source-tree layout at `/opt/basalt` (`bin/`, `serve/`,
 `tools/`, `data/`, and a `.venv` with upstream's pinned server dependencies) because the binary takes
 the directory above its own `bin/` as its install root and runs the Python server from there.
 
@@ -75,7 +79,7 @@ DRY_RUN=1 ./publish        # print the tags, touch nothing (also accepts PUSH_DR
 TAG=cu1343-sm120 ./publish # take the image from another local tag instead of the pin's own name
 ```
 
-Three tags go up: the immutable `cu1343-sm120-ad274aa` that `./build` made, the moving
+Three tags go up: the immutable `cu1343-sm120-ff0b978` that `./build` made, the moving
 `cu1343-sm120`, and `latest`. `./build` mints no `:latest`, so `./publish` owns it, and it only ever
 takes it for the newest local build of the pinned commit. Every name is read from the image's own
 `ai.basalt.*` labels, never from the tag it was handed. Needs a terminal on stdin and a
