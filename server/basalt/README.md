@@ -8,9 +8,11 @@ API.
 Basalt loads only Flash-Next `.basalt` packs. `.ninfer` artifacts (for example the QUASAR 27B)
 belong in `../ninfer`.
 
-**Status (2026-11-16):** built on Basalt v0.4.1 (`iphands/basalt-blackwell:cu1343-sm120-d3b7574`,
-Plan 08) and the model-free gate passes on that image; **it has not been booted yet**. The last
-measured boots are the v0.2.1-era image's (`cu1343-sm120-dc047a7`, Plan 01, 2026-11-04, local pack):
+**Status (2026-11-20):** built on Basalt v0.5.0 (`iphands/basalt-blackwell:cu1343-sm120-ad274aa`,
+Plan 10) and the model-free gate passes on that image; **its boots are not recorded yet** (Plan 10
+T2), and neither were the v0.4.1 image's (`cu1343-sm120-d3b7574`, Plan 08), which is kept as the
+rollback: `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-d3b7574 ./run`. The last measured
+boots are the v0.2.1-era image's (`cu1343-sm120-dc047a7`, Plan 01, 2026-11-04, local pack):
 `./run` loaded in ~40 s, `./run --single` in ~34 s, a 63.29 GiB expert cache in VRAM; clients reach it
 as `cosmo-6000` on `cosmo.lan:8700`. The defaults are the owner's choices, not measured winners —
 tuning is a later plan.
@@ -30,15 +32,15 @@ tuning is a later plan.
 
 ## Pins
 
-`versions.env`: Basalt `d3b75742` (the v0.4.1 tag's commit, pinned 2026-11-16; before that
-`dc047a77`, the v0.2.1 engine), CUDA 13.4.3 devel and runtime images by digest, image repository
+`versions.env`: Basalt `ad274aa8` (the v0.5.0 tag's commit, pinned 2026-11-20; before that
+`d3b75742`, v0.4.1, and `dc047a77`, the v0.2.1 engine), CUDA 13.4.3 devel and runtime images by digest, image repository
 `iphands/basalt-blackwell`. Moving the pin is a plan: `context/plans/RULES.md`.
 
 ## Build
 
 ```bash
 PREFLIGHT_ONLY=1 ./build   # checks only: vendor/basalt at the pin, base digests, Dockerfile lint
-./build                    # the image iphands/basalt-blackwell:cu1343-sm120-d3b7574 (log in captures/)
+./build                    # the image iphands/basalt-blackwell:cu1343-sm120-ad274aa (log in captures/)
 ```
 
 `./build` manages `vendor/basalt` (cloned on first use, checked out at `BASALT_SHA`) and refuses
@@ -54,7 +56,7 @@ DRY_RUN=1 ./publish        # print the tags, touch nothing (also accepts PUSH_DR
 TAG=cu1343-sm120 ./publish # take the image from another local tag instead of the pin's own name
 ```
 
-Three tags go up: the immutable `cu1343-sm120-d3b7574` that `./build` made, the moving
+Three tags go up: the immutable `cu1343-sm120-ad274aa` that `./build` made, the moving
 `cu1343-sm120`, and `latest`. `./build` mints no `:latest`, so `./publish` owns it, and it only ever
 takes it for the newest local build of the pinned commit. Every name is read from the image's own
 `ai.basalt.*` labels, never from the tag it was handed. Needs a terminal on stdin and a

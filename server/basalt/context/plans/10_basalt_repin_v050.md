@@ -96,7 +96,7 @@ bytes**. They are claims until T1 step 3 reads the checked-out tree and T2 boots
 | Flags `./run` passes | `--host --port --alias --allowed-host --api-key --parallel` (1..8) `--slot-full-context --vision --gpu` are server options in `serve/config.py`; `--max-context` and `--kv` (`fp16`, `int8`, `q4_0`, `k8v4` for Flash-Next) are documented engine flags; **`--ple-io` was in none of the three files read** | `[DOC]` `serve/config.py`, `docs/models/qwen38-flash-next.md`, `docs/running.md`; `--ple-io` unconfirmed — gate step 5 in T1 decides |
 | Gate hooks | `serve.config` still defines `build_parser`, `server_options`, `engine_flags_of` | `[DOC]` `serve/config.py`; confirm in T1 step 3 |
 | Image recipe inputs | upstream's `Dockerfile`, `.dockerignore`, `requirements.txt` at the tag are 3512 / 110 / 343 characters — the byte sizes of the same files at `d3b7574` — and their summaries match (same apt packages, same `bin/ serve/ tools/ data/ .venv` tree, same pins incl. `pypdf` 7.0.1) | sizes as the fetch tool reported them vs `wc -c vendor/basalt/{Dockerfile,.dockerignore,requirements.txt}`, 2026-11-20. Equal size is not equal bytes: `git diff d3b7574 ad274aa -- <the three>` in T1 step 3 |
-| Flash-Next code moved | the compare lists changes under `src/models/qwen4exp` (about 34 files) and shared `src/program`, `src/vision`, `src/platform`; none seen under `src/core` or `src/kernels` | compare API `files`, read only in part through the same tool — **counts unverified**; `git diff --stat` in T1 step 3 |
+| Flash-Next code moved | the compare lists changes under `src/models/qwen4exp` (about 34 files) and shared `src/program`, `src/vision`, `src/platform`; none seen under `src/core` or `src/kernels` — ***corrected 2026-11-20 at T1: wrong; 10 files under `src/core` and 8 under `src/kernels` changed, 285 files in all*** | compare API `files`, read only in part through the same tool — **counts unverified**; `GIT_NO_LAZY_FETCH=1 git -C vendor/basalt diff --name-only d3b7574 ad274aa` at T1 (tracker Evidence row 3) |
 | Shared-engine behaviour | elastic attention caches grow into the expert tier's room and a prompt that cannot grow is **refused** (`Status::Refused`; the engine keeps serving); partial reclaim; bounded lend is off for every model but Hy4-flash | `[DOC]` changelog; observe in T2. Elastic KV is already live at v0.4.1 on our settings (`storage/cache/basalt/aefd5d98dc650ed4/engine.log`, `elastic KV:` lines through 2026-11-19) |
 | Output | Flash-Next greedy output on pinned tiers "identical to `main`" at `63cb68ad4` — **not compared with v0.4.1** | `[DOC]` changelog Checked section — upstream's claim, not re-measured here |
 | Build cost | every model is built, now four; v0.4.1's three took 319.6 s at `JOBS=16`, image 3.49 GB | Plan 08 tracker Evidence row 4; new figure recorded in T1 |
@@ -236,8 +236,10 @@ they land. Then `git mv` this plan and its tracker to `completed/` and mark SERI
    writers (Project Rule P1).** *Mitigation*: only `versions.env` (and `README.md` at step 6) is dirty,
    every handoff carries the `dirty:` line, and no `context/` or plan file is left uncommitted while
    the owner works.
-2. **Risk: the pre-read of v0.5.0 was paraphrase, so a renamed flag or a changed build input could
-   have been missed.** *Mitigation*: T1 step 3 diffs the checked-out tree; gate steps 5–6 run on the
+2. ~~**Risk: the pre-read of v0.5.0 was paraphrase, so a renamed flag or a changed build input could
+   have been missed.**~~ RESOLVED (T1) for flags and build inputs: the local diff shows the recipe's
+   inputs unchanged, the build completed, and gate steps 5–6 pass on the image. The paraphrase did get
+   one thing wrong (changes under `src/core` and `src/kernels` — tracker Notes). *Mitigation*: T1 step 3 diffs the checked-out tree; gate steps 5–6 run on the
    built image; T2 boots.
 3. **Risk: Flash-Next behaves differently at boot or under long prompts** (its model folder changed,
    and a prompt whose cache cannot grow is now refused). *Mitigation*: T2's two boots; a refusal or a
@@ -258,7 +260,7 @@ they land. Then `git mv` this plan and its tracker to `completed/` and mark SERI
 
 ## Verification Checklist
 
-- [ ] T1: `image_for_pin` prints a tag whose `ai.basalt.ref` label is `ad274aa8dc243f0fdcc1ad382f2e31c4591b4552`; gate steps 5–6 pass on it; step 5's negative control fires
+- [x] T1: `image_for_pin` prints a tag whose `ai.basalt.ref` label is `ad274aa8dc243f0fdcc1ad382f2e31c4591b4552`; gate steps 5–6 pass on it; step 5's negative control fires *(2026-11-20, tracker Evidence rows 5–7; the tag printed is the moving `cu1343-sm120`, same image id as `…-ad274aa`)*
 - [ ] T2: both boot logs name the `ad274aa` image and the pack; a real reply in each mode is quoted in the tracker
 - [ ] T3: each harvested fact is in the file the tracker names, re-read after writing
 - [ ] All: the project gate (Rule A) passes on the final commit

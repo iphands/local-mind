@@ -34,9 +34,10 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   pack argument again; T2: pin at `d3b7574`, image `cu1343-sm120-d3b7574` built, gate 1–6 pass on it; T4:
   Plans 02 and 03 abandoned, Plan 09 registered); next **T3**, **blocked on the owner**: `./run` and
   `./run --single`, a real reply each. The new image has not been booted. Then T5, harvest and close.
-- **Plan 10** — Repin Basalt to v0.5.0 and rebuild: in progress, 0/3 tasks done; **T1 blocked on the
-  owner**: `PREFLIGHT_ONLY=1 ./build`, then `./build`, with `versions.env` edited and uncommitted until
-  the image exists. Plan 08 stays open beneath it (owner decision 2026-11-20: settle it later).
+- **Plan 10** — Repin Basalt to v0.5.0 and rebuild: in progress, 1/3 tasks done (T1: pin at `ad274aa`,
+  image `cu1343-sm120-ad274aa` built, gate 1–6 pass on it); next **T2**, **blocked on the owner's
+  paste**: `./run` and `./run --single`, a real reply each. Then T3, harvest and close. Plan 08 stays
+  open beneath it (owner decision 2026-11-20: settle it later).
 
 ## Plans <!-- hp:plans -->
 
