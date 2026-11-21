@@ -15,8 +15,10 @@ rollback: `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-d3b7574 ./run`. 
 boots are the v0.2.1-era image's (`cu1343-sm120-dc047a7`, Plan 01, 2026-11-04, local pack):
 `./run` loaded in ~40 s, `./run --single` in ~34 s, a 63.29 GiB expert cache in VRAM; clients reach it
 as `cosmo-6000` on `cosmo.lan:8700`. The defaults are the owner's choices, not measured winners —
-tuning is a later plan. **Hy4-flash has not been booted here**: `./run-hy4` (Plan 11, 2026-11-20)
-passes the gate, whose step 5b runs the engine's own no-load flag check against the pack.
+tuning is a later plan. **Hy4-flash** (`./run-hy4`, Plan 11) booted from the NFS pack on 2026-11-20:
+86.2 GiB loaded in 105.8 s, every expert in VRAM (77.84 GiB), a 456-token prompt answered — and a
+14,150-token prompt stalled on Engram reads from NFS until the engine's watchdog stopped it. It needs
+a local copy of the pack (below); no boot from one is recorded yet.
 
 ## Prerequisites
 
@@ -34,7 +36,10 @@ passes the gate, whose step 5b runs the engine's own no-load flag check against 
   Engram n-gram table from the pack for every prompt token (64 rows, the reader behind Flash-Next's
   `PLE_IO=direct`) and has no RAM mode, so the NFS caveat above applies with nothing to switch:
   `./run-hy4` prints a note when the pack is on NFS, and a local copy is
-  `PACK=models.local/Hy4-flash-NVFP4.basalt ./run-hy4`. Not measured for this model yet.
+  `PACK=models.local/Hy4-flash-NVFP4.basalt ./run-hy4`. Measured 2026-11-20 from the NFS copy:
+  prompts read at 53 tok/s (a 456-token prompt took 8.6 s, 8.3 s of it Engram reads), and a
+  14,150-token prompt made no progress for 60 s, so the engine's watchdog stopped it. **Serve
+  Hy4-flash from local NVMe** for anything past a few thousand prompt tokens.
 - Nothing else on `:8700`: stop `vllm` (`../vllmcustom`), `../ninfer` or `../ignis` first.
 
 ## Pins

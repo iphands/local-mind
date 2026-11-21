@@ -268,12 +268,17 @@ Re-read each file after writing. Then `git mv` this plan and its tracker to `com
 
 ## Open Questions / Risks
 
-1. **Risk: the Engram table is read from NFS per prompt token.** The same reader on Flash-Next's
+1. **OBSERVED (T3, 2026-11-20) — no longer a risk, a measured limit:** from the NFS pack a 456-token
+   prompt was read at 53 tok/s and a 14,150-token prompt stalled until the watchdog stopped the engine
+   (tracker Evidence rows 8–9). The note below did its job only as a warning; the fix is a local copy
+   and a default-pack decision, both the owner's (tracker Follow-ups). Original text:
+   **Risk: the Engram table is read from NFS per prompt token.** The same reader on Flash-Next's
    table, 16 rows a token, stalled a cold 121k-token prompt from this NFS (`README.md`
    § *Prerequisites*, 2026-11-06); Hy4-flash reads 64 and has no RAM mode. *Mitigation*: `run-hy4`
    prints a note when the pack is on NFS and names the local-copy command; T3 observes the first
    prompt. Copying 148 GiB to `models.local/` is the owner's step.
-2. **Risk: host memory.** Upstream's design holds every expert in RAM (77.9 GiB) beside the VRAM
+2. ~~**Risk: host memory.**~~ RESOLVED (T3): every expert went to VRAM (`RAM 0`), 6395 MiB of VRAM
+   was free with everything loaded, and 95 GiB of RAM stayed available. Original text: **Risk: host memory.** Upstream's design holds every expert in RAM (77.9 GiB) beside the VRAM
    slots; the host had 98 GiB available and GPU 0 had 8.7 GiB in use by something else when this was
    written. *Mitigation*: T3 says to free GPU 0 first and records the RAM line of the start block.
 3. **Question: are `MAX_CONTEXT=362144` and `KV=fp16` the owner's choices?** They are starting

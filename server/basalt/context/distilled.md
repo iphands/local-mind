@@ -303,6 +303,26 @@ they would agree wrongly if the tag moved; the only corroboration from a differe
 carries to this pin, so Plan 02's `src/platform/` reads start from partly-characterised ground; the stalest
 point is `CMakeLists.txt` (287 commits, `unassigned` in the manifest).
 
+## Hy4-flash on this card: every expert in VRAM, 106 s load from NFS; prompts need local NVMe [LIVE 2026-11-20][SOURCE]
+
+- From v0.5.0 (`ad274aa`) Basalt builds four models and this project serves two: Flash-Next (`./run`)
+  and Hy4-flash (`./run-hy4`, Plan 11). **Supersedes the heading "Basalt loads only
+  Qwen3.8-Flash-Next" above for the built pin**; that entry stands for `dc047a77`.
+- Engine flags are per model (`src/program/cli/arguments.cpp:125-133`). Hy4-flash takes `--kv fp16|fp8`
+  and no `--ple-io` (`src/models/hy4flash/adapter.cpp:56-75`); its context is 1024..1048576. The check
+  that tells, with no load: `basalt --model <pack> <words> --gpu-plan` (gate step 5b).
+- A pack names its model in `meta`: `"general.architecture":"hy4flash"` / `"qwen4exp"` (`pack_arch` in
+  `lib/common.sh`; read 2026-11-20 from both packs).
+- Live, `./run-hy4` defaults (`--max-context 362144 --kv fp16`, 1 slot), pack on NFS, 2026-11-20:
+  `loaded   86.2GiB 105.8s`; `VRAM expert tier 77.84 GiB, 512 of 512 experts per layer (100%)`, RAM
+  tier 0; dense 7.09 GiB, drafter 0.87 GiB; `6395 MiB of VRAM free with everything loaded`; 95 GiB of
+  host RAM still available. A reload after an engine stop took 33.8 s.
+- Prompt reading from NFS: 53 tok/s, bound by Engram reads (64 per token, 4 KiB direct, no RAM mode);
+  a 14,150-token prompt tripped the 60 s watchdog. Not measured from local NVMe yet. Decode: one
+  30-token reply at 24.3 tok/s — too short to quote as a speed.
+- Means: Hy4-flash fits this card whole; the pack must be local for real prompts.
+  Src: `context/plans/11_hy4flash_launcher_tracker.md` Evidence.
+
 ## Open Questions
 
 - ~~Does an NVFP4 Flash-Next pack fit entirely in 96 GiB VRAM, or which share lands in RAM, and

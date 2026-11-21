@@ -51,6 +51,8 @@ reports green because the thing it checks was never reached, or was looking some
 | *A live daily-driver server is not a test bench* | the owner's running server, and what you may read from it |
 | *A shared worktree has no such thing as "my uncommitted edits are private"* | two writers, one index |
 | *A boot from the NFS copy crawls at 5–10 MB/s* | `O_DIRECT` × fragmented extents |
+| *Hy4-flash from the NFS pack answers a short prompt and stalls on a long one* | the Engram table is read per prompt token, with no RAM mode |
+| *A launcher flag passed gate step 5 and was refused at boot: engine flags are per model* | a name check against the whole binary |
 | *Cross-repo git forensics: three commands that answer a different question than they look like* | `A..B`, `cherry` and the commit API across unrelated histories |
 | *Provenance that cannot contradict its own claim* | a line range as a version oracle; greps on invented identifiers |
 | *An apostrophe in a comment inside a single-quoted `awk '…'` body is still inside the quotes* | the one that failed closed |
@@ -631,6 +633,44 @@ come from noir, defragment it there first (`btrfs filesystem defragment -f -t 12
 **Grep:** `O_DIRECT` · `filefrag` · `wchan` · `models.local`
 
 **Src:** `context/plans/completed/01_flashnext_container_tracker.md` (boot 2); `include/basalt/core/direct_upload.hpp:1-6` at `dc047a77`.
+
+## Hy4-flash from the NFS pack answers a short prompt and stalls on a long one
+
+**Trap.** [OBSERVED 2026-11-20, Plan 11 T3] `./run-hy4` on the pack at `/mnt/noir/…` loaded cleanly
+(`loaded   86.2GiB 105.8s`) and answered a 456-token prompt, so the boot looked done. The next prompt:
+`s1 read  pp=14150 60s`, then `basalt serve: error: no progress for 60 s during a request (reading the
+prompt, from token 0) - stopping the engine so the server starts it again`, with `threads waiting on the
+disk (state D): 256 of 280 (nfs_file_direct_read x256)`. The server reloaded the engine, the client
+re-sent the prompt, and it stalled again. Hy4-flash looks up 64 rows of its 63 GB Engram table for every
+prompt token, each a 4 KiB direct read from the pack; from this NFS that is about 3.5k reads/s, 53 tok/s
+(`456 read in 8617 ms`, `8326 ms in the Engram's host step`). The stall report advises `--ple-io ram`,
+which is Flash-Next's flag: Hy4-flash refuses it and has no RAM mode.
+
+**Guard.** Serve Hy4-flash from local NVMe: `PACK=models.local/Hy4-flash-NVFP4.basalt ./run-hy4`.
+`run-hy4` prints a `== note:` when the pack is on NFS. A boot is not verified by its load line or by one
+short reply — send a prompt of the size the clients send (R-rules: observe the behaviour, not a proxy).
+Diagnose as the entry below: `nfs_file_direct_read` in state `D`.
+
+**Grep:** `Engram` · `nfs_file_direct_read` · `no progress for 60 s` · `ple-io`
+
+**Src:** `context/plans/11_hy4flash_launcher_tracker.md` Evidence (the two T3 rows); `vendor/basalt/src/models/hy4flash/model.cpp:195-200` and `include/basalt/ngram/ple_reader.hpp:1-15` at `ad274aa`.
+
+## A launcher flag passed gate step 5 and was refused at boot: engine flags are per model
+
+**Trap.** [OBSERVED 2026-11-20, Plan 11] `./run <a Hy4-flash pack>` printed its docker command and the
+server answered `[server] error: /models/Hy4-flash-NVFP4.basalt: unknown argument: --ple-io`. Gate step 5
+had passed `--ple-io` on that image: it looks a name up among every flag in `bin/basalt`, and from v0.4
+on each model's adapter parses its own flags. The value behind it, `--kv int8`, would have been the next
+refusal.
+
+**Guard.** Gate step 5b: the server's own no-load check, `basalt --model <pack> <engine words>
+--gpu-plan`, per launcher and per pack; its negative control is `EXTRA_ARGS='--ple-io ram'`. Each launcher
+reads `general.architecture` (`pack_arch`) and refuses the other model's pack by name. A value the engine
+checks only at load (a context past the pack's maximum) is still invisible to 5b.
+
+**Grep:** `unknown argument` · `pack flags ok` · `pack_arch` · `gpu-plan`
+
+**Src:** `context/plans/11_hy4flash_launcher.md` § *Pre-Identified Bug/Issue*; `vendor/basalt/src/program/cli/arguments.cpp:125-133`, `serve/engine/vision.py:47-66` at `ad274aa`.
 
 ## Cross-repo git forensics: three commands that answer a different question than they look like
 
