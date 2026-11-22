@@ -160,6 +160,12 @@ backend:
 # to thousands while decode runs at tens. Never read M as engine speed. `cache=N`, when
 # shown, is prompt tokens the engine served from its prefix cache: it discounts the `pp=`
 # numerator only, never M. Full provenance: README, "The rate group has three tiers".
+# Both rate cells BOUND their value instead of widening: past 999.9 tok/s `tg=`/`tg>=` print
+# 999.9, and past 99,990 tok/s `pp=` prints 99.99k. That is the display only -- the raw value
+# is in stats.format json output, in the pretty box and in every exporter, and each bound is
+# counted on /proxy/metrics (llama_proxy_tg_clamped_total, llama_proxy_pp_clamped_total) and
+# WARNed on a sampled cadence. `ctx=`/`tok=`/`finish=` are counts and diagnostics, not rates,
+# and still widen the line rather than saturating.
 # These lines carry the `llama_proxy::stats` target, so
 # `RUST_LOG=llama_proxy::stats=info` selects them and nothing else.
 # max_plausible_prefill_tps is a CANARY, not a fault threshold. A prefill rate above it is
@@ -169,8 +175,9 @@ backend:
 # non-zero counter does NOT mean the backend is broken: a full prefix-cache hit is counted with
 # its prefix UN-discounted by design and is an EXPECTED trip - compare cached_tokens with
 # prompt_tokens on that line before believing anything. The 50000.0 default is sized from this
-# box (engine compute 14,765 tok/s, corrected warm runs 12.8k-14.3k, so ~3.4x headroom). Size
-# yours by MEASURING, because it fails in BOTH directions: below ~2x your real engine rate it
+# box (engine compute 14,765 tok/s, corrected warm runs 12,770-13,066 -- mean 12,858 across four
+# warm repeats, plus one T4 live warm run at 14,257.54 -- so ~3.5x headroom against the worst measured).
+# Size yours by MEASURING, because it fails in BOTH directions: below ~2x your real engine rate it
 # warns on healthy traffic forever, and if your engine is genuinely faster than the threshold
 # the canary is simply DEAD and never fires - the silent one, and note how blind that leaves
 # you: at 50000.0 a 22,000 tok/s prefill on a 14,765 tok/s box (~1.5x overstated) is not

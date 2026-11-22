@@ -23,11 +23,31 @@ pub static EXPORTS_SKIPPED_TOTAL: AtomicU64 = AtomicU64::new(0);
 /// global, resets on restart, never exported. See [`log_sample_and_should_export`].
 pub static PREFILL_IMPLAUSIBLE_TOTAL: AtomicU64 = AtomicU64::new(0);
 
-/// WARN every Nth occurrence for the two sampled warnings in this module (rejected
-/// samples, implausible prefill). Counter exact, log sampled - the same split
-/// `proxy::streaming` uses for unrepaired fixes. The two counters are INDEPENDENT
-/// globals, so each emits its own first-and-every-Nth: occurrence 100 of one has no
-/// relationship to occurrence 100 of the other.
+/// Samples whose DECODE rate was too large for the compact line's `tg` cell, so the cell
+/// printed its 999.9 tok/s ceiling instead of the figure the collector handed over.
+/// Counted exactly; the WARN is sampled. Display-surface only: `json`, the pretty box and
+/// every exporter still carry the raw value. Process global, resets on restart.
+/// See [`count_rate_clamps`].
+pub static TG_CLAMPED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// Samples whose PREFILL rate was too large for the compact line's `pp` cell, so it
+/// printed `99.99k` instead of the raw figure. Same contract as [`TG_CLAMPED_TOTAL`], and
+/// the same warning about reading a zero. Read the ceiling correctly: the large prefill
+/// figures in this project's logs (880,447.55, 579,685.47) are RAW and cache-inflated, and the
+/// collector corrects both now — they are not a legitimate range for this cell. Warm
+/// CORRECTED prefill here runs 12,770-13,066 (mean 12,858 across four warm repeats of the
+/// identical 9074-token request; one T4 live warm run measured 14,257.54). The class that trips the
+/// ceiling legitimately is a FULL prefix-cache hit (`cached == prompt_tokens`), which `collector.rs:595-611` leaves
+/// uncorrected by design and which has no recorded maximum. So on a warm cache this counter
+/// is expected to grow on HEALTHY traffic: it counts how often the compact line displayed a
+/// low figure, not how often anything broke.
+pub static PP_CLAMPED_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+/// WARN every Nth occurrence for the sampled warnings in this module (rejected samples,
+/// implausible prefill, clamped rate cells). Counter exact, log sampled - the same split
+/// `proxy::streaming` uses for unrepaired fixes. The counters are INDEPENDENT globals, so
+/// each emits its own first-and-every-Nth: occurrence 100 of one has no relationship to
+/// occurrence 100 of the other.
 const WARN_SAMPLE_INTERVAL: u64 = 100;
 
 /// The cadence both sampled warnings above share: the first occurrence always warns,
@@ -38,6 +58,89 @@ const WARN_SAMPLE_INTERVAL: u64 = 100;
 /// while sibling tests are incrementing it.
 fn warns_at(occurrence: u64) -> bool {
     occurrence == 1 || occurrence.is_multiple_of(WARN_SAMPLE_INTERVAL)
+}
+
+/// Count, and sample-WARN, every rate the compact line could not print as it was given.
+///
+/// Driven by [`crate::stats::rate_group_with_clamps`] — the SAME function that drew the
+/// line — rather than by a predicate reading `RequestMetrics`. A separate predicate would
+/// report a `pp` clamp for a tier-2 request carrying `prompt_tps = Some(500_000)`, where
+/// the renderer prints `pp=   n/a` and nothing was bounded: an inflated counter and a WARN
+/// describing a line that does not exist. That is also why this runs only in the Compact
+/// branch.
+///
+/// "Clamped" means **the rendering would not have fit**, not `value > ceiling`: a value
+/// inside the rounding band (decode in `(999.9, 999.95)`, prefill in `(99_990, 99_995)`)
+/// already displays as the ceiling under ordinary formatting, and counting those would
+/// fill the counter with the rounding every displayed figure goes through. So the counter
+/// answers one question — "did the cell replace a number it could not print?" — and a
+/// `pp=99.99k` on the line is NOT by itself proof the counter grew.
+///
+/// Counters exact, WARN sampled on the same cadence as the prefill canary. The compact
+/// line carries NO in-line marker for a clamp (decided 2026-11-21: no tail key), so a
+/// clamped line is indistinguishable from an ordinary one by eye or by `grep`; these two
+/// counters plus this WARN are the only signal, and `json`/InfluxDB hold the raw values.
+fn count_rate_clamps(metrics: &RequestMetrics) {
+    let (_, clamps) = crate::stats::rate_group_with_clamps(metrics);
+    for clamp in clamps {
+        let counter = match clamp.cell {
+            "tg" => &TG_CLAMPED_TOTAL,
+            _ => &PP_CLAMPED_TOTAL,
+        };
+        let hits = counter.fetch_add(1, Ordering::Relaxed) + 1;
+        if !warns_at(hits) {
+            continue;
+        }
+        // What the cell actually put on the line, spelled the way the line spells it:
+        // tier 1 writes `tg=`, tier 2 writes `tg>=` because that glyph IS the tier tag.
+        let printed_label = match (clamp.cell, clamp.tier) {
+            ("tg", 2) => "tg>=999.9".to_string(),
+            ("tg", _) => "tg=999.9".to_string(),
+            _ => "pp=99.99k".to_string(),
+        };
+        let counter_name = if clamp.cell == "tg" {
+            "tg_clamped_total"
+        } else {
+            "pp_clamped_total"
+        };
+        // `model` and `group` are `?` not `%`: they arrive verbatim from the request body
+        // and Display writes them raw, so a newline in one forges a log line (the same
+        // danger class influxdb.rs documents for the line protocol).
+        tracing::warn!(
+            target: "llama_proxy::stats",
+            cell = clamp.cell,
+            tier = clamp.tier as u64,
+            actual = clamp.actual,
+            printed = clamp.printed,
+            model = ?metrics.model,
+            group = ?metrics.group_name.as_deref().unwrap_or("n/a"),
+            request_id = ?metrics.request_id,
+            duration_ms = metrics.duration_ms,
+            stream_end = metrics.stream_end_label(),
+            occurrences = hits,
+            "compact rate cell clamped: the line printed {} for a reported {} tok/s. Counted \
+             in llama_proxy_{} on /proxy/metrics -- exact counter, but only 1 in {} logs this \
+             line. THE LINE IS NOT THE RECORD: this request's raw figure is in \
+             `stats.format: json`, in the pretty box, and in any enabled exporter; only the \
+             compact line bounds it, and nothing on it marks a clamp (no in-line marker, by \
+             operator decision), so a bounded cell looks like an ordinary measurement. Nor is a \
+              ceiling glyph proof of a clamp either: a value just inside the fit boundary \
+              prints the same cell and never counted, so do not count clamps by grepping the \
+              line. Read \
+             `dur` and `work=` on the same line first (the usual story behind a tg clamp \
+             -- a pp clamp's usual story is a full-cache-hit display problem, not a wall-clock \
+             floor): a near-zero wall makes a `completion / wall` floor meaningless -- an \
+             absurd derived floor, not a fast engine. A pp clamp is EXPECTED on a FULL \
+             prefix-cache hit (cached == prompt_tokens), which the collector leaves uncorrected \
+             by design (collector.rs:595-611): that says the display was too small, not that \
+             the backend broke. Ceiling provenance, the traffic that trips each cell, and the \
+             prefill counter ladder are in this counter's own HELP on /proxy/metrics.",
+            printed_label,
+            clamp.actual,
+            counter_name,
+            WARN_SAMPLE_INTERVAL
+        );
+    }
 }
 
 /// Log one request's metrics line and report whether the sample may be exported.
@@ -70,6 +173,10 @@ pub fn log_sample_and_should_export(metrics: &RequestMetrics, format: StatsForma
         // `RUST_LOG=llama_proxy::stats=info` now selects these lines.
         if format == StatsFormat::Compact {
             tracing::info!(target: "llama_proxy::stats", "{}", formatted);
+            // The line just printed may have BOUNDED one of its two rates. Only the
+            // compact format clamps, so only this branch can report a clamp; counting in
+            // the other two would record a bound that never happened.
+            count_rate_clamps(metrics);
         } else {
             tracing::info!(target: "llama_proxy::stats", "\n{}", formatted);
         }

@@ -307,7 +307,8 @@ pub struct StatsConfig {
     /// 1 in 100). It is a CANARY, not a fault threshold: a full prefix-cache hit is
     /// counted with its prefix un-discounted by design (see `extract_vllm_usage`) and is
     /// an EXPECTED trip. Measured on the deployment box: engine compute 14,765 tok/s,
-    /// corrected warm runs 12.8k-14.3k -- so the 50k default leaves ~3.4x headroom.
+    /// corrected warm runs 12,770-13,066 (mean 12,858 across four warm repeats) plus one T4
+    /// live warm run at 14,257.54 -- so the 50k default leaves ~3.5x headroom against the worst.
     /// Setting it below ~2x a deployment's own measured engine rate makes it warn on
     /// healthy traffic forever. `0.0` (or any negative value) disables the canary.
     #[serde(default = "default_max_plausible_prefill_tps")]

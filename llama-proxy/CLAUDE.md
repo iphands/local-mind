@@ -178,6 +178,39 @@ cp config.yaml.default config.yaml
   `tg=n/a pp=n/a` when no output tokens were counted.
   `cache=N` prints when the backend reported prefix-cache hits; it discounts the `pp` numerator
   only, never `work`. These lines carry the `llama_proxy::stats` log target.
+- **The two compact rate cells CLAMP; nothing else does.** `tg`/`tg>=` print at most
+  `999.9` tok/s and `pp` at most `99.99k` (99,990 tok/s) — the largest values whose
+  *rendering* fits each cell (the decode value field is 5 cells on every tier that prints
+  one, which is what makes 999.9 one ceiling for both tiers rather than one per tier).
+  What makes the clamp honest, and what has to be preserved with it: the decision lives in
+  ONE site, `rate_group_with_clamps`, which returns the group **and** a `Vec<ClampReport>`;
+  `exporters/mod.rs::count_rate_clamps` turns those reports into
+  `llama_proxy_tg_clamped_total` / `llama_proxy_pp_clamped_total` (exact) on /proxy/metrics
+  plus a WARN on the sampled cadence the prefill canary uses; `json`, the `pretty` box and
+  every exporter see the RAW value; the clamped predicate is "the rendering would not fit",
+  not `v > ceiling`, so ordinary rounding never inflates the counters; non-finite values
+  render as `inf`/`NaN` rather than as a ceiling (`f64::min` swallows NaN — same rule as the
+  `dur` cell). `ctx=`, `tok=` and `finish=` are counts and diagnostics, not rates with a
+  stated supported range, and still WIDEN instead of saturating
+  (`an_over_wide_context_is_never_clamped`). Do not "fix" `tps_side` toward the compact
+  line: the pretty box has no declared maximum and reports nothing, so clamping there would
+  be silent by construction, which is the sin that comment names.
+- **Of the four head shapes that existed on 2026-11-21, the last two follow the trim to an
+  18-cell rate group: head 124, tail from cell 126.** The group's fixed total is now what stops
+  a rate from moving the columns — the head can still widen at `ctx=`, `tok=` and `finish=`.
+  `the_readme_offset_table_matches_this_build`
+  pins README's table to `HEAD`/`HEAD_CELLS`, so a geometry change that skips README fails a
+  test; the counters `llama_proxy_tg_clamped_total` / `llama_proxy_pp_clamped_total` are
+  process-global, reset on restart, and never exported. **They are gated three deep, and a reader
+  who misses that reads a zero as health:** `stats.enabled: true` (no sample is built without it),
+  `stats.format: compact` (the only format that clamps, so the only one that counts), and the
+  exporter's own `has_throughput_signal()` filter (a sample skipped for reporting no tokens and no
+  rate is never logged, so never counted — reconcile with
+  `llama_proxy_metrics_export_skipped_total`). Both HELP texts say this on `/proxy/metrics` itself.
+  **These bullets are a restatement, not the authority:** the bar any proposal must clear to
+  change a head cell's width, the head's order, or a clamp is `context/plans/RULES.md` P4 (the
+  geometry is frozen there, and P4 anchors it to the compact writer's own field widths —
+  `HEAD`/`HEAD_CELLS` are the test module's contract, not the source).
 - Metrics collected for both streaming and non-streaming requests
 - Context usage calculated from model's KV cache via /slots endpoint
 - Extended metrics: reasoning_tokens, accepted_prediction_tokens, rejected_prediction_tokens (Opencode/Copilot)
@@ -234,7 +267,12 @@ fixes DETECT but do NOT repair on that path. Both modes run fixes on buffered re
      with a short completion it reads in the thousands while decode runs in the tens.
      Printed as `work=`; kept on the wire because it reconciles with `sum(total_tokens)`.
    Never print a derived number as a measurement, and never reinstate the hardcoded
-   20/80 prefill/decode split that used to live here.
+   20/80 prefill/decode split that used to live here. (This is not in conflict with the
+   compact line's rate CLAMP: that never re-labels a figure, it caps a column at a declared
+   maximum the operator set, says so in a counter and a WARN, and leaves the number itself
+   unbounded in the record. "Do not present arithmetic as an engine measurement" and "do not
+   let a fixed-width column silently truncate one" are different rules; see the clamp bullet
+   under `stats/` above.)
    `cached_tokens`/`cache_creation_tokens` are optional. `context_used` is KV occupancy:
    `timings.prompt_n` / `slot.n_tokens` when available, else `prompt_tokens` - except on
    the Anthropic shape, where `input_tokens` EXCLUDES `cache_read_input_tokens` and
@@ -396,6 +434,16 @@ When modifying the proxy, ensure these compatibility requirements:
 - ❌ Alter streaming chunk format (SSE protocol)
 - ❌ Change Authorization header behavior
 - ❌ Break backward compatibility without versioning
+
+**Scope note on the one place a backend-reported number is changed:** the compact stats
+line's `tg`/`pp` cells clamp a rate to their own ceilings. That is a **display cell**, not
+the API surface — nothing the client receives is touched, and the metrics record
+(`stats.format: json`, the pretty box, every exporter's payload) carries the value the
+backend reported, unbounded. The rule against modifying standard field values is about the
+wire contract; a capped ASCII column in an operator log line is outside it, provided the
+three escape hatches stay in place: the raw value in the machine-readable format, an exact
+counter, and a WARN. A clamp without all three would be the same act as editing a response
+field, and `rates_past_their_ceiling_clamp_and_report` is what asserts the record stays raw.
 
 **Testing Checklist for Changes:**
 1. Run unit tests: `cargo test`

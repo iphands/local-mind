@@ -69,6 +69,38 @@ entry in place, dated — do not append a second entry for the same thing.
   half the matrix is blind. **Staleness trigger:** any new optional dependency that carries a
   feature-gated test module, or any gate edit that drops one of the two test lines.
 
+- **[OBSERVED 2026-11-21] A stale binary and a fresh one print lines that differ only to someone
+  who knows what changed** — the worked example of RULES Rule A3 ("prove the thing you tested is
+  the thing you built"). Symptom: a live render meant to prove the new rate clamps printed the
+  retired three-decimal `pp` cell and none of the new counters; it looked like a healthy proxy,
+  because that shape *was* correct yesterday. Why: `cargo run` rebuilds, while the launch people
+  actually use when the proxy must run in the background beside a fake backend
+  (`nohup ./target/debug/llama-proxy run --config …`) runs whatever is on disk — possibly from
+  before the diff. Do this: `cargo build` before the background launch, then
+  `ls -l --time-style=+%H:%M:%S target/debug/llama-proxy` and compare the mtime with the log's
+  first timestamp before believing a render, and make the render prove
+  one thing you changed **on purpose** (here: the cell geometry, and a clamp counter going 0 → 1)
+  rather than checking that a line appeared. Distinguish by the *pair* of tells — a retired shape
+  plus absent new counters — not by a literal string, because the tracker prints retired shapes
+  legitimately as history. Don't: treat "200 OK and a stats line printed" as verification of a
+  formatter change. **Delete this entry when:** the KB's live-render recipe moves to something
+  that builds before it launches (`cargo run`, or a `just` target that builds then runs), which
+  makes the trap unreachable.
+
+- **[OBSERVED 2026-11-21] A Rust string literal keeps a line break whose trailing `\` you forgot,
+  and nothing complains.** Symptom: a `tracing::warn!` message assembled from 13 continuation
+  lines; I inserted three of them without the backslash, and `cargo fmt`, `cargo check` under
+  `-D warnings` and clippy all passed. The message would have printed two hard newlines plus 14
+  cells of indent into the middle of a WARN whose whole value is being one greppable line. Why:
+  only backslash-then-newline strips the break — a bare newline is *kept* in the literal (verified
+  standalone, `rustc --edition 2021` compiles it and prints the break and the indent back), so the
+  compiler cannot see a prose defect that only shows in the log. Do this: after editing a message
+  built from continuation lines, check that every line of the literal except the last ends in
+  `\`, and read the message **as printed** (the live render), not as source. Don't: trust
+  `cargo check` to police prose structure, or assume a `\`-heavy literal is self-consistent
+  because the file compiled. **Staleness trigger:** any log message or HELP text edited while
+  assembled from continuation lines.
+
 ## Editing the agent docs
 
 - **[HAZARD — verified 2026-10-16, has not bitten] `AGENTS.md` is a symlink → `CLAUDE.md`; a
@@ -85,7 +117,76 @@ entry in place, dated — do not append a second entry for the same thing.
    "`CLAUDE.md`" is two different files — project-root (the proxy doc) and `context/CLAUDE.md` (this KB
    header); "update CLAUDE.md" unqualified means the **root** one.
 
+## Citing numbers and ranges
+
+Tightens `plans/RULES.md` P1 (every number carries provenance) and Rule E (evidence over
+assertion). A number that *is* in the tree can still be cited wrong two ways: **by category** ("A number
+can be real and still cited in the wrong category") and **by cross-reference** ("A citation to a
+document that does not contain the claim").
+
+- **[OBSERVED 2026-11-21] A number can be real and still cited in the wrong category, and your own
+  KB shorthand is the least trustworthy source in the room.** Symptom: "the ceiling is below the
+  580,000 tok/s that README documents as a legitimate full-prefix-cache rate" — asserted by both
+  reviewers, then repeated by me into five live sites (README's clamp-limits bullet, two counter
+  HELP texts, two rustdocs) before anyone opened the code under discussion. The number exists; the
+  category does not. `collector.rs:569-571` gives ~580k as the **raw** rate of the captured
+  186,417-token request — 182,400 of those tokens were cached, and the honest figure is **12,491**
+  — and the 880,447.55 I used as the yardstick is the same class (164,663 tokens with 164,096
+  cached, ≈290× inflation, logged before the correction existed).
+  Where the log lines live: `tps=880447.55` at `plans/completed/01_stats_columnar_prefill.md:42`
+  (inflation table `:58`) and `tps=579685.47` at `plans/03_columnar_stats_honest_prefill.md:71`
+  (correction table `:80`), both quoted verbatim in `handler.rs`'s `pp_clamped` HELP — which is
+  why every other doc can cite a literal instead of re-deriving one.
+  The promotion started in a compressed tracker cell that called 580k a "legitimate ceiling";
+  every later citation inherited the promotion instead of the arithmetic, mine included. What the
+  ceiling is actually comparable to: the **full** prefix-cache-hit class (`cached ==
+  prompt_tokens`) is left uncorrected by design (`collector.rs:595-611`), so it is unbounded
+  **with no recorded maximum** — no capture in this repo is a full hit — while warm corrected
+  prefill here runs 12,770–13,066 (mean 12,858 across four warm repeats of the identical 9074-token
+  request; one T4 live warm run measured 14,257.54). Do this: before a number enters operator-facing prose, open
+  the code that computes it and name its category
+  (measured / derived / raw-and-since-corrected / unbounded-by-design); treat a compressed tracker
+  cell as a pointer to code, never as the fact; when a wrong figure has already propagated, grep
+  the corpus (`rg -n --no-ignore '<literal>' README.md CLAUDE.md context/ src/` — `src/` catches
+  rustdoc and HELP strings, which is where this one had landed) and either fix every site in one
+  commit or file a Follow-ups row naming the rest. Don't: paste a figure because two reviewers
+  agreed on it (neither had a shell for that review and both said so); fix only the first site you
+  remember; delete the number to end the argument — stating which legitimate traffic trips a
+  ceiling is exactly what let the human keep the tighter cell. **Staleness trigger:** any
+  "legitimate / expected range" claim re-used from shorthand rather than from the code that
+  computes it.
+
+- **[OBSERVED 2026-11-21] A citation to a document that does not contain the claim passes review
+  when the *phrase* matches — and the document may be your own uncommitted draft.** Symptom: a
+  rules entry and Plan 03's tracker each said "four shapes, which is the count README quotes", and
+  a working-tree grep of README found "Four head shapes" — corroboration. It was a different four:
+  that sentence enumerated 129-in-the-old-order, 128 and **two candidates that never reached a
+  commit** (no 124), while the citing documents meant pre-reorder 129, post-reorder 129, 128, 124;
+  prose in the same file also said the geometry "moved four times" — a count of *changes* where
+  four shapes counts *resulting states*. **Worse, and found only on re-check: none of that README
+  text was ever committed** — `git show HEAD:llama-proxy/README.md` has no tally and no "four
+  times" at all, so both wordings existed only in a draft written an hour earlier, and no later
+  reader (no reviewer without my working tree) could retrieve the source being cited. The trap
+  repeats on the measurement side: an unanchored section range (`sed -n /P4/,/Series-Scoped/p`)
+  opens on `RULES.md:17` — a plan-gate row containing the words "clear P4 first" — and counts the
+  wrong span, which is how a "56 → 51 lines" claim got published. Do this: when a claim is
+  attributed to another file, read that file's **enumeration**, not the matching line, and check
+  the **committed object** (`git show HEAD:<path>`) before treating a document as corroboration —
+  a file you edited today is your claim in different typography, not evidence for it. When a count
+  appears in more than one place, state in the sentence what is being counted ("three changes,
+  four shapes"), and label a tally that only describes one day's churn so it cannot be reused as
+  corroboration. Anchor every section range on the heading (`/^### P4/`) or a line number, and
+  record what you excluded. Don't: cite a tally across documents from memory of a phrase; keep two
+  tallies of the same events that differ by what they include (the next reader merges them); accept
+  "the docs say X" from your own session as a source. **Staleness trigger:** any cross-document
+  citation of a count, tally or list length; any rules or KB sentence that says "README says X" —
+  cite the commit, or it is your claim wearing a filename; any `sed`/`awk` range whose endpoints
+  are unanchored words.
+
 ## Documenting the stats line
+
+> **Geometry changes** — a head cell's width, the head's order, or a clamp — clear
+> **`plans/RULES.md` P4** before writing code. The entries below are what each move cost.
 
 - **[OBSERVED 2026-10-16] the compact line can change key names while every test stays green, because
   nothing renders the docs.** Symptom: Plan 03 rewrote the throughput cell to `pp=`/`tg=`/`tg>=` and
@@ -127,21 +228,70 @@ entry in place, dated — do not append a second entry for the same thing.
   the subscriber setup in `main.rs` (a `.with_ansi(false)` makes this entry obsolete), or a
   tracing-subscriber upgrade.
 
-- **[OBSERVED 2026-11-21] A fixed-width field with two label renderings shares ONE value width, so
-  "trim a cell from each rendering" is a ONE-cell saving, not two.** Symptom: an option list handed
-  to a human that under-promises the saving, and cell arithmetic that does not close. Why:
-  `rate_group` writes `tg=` (3 cells) on tiers 1/3 and `tg>=` (4 cells) on tier 2, and the group's
-  contract is that both put the number's **right edge on the same cell** — so the label's extra `>`
-  is paid for out of the value field. An 11-cell `tg` field was `{:>8.1}` on tier 1 and `{:>7.1}` on
-  tier 2; one cell off gives `{:>7.1}`/`{:>6.1}`, and the two tiers' **ceilings then differ by an
-  order of magnitude on purpose** (99,999.9 vs 9,999.9). Do this: count in **value cells**, and state
-  a ceiling as "the largest value whose RENDERING fits", never as a numeric range — `{:>6.1}` of
-  9,999.95 is `10000.0`, seven characters in a six-cell field, so the real ceiling is below the
-  nominal range. When the freed cell gets spent, check which trade the human was actually offered:
-  this trim could buy line length *or* `pp`'s headroom, not both. **Instance:** the 2026-11-21
-  rate-cell trim (group 23 → 22, `HEAD_CELLS` 129 → 128); I offered a two-cell saving and corrected
-  it mid-decision. **Staleness trigger:** any proposal to resize a multi-rendering fixed-width field,
-  or a new tier added to `rate_group`.
+- **[OBSERVED 2026-11-21] Which quantity you declare SHARED — the cell, or the value inside it —
+  decides how many ceilings one field has; "trim a cell from each rendering" is a ONE-cell saving
+  either way.** Symptom: an option list handed to a human that under-promises the saving, cell
+  arithmetic that does not close, and a build that ends up with two ceilings an order of magnitude
+  apart because the sharing was declared at the wrong level. Why: `rate_group` writes `tg=`
+  (3 cells) on tiers 1/3 and `tg>=` (4 cells) on tier 2, so if the **cell** is the shared quantity
+  the label's extra `>` is paid for out of the value field and the tiers' ceilings differ by a
+  factor of ten (`{:>8.1}`/`{:>7.1}`, then `{:>7.1}`/`{:>6.1}` → 99,999.9 vs 9,999.9). Sharing the
+  **value field** instead — one const, `DECODE_VALUE_CELLS = 5` (`formatter.rs:314`) — makes each
+  cell a derived quantity per tier (`tg=` 3+5=8, `tg>=` 4+5=9, balanced by the `pp` sides 9/8/9)
+  and gives **one** ceiling (999.9) to both tiers, which is what shipped six hours later. Do this:
+  decide and *state* which quantity is shared before sizing anything, because the two choices
+  yield different ceilings; count in **value cells**; state a ceiling as "the largest value whose
+  RENDERING fits", never as a numeric range — `{:>6.1}` of 9,999.95 is `10000.0`, seven glyphs in
+  a six-cell field, so the real ceiling is below the nominal range. Instances, in order: the trim
+  to 10 cells (group 23 → 22, `HEAD_CELLS` 129 → 128) shared the **cell** — I offered a two-cell
+  saving and corrected it mid-decision; the trim to 18 (group 22 → 18, head 128 → 124) shared the
+  **value field**, which is what made the label asymmetry harmless. When a freed cell gets spent,
+  check which trade the human was actually offered: it buys line length *or* a rate ceiling, not
+  both — and if it buys a CLAMP, price that too (`plans/RULES.md` P4 item 3: three escape hatches,
+  or the clamp is a silent edit of a backend-reported figure). **Staleness trigger:** any proposal
+  to resize a multi-rendering fixed-width field, any change to `DECODE_VALUE_CELLS` /
+  `PP_VALUE_CELLS`, or a new tier added to `rate_group`.
+
+- **[OBSERVED 2026-11-21] A clamp cannot be cross-checked against the line it printed, because a
+  clamped cell always fits.** Symptom: a tie test written as "the clamp reports must match what
+  the line shows" failed on its own fixture — `floor 999.95 (tier 2): [ClampReport { cell: "tg",
+  actual: 999.95, printed: 999.9 }] reported, but the rendered group shows decode in 5 cells
+  (bound 5)` — because it was vacuous by construction. Why: after a substitution the cell holds
+  the ceiling, which fits by definition; the rendered line is precisely silent about the value
+  that was replaced, so asking it "was something bounded here?" can only ever answer "no". Same
+  family as "`contains` cannot fail for a ragged line" and "a fix can live entirely in the branch
+  your deployment never runs" (both in this file) — one level further out: not position-blind, but
+  silent by construction. Do this: cross-check a substitution against an **independent**
+  derivation of the format specs — re-declare in the test which rate each tier prints and whether
+  it overflows — and demand the report vector match in count **and in which cell it names** (a
+  right-length vector naming the wrong cell passes a count alone). Drive counting off the render
+  site (`rate_group_with_clamps` returning `(String, Vec<ClampReport>)`), never off a predicate
+  over `RequestMetrics`: a field-level predicate reports phantom `pp` clamps on the tier that
+  prints no prefill figure at all. Don't: assert on a rendered string to prove a value was
+  bounded, and do not "simplify" the tuple back to a `String` because `format_compact` discards
+  the reports — the counter is the other caller. **Staleness trigger:** any display that
+  substitutes a sentinel for an out-of-range value; any refactor of `rate_group_with_clamps`.
+
+- **[OBSERVED 2026-11-21] A rate cell's resolution boundary has to be rendered, not derived, and a
+  placeholder-shaped zero gets read as a measurement.** Symptom: dropping `pp`'s third decimal
+  (`{:>7.3}k` → `{:>5.2}k`) to buy a cell, and my arithmetic putting the resulting sub-resolution
+  band at under 50 tok/s where the render said under 5 (measured neighbours: `4.99 → 0.00k`,
+  `5.00 → 0.01k`). Why: the band comes from the format's rounding at the printed precision, not
+  from the cell's width — and the output never says which cause a `pp= 0.00k` is. The semantic
+  ambiguity is the expensive half: tier 1 is armed by a reported **decode** rate alone, and
+  `m.prompt_tps.unwrap_or(0.0)` (`formatter.rs:478`) then prints an **absent** prefill as `0.00k`
+  — verified live on a backend serving `metrics.generation_time_ms` with no
+  `time_to_first_token_ms`, which renders `tg=146.3 pp= 0.00k`. Do this: state a resolution claim
+  as "below the cell's resolution", never as a claim about the backend; measure a boundary by
+  rendering its neighbours; when a precision change lands, enumerate the reader-visible fallout
+  (README's own 14,765 tok/s engine figure stopped reproducing off the line, `pp=14.77k`).
+  Instance: the Plan 03 tracker's `pp`-third-decimal row; README's `pp= 0.00k` clause owns the
+  operator wording. Don't: write "the backend reported zero prefill" — `finite_rate_opt`
+  (`collector.rs:403`) makes a reported zero unrepresentable, so that sentence describes an
+  unreachable state, and typing it into docs converts a rendering artefact into a backend claim.
+  **Staleness trigger:** any `{:.N}` change in a printed rate field; any change to tier arming, or
+  to the `unwrap_or(0.0)` in `rate_group_with_clamps` — in which case README's `pp= 0.00k` clause
+  is rewritten in the same commit.
 
 - **[OBSERVED 2026-11-21] A published start offset survives two shapes of review because the slice
   it documents comes back non-empty.** Symptom: README's offset table read `tail | 130-` while the
@@ -171,7 +321,8 @@ entry in place, dated — do not append a second entry for the same thing.
    this: before believing any backend-facing fix, prove **which branch the live backend reaches**
    (here: `/props` 404 + zero `timings` across captures), then reproduce the number against a
    **captured payload** under `captures/`, not against a hand-built fixture, and gate any cache
-   arithmetic on the wire shape (see the `cached_tokens` entry below, which owns that rule). Record
+   arithmetic on the wire shape (see "`cached_tokens` is not always a subset of the
+   prompt", which owns that rule). Record
    the dead-branch evidence in the tracker. Do
 
   **not** accept a green `cargo test` as proof a backend fix works; do **not** document behaviour of a
@@ -211,7 +362,9 @@ entry in place, dated — do not append a second entry for the same thing.
   nothing downstream can see it. Asymmetry: the cache discounts the **`pp=` numerator only** — `work=`
   deliberately keeps cached tokens because it must reconcile with `sum(total_tokens)`. Do this: gate
   any cache subtraction on the wire shape, and let a full hit (`cached == prompt_tokens`) stand
-  uncorrected at `debug!` (it is legitimate, and it is the most inflated number the proxy can emit).
+  uncorrected at `debug!` (it is legitimate, and it is the most inflated **prefill** rate the proxy can
+  emit — `collector.rs:601` says "the most inflated it can be" about that rate, and a tier-2 derived
+  decode floor can still print larger, so do not widen that into a claim about the line).
   Do **not** write "a discount on `work=` too", and do not assume `cached > prompt` is noise — that is
   reported as a data error, unlike llama.cpp's saturating `prompt_n - cache_n`. **Staleness trigger:**
   a new usage shape, a new exporter field derived from the cache, or any edit to the prefill

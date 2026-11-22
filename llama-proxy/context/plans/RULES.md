@@ -14,7 +14,7 @@
 | Change | Plan? |
 |---|---|
 | A typo, a comment, a doc fix, a constant tweak, a one-file obvious fix | **No.** Do it, verify (Rule A), commit. |
-| A new or changed stats line / output format | **Yes.** It changes human-readable output that clients may parse; verify by eye and by the gate. |
+| A new or changed stats line / output format | **Yes.** It changes human-readable output that clients may parse; verify by eye and by the gate. **Head-cell geometry — size, a key added or removed, order, what prints in it per tier, or a clamp: clear P4 first.** |
 | A fix to a metrics calculation (prefill tps) | **Yes.** A wrong number is a silent failure; verify against a reproduction. |
 | A new backend route or endpoint | **Yes.** It changes request routing; verify the new endpoint responds and existing ones are untouched. |
 | A change to metrics export (InfluxDB) | **Yes.** It changes exported fields; verify against the exporter. |
@@ -311,6 +311,73 @@ ignore hides nothing tracked). Being ignored changed what the outer git *sees*, 
    build faking a hit upstream never shipped — distrust a lone *hit* as much as a zero.
 6. A backend-behavior fact learned here goes in `context/distilled.md` tagged `[REPO]` with its
    `path:line` (see `context/AGENTS.md`, "Where Findings Go").
+
+### P4 — Compact-line geometry: the freeze bar
+
+The compact head's **width and order** are frozen as of 2026-11-21, at the width the compact
+writer's **field widths** produce: `{:>7.0}` in `dur`, `{:>6}` in each `ctx`/`tok` count field,
+`pad_cells(.., 16)` for `model`, `pad_cells(.., 7)` for the `stream=` badge, `pad_cells(.., 10)`
+for `finish=`, and `DECODE_VALUE_CELLS`/`PP_VALUE_CELLS` for the rate group's two value fields.
+`HEAD` and the `CELL_*` consts are the test-side contract those widths are measured *against*
+(they live in `#[cfg(test)] mod tests`), and README's `cut -c` table, the example block, the
+goldens and `head_offsets()` are published mirrors: both follow the writer, neither defines it.
+Editing one of those widths in the compact writer changes the frozen geometry whether or not any
+const moves — that is the edit this bar exists to catch.
+The line is documentation: people paste it into `cut`, `awk` and `sed`, and consumers slice by
+position.
+**Not** frozen: the free-form tail after the head's separator (README, "The head is columnar;
+the tail is not"), so a tail key is not a geometry change. Dated instances: Plan 03's tracker.
+*Why P4 and not a `<TOPIC>_RULES.md`:* series-scoped rules retire when the series closes, and a
+frozen geometry must outlive its plan.
+
+A proposal that changes **what occupies a head cell** — resize it, add or remove a head key,
+reorder the head, re-tier what prints in it, or clamp a cell — carries all four items, one row
+per item (claim, artifact/citation, the command that produced it), in the plan's `### Key Facts`
+(with a *How confirmed* cell) or the tracker's Notes — never only a chat reply. Clearing them is
+a **proposal to unfreeze**: record the four and **stop**; unfreezing is a human decision.
+
+1. **A quantity an operator reads, not a cell count.** Name the **artifact** that changes — a
+   README recipe, a dashboard field, a paste target — **run it today and paste what it returns**,
+   and say what a reader sees now that is wrong or missing. An argument naming no artifact is a
+   cell count wearing a sentence.
+2. **A distribution per rendering.** For every label form and every tier of that cell: the widest
+   and narrowest values *that rendering* has printed, cited per P2 to a capture file, a build and
+   an n — or, where the value is *derived*, to the build plus the canned/replayed input or the
+   sweep array that produced it, labelled as not-capture evidence. A distribution measured on the
+   engine-measured tier does not size a derived one: 247.2 tok/s is tier-1 decode evidence and
+   cannot license a cell that also carries tier 2's `completion / wall` floor. A rendering with no
+   recorded values is an **unmeasured rendering**: name what would produce values, **run it, and
+   size from what came back** — or the proposal does not resize that rendering. For the derived
+   tier the sources are the clamp counters plus the raw rates an exporter ships (item 3 states
+   what the counters are blind to; `stats.enabled` and `has_throughput_signal()` gate both, and
+   the same test arms the counters and decides the export, so every sample that could trip a clamp
+   is both counted and exported). Provisioning far beyond (or below) what a rendering records is
+   the reason to move.
+3. **For a clamp: all three escape hatches, all required.** The raw value in the machine-readable
+   record (`json`, the pretty box, every exporter); an exact counter on `/proxy/metrics`, stating
+   what it is blind to (`stats.format: compact` only; a sample the exporter skips for reporting no
+   tokens and no rate is never logged, so it is never counted; never exported; resets on restart);
+   and a WARN where an operator sees it. Both HELP texts and the WARN name the **class** of traffic that
+   trips the ceiling — full prefix-cache hits, a near-zero wall beside counted tokens — not an
+   adjective: a ceiling is a claim about a deployment, not about a backend. Fewer than three is
+   not a geometry proposal, it is a proposal to edit a backend-reported figure, and it stops here.
+4. **Published offsets re-measured with `cut` on live lines from a binary built after your last
+   edit** — build first, then compare its mtime with the log's first timestamp (see
+   `context/pitfalls.md`, Toolchain: "A stale binary and a fresh one…"); never arithmetic (see
+   `context/pitfalls.md`, "A published start offset…"). Live lines for every tier that prints the
+   cell today, plus one with a clamp tripped; where a tier only *would* print, say so and a
+   rendered fixture is enough. Paste `cut`'s literal output into the tracker row and let the
+   commit show the old→new offset table as a diff. README's table, the example block and the
+   goldens are **pasted out of the renderer's own printed output** and pinned by
+   `the_readme_offset_table_matches_this_build`, whose expectations derive from the test-side
+   `HEAD` spec — there is no generator, so re-paste from the printed lines; never type them. The
+   compact writer's field widths are the source; `HEAD`, the `CELL_*` consts, `HEAD_CELLS`,
+   `head_offsets()` and README's table are all checked against them — recompute the mirrors from
+   the format strings, never nudge a mirror to green.
+
+`context/plans/completed/**` and `fixrate.md` keep pre-Plan-03 cell shapes as evidence of the
+state they were written in — do not "update" them; a **live** tracker is superseded in place,
+with a date, not frozen.
 
 ---
 

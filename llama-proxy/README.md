@@ -297,6 +297,12 @@ the backend counted output tokens). `cached_tokens` and
 `cache_creation_tokens` appear only when the backend reported them — absent is
 not "zero cached".
 
+This is the format that carries **the values as reported**. The compact line's two rate
+cells are bounded by their own widths and print a ceiling when a rate will not fit them;
+`prompt_tps`, `generation_tps` and `decode_tps_min` here are what the backend gave the
+proxy, with no upper bound and no rounding, and so are the numbers any enabled exporter
+receives. If a rate matters to a dashboard, read it from this format and not off the line.
+
 ### Compact Format
 
 One line per completed request, on the `llama_proxy::stats` log target. Fields are
@@ -304,18 +310,25 @@ One line per completed request, on the `llama_proxy::stats` log target. Fields a
 
 **Building a dashboard, or piping this anywhere? Use `stats.format: json`** — one JSON
 object per line, keys stable across releases (the [JSON Format](#json-format) section lists
-them and states the absent-is-not-zero rule). The offsets below are this build's *display*
-geometry, and that geometry moved twice on 2026-11-21 — the mapping for old builds is at the
-bottom of this section.
+them and states the absent-is-not-zero rule). The compact line's two **rate cells are
+clamped to their cells; json carries the values as reported.** The offsets below are this
+build's *display* geometry, and it changed three times on 2026-11-21 (the decode-first reorder,
+the `tg` trim 129 → 128, and the 22 → 18 rate-group trim that took `pp`'s third decimal with it) —
+three changes, four shapes. The mapping for old builds is at the bottom of this section.
 
 **The head is columnar; the tail is not.** Everything from the rate group through
 `finish=` sits at a fixed offset whatever the numbers say — **up to each cell's own
-ceiling**: prefill is swept from 1 to 999,999 tok/s, the decode floor from 0.07 to
-9,999.9 and a measured decode from 0.07 to 99,999.9 — so a head cell can be sliced by
-position. Past a ceiling the cell **widens** rather than rounding a backend-reported rate
-into its own cell, and every column right of it moves; the rate is never silently clamped
-(the head widens by two routes — `pp` on cache-inflated but healthy traffic, and the
-derived floor when the wall clock is too small to mean anything; both are covered below).
+ceiling**. The two rate cells are swept past theirs and stay 18 cells: prefill from 1 to
+880,447 tok/s (raw — see the limits bullet below), a measured decode and the decode floor from
+0.07 to 12,345,678.99 — so a
+head cell can be sliced by position. **Past their ceilings the two rate cells clamp to the
+ceiling instead of widening**, and the counter plus a sampled WARN say so; the true figure
+is never lost, because `json`, the `pretty` box and every exporter carry it raw. The other
+three head cells are **not** clamped and still widen: `ctx=`/`tok=` hold backend-reported
+counts (`an_over_wide_context_is_never_clamped`) and `finish=` overflows on purpose, so a
+long-enough context window or a rare finish value still moves everything right of it. What
+the clamp bought is narrow and real: the rate group can no longer be the thing that shifts
+your slices.
 **Position slicing needs a pre-pass** for two reasons: the columns below count from the
 head's first glyph (a raw line starts with the timestamp), and the subscriber leaves colour
 **on** — the `tracing_subscriber::fmt()` builder in `main.rs` never calls `.with_ansi`, and
@@ -331,17 +344,20 @@ sed -e 's/\x1b\[[0-9;]*m//g' -e 's/.*llama_proxy::stats: //'
 Pattern recipes — the `sed` and `grep` extractions below — read a raw line fine, because
 they match rather than count. Only `cut -c` needs the pre-pass.
 
-| Cell | Columns (this build) | Slice |
+| Cell | Columns (this build · not frozen) | Slice |
 |---|---|---|
-| rate (`tg=`/`pp=`) | 1-22 | `cut -c1-22` |
-| `dur=` | 24-36 | `cut -c24-36` |
-| `ctx=` | 38-54 | `cut -c38-54` |
-| `tok=` | 56-72 | `cut -c56-72` |
-| `model=` | 74-95 | `cut -c74-95` |
-| `stream=` | 97-110 | `cut -c97-110` |
-| `finish=` | 112-128 | `cut -c112-128` |
-| whole head | 1-128 | `cut -c1-128` |
-| tail | 130- | `cut -c130-` |
+| rate (`tg=`/`pp=`) | 1-18 | `cut -c1-18` |
+| `dur=` | 20-32 | `cut -c20-32` |
+| `ctx=` | 34-50 | `cut -c34-50` |
+| `tok=` | 52-68 | `cut -c52-68` |
+| `model=` | 70-91 | `cut -c70-91` |
+| `stream=` | 93-106 | `cut -c93-106` |
+| `finish=` | 108-124 | `cut -c108-124` |
+| whole head | 1-124 | `cut -c1-124` |
+| tail | 126- | `cut -c126-` |
+
+Slice the rate **group**, not the field inside it: `pp=` starts at cell 10 on tier 1 and
+cell 11 on tier 2, because tier 2's wider `tg>=` label is what keeps the group 18 cells.
 
 Six limits on that table:
 
@@ -349,109 +365,137 @@ Six limits on that table:
   tail — `group=`, `work=`, `queue=`, `concurrent=`, `cache=`, in that order — is emitted
   conditionally, so its columns depend on what the request reported. The head's trailing
   pad is trimmed, so a line with no tail ends where its `finish=` value ends — line 6
-  stops at cell 121, not 128. A start offset is the cell holding the key's **first glyph**,
-  not the first cell whose slice comes back non-empty: cell 128 is `finish=`'s last cell
-  and 129 is the separator, so the tail begins at 130. Slice the head by position, read the
+  stops at cell 117, not 124. A start offset is the cell holding the key's **first glyph**,
+  not the first cell whose slice comes back non-empty: cell 124 is `finish=`'s last cell
+  and 125 is the separator, so the tail begins at 126. Slice the head by position, read the
   tail by key.
 - **`content_filter` overflows `finish=` on purpose.** The pad is 10 cells: `tool_calls`
   fills it exactly, `content_filter` (14) pushes everything after it right. That is
   deliberate — a rare diagnostic is never clamped into invisibility — and it only moves
-  tail columns, which were never columnar.
+  tail columns, which were never columnar. It is one of the three ways the head still
+  widens, with `ctx=` and `tok=`.
 - **The table is bytes; the contract is display cells.** Widths are computed in terminal
   cells, so an ASCII name and a CJK name both occupy the model cell's 22 cells, and
   neither shifts the line.
   But `cut -c` counts bytes, so a non-ASCII model name misaligns the *slice* — for
-  `model=` and everything right of it. The four cells left of it (1-72) are byte-safe
+  `model=` and everything right of it. The four cells left of it (1-69) are byte-safe
   whatever the backend calls itself, which is what moving `model=` out of column 1 bought.
 - **`model=` is truncated to 16 cells with a trailing `...`**, as line 5 shows:
   `Qwen3-14B-128K-Q3_K_S.gguf` prints as `Qwen3-14B-128...`. A full-name grep therefore
   never matches, and two models sharing their first 13 cells are indistinguishable here —
   read the true name from the `json` format. To count requests per model, slice
-  `cut -c74-95`; it is no longer the start of the line.
-- **Whitespace splitting is stable for exactly two fields.** On a stripped line `$1` is the
-  decode tag (`tg=` or `tg>=`) and `$2` the decode number on **every** tier — that is what
-  decode leading buys, and it is why the pair is safe to take positionally; `$3`/`$4` are the `pp` label and its
-  value (content is tier-dependent). Read the decode pair together: the tag lives in `$1`,
-  so a panel printing `$2` alone averages a measurement with a bound. Past `$4` the field
-  indices are not a contract — a cell's own right-alignment pad is a separator, and the two
-  `/`-joined cells are `{:>6}/{:>6}`, so `ctx=  9074/262144` is two fields while a 4-digit
-  window, `ctx=   100/  4096`, is three. The tail happens to begin at `$15` on all six lines
-  above; that is luck, not a guarantee. On a raw log line `$1` is the colour-escaped
-  timestamp instead. Past the decode pair, use the offsets or the keys.
-- **A rate past its cell's ceiling widens the group, and every column right of it moves.**
-  `pp` holds 999,999 tok/s, a measured decode 99,999.9 and the derived floor 9,999.9. The
-  cells are **not provisioned alike**: `pp`'s ceiling is only 1.14× the worst prefill this
-  deployment has recorded (llama.cpp's cache-inflated 880k), while the derived floor's
-  ceiling is 40× the highest decode this repo has ever recorded (247.2 tok/s) and the
-  measured decode's is 404× that. The asymmetry is deliberate: prefill's range is real and
-  documented, decode's is measured and narrow. Reaching `pp`'s ceiling is not exotic —
-  `cached == prompt_tokens` is deliberately left undiscounted, so a long session's second
-  turn can print a prefill no hardware produced. The symptom is **misaligned text and
-  slices that silently return junk**, with `pp=1000.000k` as the tell; nothing is rounded
-  into the cell. The answer is not a wider cell — such a rate is already ~20× the
-  `stats.max_plausible_prefill_tps` default of 50,000, so the canary flags it *unless it or
-  `stats.enabled` is off*, and then the columns shift in silence. See *A prefill rate that
-  looks too good to be true*. The floor's ceiling is the one to know the shape of, because
-  its input is arithmetic, not an engine: `completion / wall` has no physical bound, so a
-  near-zero wall beside counted tokens reaches it. A **canned test backend** through this
-  same code path rendered `dur=1ms` beside 412 counted tokens — `dur` prints whole
-  milliseconds, so that is a wall somewhere under 1.5 ms and a derived floor of roughly
-  3–8×10⁵ tok/s, some 30–80× its own ceiling. No real engine comes near it (nothing in
-  `captures/` is within 40×), but the trim moved this trip point from 99,999.9 to 9,999.9
-  rather than creating the hazard, and a sample like that is already absurd in the same
-  quantity wherever it surfaces — `total_tps`, which the compact line prints as `work=` on
-  tiers 2–3, out in the free-form tail, finite and merely enormous — which is why a shifted
-  head is the least of what it means.
+  `cut -c70-91`; it is no longer the start of the line.
+- **The rate group is matched, never sliced or field-indexed.** Its values are
+  right-aligned against their labels and the internal pad can reach zero, so the group's
+  whitespace field count depends on the *value*: `tg=376.7` is one token and `tg= 51.1` is
+  two. Whitespace field indexing and `cut -c` are both available from `dur=` onward;
+  inside the group use the recipe below. Past `dur=` the field indices are still not a
+  contract — a cell's own right-alignment pad is a separator, and the two `/`-joined cells
+  are `{:>6}/{:>6}`, so `ctx=  9074/262144` is two fields while a 4-digit window,
+  `ctx=   100/  4096`, is three. On a raw log line `$1` is the colour-escaped timestamp
+  instead. Past the rate group, use the offsets or the keys.
+- **The two rate cells clamp at their ceilings; the head's other cells widen.** A decode rate
+  above **999.9 tok/s** prints `tg=999.9` (tier 1) or `tg>=999.9` (tier 2); a prefill rate above
+  **99,990 tok/s** prints `pp=99.99k`. Those are the values each cell **prints when it clamps**;
+  the fit boundary is 1,000.0 and 99,995 (999.95 rounds to `1000.0`, six glyphs in a five-cell
+  field), so a figure just inside either boundary displays identically and is not counted. What
+  the clamp costs is a number that looks right and is not, so the line itself is only the display:
+  **the raw figure is in `json`, in the `pretty` box and in every exporter**, and the clamp is
+  counted on `/proxy/metrics` (`llama_proxy_tg_clamped_total`, `llama_proxy_pp_clamped_total`) and
+  WARNed on the first occurrence and then one in a hundred. **A clamped line carries no in-line
+  marker** — no key, no flag, nothing that distinguishes `pp=99.99k` printed from a 300,000 tok/s
+  prefill and printed from an honest 99,995 — so the counters and the WARN are the only signal,
+  and the WARN is sampled. Read the counters as *display-space* meters, not fault meters. The two
+  ceilings are not provisioned alike and one of them is a claim about **this** deployment rather
+  than about vLLM: decode's 999.9 is about 4× the highest decode rate this project has ever
+  recorded (247.2 tok/s, from an archived `tps=…/247.16`; six `metrics.tokens_per_second` captures
+  from 2026-10-16 read 10.9–99.2 — those files are gitignored, so they exist on the dev box, not
+  in the checkout). Prefill's 99,990 sits far below the large prefill figures still sitting in
+  this repo's archived logs — **880,447.55** (archived `tps=880447.55`) and **579,685.47**
+  (archived `tps=579685.47`) — but both are **raw, cache-inflated rates the collector now
+  corrects**, not a legitimate range; the token arithmetic behind each and where those log lines
+  live is in `context/pitfalls.md`, "Citing numbers and ranges". Warm *corrected* prefill here
+  runs 12,770–13,066 (mean 12,858, four warm repeats of the identical 9074-token request; one T4 live
+  warm run measured 14,257.54), well under the ceiling. What legitimately reaches past it is the
+  **full** prefix-cache-hit class: `cached == prompt_tokens` is deliberately left **uncorrected**
+  (`collector.rs:595-611`), which makes that class unbounded and **unrecorded** — no capture in
+  this repo is a full hit — so a big-context warm server can print an off-scale `pp` on a
+  perfectly healthy turn. The trip routes differ: `pp` clamps on full-cache hits and on absurd
+  ones, while a decode clamp almost always means the **derived** floor — `completion / wall` has
+  no physical bound, so a near-zero wall beside counted tokens reaches 999.9 long before it looks
+  impossible. A **canned test backend** through this same code path rendered `dur=1ms` beside 412
+  counted tokens — `dur` prints whole milliseconds, so that is a wall somewhere under 1.5 ms and a
+  derived floor of roughly 3–8×10⁵ tok/s, some 300–800× past the ceiling it now clamps into. Such
+  a sample is already absurd in the same quantity wherever it surfaces — `total_tps`, which the
+  compact line prints as `work=` on tiers 2–3, out in the free-form tail, finite and merely
+  enormous — and an absurd `work=` sitting beside a clipped `999.9` is the symptom to learn.
+  `stats.max_plausible_prefill_tps` (default 50,000) is a *separate*, earlier rung for prefill;
+  see below.
 
 > **Position slicing is per-build.** The table above is this build's display geometry, not a
 > cross-release contract: widths and order are the stable part, and offsets move. If you
 > slice by position against a saved build, this is the mapping to the shape before
 > 2026-11-21. A machine parser should not be slicing at all — use `stats.format: json`,
-> whose keys are stable.
+> whose keys are stable and whose rates are never clamped. Re-derive rather than trusting
+> this table for your binary: the recipe in `context/pitfalls.md` (`line.find(key) + 1`
+> against a stripped, colour-stripped line) measures any build in one command.
 >
 > | Cell | was (≤ 2026-10-16) | now |
 > |---|---|---|
-> | rate (`tg=`/`pp=`) | 24-46 | 1-22 |
-> | `dur=` | 48-60 | 24-36 |
-> | `ctx=` | 62-78 | 38-54 |
-> | `tok=` | 80-96 | 56-72 |
-> | `model=` | 1-22 | 74-95 |
-> | `stream=` | 98-111 | 97-110 |
-> | `finish=` | 113-129 | 112-128 |
+> | rate (`tg=`/`pp=`) | 24-46 | 1-18 |
+> | `dur=` | 48-60 | 20-32 |
+> | `ctx=` | 62-78 | 34-50 |
+> | `tok=` | 80-96 | 52-68 |
+> | `model=` | 1-22 | 70-91 |
+> | `stream=` | 98-111 | 93-106 |
+> | `finish=` | 113-129 | 108-124 |
 >
-> Decode moved to the front of the head and the `tg` field lost a cell the same day, so
-> every labelled cell right of the group shifted left. A first change that day made the head
-> 129 cells (`tg` 1-23, `dur` 25-37, `ctx` 39-55, `tok` 57-73, `model` 75-96, `stream` 98-111,
-> `finish` 113-129) in commit `5da96be`; it is in this repo's history and was never tagged or
-> documented as a supported geometry, so if you built from it, re-derive your offsets from
-> the table above.
+> Four head shapes existed inside 2026-11-21 — 129 cells in the old column order, 129 in the
+> decode-first order (`5da96be`, `tg` 1-23), 128 (`d05f96b`), and 124 (this commit's rate-group
+> trim, `tg` 1-18) — and none of them was a release shape. The two columns above are the only
+> mapping to code against; everything else is re-derived. Decode moved to the front of the head
+> the same day and the rate group then lost four cells (22 → 18), so every labelled cell right
+> of it shifted left twice. Treat that tally as a count of shapes that existed in one day, not
+> as corroboration for any other tally of the day's changes.
 
 Pulling numbers out, whichever tier rendered it. Every command here was run against the
 lines below and against real `llama_proxy::stats` lines carrying the tracing prefix;
 none is typed from memory:
 
 ```bash
-# decode tok/s, tier-tagged: "= 146.3" measured · ">= 131.0" a floor · "= n/a" nothing counted.
-# Anchored on `pp=` — the group's two fields stay adjacent on every tier, and the leading
-# `.*` is allowed to match nothing, so this reads a stripped line and a raw one alike.
+# Decode tok/s — the one extraction that works on every tier and every digit count. The tg
+# cell is right-aligned and its value can touch the label (tg=376.7), so the decode number
+# is NOT always its own whitespace field: $1/$2 hold it only while the value has two
+# integer digits, and past that they silently mean something else. Anchor on the NEXT key
+# instead of on the label's pad. The `.*` may match nothing, so a stripped line and a raw
+# colour-escaped one both work.
 sed -nE 's/.*tg([>=]+)[[:space:]]*([^ ]+)[[:space:]]+pp=.*/\1 \2/p'
+#   = 146.3  measured · >= 131.0  a bound · = n/a  nothing counted. Keep the tag.
 
 # whole head, for lining two requests up side by side
-sed -e 's/\x1b\[[0-9;]*m//g' -e 's/.*llama_proxy::stats: //' | cut -c1-128
+sed -e 's/\x1b\[[0-9;]*m//g' -e 's/.*llama_proxy::stats: //' | cut -c1-124
 
 # an 80-column pane: the decode rate and whose it is, and nothing in between
 # (GNU cut glues two ranges without a delimiter, so ask for one)
 sed -e 's/\x1b\[[0-9;]*m//g' -e 's/.*llama_proxy::stats: //' \
-  | cut -c1-22,74-95 --output-delimiter=' | '
+  | cut -c1-18,70-91 --output-delimiter=' | '
 
-# the same grab by key instead of position. `grep -o 'tg=[0-9.]*'` is NOT tier-safe: on
-# tier 2 the `>` sits between the `g` and the `=`, so it returns nothing, silently.
+# the same grab by key instead of position, for when you want the label too
 grep -oE 'tg[>=]+[[:space:]]*[^ ]+'
 ```
 
+`grep -oE 'tg=[0-9.]*'` is **not** tier-safe and is not offered above: the `>` sits between
+the `g` and the `=` on tier 2, and tier 3 prints `n/a`, which is not digits — so it hands
+back **nothing for "not measured"**, indistinguishable from "no matching lines". The same
+objection covers `grep -oE 'tg[>=]?=[ ]*[0-9.]+'`, which also cannot tell a clamped `999.9`
+from a measured one. Use the `sed` above; it keeps the tag and keeps absence.
+
 Keep the tag the extraction hands back: `>=` is a bound and `=` is a measurement, so a
 panel that averages the number alone is averaging a measurement with a bound — the one
-thing this line exists to prevent. Keep them in separate series.
+thing this line exists to prevent. Keep them in separate series. And an extraction anchored
+on **whitespace fields** rather than on the pattern above does not degrade gracefully: at
+three integer digits it returns `pp=` where it used to return the rate, so a panel built
+that way is not averaging a bound with a measurement, it is averaging a label.
 
 The lines below **are** the formatter's output, not a description of it: a test renders
 these same fixtures and fails if the file and the code ever disagree. Lines 1-4 are one
@@ -461,12 +505,12 @@ separate requests, there to show the cells those four never reach: a truncated m
 name, `finish=tool_calls`, `group=`, the `trunc` badge, and an empty tail.
 
 ```
-tg=  146.3 pp= 14.765k dur=   3144ms ctx=  9074/262144 tok=  9074/   412 model=cosmo-6000       stream=ok      finish=stop       concurrent=1 cache=3200
-tg>= 131.0 pp=     n/a dur=   3144ms ctx=  9074/262144 tok=  9074/   412 model=cosmo-6000       stream=ok      finish=stop       work=3017.18 concurrent=1 cache=3200
-tg=    n/a pp=     n/a dur=   3144ms ctx=  9074/262144 tok=  9074/   n/a model=cosmo-6000       stream=gone    finish=n/a        concurrent=1
-tg=    n/a pp=     n/a dur=     12ms ctx=   n/a/262144 tok=   n/a/   n/a model=cosmo-6000       stream=sync    finish=n/a        concurrent=1
-tg=   51.1 pp= 12.858k dur=   2841ms ctx=  4100/262144 tok=  4100/   118 model=Qwen3-14B-128... stream=ok      finish=tool_calls group=local concurrent=3
-tg=    n/a pp=     n/a dur=  30000ms ctx=  2048/262144 tok=  2048/   n/a model=cosmo-6000       stream=trunc   finish=n/a
+tg=146.3 pp=14.77k dur=   3144ms ctx=  9074/262144 tok=  9074/   412 model=cosmo-6000       stream=ok      finish=stop       concurrent=1 cache=3200
+tg>=131.0 pp=  n/a dur=   3144ms ctx=  9074/262144 tok=  9074/   412 model=cosmo-6000       stream=ok      finish=stop       work=3017.18 concurrent=1 cache=3200
+tg=  n/a pp=   n/a dur=   3144ms ctx=  9074/262144 tok=  9074/   n/a model=cosmo-6000       stream=gone    finish=n/a        concurrent=1
+tg=  n/a pp=   n/a dur=     12ms ctx=   n/a/262144 tok=   n/a/   n/a model=cosmo-6000       stream=sync    finish=n/a        concurrent=1
+tg= 51.1 pp=12.86k dur=   2841ms ctx=  4100/262144 tok=  4100/   118 model=Qwen3-14B-128... stream=ok      finish=tool_calls group=local concurrent=3
+tg=  n/a pp=   n/a dur=  30000ms ctx=  2048/262144 tok=  2048/   n/a model=cosmo-6000       stream=trunc   finish=n/a
 ```
 
 The rate group has three tiers, and which one you see is a fact about the **backend** and
@@ -476,30 +520,47 @@ anyway in order to repair it):
 
 | Rendered | Meaning | Source |
 |---|---|---|
-| `tg=  146.3 pp= 14.765k` | decode and prefill, **backend-sourced** — not both engine-computed | llama.cpp `timings` supplies `predicted_per_second`/`prompt_per_second`, computed by the engine; vLLM `metrics` (needs `--enable-per-request-metrics`) supplies counts and durations and **the proxy does the division** |
-| `tg>= 131.0 pp=     n/a` | decode is **at least** 131.0, and no prefill rate exists | `completion / wall`; its `work=` partner is in the tail |
-| `tg=    n/a pp=     n/a` | nothing to measure (no counted output tokens) | — |
+| `tg=146.3 pp=14.77k` | decode and prefill, **backend-sourced** — not both engine-computed | llama.cpp `timings` supplies `predicted_per_second`/`prompt_per_second`, computed by the engine; vLLM `metrics` (needs `--enable-per-request-metrics`) supplies counts and durations and **the proxy does the division** |
+| `tg>=131.0 pp=  n/a` | decode is **at least** 131.0, and no prefill rate exists | `completion / wall`; its `work=` partner is in the tail |
+| `tg=  n/a pp=   n/a` | nothing to measure (no counted output tokens) | — |
 
-The two fields are one group of fixed widths — the `tg` field is 10 cells on every tier, so
-146.3 and 131.0 end their digits on cell 10 whether they arrived as a measurement or a
-bound — and `pp` prints only on tier 1. Trimming `tg` to 10 cells bought one incidental
-legibility: tier 2 now prints `tg>= 131.0`, which reads as the inequality it is. `tg>=` is a
-floor, never a measurement: its denominator is the whole wall
-clock, which still holds prefill, network and (in `fake` mode) the proxy's own synthesis, so
+A tier-1 line printing `pp= 0.00k` is an **absence wearing a measurement's glyph**, and two
+routes reach it. The common one: the backend reported a decode rate and **no prefill rate at
+all** — tier 1 is armed by a reported decode rate alone, and the renderer prints an absent
+prefill as `0.0` (`m.prompt_tps.unwrap_or(0.0)`, `formatter.rs:478`). A test harness proved it,
+and it is not a supported configuration: a canned backend sending `metrics.generation_time_ms`
+with no `time_to_first_token_ms` prints `tg=146.3 pp= 0.00k`, where tier 2 prints `pp=  n/a`.
+The second route is a reported prefill rate genuinely **below the cell's resolution** — under
+5 tok/s, where the retired three-decimal form's band was under 0.5. A backend-reported **exact
+zero** is not a third case: a rate of 0.0 is reported as *absent* (zero tokens per second is the
+absence of a speed), so it arrives as the first case. `json` tells them apart — `prompt_tps`
+absent, or `prompt_tps` a number. Whether the `n/a` placeholder is the better glyph for the
+first case is an open question, filed in the Plan 03 follow-ups.
+
+What the tiers share is the **decode value field** — 5 cells wherever a decode rate prints
+— not the cell around it: `tg=` makes tier 1's cell 8 cells and `tg>=` makes tier 2's 9, and
+tier 2's shorter `pp` placeholder gives the extra cell back, so all three groups are 18.
+That sharing is what makes **999.9 the ceiling on both tiers** rather than an order of
+magnitude apart per tier. Its cost is legibility: 146.3 and 131.0 now end their digits on
+cell 8 and cell 9 respectively, so decode no longer stacks down a wall of mixed-tier lines.
+`tg>=` is a floor, never a measurement: its
+denominator is the whole wall clock, which still holds prefill, network and (in `fake` mode) the
+proxy's own synthesis, so
 it understates. `work=` is a **cost** rate, not engine speed: on a long-context agent turn
 with a short completion it runs to thousands while decode runs at tens — which is why the
 head leads with `tg`, not `work`.
 
-Leading with decode has one cosmetic cost: a burst of tier-3 lines reads `tg=    n/a` down
+Leading with decode has one cosmetic cost: a burst of tier-3 lines reads `tg=  n/a` down
 the whole wall, which looks like a proxy that stopped measuring. Which tier rendered is
 still decided above the proxy, not inside it — read `stream=` beside it: `gone` means the
 client left before the one chunk that carries `usage`, so nothing was counted, and `trunc`
 means the backend cut the stream.
 
-A tier-2 line prints `pp=n/a` where the `pretty` box for the same sample prints a
+A tier-2 line prints `pp=  n/a` where the `pretty` box for the same sample prints a
 `Decode (floor)` / `Work rate` pair: the head has room for one honest number per cell, so
 it drops a derived figure rather than letting a fixed-width slot imply it is a measurement.
-Those five spaces inside `pp=`'s cell are evidence of **absence**, not of a slow prefill —
+Those two spaces inside tier 2's `pp=` cell (three on tier 3, whose `tg=` label is one cell
+narrower) are evidence of **absence**, not of a slow prefill —
 which is the one misreading the cell next to decode invites.
 
 **Prefill is corrected for prefix-cache hits — but only where the body proves the
@@ -510,7 +571,7 @@ subset of the prompt (`collector.rs:591`). On the Anthropic shape `cached_tokens
 `cache_read_input_tokens`, **disjoint** from `input_tokens`, so it is left alone —
 subtracting it would understate prefill by the whole cached amount, and the rate would
 merely look slow. A **full** hit (`cached == prompt_tokens`) is legitimate and left
-undiscounted, which makes it the most inflated number this line can carry; `cached >
+undiscounted, which makes it the most inflated **prefill** rate this line can carry; `cached >
 prompt_tokens` is reported as a data error rather than saturating. llama.cpp's `timings`
 path runs the same formula but **saturates** where the vLLM path keeps the raw rate, and
 whether it should subtract at all is unresolved upstream. The mechanics, and why a single
@@ -526,6 +587,17 @@ A prefill rate your hardware could not physically produce is counted by the cana
 `stats.max_plausible_prefill_tps` — see *A prefill rate that looks too good to be true*
 below. Like the other stats counters it is **inert while `stats.enabled: false`**, and it
 never reaches an exporter.
+
+The canary and the `pp` cell are **two rungs of one ladder, and the knob is the lower one**:
+`stats.max_plausible_prefill_tps` (default 50,000) counts anything above it into
+`llama_proxy_stats_prefill_implausible_total`, while `llama_proxy_pp_clamped_total` counts
+only what the *display* could not print, above 99,990. A prefill of 300,000 is therefore
+counted twice, by design — once as "implausible for your engine" and once as "off the
+compact line's scale" — and a rate between 50,000 and 99,990 is counted only by the knob.
+Both counters are process-global, reset on restart, never exported, and **inert twice over**:
+they need `stats.enabled: true` *and* `stats.format: compact`, because in `pretty`/`json`
+nothing is bounded and there is nothing to count. The clamp's own WARN is sampled (first
+occurrence, then one in a hundred) while the counters stay exact.
 
 The `stream=` badge says how the proxy **obtained** the body, not what the client
 received. There are five values and only these: `ok` a completed SSE stream; `gone` a
@@ -1130,11 +1202,17 @@ physically produce, the proxy flags it: any exported sample whose prefill rate e
 `stats.max_plausible_prefill_tps` (default `50000` tok/s) increments
 `llama_proxy_stats_prefill_implausible_total` on `/proxy/metrics`.
 
+One thing to know about reading that rate off the line before you judge it: above 99,990
+tok/s the `pp=` cell **clamps to `99.99k`**, so the compact line cannot show you the
+magnitude of exactly the figures this section is about. Read the raw value from
+`stats.format: json` or from InfluxDB; the clamp is counted in
+`llama_proxy_pp_clamped_total` and its WARN prints the true figure.
+
 **Treat it as a canary, not a fault.** The most common trip is entirely expected: on a
 **full prefix-cache hit** vLLM reports `cached_tokens == prompt_tokens`, and the proxy
 deliberately leaves that rate un-discounted, because claiming it computed zero tokens is
 not a number it can stand behind (a *partial* hit is discounted — see the `cache=` cell).
-That un-discounted rate is also the most inflated figure the proxy can honestly report. So
+That un-discounted rate is also the most inflated prefill figure the proxy can honestly report. So
 compare `cached_tokens` against `prompt_tokens` on the WARN line before believing anything
 is broken: at or near equal, that is the cache case. If `cached_tokens=n/a` the backend
 reports no prefix cache at all, and the WARN genuinely cannot separate benign from wrong —
@@ -1165,8 +1243,11 @@ traffic forever, while an engine genuinely faster than the threshold leaves the 
 whose engine computes 14,765 tok/s, the `50000` default does **not** fire at a 22,000 tok/s
 prefill figure, even though that is ~1.5x what the hardware can do. The default comes from
 this deployment's own measurements (engine compute 14,765 tok/s, corrected warm runs
-clustering 12.8k–14.3k, so ~3.4x headroom); send one long uncached prompt, read the prefill
-figure off the compact line, and set yours from that. `0.0` or any negative value disables
+12,770–13,066 (mean 12,858, four warm repeats) plus one T4 live warm run at 14,257.54,
+so ~3.5x headroom against the worst measured healthy figure); send one long uncached prompt,
+read the prefill
+figure off the **`json`** output (the compact line's `pp` cell clamps at 99.99k, so it is
+the wrong instrument above that), and set yours from that. `0.0` or any negative value disables
 the canary **entirely** — the counter stops too, this is not a log-only mute — and a
 non-finite value (`inf`, `nan`) is rejected at load rather than silently disabling it.
 

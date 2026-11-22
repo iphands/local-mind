@@ -567,8 +567,9 @@ fn extract_vllm_usage(metrics: &mut RequestMetrics, response: &Value, duration_m
                 // while `time_to_first_token_ms` covers only the compute the engine
                 // actually did. Dividing one by the other therefore rates tokens that
                 // were never processed: the captured 186,417-token request at a
-                // 321.6 ms ttft reads 580k tok/s, when 182,400 of those tokens were
-                // cached and the honest figure is 12,491. Same correction the
+                // 321.6 ms ttft reads 579,685.47 tok/s (archived `tps=579685.47`,
+                // plans/03_columnar_stats_honest_prefill.md:71), when 182,400 of those
+                // tokens were cached and the honest figure is 12,491. Same correction the
                 // llama.cpp branch above applies, with this path's inputs.
                 //
                 // The denominator stays `ttft` alone. T1 measured `queue_time_ms` at
