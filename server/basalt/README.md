@@ -9,15 +9,16 @@ Anthropic-compatible API: `./run` for Flash-Next, `./run-hy4` for Tencent's **Hy
 Engine flags are per model, so each launcher takes only its own model's packs and says so
 when handed the wrong one. `.ninfer` artifacts (for example the QUASAR 27B) belong in `../ninfer`.
 
-**Status (2026-11-21):** built on Basalt v0.5.5 (`iphands/basalt-blackwell:cu1343-sm120-ff0b978`,
+**Status (2026-11-25):** built on Basalt v0.5.5 (`iphands/basalt-blackwell:cu1343-sm120-ff0b978`,
 Plan 13) with our buffered-io patch (§ *Build*), and the model-free gate passes on that image.
 `./run` booted on it on 2026-11-21 from the NFS pack with buffered reads (Plan 13 T2): 68.4 GiB
 loaded in 149.7 s, 3 slots × 362144, a 108,314-token prompt read in 9.4 s, requests answered;
 `./run --single` and `./run-hy4` have not been booted on it. The v0.5.0 image (`cu1343-sm120-ad274aa`, Plan 10, rebuilt with the patch) is
 kept as the rollback: `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-ad274aa ./run`. The
 image holds five models and this project has launchers for three; **Inkling 2 Mini** (`./run-ink`,
-Plan 14, new in v0.5.5) has a launcher that passes its dry runs, and the engine's parser takes its
-flags for the downloaded pack (sha256 as on the model card); it has not been booted. The last boots
+Plan 14, new in v0.5.5) booted from the NFS pack on 2026-11-22 and served for three days (Plan 14 T4):
+17.1 GiB loaded in 52.0 s, every expert on the card, 1 slot × 362144, 870 requests finished, prompts
+up to 204,763 tokens. The last boots
 recorded in both modes are the v0.2.1-era image's (`cu1343-sm120-dc047a7`, Plan 01, 2026-11-04, local pack):
 `./run` loaded in ~40 s, `./run --single` in ~34 s, a 63.29 GiB expert cache in VRAM; clients reach it
 as `cosmo-6000` on `cosmo.lan:8700`. The defaults are the owner's choices, not measured winners —

@@ -267,7 +267,7 @@ rates T4 saw), the pack's header length field and what a download in progress lo
 - [x] T1 *(2026-11-21, tracker Evidence rows 2–4)*: `DRY_RUN=1 ./run-ink` on a complete synthetic `inkling2` pack prints Inkling's flags and none of Flash-Next's; on a cut-short one it exits 1 with "incomplete"; gate step 4 asserts both
 - [x] T2 *(2026-11-21, tracker Evidence row 5)*: `./run` and `./run-hy4` refuse an `inkling2` pack and name `./run-ink`; their own `serve` words are unchanged
 - [x] T3 *(2026-11-21, tracker Evidence rows 7–8)*: the pack's sha256 is the card's; gate step 5b prints a `pack flags ok (./run-ink: inkling2 …)` line
-- [ ] T4: the boot log names the `ff0b978` image and the pack; a real reply is quoted in the tracker
+- [x] T4: the boot log names the `ff0b978` image and the pack; a real reply is quoted in the tracker *(2026-11-25, tracker Evidence row 9: image and pack named; 870 finished requests from the owner's client stand in for the quoted reply, whose text the logs do not keep)*
 - [ ] T5: each harvested fact is in the file the tracker names, re-read after writing
 - [ ] All: the project gate (Rule A) passes on the final commit
 - [ ] All: findings harvested into `context/` (Rule D) — bytes on disk, re-read

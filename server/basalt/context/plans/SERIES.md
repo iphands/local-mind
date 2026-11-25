@@ -57,10 +57,11 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   image `cu1343-sm120-ff0b978` built with the buffered-io patch, gate 1–6 with 5b pass on it); **T2 is
   half recorded and blocked on the owner**: `./run` serves on the new image (engine 0.5.5, buffered reads,
   3 × 362144); still needed, `./run-hy4` on it with a reply. Then T3, harvest and close.
-- **Plan 14** — Inkling 2 Mini launcher `./run-ink`: in progress, 3/5 tasks done (T1: the launcher, the
+- **Plan 14** — Inkling 2 Mini launcher `./run-ink`: in progress, 4/5 tasks done (T1: the launcher, the
   completeness check, gate steps 1 and 4; T2: `./run` and `./run-hy4` name `./run-ink`; T3: the pack is
-  downloaded, its hash is the model card's, gate steps 4, 5 and 5b run on it); **T4 is blocked on the
-  owner**: `docker stop basalt`, `./run-ink`, one reply. Then T5, harvest and close.
+  downloaded, its hash is the model card's, gate steps 4, 5 and 5b run on it; T4: the owner's boot of
+  2026-11-22, 870 requests served on the v0.5.5 image, every expert on the card); next **T5**, harvest
+  and close.
 
 ## Plans <!-- hp:plans -->
 
