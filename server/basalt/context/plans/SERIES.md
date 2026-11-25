@@ -62,9 +62,10 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   downloaded, its hash is the model card's, gate steps 4, 5 and 5b run on it; T4: the owner's boot of
   2026-11-22, 870 requests served on the v0.5.5 image, every expert on the card); next **T5**, harvest
   and close.
-- **Plan 15** — Repin Basalt to v0.5.7 and rebuild: in progress, 0/3 tasks done; next **T1**: the agent's
-  pin edit and preflight, then the **owner's `./build`**, then the gate on the new image. Then T2, the
-  owner's boots, and T3, harvest and close.
+- **Plan 15** — Repin Basalt to v0.5.7 and rebuild: in progress, 0/3 tasks done; **T1 is blocked on the
+  owner's `./build`**: the agent's `versions.env` edit to `400b411` and its preflight follow the handoff
+  commit and stay uncommitted (the gate needs the image). Then the gate on the new image and the
+  commit; T2, the owner's boots; T3, harvest and close.
 
 ## Plans <!-- hp:plans -->
 

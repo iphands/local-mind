@@ -26,7 +26,7 @@
 
 | # | Task | File / Module | Status | Notes |
 |---|------|---------------|--------|-------|
-| 1 | T1: repin to `400b411`, preflight, owner build, gate on the new image | `versions.env`, `README.md` | pending | |
+| 1 | T1: repin to `400b411`, preflight, owner build, gate on the new image | `versions.env`, `README.md` | blocked | **Waits on the owner's `./build` (2026-11-25).** The agent's half of steps 1–2 (the `versions.env` edit, `PREFLIGHT_ONLY=1 ./build`, the caller sweep, gate steps 1–4 on the dirty tree) follows this commit and is not committed: gate steps 5, 5b and 6 fail until an image is labelled `400b411…`, so `versions.env` stays dirty until the build exists. Then steps 4–5: image id and labels, the build log, the full gate, `README.md`, the commit. Until the build, a launcher needs `IMAGE_OVERRIDE=iphands/basalt-blackwell:cu1343-sm120-ff0b978`. |
 | 2 | T2: owner boots, `./run-ink`, `./run`, `./run-hy4`, requests answered | tracker Evidence | pending | |
 | 3 | T3: harvest and close | `context/` | pending | |
 
