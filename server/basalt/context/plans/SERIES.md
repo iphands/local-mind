@@ -8,7 +8,7 @@ Plan status: `pending` | `in-progress` | `blocked` | `done` | `abandoned`.
 Plans further out are intentionally light: an untouched pending plan is a **hypothesis, not a
 contract** — re-read and revise it before starting (RULES.md Rule C).
 
-**Next free plan number: `15`.** <!-- hp:next-free -->
+**Next free plan number: `16`.** <!-- hp:next-free -->
 
 > **North star (user directive, 2026-11-04):** serve Qwen3.8-Flash-Next through
 > [Basalt](https://github.com/jesdga95/basalt), source-built from a pinned commit in our own
@@ -62,6 +62,9 @@ contract** — re-read and revise it before starting (RULES.md Rule C).
   downloaded, its hash is the model card's, gate steps 4, 5 and 5b run on it; T4: the owner's boot of
   2026-11-22, 870 requests served on the v0.5.5 image, every expert on the card); next **T5**, harvest
   and close.
+- **Plan 15** — Repin Basalt to v0.5.7 and rebuild: in progress, 0/3 tasks done; next **T1**: the agent's
+  pin edit and preflight, then the **owner's `./build`**, then the gate on the new image. Then T2, the
+  owner's boots, and T3, harvest and close.
 
 ## Plans <!-- hp:plans -->
 
@@ -83,6 +86,7 @@ Keep **Notes** to ~25 words — the detail lives in the plan's tracker.
 | 12 | Local patch: a switch that stops Basalt's `O_DIRECT` reads | 10 (T1), 11 | in-progress | `BASALT_BUFFERED_IO=1`, a 3-file patch applied in the image build; the launchers and `./preload` turn it on. Owner rebuild and one Hy4-flash boot from NFS. |
 | 13 | Repin Basalt to v0.5.5 and rebuild the image | 10 (T1), 12 (T1) | in-progress | `ad274aa` → `ff0b978` (v0.5.5 tag commit, 177 commits on; a fifth model, Inkling 2 Mini). The patch fits unchanged. Owner builds and boots. |
 | 14 | Inkling 2 Mini launcher: `./run-ink` | 13 (T1's image), 11 | in-progress | Third launcher, for the model v0.5.5 added: `--kv fp16`, no table flags; refuses a pack still downloading. Gate step 4 on synthetic packs until the real one lands; one owner boot. |
+| 15 | Repin Basalt to v0.5.7 and rebuild the image | 13 (T1), 12 (T1), 14 (T1–T3) | in-progress | `ff0b978` → `400b411` (v0.5.7 tag commit, 251 commits and two releases on). `--gpu 0` is untouched by its multi-GPU break; the patch fits unchanged. Owner builds and boots. |
 
 ## Dependency Chain <!-- hp:chain -->
 
@@ -95,6 +99,7 @@ completed/01_flashnext_container ──(recipe, ./build, ./run; feeds 05, 06, 07
 10_basalt_repin_v050 ──(the v0.5.0 image, built at T1)── 11_hy4flash_launcher ──(the NFS stall at T3; ./preload)── 12_buffered_io_patch
 10_basalt_repin_v050 ──(the pin at T1)── 13_basalt_repin_v055 ──(patches/0001 must fit the new pin)── 12_buffered_io_patch
 13_basalt_repin_v055 ──(the v0.5.5 image, the first with inkling2)── 14_inkling_launcher ──(shaped after)── 11_hy4flash_launcher
+13_basalt_repin_v055 ──(the pin at T1)── 15_basalt_repin_v057 ──(patches/0001 must fit; ./run-ink's gate checks)── 12_buffered_io_patch, 14_inkling_launcher
 abandoned/02_basalt_vendor_audit, abandoned/03_basalt_audit_runtime ──(method, scripts, posture.md)──▶ 09
 ```
 *2026-11-16:* Plans 02 and 03 audited `dc047a7`; Plan 08 moved the pin, so both are abandoned and Plan 09
@@ -141,6 +146,10 @@ inherits their method. *(The 2026-11-05 chain, with 03 gating 02's verdict, is i
   say no flag or config key was removed or renamed. The first repin with a carried patch: the three files
   `patches/0001` touches are the same blobs at both pins. Proven as Plans 08 and 10 were: gate steps 5, 5b
   and 6 on the new image and an owner boot per launcher. Plans 08, 10, 11 and 12 stay open beneath it.
+- **15 — Repin to v0.5.7** (owner request, 2026-11-25: "0.5.5 has been working well lets repin to 0.5.7").
+  Upstream released 0.5.6 and 0.5.7 on 2026-11-23: slot batching on every model, faster Inkling prompts, a
+  Hy4-flash output fix, then three settings (`gpu`, `gpu-mode`, `gpu-share`) that replace each model's
+  multi-GPU logic — breaking for configs that name several cards, not for `--gpu 0`. Proven as Plan 13 was.
 - **09 — Audit of the v0.4.1 pin** (registered 2026-11-16 at Plan 08 T4, owner decision). The built
   engine is now unaudited: Plan 02 read none of `d3b7574`. What carries over is method, not results — the
   manifest-then-census shape, the planted canaries, `context/audit/scripts/` (which hard-code the old pin
